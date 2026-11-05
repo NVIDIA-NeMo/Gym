@@ -223,7 +223,9 @@ class TestApp:
             command = command.replace("/logs/verifier", quote(str(verifier_dir)))
             command = command.replace("/tests/test.sh", quote(str(script)))
             result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
-            return MagicMock(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+            return MagicMock(
+                return_code=result.returncode, stdout=result.stdout, stderr=result.stderr, error_type=None
+            )
 
         async def download(remote_path, local_path):
             assert remote_path == "/logs/verifier/reward.txt"
@@ -392,3 +394,93 @@ def _configured_patches() -> list[tuple[str, str, str]]:
 def test_configured_patches_match_the_pinned_task_scripts(subfolder: str, task: str, old: str) -> None:
     scripts = (PINNED_TASKS / task.split("/", 1)[1] / subfolder).rglob("*.sh")
     assert any(old in script.read_text() for script in scripts)
+
+
+def _infra_server(tmp_path: Path, exec_side_effect, download_side_effect=None):
+    server = TerminalBench21ResourcesServer(
+        config=TerminalBench21ResourcesServerConfig(
+            sandbox_provider="test", sandbox_config={}, evaluation_timeout=30, host="", port=0, entrypoint="", name=""
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(side_effect=exec_side_effect)
+    sandbox.download = AsyncMock(side_effect=download_side_effect)
+    sandbox.stop = AsyncMock()
+    server._upload_folder = AsyncMock()
+    server._session_id_to_sandbox["s"] = sandbox
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "s"}
+    return server, request
+
+
+def _ok(stdout="", return_code=0, error_type=None):
+    return SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=error_type)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failing", ["upload", "mkdir_raises", "mkdir_sandbox_error", "test_raises", "test_sandbox_error"]
+)
+async def test_verifier_infrastructure_failure_is_masked(tmp_path: Path, failing: str) -> None:
+    async def execute(command, **kwargs):
+        if failing == "mkdir_raises" and command.startswith("mkdir"):
+            raise ConnectionError("sandbox gone")
+        if failing == "mkdir_sandbox_error" and command.startswith("mkdir"):
+            return _ok(return_code=125, error_type="sandbox")
+        if failing == "test_raises" and "test.sh" in command:
+            raise ConnectionError("sandbox gone")
+        if failing == "test_sandbox_error" and "test.sh" in command:
+            return _ok(return_code=125, error_type="sandbox")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    if failing == "upload":
+        server._upload_folder.side_effect = ConnectionError("upload failed")
+
+    result = await server.verify(request, _verify_request(tmp_path))
+
+    assert result.mask_sample is True
+    assert result.failure_kind == "verifier_error"
+    assert result.failure_reason
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_reward_download_connection_failure_is_masked(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        return _ok()  # the probe finds reward.txt present
+
+    server, request = _infra_server(tmp_path, execute, ConnectionError("lost"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "download_error", [FileNotFoundError("reward.txt"), RuntimeError("provider says no such file")]
+)
+async def test_absent_reward_file_is_still_scored_zero(tmp_path: Path, download_error: Exception) -> None:
+    async def execute(command, **kwargs):
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, download_error)
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("timeout_style", ["result", "raises"])
+async def test_test_script_timeout_is_still_scored_zero(tmp_path: Path, timeout_style: str) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            if timeout_style == "raises":
+                raise TimeoutError()
+            return _ok(return_code=125, error_type="timeout")
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.reward == 0.0 and result.evaluation_completed is False
