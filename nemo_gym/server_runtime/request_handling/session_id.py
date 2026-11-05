@@ -23,6 +23,10 @@ from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.server_runtime.request_handling.session_routing import SESSION_ACQUIRE_SCOPE_KEY, SESSION_ID_SCOPE_KEY
 
 
+class _ReplyReplaced(Exception):
+    """Stops a route whose reply a lost claim's 409 replaced, so it streams nothing to a reply that has ended."""
+
+
 class SessionIDMiddleware:
     """Assign the session ID before the route runs, and settle it when the reply starts.
 
@@ -85,7 +89,7 @@ class SessionIDMiddleware:
                             {"detail": "This session's ID is already owned by another worker. Retry it."}, 409
                         )
                         await conflict(scope, receive, send)
-                        return
+                        raise _ReplyReplaced
                     if minted and (not used or failed):
                         # No cookie names an ID that nothing holds, so a later request cannot name a session nobody
                         # owns.
@@ -93,4 +97,8 @@ class SessionIDMiddleware:
                         del session[SESSION_ID_KEY]
             await send(message)
 
-        await self.app(scope, receive, send_settled)
+        try:
+            await self.app(scope, receive, send_settled)
+        except _ReplyReplaced:
+            if not refused:
+                raise

@@ -25,9 +25,10 @@ import re
 import socket
 import threading
 import time
+from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Iterator
+from typing import AsyncIterator, Iterator
 from unittest.mock import MagicMock
 
 import pytest
@@ -35,6 +36,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
+from starlette.requests import ClientDisconnect
 
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.server_runtime.base_server import SimpleServer
@@ -115,6 +117,25 @@ def test_a_new_session_takes_the_id_the_session_router_chose() -> None:
         await gym_app({**scope, SESSION_ID_SCOPE_KEY: "chosen"}, receive, send)
 
     assert TestClient(routed).get("/id").json() == "chosen"
+
+
+def test_a_session_the_router_chose_hands_out_no_cookie_when_its_route_replied_with_an_error() -> None:
+    app = _app_with_gym_middleware()
+
+    @app.get("/refused")
+    async def refused(request: Request) -> None:
+        request.session[SESSION_ID_KEY]
+        raise HTTPException(status_code=409, detail="seed belongs to another episode")
+
+    gym_app = app.build_middleware_stack()
+
+    async def routed(scope, receive, send):
+        await gym_app({**scope, SESSION_ID_SCOPE_KEY: "another-episode"}, receive, send)
+
+    response = TestClient(routed).get("/refused")
+
+    assert response.status_code == 409
+    assert "set-cookie" not in response.headers
 
 
 def test_a_failed_route_reply_keeps_its_partial_observations() -> None:
@@ -223,11 +244,14 @@ async def test_a_cancelled_request_gets_the_failure_reply_and_the_cancellation_p
         sent.append(message)
 
     request = asyncio.create_task(app(_http_scope("/slow"), receive, send))
-    await entered.wait()
-    request.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await request
+    try:
+        async with asyncio.timeout(10):
+            await entered.wait()
+            request.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await request
+    finally:
+        request.cancel()
     assert sent[0]["status"] == 500
     assert sent[1]["body"] == b'"Request was cancelled"'
 
@@ -249,8 +273,9 @@ def test_a_route_whose_task_other_code_cancels_gets_the_failure_reply() -> None:
     assert response.json() == "Request was cancelled"
 
 
-def _app_with_session_claim(claimed: bool, claims: list[str]) -> FastAPI:
+def _app_with_session_claim(claimed: bool, claims: list[str], streamed: list[str] | None = None) -> FastAPI:
     """Gym's session middleware behind a session router whose claim succeeds or fails, recording each claim."""
+    streamed = [] if streamed is None else streamed
     app = _app_with_gym_middleware()
 
     @app.get("/uses-session")
@@ -260,6 +285,21 @@ def _app_with_session_claim(claimed: bool, claims: list[str]) -> FastAPI:
     @app.get("/ignores-session")
     async def ignores_session() -> str:
         return "ok"
+
+    @app.get("/refuses-session")
+    async def refuses_session(request: Request) -> None:
+        request.session[SESSION_ID_KEY]
+        raise HTTPException(status_code=404, detail="no such seed")
+
+    @app.get("/streams-session")
+    async def streams_session(request: Request) -> StreamingResponse:
+        request.session[SESSION_ID_KEY]
+
+        async def chunks() -> AsyncIterator[bytes]:
+            streamed.append("chunk")
+            yield b"chunk"
+
+        return StreamingResponse(chunks())
 
     gym_app = app.build_middleware_stack()
 
@@ -280,6 +320,23 @@ def test_a_session_whose_claim_another_worker_won_is_refused_with_a_409() -> Non
     assert response.status_code == 409
     assert response.json() == {"detail": "This session's ID is already owned by another worker. Retry it."}
     assert claims == ["claim"]
+
+
+def test_a_route_whose_reply_a_lost_claim_replaced_stops_before_streaming() -> None:
+    claims = []
+    streamed = []
+    response = TestClient(_app_with_session_claim(False, claims, streamed)).get("/streams-session")
+
+    assert response.status_code == 409
+    assert streamed == []
+
+
+def test_a_claimed_new_session_whose_route_replied_with_an_error_hands_out_no_cookie() -> None:
+    claims = []
+    response = TestClient(_app_with_session_claim(True, claims)).get("/refuses-session")
+
+    assert response.status_code == 404
+    assert "set-cookie" not in response.headers
 
 
 def test_a_claimed_session_the_route_used_hands_out_its_cookie() -> None:
@@ -332,8 +389,9 @@ def _app_leaving_context_behind() -> FastAPI:
     return app
 
 
-def _pipelined_replies(app: FastAPI) -> list[str]:
-    """Send ``/set`` then ``/read`` in one write on one connection, so uvicorn pipelines ``/read``."""
+@contextmanager
+def _serving(app: FastAPI) -> Iterator[int]:
+    """Serve ``app`` on a real uvicorn server in a thread, and yield its port."""
     server = uvicorn.Server(
         uvicorn.Config(app, host="127.0.0.1", port=0, http="httptools", log_level="warning", lifespan="off")
     )
@@ -344,17 +402,21 @@ def _pipelined_replies(app: FastAPI) -> list[str]:
         while not server.started:
             assert time.monotonic() < deadline, "the test server did not start"
             time.sleep(0.01)
-        port = server.servers[0].sockets[0].getsockname()[1]
-        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
-            connection.sendall(
-                b"GET /set HTTP/1.1\r\nHost: test\r\n\r\nGET /read HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
-            )
-            raw = b""
-            while chunk := connection.recv(65536):
-                raw += chunk
+        yield server.servers[0].sockets[0].getsockname()[1]
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+def _pipelined_replies(app: FastAPI) -> list[str]:
+    """Send ``/set`` then ``/read`` in one write on one connection, so uvicorn pipelines ``/read``."""
+    with _serving(app) as port, socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+        connection.sendall(
+            b"GET /set HTTP/1.1\r\nHost: test\r\n\r\nGET /read HTTP/1.1\r\nHost: test\r\nConnection: close\r\n\r\n"
+        )
+        raw = b""
+        while chunk := connection.recv(65536):
+            raw += chunk
     return re.findall(r'\r\n\r\n"([^"]*)"', raw.decode())
 
 
@@ -368,6 +430,37 @@ def test_a_pipelined_request_does_not_inherit_what_the_previous_route_set() -> N
     install_request_context_isolation(app)
 
     assert _pipelined_replies(app) == ["set", "unset"]
+
+
+def test_a_client_that_disconnects_mid_upload_cancels_the_route_before_it_sees_the_disconnect() -> None:
+    # A handler that treats a failed body read as an empty body must not go on to act on it.
+    app = _app_with_gym_middleware()
+    app.add_middleware(ClientDisconnectCancellationMiddleware)
+    reading = threading.Event()
+    finished = threading.Event()
+    outcome = []
+
+    @app.post("/execute")
+    async def execute(request: Request) -> str:
+        try:
+            reading.set()
+            await request.json()
+        except ClientDisconnect:
+            outcome.append("carried on with an empty body")
+        finally:
+            finished.set()
+        return "executed"
+
+    with _serving(app) as port:
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+            connection.sendall(
+                b"POST /execute HTTP/1.1\r\nHost: test\r\nContent-Type: application/json\r\n"
+                b'Content-Length: 100\r\n\r\n{"code": '
+            )
+            assert reading.wait(10), "the route never started reading the body"
+        assert finished.wait(10), "the route was neither cancelled nor finished"
+
+    assert outcome == []
 
 
 # Environment-specific bearer-token checks, to be converted separately, by how many each file registers.
@@ -396,7 +489,9 @@ def test_gym_servers_add_no_middleware_that_runs_the_app_in_another_task() -> No
     ):
         for path in sorted((REPO / root).rglob("*.py")):
             relative = path.relative_to(REPO).as_posix()
-            if "/tests/" in f"/{relative}":
+            parts = path.relative_to(REPO).parts
+            # Installed environments, such as a server's .venv, hold third-party code that may use either form.
+            if "tests" in parts or any(part.startswith(".") or part == "site-packages" for part in parts):
                 continue
             count = len(pattern.findall(path.read_text(encoding="utf-8", errors="replace")))
             if count > _ALLOWED_DECORATED_MIDDLEWARE.get(relative, 0):
