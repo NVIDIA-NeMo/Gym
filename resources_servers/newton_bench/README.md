@@ -128,6 +128,10 @@ metadata: the idle sweep and `/end_session` can remove it before the episode clo
 checked before reporting that state as expired or lost. Cookie seeds use the shared lifecycle; a failed cookie reseed keeps
 the previous verification receipt, which is discarded only after the replacement metadata is ready.
 
+The first `execute_python` call starts a fresh Python interpreter, so workers do not inherit the server's sockets.
+That call includes numerical-library startup within the `max_execution_time + 5` second response wait; later
+calls reuse the worker and its Python variables.
+
 The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
 `task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
 ID for another episode, or arrives after the session was verified or closed, is refused with 409. `/verify` releases
