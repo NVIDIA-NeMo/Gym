@@ -61,3 +61,11 @@ speed_bench_simple_agent:
         type: responses_api_models
         name: policy_model
 ```
+
+## Agent sessions
+
+The agent also serves the agent sessions API, and the shipped configs run it through a `single_agent_turn_legacy`
+Environment Server. The Environment Server seeds and verifies; the agent session's one activation runs the same replay.
+A session takes no tools and no sandbox: a seed that grants a sandbox or requires a tool is refused. A retried
+activation returns the replay it already ran instead of making new model calls. The timing fields cover only the
+replay, so the session's seed and close round trips stay outside each task's generation window.

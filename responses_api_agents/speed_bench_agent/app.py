@@ -40,19 +40,30 @@ preserved (so a partially-completed conversation can be resumed) — only
 
 For tasks that only have a single user turn, this collapses to a single
 model call (same shape as simple_agent).
+
+Under an Environment Server, the agent sessions API runs the same replay as
+the session's one activation. The session holds no tools and no sandbox, and
+the timing metrics cover only the replay, as they do under `/run`.
 """
 
 import json
 import logging
+from dataclasses import dataclass, field
 from time import perf_counter, time
-from typing import List
+from typing import Any, List
 
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import (
+    ActivationConflictError,
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    OrderedOperationLedger,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -70,6 +81,9 @@ from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerif
 
 LOG = logging.getLogger(__name__)
 
+# Bound on stopping a session's replay that is still running when the session closes.
+_SESSION_CLOSE_TIMEOUT_SECS = 30.0
+
 
 class SpeedBenchAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
@@ -86,6 +100,11 @@ class SpeedBenchAgentVerifyRequest(BaseVerifyRequest):
 
 class SpeedBenchAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+@dataclass
+class _SpeedBenchSession(AgentSessionState):
+    operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
 
 
 def _content_text(content) -> str:
@@ -109,12 +128,55 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
 
     config: SpeedBenchAgentConfig
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> _SpeedBenchSession:
+        # The replay calls only the model, so a session holds no tools and no sandbox.
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("SPEED-Bench agent does not support sandbox access")
+        required = [access.name for access in self.effective_tool_accesses(body) if access.required]
+        if required:
+            raise AgentSeedRejectedError(
+                f"SPEED-Bench agent does not support required tool access: {', '.join(required)}"
+            )
+        return _SpeedBenchSession(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, _SpeedBenchSession):
+            raise TypeError("Expected SPEED-Bench session state")
+        await state.operations.close(timeout=_SESSION_CLOSE_TIMEOUT_SECS)
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
     async def responses(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        model_url_path = self.url_path_for_request("/v1/responses", request)
+        agent_session_id = self._agent_session_id_from_request(request)
+        if agent_session_id is None:
+            replay, model_server_cookies = await self._replay(body, model_url_path)
+            # Propagate any cookies the resources server set so /verify sees them.
+            for k, v in (*request.cookies.items(), *(model_server_cookies or {}).items()):
+                response.set_cookie(k, v)
+            return replay
+        state = self._require_agent_session(agent_session_id)
+        if not isinstance(state, _SpeedBenchSession):
+            raise TypeError("Expected SPEED-Bench session state")
+
+        async def activation() -> NeMoGymResponse:
+            replay, _ = await self._replay(body, model_url_path)
+            return replay
+
+        try:
+            # A retried activation gets the replay it already ran, not a second set of timed model calls.
+            return await state.operations.execute(index=1, request=body, operation=activation)
+        except ActivationConflictError as error:
+            raise HTTPException(409, str(error)) from error
+
+    async def _replay(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, model_url_path: str
+    ) -> tuple[NeMoGymResponse, Any]:
+        """Replay the trailing user turns, one model call each; returns the summary response and model cookies."""
         generation_started_at = time()
         generation_start = perf_counter()
         request_metrics: list[dict[str, JsonValue] | None] = []
@@ -156,13 +218,12 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         usage = None
         last_response: NeMoGymResponse = None
         model_server_cookies = None
-        resources_server_cookies = request.cookies
 
         async def _call_model(turn_input):
             new_body = body.model_copy(update={"input": turn_input})
             model_response = await self.server_client.post(
                 server_name=self.config.model_server.name,
-                url_path=self.url_path_for_request("/v1/responses", request),
+                url_path=model_url_path,
                 json=new_body,
                 cookies=model_server_cookies,
             )
@@ -208,10 +269,6 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             usage = accumulate_response_usage(usage, last_response.usage)
             last_response.usage = None
 
-        # Propagate any cookies the resources server set so /verify sees them.
-        for k, v in (*resources_server_cookies.items(), *(model_server_cookies or {}).items()):
-            response.set_cookie(k, v)
-
         last_response.output = accumulated_outputs
         last_response.usage = usage
         duration = perf_counter() - generation_start
@@ -221,7 +278,7 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
             "generation_finished_at": generation_started_at + duration,
             "generation_duration": duration,
         }
-        return last_response
+        return last_response, model_server_cookies
 
     async def run(self, request: Request, body: SpeedBenchAgentRunRequest) -> SpeedBenchAgentVerifyResponse:
         cookies = request.cookies
