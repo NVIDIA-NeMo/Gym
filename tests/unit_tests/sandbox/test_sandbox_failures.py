@@ -14,6 +14,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
     PROVIDER_IO_TIMEOUT,
+    PROVIDER_OOM_KILLED,
     PROVIDER_REQUEST_FAILED,
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
@@ -841,3 +842,85 @@ def test_provider_create_class_action_uses_configured_classification():
     assert module._is_retryable_create_error(failure, config=policy)
     policy.classification.by_failure_kind["provider_request_failed"] = "evaluation"
     assert not module._is_retryable_create_error(failure, config=policy)
+
+
+@pytest.mark.parametrize("final_inspect", ["current user container: OOMKilled", None, RuntimeError("inspect failed")])
+async def test_terminal_transition_rechecks_inspect_once_with_original_deadline(monkeypatch, final_inspect):
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    deadline = now + 1
+
+    async def advance(delay):
+        nonlocal now
+        now += delay
+
+    monkeypatch.setattr(loop, "time", lambda: now)
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    raw = SimpleNamespace(
+        get_info=AsyncMock(
+            side_effect=[
+                SimpleNamespace(status=SimpleNamespace(state="Running", reason=None)),
+                SimpleNamespace(status=SimpleNamespace(state="Running", reason=None)),
+                SimpleNamespace(status=SimpleNamespace(state="Failed", reason="OOMKilled")),
+            ]
+        )
+    )
+    provider = module.OpenSandboxProvider(diagnostics={"inspect_oom": True, "poll_interval_s": 0.1})
+    inspect = AsyncMock(side_effect=[None, final_inspect])
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
+    handle = SandboxHandle("sb", "opensandbox", raw)
+
+    evidence = await provider._sandbox_death_evidence(handle, deadline=deadline)
+
+    assert evidence.failure_kind == (PROVIDER_OOM_KILLED if isinstance(final_inspect, str) else PROVIDER_UNAVAILABLE)
+    assert evidence.provider_status_reason == "OOMKilled"
+    assert raw.get_info.await_count == 3
+    assert inspect.await_count == 2  # Not once per Running poll, nor repeatedly after terminal state.
+    assert [call.kwargs["deadline"] for call in inspect.await_args_list] == [deadline, deadline]
+    assert now < deadline
+
+
+async def test_terminal_transition_does_not_inspect_after_remaining_budget_expires(monkeypatch):
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    deadline = now + 1
+    lifecycle_reads = 0
+
+    async def advance(delay):
+        nonlocal now
+        now += delay
+
+    async def get_info():
+        nonlocal now, lifecycle_reads
+        lifecycle_reads += 1
+        if lifecycle_reads == 1:
+            return SimpleNamespace(status=SimpleNamespace(state="Running", reason=None))
+        now = deadline
+        return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="OOMKilled"))
+
+    monkeypatch.setattr(loop, "time", lambda: now)
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    provider = module.OpenSandboxProvider(diagnostics={"inspect_oom": True, "poll_interval_s": 0.1})
+    inspect = AsyncMock(return_value=None)
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
+    handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(get_info=get_info))
+
+    evidence = await provider._sandbox_death_evidence(handle, deadline=deadline)
+
+    assert evidence.failure_kind == PROVIDER_UNAVAILABLE
+    assert lifecycle_reads == 2
+    inspect.assert_awaited_once_with(handle, deadline=deadline)
+    assert now == deadline
+
+
+async def test_already_terminal_lifecycle_inspects_only_once():
+    provider = module.OpenSandboxProvider(diagnostics={"inspect_oom": True})
+    raw = SimpleNamespace(get_info=AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="Failed"))))
+    handle = SandboxHandle("sb", "opensandbox", raw)
+    provider._control_plane_inspect_oom_evidence = AsyncMock(return_value=None)
+
+    evidence = await provider._sandbox_death_evidence(handle, deadline=asyncio.get_running_loop().time() + 1)
+
+    assert evidence.failure_kind == PROVIDER_UNAVAILABLE
+    raw.get_info.assert_awaited_once()
+    provider._control_plane_inspect_oom_evidence.assert_awaited_once()

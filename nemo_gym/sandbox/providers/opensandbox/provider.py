@@ -2396,7 +2396,13 @@ class OpenSandboxProvider:
                 except Exception:
                     # Optional diagnosis must not replace the original failure.
                     pass
-            if self._diagnostics.inspect_oom and not inspected and deadline > loop.time():
+            # An early inspect can precede termination. Recheck once when lifecycle
+            # first becomes terminal, using only the original deadline's remainder.
+            if (
+                self._diagnostics.inspect_oom
+                and (not inspected or terminal_notice is not None)
+                and deadline > loop.time()
+            ):
                 inspected = True
                 try:
                     evidence = await self._control_plane_inspect_oom_evidence(handle, deadline=deadline)
