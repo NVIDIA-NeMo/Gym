@@ -99,8 +99,6 @@ class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerify
 
 
 class TerminalBench21VerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
-
     # Misc metrics
     verification_time_taken: float
 

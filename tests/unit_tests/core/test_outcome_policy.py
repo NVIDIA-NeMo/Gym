@@ -8,6 +8,7 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT,
     CANCELLED,
     KILL_SHAPED,
     PROVIDER_CREDENTIALS_REJECTED,
@@ -25,6 +26,24 @@ from nemo_gym.core.outcome_policy import (
     choose_stage_outcome,
 )
 from nemo_gym.trajectory.trajectory_record import SandboxObservation
+
+
+def test_agent_budget_timeout_defaults_to_zero_and_verify_override_keeps_attribution():
+    for rules, action in (
+        ({}, OutcomeAction.COUNT_AS_ZERO),
+        ({"agent": {"by_failure_kind": {AGENT_TIMEOUT: "verify"}}}, OutcomeAction.VERIFY),
+    ):
+        decision = choose_stage_outcome(
+            failure_kind=AGENT_TIMEOUT,
+            http_status=None,
+            stage="agent",
+            config=StageOutcomePolicyConfig(by_stage=rules),
+        )
+        assert decision.action == action and decision.attribution == FailureClass.MODEL
+    unknown = choose_stage_outcome(
+        failure_kind=AGENT_TIMEOUT, http_status=None, stage=None, config=StageOutcomePolicyConfig()
+    )
+    assert unknown.action == OutcomeAction.FAIL and unknown.attribution == FailureClass.MODEL
 
 
 @pytest.mark.parametrize(

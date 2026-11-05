@@ -308,7 +308,6 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
     verification_attempts: int | None = Field(default=None, exclude_if=lambda value: value is None)
     image_provenance: dict[str, Any] = Field(default_factory=dict)
-    evaluation_completed: bool
     eval_timed_out: bool = False
     resolved: bool
     patch_applied: bool

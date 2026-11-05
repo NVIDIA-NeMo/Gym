@@ -51,7 +51,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier, verification_outcome
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -829,6 +829,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 response=resp,
                 reward=resp.reward,
                 rollout_error=resp.rollout_error,
+                **(verification_outcome("failed", failure_kind=VERIFIER_ERROR) if failures else {}),
             )
             if failures:
                 # verifiers scored each reward function that raised as 0.0; that zero is no grade of the answer.
@@ -839,7 +840,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
         # This agent is its own verifier: the rubric graded inside the rollout above. Its result is its grading
         # record when every reward function is synchronous (no model asked), observed like a resources server's.
-        # Any other rubric is not observed at all, as before: an invocation without a record would read as ungraded.
+        # Other rubrics retain compact completion evidence without claiming a programmatic grading record.
         vf_env_id = body.vf_env_id or self.config.vf_env_id
         return await observe_verifier(
             scored,

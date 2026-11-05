@@ -83,7 +83,6 @@ class SWEAtlasQAVerifyRequest(SWEAtlasQARequest, BaseVerifyRequest):
 
 class SWEAtlasQAVerifyResponse(BaseVerifyResponse):
     task_id: str
-    evaluation_completed: bool
     answer: str | None = None
     agg_score: float = 0.0
     num_rubrics: int = 0

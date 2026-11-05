@@ -21,7 +21,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     OutcomeAction,
-    agent_outcome_policy,
+    agent_outcome_decision,
     confirmed_policy_response_timeout,
     verification_failure_fields,
 )
@@ -47,6 +47,7 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NgFailureEvent,
+    classify_failure,
     rebuild_failure,
 )
 from nemo_gym.server_runtime import (
@@ -65,6 +66,7 @@ from nemo_gym.server_runtime import (
     SingleAgentTurnResult,
     StepType,
     ToolAccess,
+    apply_zero_score,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
@@ -258,7 +260,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             return trajectory.model_dump(mode="json") if trajectory else None
 
         if stage == "verify":
-            action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
+            decision = agent_outcome_decision(agent_response, config=self.config.agent_outcome_policy)
+            action = decision.action
             cause = self._agent_failure(agent_response)
             if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
                 extra = agent_response.model_extra or {}
@@ -275,18 +278,21 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
                     action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
             if action == OutcomeAction.COUNT_AS_ZERO:
-                # Explicit policy completion is not a verifier execution.
-                report = FailureReport.model_validate(agent_response.model_extra["failure_report"])
+                # Execute the policy's grading operation; keep the agent's own failed/incomplete response.
+                outcome = AgentOutcome.model_validate_json(agent_response.metadata[AGENT_OUTCOME_METADATA_KEY])
+                report_data = (agent_response.model_extra or {}).get("failure_report")
+                report = FailureReport.model_validate(report_data) if report_data is not None else None
+                fields = self._verify_body(request, agent_response) | {
+                    "failure_kind": outcome.failure_kind,
+                    "failure_reason": agent_response.error.message if agent_response.error else None,
+                }
+                if report is not None:
+                    fields |= FailureReportRow.fields(report)
                 verification = SingleAgentTurnResult.model_validate(
-                    self._verify_body(request, agent_response)
-                    | {
-                        "reward": 0.0,
-                        "_ng_failure_class": cause.failure_kind,
-                        "failure_kind": cause.failure_kind,
-                        "_ng_failure_terminal": True,
-                        "_ng_failure_counts_as_zero": True,
-                        **FailureReportRow.fields(report),
-                    }
+                    await apply_zero_score(
+                        fields,
+                        decision=decision.model_copy(update={"action": action}),
+                    )
                 )
                 stage = "return"
             elif action != OutcomeAction.VERIFY:
@@ -340,7 +346,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
         final_zero_report = (
             FailureReportRow.report(verification.model_dump(mode="json"))
-            if (verification.model_extra or {}).get("_ng_failure_counts_as_zero") is True
+            if verification.failure_outcome_action == OutcomeAction.COUNT_AS_ZERO
             else None
         )
         return SingleAgentTurnResponse(
@@ -640,7 +646,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     def _timeout_action(self, fallback: OutcomeAction) -> OutcomeAction:
         """Keep the migrated agent's explicit timeout rule unless the environment overrides policy."""
         policy = self.config.agent_outcome_policy
-        if MODEL_POLICY_RESPONSE_TIMEOUT in policy.by_failure_kind or "default_action" in policy.model_fields_set:
+        failure_class = classify_failure(
+            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT, stage="agent", config=policy.classification
+        )
+        if (
+            MODEL_POLICY_RESPONSE_TIMEOUT in policy.by_failure_kind
+            or failure_class in policy.by_failure_class
+            or "default_action" in policy.model_fields_set
+        ):
             return fallback
         agent = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
         rules = (agent.get("outcome_policy") or {}).get("by_failure_kind") or {}

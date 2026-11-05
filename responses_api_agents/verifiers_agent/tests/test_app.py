@@ -777,7 +777,7 @@ class TestOwnGradingRecord:
         assert "partial_credit" in body["failure_reason"]
         [invocation] = body["ng_verifier_invocations"]
         assert invocation["failure_kind"] == "verifier_error"
-        assert invocation["status"] == "unknown"
+        assert invocation["status"] == "failed"
         assert "grading_record" not in invocation
 
     def test_a_rubric_that_may_ask_a_model_is_not_observed(self) -> None:

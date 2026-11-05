@@ -163,7 +163,6 @@ class SWENextVerifyRequest(SWENextInstanceRequest, BaseVerifyRequest):
 
 
 class SWENextVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str

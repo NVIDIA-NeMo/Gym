@@ -97,8 +97,10 @@ def test_boundary_rejects_unsupported_actions_at_load(field):
 
     with pytest.raises(ValidationError, match="does not support verify"):
         SimpleAgentOutcomePolicyConfig(**{field: value("verify")})
-    with pytest.raises(ValidationError, match="does not support count_as_zero"):
-        AgentOutcomePolicyConfig(**{field: value("count_as_zero")})
+    policy = AgentOutcomePolicyConfig(**{field: value("count_as_zero")})
+    actual = getattr(policy, field)
+    expected = value("count_as_zero")
+    assert actual == expected if field == "default_action" else actual.items() >= expected.items()
 
 
 def test_alias_resolves_once_conflicts_are_rejected_and_config_roundtrips():

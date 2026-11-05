@@ -3,7 +3,7 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
-from typing import TYPE_CHECKING, Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -11,17 +11,24 @@ from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
+    AGENT_TIMEOUT,
     FAILURE_KINDS,
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_OOM_KILLED,
+    FailureClass,
     FailureClassificationConfig,
     classify_failure,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
+from nemo_gym.core.outcome_policy import OutcomeAction as OutcomeAction
 
 # Compatibility imports for existing agent/environment policy consumers.
-from nemo_gym.core.outcome_policy import OutcomeAction as OutcomeAction
+from nemo_gym.core.outcome_policy import (
+    OutcomeDecision,
+    StageOutcomePolicyConfig,
+)
 from nemo_gym.core.outcome_policy import OutcomePolicyConfig as OutcomePolicyConfig
 from nemo_gym.core.outcome_policy import choose_action as choose_action
 from nemo_gym.core.outcome_policy import failure_outcome_policy as failure_outcome_policy
@@ -65,15 +72,14 @@ class AgentOutcome(BaseModel):
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     """Existing Environment Server defaults for classified failed agent responses."""
 
-    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
-        {OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL}
-    )
     classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
 
     by_failure_kind: dict[str, OutcomeAction] = Field(
         default_factory=lambda: {
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
+            MODEL_CONTEXT_LIMIT: OutcomeAction.VERIFY,
+            AGENT_TIMEOUT: StageOutcomePolicyConfig().by_stage["agent"].by_failure_kind[AGENT_TIMEOUT],
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
             PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
@@ -94,29 +100,47 @@ def agent_outcome_policy(
     config: AgentOutcomePolicyConfig | None = None,
     classification: FailureClassificationConfig | None = None,
 ) -> OutcomeAction:
+    """Compatibility action projection of the owning environment's decision."""
+    return agent_outcome_decision(response, config=config, classification=classification).action
+
+
+def agent_outcome_decision(
+    response: "NeMoGymResponse",
+    *,
+    config: AgentOutcomePolicyConfig | None = None,
+    classification: FailureClassificationConfig | None = None,
+) -> OutcomeDecision:
     """Apply configured grading/retry rules to a classified failed response.
 
     Unclassified legacy responses retain their existing grading behavior; malformed
     metadata is an ungraded, nonretryable failure regardless of configuration.
     """
     raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
-    if response.status != "failed" or raw is None:
-        return OutcomeAction.VERIFY
+    if raw is None:
+        return OutcomeDecision(action=OutcomeAction.VERIFY, attribution=FailureClass.UNKNOWN)
     try:
         outcome = AgentOutcome.model_validate_json(raw)
     except ValidationError:
         # Keep malformed classification in the partial response for diagnosis, not scoring.
-        return OutcomeAction.FAIL
+        return OutcomeDecision(
+            action=OutcomeAction.FAIL,
+            attribution=FailureClass.UNKNOWN,
+        )
     config = config or AgentOutcomePolicyConfig()
-    return choose_action(
+    failure_class = classify_failure(
         failure_kind=outcome.failure_kind,
+        stage="agent",
         http_status=outcome.status_code,
-        config=config,
-        failure_class=classify_failure(
+        config=classification or config.classification,
+    )
+    return OutcomeDecision(
+        action=choose_action(
             failure_kind=outcome.failure_kind,
             http_status=outcome.status_code,
-            config=classification or config.classification,
+            config=config,
+            failure_class=failure_class,
         ),
+        attribution=failure_class,
     )
 
 

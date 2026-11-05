@@ -205,7 +205,7 @@ async def test_only_matching_environment_selector_overrides_agent_timeout_rule(p
     assert {"agent", "model"} <= result.failure_report.events.keys()
     if action == "count_as_zero":
         assert result.failure is None and result.result.reward == 0
-        assert result.result.model_extra["_ng_failure_counts_as_zero"] is True
+        assert result.result.failure_outcome_action == "count_as_zero"
         assert result.failure_report.failure_id == "agent"
         # JSON/checkpoint roundtrip retains precisely the original selected operation.
         restored = type(result).model_validate_json(result.model_dump_json())

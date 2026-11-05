@@ -115,7 +115,7 @@ class UserTurn(BaseModel):
 class SWETResult(SingleAgentTurnResult):
     # Required, so a result path that does not say whether the judge measured the patch fails to serialize
     # instead of defaulting to a completed measurement.
-    evaluation_completed: bool
+    legacy_evaluation_completed: bool = Field(validation_alias="evaluation_completed", exclude=True, repr=False)
     judge_score: float | None = None
     task_id: str
     ng_activations: list[CandidateTurn] = Field(default_factory=list)

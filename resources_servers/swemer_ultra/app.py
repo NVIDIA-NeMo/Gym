@@ -130,7 +130,6 @@ class SwemerUltraVerifyRequest(SwemerUltraInstanceRequest, BaseVerifyRequest):
 
 
 class SwemerUltraVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str

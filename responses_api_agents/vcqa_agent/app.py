@@ -326,7 +326,9 @@ class VcqaAgentVerifyResponse(BaseVerifyResponse):
     final_answer: Optional[str] = None
     num_turns: Optional[int] = None
     # False when the reward is not a measurement of the policy (infra or judge failure).
-    evaluation_completed: bool = True
+    legacy_evaluation_completed: bool | None = Field(
+        default=True, validation_alias="evaluation_completed", exclude=True, repr=False
+    )
     failure_stage: Optional[str] = None
     judge_errors: Optional[int] = None
 

@@ -129,7 +129,6 @@ class R2EGymVerifyRequest(R2EGymInstanceRequest, BaseVerifyRequest):
 
 
 class R2EGymVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str

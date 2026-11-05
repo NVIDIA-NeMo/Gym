@@ -143,7 +143,6 @@ class SWEGymVerifyRequest(SWEGymInstanceRequest, BaseVerifyRequest):
 
 
 class SWEGymVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str
