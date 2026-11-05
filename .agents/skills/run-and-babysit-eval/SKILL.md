@@ -51,6 +51,11 @@ Without `uv`, install it with `curl -LsSf https://astral.sh/uv/install.sh | sh` 
 `export PATH="$HOME/.local/bin:$PATH"`. The submitted run installs its own extras and `ray`; the launcher
 needs only the `mlflow` extra, which the MLflow delivery check in `--inspect` uses.
 
+When the `gym` command cannot run (a wrapper or a policy blocks the entry-point script, or `PATH` lacks the
+venv), call the same CLI through the venv's Python:
+`python -c 'from nemo_gym.cli.main import main; main()' eval resubmit ...`. `python -m nemo_gym.cli.main`
+only imports the module and runs nothing.
+
 1. Pin Gym: `driver.gym_install.ref` is a full commit, not a branch. Recovery reads a run with the Gym
    that wrote it and refuses an unpinned ref.
 2. Make every long benchmark resumable under `driver.benchmarks.<name>`: `resumable: true`, or
@@ -90,7 +95,18 @@ gym eval submit --config submit.yaml            # --select a,b submits only thos
 ```
 
 The job id is `gym_job_id` in the run directory's `gym-job.json` (or in `gym eval submit --json`). The
-`Run directory:` line ends with it but wraps when stdout is not a terminal.
+`Run directory:` line ends with it but wraps when stdout is not a terminal. The same file records the
+commits: `gym_commit` is the Gym that submitted the run, and each `benchmarks[]` entry holds that
+benchmark's Slurm `job_id` and, after a repin, the `gym_commit` its job now runs. The commit the job
+installs is `driver.gym_install.ref` in `resolved-config.yaml`. Read ids and commits from these files, not
+from a wrapper's console output, which may be cut or reformatted.
+
+A job that stays `PENDING`: read why with `squeue -j <job id> -o '%i %T %r'` and the expected start with
+`squeue --start -j <job id>`. Priority or a per-user limit of the QOS only makes it wait; it is not a fault
+of the run. If your site has a faster QOS you may use and no job of the run has started, cancel only that
+run's own pending job (`scancel <job id>`, the `job_id` from `gym-job.json`; never another user's or
+another run's job) and submit again with that QOS in `compute.cluster.extra_args` (`{qos: <qos>}`). Once a
+job of the run has started, let the chain continue on its QOS.
 
 A resumable benchmark is a chain of Slurm jobs. Each job queues its successor (`afternotok`) and a
 sentinel (`afterany`), then reads its predecessor's final state:
@@ -130,10 +146,13 @@ the chain stops or the run ends.
 ## 3. Inspect first, always
 
 ```bash
-gym eval resubmit "$GYM_JOB_ID" <benchmark> --recover --inspect \
+gym eval resubmit "$GYM_JOB_ID" <benchmark> --recover --inspect --no-auto-repin \
   --score-agent <agent name in the aggregate> \
   --score-key '["agent_metrics", "mean/reward"]'
 ```
+
+This is the acceptance call: keep the score flags and `--no-auto-repin` in it, so the verdict you record is
+taken on the run's own pin and names `--repin` instead of planning a move (see "Older pin" below).
 
 The agent name is `agent_ref.name` of the rows, the agent entry in
 `artifacts/rollouts_aggregate_metrics.json`; without the score flags the score gate reports "score
