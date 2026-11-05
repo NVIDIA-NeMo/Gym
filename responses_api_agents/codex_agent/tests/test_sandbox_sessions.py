@@ -2820,22 +2820,34 @@ def seed_owned(agent, sandbox, body: dict):
     return (sandbox.start.await_args.args[0] if sandbox.start.await_args else None), created
 
 
+def owned_seed_with_several_grants(*, required: bool = True) -> dict:
+    """A required and an optional MCP grant on different hosts, plus an optional direct HTTP grant Codex skips."""
+    body = owned_seed_with_search_grant()
+    body["tool_accesses"] = [
+        mcp_grant("search", required=required, url="http://resources.example:7000/mcp"),
+        mcp_grant("docs", required=False, url="http://docs.example:9000/mcp"),
+        {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+    ]
+    return body
+
+
 @pytest.mark.parametrize(
-    ("network_access", "allowed"),
+    ("network_access", "required", "allowed"),
     [
-        ("inherit", None),
-        ("model_only", ["model.example"]),
-        ("model_and_tools", ["model.example", "resources.example"]),
+        ("inherit", True, None),
+        # A required grant under model_only is refused (see the required-grant test), so this case grants optional ones.
+        ("model_only", False, ["model.example"]),
+        ("model_and_tools", True, ["docs.example", "model.example", "resources.example"]),
     ],
 )
-def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, allowed):
+def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, required, allowed):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
     agent.config.network_access = network_access
     sandbox.expected_workdir = "/workspace"
 
-    spec, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+    spec, created = seed_owned(agent, sandbox, owned_seed_with_several_grants(required=required))
 
     assert created.status_code == 200, created.text
     policy = spec.provider_options.get("network_policy")
@@ -2864,9 +2876,10 @@ def test_tool_egress_leaves_out_the_mcp_grants_codex_skips(setup):
     }
 
 
-def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setup):
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setup, network_access):
     agent, sandbox = setup
-    agent.config.network_access = "model_only"
+    agent.config.network_access = network_access
     module = "responses_api_agents.codex_agent.app"
     with (
         patch(f"{module}.AsyncSandbox") as factory,
@@ -2879,26 +2892,58 @@ def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setu
         factory.connect.assert_not_awaited()
 
 
-def test_unenforceable_network_access_is_a_terminal_seed_refusal(setup):
+@pytest.mark.parametrize(
+    ("provider_name", "provider_options", "required", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, False, "not both"),
+        ("docker", {}, False, "requires the OpenSandbox network-policy provider"),
+        # model_only blocks a required grant's host, so the session would fail only after the sandbox exists.
+        ("opensandbox", {}, True, "model_and_tools"),
+    ],
+    ids=["explicit_policy", "provider_without_policies", "required_grant"],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(
+    setup, provider_name, provider_options, required, reason
+):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {
         "image": "test-image",
         "workdir": "/workspace",
-        "provider_options": {"network_policy": {}},
+        "provider_options": provider_options,
     }
     agent.config.network_access = "model_only"
-
-    spec, refused = seed_owned(agent, sandbox, owned_seed_with_search_grant())
-
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
+    body = owned_seed_with_several_grants(required=required)
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        refused = client.post("/v1/agent_sessions", json=body)
     # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
     assert refused.status_code == 422, refused.text
-    assert "not both" in refused.text
-    assert spec is None
+    assert reason in refused.json()["detail"]
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+    assert body["agent_session_id"] not in agent._session_records
 
 
-@pytest.mark.parametrize("reported", ["codex-cli 0.144.4", "codex-cli 0.143.0"])
-def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported):
+@pytest.mark.parametrize(
+    ("reported", "return_code", "error_type", "outcome"),
+    [
+        ("codex-cli 0.144.4", 0, None, "accepted"),
+        ("codex-cli 0.143.0", 0, None, "refused"),
+        # The check is exact: a version that only starts with the pinned one is another version.
+        ("codex-cli 0.144.40", 0, None, "refused"),
+        ("codex-cli 0.144.4", 1, None, "refused"),
+        # A transport failure or timeout may pass on another attempt, so it stays retryable.
+        ("", None, "timeout", "retried"),
+    ],
+    ids=["pinned", "other_version", "version_prefix", "failed_run", "timeout"],
+)
+def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
@@ -2908,24 +2953,38 @@ def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported):
 
     async def report_version(command, **kwargs):
         if command.endswith("codex.js --version"):
-            return SimpleNamespace(error_type=None, return_code=0, stdout=reported + "\n", stderr="")
+            return SimpleNamespace(error_type=error_type, return_code=return_code, stdout=reported + "\n", stderr="")
         return await execute(command, **kwargs)
 
     sandbox.exec.side_effect = report_version
-
-    _, created = seed_owned(agent, sandbox, owned_seed_with_search_grant())
+    sandbox.start = AsyncMock()
+    body = owned_seed_with_search_grant()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body)
+        record = agent._session_records.get(body["agent_session_id"])
+        runtime = record.state.runtime if record is not None and record.state is not None else None
 
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
-    assert (
+    (check,) = [command for command in commands if command.endswith("codex.js --version")]
+    # The check runs the runtime's own node and Codex, after Python, with CODEX_HOME under the session directory.
+    assert check.startswith("python3 -c ")
+    assert "CODEX_HOME=/tmp/nemo-gym-codex-sessions/" in check
+    assert check.endswith(
         "/opt/codex-runtime/node/bin/node /opt/codex-runtime/codex/node_modules/@openai/codex/bin/codex.js --version"
-        in commands
     )
     assert not any("install_codex_runtime.sh" in command for command in commands)
     assert not any(path.endswith("/install_codex_runtime.sh") for path in sandbox.files)
-    if reported == "codex-cli 0.144.4":
+    if outcome == "accepted":
         assert created.status_code == 200, created.text
+        # Activation runs Codex from the preinstalled runtime, not from the default path.
+        assert runtime == "/opt/codex-runtime"
     else:
-        assert created.status_code >= 500
+        assert created.status_code == (422 if outcome == "refused" else 500), created.text
         sandbox.stop.assert_awaited_once()
 
 

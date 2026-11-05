@@ -679,7 +679,7 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         description=(
             "Directory inside the sandbox that already holds `node/` and `codex/` as `install_codex_runtime.sh` lays "
             "them out, for sandboxes that cannot download the runtime. Setup checks that it runs `codex_version` "
-            "instead of installing one."
+            "instead of installing one, in a borrowed sandbox as well as one Codex creates."
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -870,6 +870,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
                         for access in tool_accesses
                         if isinstance(access, MCPToolAccess) and _codex_mcp_server_name(access.name)
                     ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
                 )
             except BaseException:
                 await provider.aclose()
@@ -908,22 +914,29 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"error_type={prepared.error_type}; {prepared.stderr or prepared.stdout}"
                 )
             if self.config.sandbox_runtime_dir:
+                # The installer checks Python and isolates Codex's own check; a preinstalled runtime gets the same.
+                # CODEX_HOME keeps the check out of the task's HOME, where Codex would otherwise create ~/.codex.
+                version_home = f"{directory}/codex-version-home"
                 checked = await sandbox.exec(
+                    "python3 -c 'import sys; assert sys.version_info >= (3, 8), \"Codex needs Python 3.8 or newer\"' && "
+                    f"mkdir -p {shlex.quote(version_home)} && CODEX_HOME={shlex.quote(version_home)} "
                     f"{shlex.quote(runtime + '/node/bin/node')} "
                     f"{shlex.quote(runtime + '/codex/node_modules/@openai/codex/bin/codex.js')} --version",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
                 reported = (checked.stdout or "").strip()
-                if (
-                    checked.return_code != 0
-                    or checked.error_type
-                    or reported != f"codex-cli {self.config.codex_version}"
-                ):
+                if checked.error_type:
+                    # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
-                        f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
-                        f"(exit {checked.return_code}, error_type={checked.error_type}); "
+                        f"Codex could not check the runtime in {runtime} (error_type={checked.error_type}); "
                         f"stdout={checked.stdout}; stderr={checked.stderr}"
+                    )
+                if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
+                    # A missing runtime, another version or no usable Python fails the same way every time.
+                    raise AgentSeedRejectedError(
+                        f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
+                        f"(exit {checked.return_code}); stdout={checked.stdout}; stderr={checked.stderr}"
                     )
             else:
                 # Install only the agent runtime in the existing task sandbox.
