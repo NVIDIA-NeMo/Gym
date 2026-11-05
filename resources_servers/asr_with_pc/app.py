@@ -39,13 +39,13 @@ from typing import Any, Dict, List, Literal, Optional
 import numpy as np
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 # Hallucination detection: chars/min above this rate signal repetition/hallucination.
@@ -322,7 +322,6 @@ def _asr_to_response_scores(asr: Dict[str, Any]) -> Dict[str, Any]:
 
 
 class ASRWithPCResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ASRWithPCConfig
 
     async def verify(self, body: ASRWithPCVerifyRequest) -> ASRWithPCVerifyResponse:

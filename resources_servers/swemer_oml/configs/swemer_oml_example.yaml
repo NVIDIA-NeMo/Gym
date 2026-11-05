@@ -22,3 +22,11 @@ swemer_oml_example_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/swemer_oml/data/example.jsonl
+
+swemer_oml_example_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: swemer_oml_example_agent

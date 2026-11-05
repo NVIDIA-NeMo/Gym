@@ -15,28 +15,37 @@
 
 import base64
 import json
+import logging
 import zlib
 from asyncio import Semaphore
 from time import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from lcb_integration.compute_code_generation_metrics import check_correctness_remote
 from lcb_integration.extraction_utils import LMStyle, extract_code
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
+from sandbox_execution import check_correctness_in_sandbox
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
-from nemo_gym.reward_profile import (
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.metrics import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
+from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+    observe_programmatic_grading,
+)
+from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
+
+
+LOG = logging.getLogger(__name__)
 
 
 # ----------------------------
@@ -47,6 +56,17 @@ class CompCodingResourcesServerConfig(BaseResourcesServerConfig):
     unit_test_timeout_secs: int
     debug: bool
     reasoning_format_penalty: float = 0.0
+    # Run unit tests in a fresh provider sandbox per verification instead of on a Ray worker.
+    # Names a top-level sandbox block, such as `sandbox` from
+    # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
+    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    sandbox_config: SandboxVerificationConfig = Field(default_factory=SandboxVerificationConfig)
+
+    @model_validator(mode="after")
+    def _require_sandbox_image(self) -> "CompCodingResourcesServerConfig":
+        if self.sandbox_provider is not None and not self.sandbox_config.image:
+            raise ValueError("sandbox_config.image is required when sandbox_provider is set")
+        return self
 
 
 # ----------------------------
@@ -83,11 +103,28 @@ class CompCodingVerifyResponse(BaseVerifyResponse):
 # Server
 # ----------------------------
 class CompCodingResourcesServer(SimpleResourcesServer):
+    # Each verification runs its candidate code on its own: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     ray_enabled = True
     config: CompCodingResourcesServerConfig
 
     def model_post_init(self, context):
         self._semaphore: Semaphore = Semaphore(value=self.config.num_processes)
+        self._sandbox_target: Optional[Tuple[Dict[str, Any], Dict[str, str]]] = None
+
+    def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        """Provider config and sandbox metadata, resolved once from the global config."""
+        if self._sandbox_target is None:
+            global_config_dict = get_global_config_dict()
+            provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+            metadata = {
+                **resolve_provider_metadata(self.config.sandbox_provider, global_config_dict),
+                "nemo_gym_server": self.config.name,
+            }
+            self._sandbox_target = (provider, metadata)
+        return self._sandbox_target
 
     @staticmethod
     def _has_reasoning_format_violation(response) -> bool:
@@ -154,10 +191,12 @@ class CompCodingResourcesServer(SimpleResourcesServer):
 
         if not model_out or not model_out.strip():
             # A response existed but had no usable text -> model failure
-            return CompCodingVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                difficulty=difficulty,
+            return observe_programmatic_grading(
+                lambda: CompCodingVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    difficulty=difficulty,
+                )
             )
 
         # Tests are stored compressed by benchmarks/livecodebench/prepare_utils.py
@@ -178,14 +217,16 @@ class CompCodingResourcesServer(SimpleResourcesServer):
         # 3) extract code (code fence or raw)
         code = extract_code(model_out, LMStyle.OpenAIChat)
         if not code:
-            return CompCodingVerifyResponse(
-                **body.model_dump(),
-                reward=0.0,
-                extracted_model_output=model_out,
-                difficulty=difficulty,
+            return observe_programmatic_grading(
+                lambda: CompCodingVerifyResponse(
+                    **body.model_dump(),
+                    reward=0.0,
+                    extracted_model_output=model_out,
+                    difficulty=difficulty,
+                )
             )
 
-        # 4) run (no sandbox)
+        # 4) run on a Ray worker, or in a sandbox when sandbox_provider is set
         async with self._semaphore:
             """
             Sample looks like this:
@@ -220,28 +261,54 @@ class CompCodingResourcesServer(SimpleResourcesServer):
                 self.config.debug,  # debug
             )
 
-            future = check_correctness_remote.remote(*task_args)
-            result, metadata = await future
+            if self.config.sandbox_provider is None:
+                future = check_correctness_remote.remote(*task_args)
+                result, metadata = await future
+            else:
+                provider, sandbox_metadata = self._resolve_sandbox_target()
+                try:
+                    result, metadata = await check_correctness_in_sandbox(
+                        *task_args,
+                        num_tests=len(tests.inputs),
+                        provider=provider,
+                        config=self.config.sandbox_config,
+                        metadata=sandbox_metadata,
+                    )
+                except SandboxVerificationError as e:
+                    # The environment failed, not the policy: exclude the sample rather than score it.
+                    LOG.warning("code_gen sandbox verification failed (%s): %s", e.failure_kind, e)
+                    return CompCodingVerifyResponse(
+                        **body.model_dump(),
+                        reward=0.0,
+                        mask_sample=True,
+                        failure_kind=e.failure_kind,
+                        failure_reason=str(e),
+                        extracted_model_output=model_out,
+                        extracted_model_code=code,
+                        difficulty=difficulty,
+                    )
 
             unit_tests_time_taken = time() - start_time
 
-        has_violation = self._has_reasoning_format_violation(body.response)
+        def _grade() -> CompCodingVerifyResponse:
+            has_violation = self._has_reasoning_format_violation(body.response)
+            return CompCodingVerifyResponse(
+                **body.model_dump(),
+                reward=(
+                    self.config.reasoning_format_penalty
+                    if has_violation
+                    else (1.0 if all(r == True for r in result) else 0.0)
+                ),
+                extracted_model_output=model_out,
+                extracted_model_code=code,
+                result=result,
+                metadata=metadata,
+                unit_tests_time_taken=unit_tests_time_taken,
+                reasoning_format_violation_rate=1.0 if has_violation else 0.0,
+                difficulty=difficulty,
+            )
 
-        return CompCodingVerifyResponse(
-            **body.model_dump(),
-            reward=(
-                self.config.reasoning_format_penalty
-                if has_violation
-                else (1.0 if all(r == True for r in result) else 0.0)
-            ),
-            extracted_model_output=model_out,
-            extracted_model_code=code,
-            result=result,
-            metadata=metadata,
-            unit_tests_time_taken=unit_tests_time_taken,
-            reasoning_format_violation_rate=1.0 if has_violation else 0.0,
-            difficulty=difficulty,
-        )
+        return observe_programmatic_grading(_grade)
 
 
 if __name__ == "__main__":

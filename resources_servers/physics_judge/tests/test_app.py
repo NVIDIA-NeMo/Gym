@@ -21,20 +21,24 @@ breakdown layered on top is exercised here).
 """
 
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
-from pytest import approx, fixture, raises
+from pytest import approx, fixture, mark, raises
+from starlette.testclient import TestClient
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,
@@ -219,7 +223,7 @@ class TestGenerateJudgeEvaluation:
         assert "2.998e8 m/s" in rendered
 
     async def test_non_text_content_yields_false(self, server: PhysicsJudgeResourcesServer) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseOutputRefusal
+        from nemo_gym.core import NeMoGymResponseOutputRefusal
 
         refusal_response = NeMoGymResponse(
             id="r",
@@ -361,6 +365,62 @@ class TestComputeMetrics:
         assert not any("/" in k and not k.startswith("pass@") and not k.startswith("majority@") for k in metrics)
 
 
+class TestDomainThroughVerify:
+    """`domain` must survive the real /verify route, since compute_metrics reads it from verify rows."""
+
+    @fixture
+    def client(self, config: PhysicsJudgeResourcesServerConfig) -> TestClient:
+        # Symbolic-only, so the gold answer scores without a judge call.
+        server = PhysicsJudgeResourcesServer(
+            config=config.model_copy(update={"should_use_judge": False}),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        with TestClient(server.setup_webserver()) as client:
+            yield client
+
+    def _verify_all(self, client: TestClient, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        verified = []
+        for task_index, row in enumerate(rows):
+            body = {**row, "response": _make_text_response(row["expected_answer"])}
+            response = client.post("/verify", json=body)
+            assert response.status_code == 200, response.text
+            verified.append({**response.json(), "_ng_task_index": task_index, "_ng_rollout_index": 0})
+        return verified
+
+    def test_shipped_rows_keep_domain_and_get_per_domain_metrics(self, client: TestClient) -> None:
+        example = Path(__file__).parents[1] / "data" / "example.jsonl"
+        rows = [json.loads(line) for line in example.read_text().splitlines()]
+        domains = [row["domain"] for row in rows]
+        assert len(set(domains)) == 5
+
+        verified = self._verify_all(client, rows)
+        assert [row.get("domain") for row in verified] == domains
+
+        response = client.post("/aggregate_metrics", json={"verify_responses": verified})
+        assert response.status_code == 200, response.text
+        metrics = response.json()["agent_metrics"]
+        assert metrics["mean/reward"] == approx(1.0)
+        for domain in domains:
+            assert metrics[f"{domain}/pass@1/symbolic_accuracy"] == approx(100.0)
+            assert metrics[f"{domain}/pass@1/no_answer"] == approx(0.0)
+
+    def test_row_without_domain_gets_no_subset_metrics(self, client: TestClient) -> None:
+        row = {
+            "responses_create_params": {"input": [{"role": "user", "content": "What is 2+2?"}]},
+            "question": "What is 2+2?",
+            "expected_answer": r"\boxed{4}",
+        }
+        verified = self._verify_all(client, [row])
+        assert verified[0].get("domain") is None
+
+        # A null `domain` must add nothing over a row that has no `domain` key at all.
+        without_key = [{k: v for k, v in verified[0].items() if k != "domain"}]
+        metrics = client.post("/aggregate_metrics", json={"verify_responses": verified}).json()["agent_metrics"]
+        baseline = client.post("/aggregate_metrics", json={"verify_responses": without_key}).json()["agent_metrics"]
+        assert metrics["mean/reward"] == approx(1.0)
+        assert metrics.keys() == baseline.keys()
+
+
 class TestGetKeyMetrics:
     def test_includes_token_means_when_present(self, server: PhysicsJudgeResourcesServer) -> None:
         agent_metrics = {
@@ -389,7 +449,7 @@ class TestJudgeFailureInheritance:
         self, server: PhysicsJudgeResourcesServer
     ) -> None:
         # Covered transitively: the inherited math_with_judge judge call goes through
-        # call_judge, so a transport failure surfaces as JudgeError (routed to the
+        # call_judge, so a transport failure surfaces as a judge failure (routed to the
         # failures sidecar), not a raw 500.
         server.server_client.post = AsyncMock(side_effect=RuntimeError("judge down"))
         request = LibraryJudgeMathVerifyRequest(
@@ -398,5 +458,36 @@ class TestJudgeFailureInheritance:
             question="What is 2+2?",
             expected_answer="4",
         )
-        with raises(JudgeError, match="judge down"):
+        with raises(NgFailureEvent, match="judge down") as failure:
             await server.verify(request)
+        assert is_judge_failure(failure.value)
+
+
+class TestSavedVerdictForRecovery:
+    # This server parses its own verdict and builds math_with_judge's JudgeEvaluation without a verdict label. Its
+    # saved evaluation keeps the shape it had before the label existed: recovery reads a present null label as a judge
+    # that gave no verdict, so a valid verdict must not save one.
+    @mark.parametrize("judge_text,reward", [("Judgement: [Correct]", 1.0), ("Reasoning... so [Incorrect].", 0.0)])
+    def test_a_valid_verdict_through_verify_saves_no_label_and_is_not_rejudged(
+        self, server: PhysicsJudgeResourcesServer, judge_text: str, reward: float
+    ) -> None:
+        _attach_judge_text(server, judge_text)
+        question = "How many sides does a hexagon have?"
+        body = {
+            "responses_create_params": {"input": [{"role": "user", "content": question}]},
+            "question": question,
+            "expected_answer": "six",  # in words, so the symbolic check fails and the judge decides
+            "response": _make_text_response(r"The answer is \boxed{6}.", response_id="policy_resp"),
+        }
+        with TestClient(server.setup_webserver()) as client:
+            reply = client.post("/verify", json=body)
+        assert reply.status_code == 200, reply.text
+        verified = reply.json()
+        assert server.server_client.post.await_count == 1
+        assert verified["reward"] == reward
+        assert verified["judge_evaluations"]
+        assert all("verdict_label" not in evaluation for evaluation in verified["judge_evaluations"])
+        row = {"_ng_task_index": 0, "_ng_rollout_index": 0, **verified}
+        evidence = saved_row_evidence(row)
+        assert evidence["_ng_collected_grading_facts"]["judge_unparsed"] is False
+        assert reverification_cause(evidence) is None

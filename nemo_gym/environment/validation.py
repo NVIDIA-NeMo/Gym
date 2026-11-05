@@ -21,8 +21,16 @@ from pydantic import BaseModel, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    dataset_agent_pins,
+    get_first_server_config_dict,
+    resolve_dataset_agent,
+    translate_interpolation_error,
+)
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.environment.manifest import (
     DatasetKind,
     EnvironmentKind,
@@ -32,15 +40,7 @@ from nemo_gym.environment.manifest import (
     load_manifest,
     resolve_manifest_config_path,
 )
-from nemo_gym.global_config import (
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-    dataset_agent_pins,
-    get_first_server_config_dict,
-    resolve_dataset_agent,
-    translate_interpolation_error,
-)
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 
 class EnvironmentValidationError(ConfigError):
@@ -170,6 +170,11 @@ def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str)
         }
     except ConfigError as e:
         raise EnvironmentValidationError(f"Datasets on {owner_instance_name!r}: {e}") from e
+    if None in agents:
+        raise EnvironmentValidationError(
+            f"Datasets on {owner_instance_name!r} route by taskset to an Environment Server that fronts several "
+            "agents. An environment manifest describes one agent, so it cannot describe this composition."
+        )
     if len(agents) != 1:
         raise EnvironmentValidationError(
             f"Datasets on {owner_instance_name!r} route to different agents ({sorted(agents)}); "

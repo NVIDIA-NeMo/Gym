@@ -32,10 +32,8 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.11.29 is the latest stable.
-  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
-  # 
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
+  # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
 
 jobs:
   full-test-suite:
@@ -73,18 +71,22 @@ jobs:
           # mlflow/wandb are optional extras; the core suite covers both their
           # installed- and missing-dependency paths, so they're synced here too.
           # Mirrors scripts/ci/core_unit_tests.sh, which syncs the same extras.
-          uv sync --extra dev --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
+          uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra telemetry --extra mlflow --extra wandb
 
       - name: Test
         run: |
           source .venv/bin/activate
-          PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+          source scripts/ci/test_worker_env.sh
+          PYTEST_ADDOPTS='-m "not sandbox" -n 4 --dist=loadfile --cov-report= --cov-fail-under=0' ng_dev_test
           pytest --cov=. --cov-append --cov-report=term-missing \
             --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
   server-suite:
     name: Server suite (shard ${{ matrix.shard }})
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -110,21 +112,33 @@ jobs:
         run: |
           export UV_CACHE_DIR="$HOME/.cache/uv"
           echo "UV_CACHE_DIR=$UV_CACHE_DIR" >> "$GITHUB_ENV"
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends git curl ca-certificates
+          bash scripts/ci/install_test_dependencies.sh
           curl -LsSf "$UV_INSTALL_URL" | sh
+          export PATH="$HOME/.local/bin:$PATH"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv --version
           uv venv
           source .venv/bin/activate
           uv sync --extra dev
 
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: |
           source .venv/bin/activate
-          ng_test_all \
+          source scripts/ci/test_worker_env.sh
+          python scripts/ci/server_test_workers.py "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}" \
             +fail_on_total_and_test_mismatch=true \
-            +delete_venvs_after_each_test=true \
-            +num_shards=${{ env.NUM_SHARDS }} \
-            +shard_index=${{ matrix.shard }}
+            +delete_venvs_after_each_test=true
+
+      - name: Upload server worker logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-server-worker-logs-${{ matrix.shard }}
+          path: results/server-workers
+          if-no-files-found: warn
 
   server-suite-result:
     name: Server suite
@@ -146,8 +160,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEMO_GYM_ALLOW_PRERELEASE: "true"
-      UV_INDEX_URL: "http://127.0.0.1:8888/"
-      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
+      # Extra indexes take priority over the default index: resolve Gym from our wheel first.
+      UV_INDEX_URL: "https://pypi.org/simple/"
+      UV_EXTRA_INDEX_URL: "http://127.0.0.1:8888/"
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -169,7 +184,8 @@ jobs:
 
       - name: Build wheel and serve as local PyPI index
         run: |
-          uv build
+          # The local index is not serving yet; resolve build dependencies from PyPI.
+          env -u UV_EXTRA_INDEX_URL uv build
           mkdir -p /tmp/local-pypi/nemo-gym
           cp dist/*.whl /tmp/local-pypi/nemo-gym/
           ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
@@ -239,10 +255,20 @@ jobs:
           source .venv/bin/activate
           ng_init_resources_server +entrypoint=resources_servers/hello_world
           test -f resources_servers/hello_world/app.py
-          test -f resources_servers/hello_world/requirements.txt
+          test -f resources_servers/hello_world/pyproject.toml
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
-          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
+          grep -q "nemo-gym" resources_servers/hello_world/pyproject.toml
+          # Scaffolding emits dependency metadata; resolve and verify the lock before setup.
+          uv lock --project resources_servers/hello_world
+          uv lock --check --project resources_servers/hello_world
+          test -f resources_servers/hello_world/uv.lock
+          # The child must use the parent wheel, not a different release from PyPI.
+          NEMO_GYM_VERSION=$(python -c "from importlib.metadata import version; print(version('nemo-gym'))")
+          uv sync --locked --project resources_servers/hello_world
+          resources_servers/hello_world/.venv/bin/python -c \
+            "import sys; from importlib.metadata import version; import nemo_gym.server_runtime; assert version('nemo-gym') == sys.argv[1]" \
+            "$NEMO_GYM_VERSION"
           echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 
@@ -280,36 +306,32 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [full-test-suite, server-suite-result, test-wheel-install]
+    needs: [full-test-suite, server-suite, server-suite-result, test-wheel-install]
     environment: main
+    permissions: {}
+    # Use the event directly: setup outputs are empty when setup fails.
     if: >-
       ${{
-        always() && !cancelled() &&
-        (needs.full-test-suite.result == 'failure' ||
-         needs.server-suite-result.result == 'failure' ||
-         needs.test-wheel-install.result == 'failure') &&
+        always() && !cancelled() && failure() &&
+        (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') &&
         (github.event_name != 'workflow_dispatch' || inputs.send_notification)
       }}
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-
-      # workflow_dispatch can be run against any ref via the Actions UI, so
-      # only alert the shared Gym channel for runs against main or a release
-      # branch (rMAJOR.MINOR.PATCH) - not ad-hoc feature-branch dispatches.
+      # Dispatches on feature branches must not alert the shared channel.
       - name: Check ref is main or a release branch
         id: ref_check
-        uses: ./.github/actions/is-main-or-release-ref
-
+        shell: bash
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          if [[ "$REF" == "main" || "$REF" =~ ^r[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "allowed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "allowed=false" >> "$GITHUB_OUTPUT"
+          fi
       - name: Notify Gym alerts channel
         if: steps.ref_check.outputs.allowed == 'true'
-        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/send-slack-alert@f07495d7a01aad5578a407db8e0c4f4e395375f6 # v1.9.1
+        uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
         with:
+          needs-json: ${{ toJSON(needs) }}
           webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
-          message: |
-            :rotating_light: Full test suite failed on ${{ github.ref_name }}
-
-            • Repository: ${{ github.repository }}
-            • Commit: `${{ github.sha }}`
-            • Trigger: ${{ github.event_name == 'schedule' && 'Nightly schedule' || github.event_name == 'workflow_dispatch' && 'Manual dispatch' || 'Push to main' }}
-            • Workflow: <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View Run>

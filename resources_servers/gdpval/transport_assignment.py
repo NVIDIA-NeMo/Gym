@@ -26,6 +26,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, Mapping, Sequence, Tuple
 
+from resources_servers.gdpval import persisted_layout
+
 
 _BINARY_EXTENSIONS = {
     ".pdf",
@@ -153,34 +155,15 @@ def _find_gdpval_config(global_config: Mapping[str, Any]) -> tuple[str, Mapping[
     return matches[0]
 
 
-def _find_candidate_root(global_config: Mapping[str, Any], gdpval_server_name: str) -> Path:
-    """The ``persist_deliverables_dir`` of the agent that serves the GDPVal server.
+def _candidate_deliverables_root(gdpval_server_config: Mapping[str, Any]) -> Path:
+    """The GDPVal resources server's ``persist_deliverables_dir``, where ``/verify`` writes candidate deliverables.
 
-    Candidate deliverables are persisted by the agent, not the resources server,
-    so the root is read from every agent whose ``resources_server`` is the GDPVal
-    server. Like the Stirrup agent, a relative path is refused. A root that does
-    not exist yet is accepted: nothing has been persisted on a fresh run.
+    A relative path is refused. A root that does not exist yet is accepted: nothing has been persisted on a
+    fresh run.
     """
-    roots = set()
-    for value in global_config.values():
-        agents = value.get("responses_api_agents") if isinstance(value, Mapping) else None
-        if not isinstance(agents, Mapping):
-            continue
-        for agent in agents.values():
-            if not isinstance(agent, Mapping):
-                continue
-            resources_server = agent.get("resources_server")
-            if not isinstance(resources_server, Mapping) or resources_server.get("name") != gdpval_server_name:
-                continue
-            root = agent.get("persist_deliverables_dir")
-            if root:
-                roots.add(str(root))
-    if len(roots) != 1:
-        raise ValueError(
-            "multistage.transport_assignment_repair needs exactly one persist_deliverables_dir on the agent "
-            f"serving {gdpval_server_name!r} (found {sorted(roots)})"
-        )
-    candidate_root = Path(roots.pop())
+    if not gdpval_server_config.get("persist_deliverables_dir"):
+        raise ValueError("multistage.transport_assignment_repair needs the GDPVal persist_deliverables_dir")
+    candidate_root = Path(str(gdpval_server_config["persist_deliverables_dir"]))
     if not candidate_root.is_absolute():
         raise ValueError(f"persist_deliverables_dir must be an absolute path (got {str(candidate_root)!r})")
     if candidate_root.exists() and not candidate_root.is_dir():
@@ -189,17 +172,13 @@ def _find_candidate_root(global_config: Mapping[str, Any], gdpval_server_name: s
 
 
 def _repeat_dirs(root: Path, task_id: str) -> list[Path]:
-    task = root / f"task_{task_id}"
-    if not task.is_dir():
-        return []
-    repeats = sorted(path for path in task.iterdir() if path.is_dir() and path.name.startswith("repeat_"))
-    return repeats or [task]
+    return persisted_layout.repeat_dirs(persisted_layout.task_dir(root, task_id))
 
 
 def _has_valid_finish_marker(repeat_dirs: Sequence[Path]) -> bool:
     """Whether a reference task has at least one persisted completion marker."""
     for repeat in repeat_dirs:
-        marker = repeat / "finish_params.json"
+        marker = repeat / persisted_layout.FINISH_PARAMS_FILE
         try:
             marker_stat = marker.stat()  # Follow the immutable transport-view symlink.
             if not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_size > 16 * 1024 * 1024:
@@ -430,8 +409,8 @@ def make_assignment_repair(
     knob types) raise here, at startup. The returned callback does not raise
     for tasks it cannot repair; see the module docstring.
     """
-    gdpval_server_name, gdpval = _find_gdpval_config(global_config)
-    candidate_root = _find_candidate_root(global_config, gdpval_server_name)
+    _, gdpval = _find_gdpval_config(global_config)
+    candidate_root = _candidate_deliverables_root(gdpval)
     all_references = {
         str(reference_id): Path(str(reference_config["deliverables_dir"]))
         for reference_id, reference_config in (gdpval.get("reference_models") or {}).items()

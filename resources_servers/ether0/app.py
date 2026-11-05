@@ -25,7 +25,7 @@ from ether0.model_prompts import extract_answer_loose  # noqa: E402
 from ether0.models import RewardFunctionInfo  # noqa: E402
 from ether0.rewards import EVAL_FUNCTIONS  # noqa: E402
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -52,7 +52,10 @@ class Ether0VerifyResponse(BaseVerifyResponse):
 
 
 class Ether0ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
+    # Each verification runs one ether0 reward function on the answer: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: BaseResourcesServerConfig
 
     async def verify(self, body: Ether0VerifyRequest) -> Ether0VerifyResponse:

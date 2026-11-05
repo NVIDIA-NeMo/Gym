@@ -1,0 +1,18 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# The aai multiple-choice prompt (eval/aai/mcq-4choices), with the letter list parameterized so
+# the same config serves the 18,470 four-choice and the 200 two-choice questions.
+# https://artificialanalysis.ai/methodology/intelligence-benchmarking
+#
+# `instruction` is SciKnowEval's own per-question framing with the "answer without any
+# explanation" directive removed - it is kept because several tasks put real context there,
+# e.g. "You are a toxicologist. Below are the IUPAC names of four molecules.", which the
+# question text alone does not state.
+
+system: |-
+  {instruction}
+
+user: |-
+  Answer the following multiple choice question. The last line of your response should be in the following format: 'Answer: {letters}' (e.g. 'Answer: A').
+
+  {problem}

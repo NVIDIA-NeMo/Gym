@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -9,15 +11,16 @@ import pytest
 from nemo_fabric import Fabric
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    ModelServerRef,
+    ResourcesServerRef,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nemo_fabric_agent.app import (
     NeMoFabricAgent,
     NeMoFabricAgentConfig,
@@ -512,3 +515,31 @@ def test_fabric_output_items_reads_claude_sdk_event_blocks() -> None:
     assert items[0]["arguments"] == '{"command": "echo hi"}'
     assert items[0]["call_id"] == items[1]["call_id"] == "tu1"
     assert items[1]["output"] == "hi"
+
+
+@pytest.mark.parametrize("preset", [None, "/opt/adapter/bin/python"])
+def test_fabric_runs_python_adapters_on_the_agent_interpreter(preset: str | None, tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("ADAPTER_PYTHON", preset or "unset")
+    if preset is None:
+        monkeypatch.delenv("ADAPTER_PYTHON")
+    agent = _agent(cwd=str(tmp_path))
+    agent.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
+    }
+    agent.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['host']}:{config['port']}"
+    failed = _FakeResult()
+    failed.status = "failed"
+    failed.error = MagicMock(message="stop here")
+    seen: list[str | None] = []
+
+    async def run(*args, **kwargs):
+        seen.append(os.environ.get("ADAPTER_PYTHON"))
+        return failed
+
+    fabric = MagicMock()
+    fabric.run = AsyncMock(side_effect=run)
+    with patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric):
+        with pytest.raises(RuntimeError, match="stop here"):
+            asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
+
+    assert seen == [preset or sys.executable]

@@ -52,9 +52,17 @@ INSTANCE_NAME_PREFIX = "nemo-gym-"
 READY_PROBE_COMMAND = "printf apptainer-sandbox-ready"
 READY_PROBE_EXPECTED = "apptainer-sandbox-ready"
 SANDBOX_RUNTIME_RETURN_CODE = 125
-# Best-effort stderr markers indicating apptainer itself (not the user's command)
-# failed to run the command. Apptainer prefixes its own fatal errors with "FATAL:".
-APPTAINER_RUNTIME_ERROR_MARKERS = ("fatal:", "no instance found", "instance not found", "does not exist")
+# Exit code apptainer uses when it fails on its own (CLI / starter error).
+APPTAINER_FATAL_RETURN_CODE = 255
+# Apptainer logs its own failures as lines starting with "FATAL:" / "ERROR:" (the
+# starter pads the level, e.g. "FATAL   :"). Match that line format only: plain
+# substrings such as "fatal:" or "does not exist" also appear in the user's own
+# stderr (git, test runners) and would turn ordinary command failures into
+# sandbox errors. "ERROR:" lines are also printed by pip / pytest, so they only
+# count together with apptainer's exit code.
+APPTAINER_FATAL_LINE = re.compile(r"^FATAL\s*:\s", re.MULTILINE)
+APPTAINER_ERROR_LINE = re.compile(r"^ERROR\s*:\s", re.MULTILINE)
+APPTAINER_RUNTIME_ERROR_MARKERS = ("no instance found", "instance not found")
 APPTAINER_MISSING_INSTANCE_MARKERS = ("no instance found", "instance not found", "does not exist")
 APPTAINER_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 APPTAINER_ENV_FILE_READONLY = frozenset({"EUID", "GID", "HOME", "IFS", "OPTIND", "PWD", "UID"})
@@ -201,10 +209,19 @@ def _to_sandbox_status(state: str | None) -> SandboxStatus:
     return SandboxStatus.UNKNOWN
 
 
-def _is_runtime_failure(stderr: str) -> bool:
-    """Best-effort: did apptainer itself fail to run the command (vs the command failing)?"""
+def _is_runtime_failure(stderr: str, return_code: int | None = None) -> bool:
+    """Best-effort: did apptainer itself fail to run the command (vs the command failing)?
+
+    Only apptainer's own output counts: a ``FATAL:`` line, a missing-instance message,
+    or an ``ERROR:`` line together with apptainer's exit code 255. Anything the user's
+    command prints (git ``fatal: ...``, ``... does not exist``) is a command failure.
+    """
+    if APPTAINER_FATAL_LINE.search(stderr):
+        return True
     low = stderr.lower()
-    return any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS)
+    if any(marker in low for marker in APPTAINER_RUNTIME_ERROR_MARKERS):
+        return True
+    return return_code == APPTAINER_FATAL_RETURN_CODE and APPTAINER_ERROR_LINE.search(stderr) is not None
 
 
 def _is_missing_instance(stderr: str) -> bool:
@@ -325,33 +342,38 @@ class ApptainerProvider:
             if daemonize:
                 return await self._run_daemonizing(argv, timeout_s=timeout_s)
 
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE if stdin is not None else None,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                start_new_session=True,
-                env=self._subprocess_env,
-            )
-            try:
-                stdout_b, stderr_b = await asyncio.wait_for(
-                    proc.communicate(input=stdin),
-                    timeout=timeout_s,
+            # Output goes to files, not pipes: a process the command leaves running in the instance
+            # (`tmux new-session -d`, `server &`) can keep the write end of an output pipe open, and reading
+            # the pipe to EOF then waits until that process exits. Under uvloop, the event loop of Gym's
+            # servers, Terminus 2's tmux start never returned. With files, the command's exit ends the wait.
+            with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+                proc = await asyncio.create_subprocess_exec(
+                    *argv,
+                    stdin=asyncio.subprocess.PIPE if stdin is not None else None,
+                    stdout=out_f,
+                    stderr=err_f,
+                    start_new_session=True,
+                    env=self._subprocess_env,
                 )
-            except asyncio.TimeoutError as e:
-                # Graceful timeout: SIGTERM the process group first and give it a short grace period
-                # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
-                # handler), THEN SIGKILL if it hasn't exited.
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                with contextlib.suppress(asyncio.TimeoutError, Exception):
-                    await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
-                if proc.returncode is None:  # still alive after grace -> hard kill
+                try:
+                    await asyncio.wait_for(proc.communicate(input=stdin), timeout=timeout_s)
+                except asyncio.TimeoutError as e:
+                    # Graceful timeout: SIGTERM the process group first and give it a short grace period
+                    # to react (e.g. an in-container agent flushing a partial trace on its SIGTERM
+                    # handler), THEN SIGKILL if it hasn't exited.
                     with contextlib.suppress(ProcessLookupError):
-                        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                    with contextlib.suppress(Exception):
-                        await proc.wait()
-                raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                    with contextlib.suppress(asyncio.TimeoutError, Exception):
+                        await asyncio.wait_for(proc.wait(), timeout=self._exec_config.timeout_grace_s)
+                    if proc.returncode is None:  # still alive after grace -> hard kill
+                        with contextlib.suppress(ProcessLookupError):
+                            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                        with contextlib.suppress(Exception):
+                            await proc.wait()
+                    raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+                out_f.seek(0)
+                err_f.seek(0)
+                stdout_b, stderr_b = out_f.read(), err_f.read()
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
@@ -665,7 +687,7 @@ class ApptainerProvider:
                 error_type="timeout",
             )
 
-        if code != 0 and _is_runtime_failure(err):
+        if code != 0 and _is_runtime_failure(err, code):
             return SandboxExecResult(
                 stdout=out,
                 stderr=err,

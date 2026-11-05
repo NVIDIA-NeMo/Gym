@@ -61,6 +61,9 @@ PERMANENT_JUDGE_ERROR_MARKERS = (
     "maximum number of tokens allowed",
     "input is too long",
     "too many tokens",
+    # OpenAI's request-wide image cap ("Total image size is 140.25MB, which exceeds the allowed limit of 50MB."),
+    # returned as a 400 that the model-server proxy re-raises as a 500.
+    "which exceeds the allowed limit",
 )
 
 # Throttle signals veto a permanent classification: provider 429 bodies often

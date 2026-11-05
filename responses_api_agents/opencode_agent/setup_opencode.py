@@ -15,6 +15,7 @@
 
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import tarfile
@@ -22,12 +23,15 @@ import time
 import urllib.request
 from pathlib import Path
 
+from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
+
 
 LOG = logging.getLogger(__name__)
 
 _OPENCODE_PKG = "opencode-ai"
 _NODE_VERSION = "22.15.0"
-_NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-x64.tar.xz"
+_NODE_ARCH = "arm64" if platform.machine().lower() in ("aarch64", "arm64") else "x64"
+_NODE_DIST_URL = f"https://nodejs.org/dist/v{_NODE_VERSION}/node-v{_NODE_VERSION}-linux-{_NODE_ARCH}.tar.xz"
 _LOCAL_PREFIX = Path(__file__).parent / ".opencode_node"
 
 
@@ -86,31 +90,23 @@ def installed_opencode_version() -> str | None:
     return lines[-1].strip() if lines else None
 
 
-def ensure_opencode(version: str | None = None) -> None:
-    """Ensure ``opencode`` is on PATH, installing it via npm if necessary.
+def _require_version(version: str) -> None:
+    found = installed_opencode_version()
+    if found != version:
+        raise RuntimeError(f"Expected OpenCode {version}, found {found!r}; install opencode-ai@{version}")
 
-    An opencode already on PATH is kept (container images bake one): agent
-    behavior is version-sensitive and the pin governs fresh installs only, so
-    a mismatch with the requested ``version`` is warned about instead of
-    silently running a different build.
-    """
+
+def ensure_opencode(version: str = OPENCODE_VERSION) -> None:
+    """Install OpenCode if absent and require the configured release."""
     if shutil.which("opencode"):
-        found = installed_opencode_version()
-        if version and found and found != version:
-            LOG.warning(
-                "opencode %s is on PATH but %s is pinned (config opencode_version) — "
-                "the pin only applies to fresh installs; rebuild the image or "
-                "`npm install -g opencode-ai@%s` to match",
-                found,
-                version,
-                version,
-            )
+        _require_version(version)
         return
 
     # Check ~/.local/bin
     local_bin = Path.home() / ".local" / "bin"
     if (local_bin / "opencode").is_file():
         os.environ["PATH"] = str(local_bin) + os.pathsep + os.environ.get("PATH", "")
+        _require_version(version)
         return
 
     npm = shutil.which("npm")
@@ -137,4 +133,5 @@ def ensure_opencode(version: str | None = None) -> None:
     if not shutil.which("opencode"):
         raise RuntimeError("opencode install appeared to succeed but 'opencode' is still not on PATH")
 
+    _require_version(version)
     LOG.info("opencode is ready at %s", shutil.which("opencode"))

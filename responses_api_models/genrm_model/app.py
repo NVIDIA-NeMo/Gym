@@ -25,11 +25,11 @@ from typing import Any, Dict
 
 from fastapi import Request
 
+from nemo_gym.models import ChatCompletionsConverter
 from responses_api_models.local_vllm_model.app import (
     LocalVLLMModel,
     LocalVLLMModelConfig,
 )
-from responses_api_models.vllm_model.app import VLLMConverter
 
 
 class GenRMModelMixin:
@@ -38,10 +38,12 @@ class GenRMModelMixin:
     Expects config to have return_token_id_information and supports_principle_role.
     """
 
-    def get_converter(self) -> VLLMConverter:
-        return VLLMConverter(
+    def get_converter(self) -> ChatCompletionsConverter:
+        return ChatCompletionsConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
+            custom_tool_strategy=self.config.custom_tool_strategy,
+            inline_tool_output_images=self.config.inline_tool_output_images,
         )
 
     def _preprocess_chat_completion_create_params(self, request: Request, body_dict: Dict[str, Any]) -> Dict[str, Any]:
@@ -70,6 +72,7 @@ class GenRMModelMixin:
         if self.config.supports_principle_role and principle:
             messages.append({"role": "principle", "content": principle})
 
+        # Candidate responses currently support text only; the user message may contain images.
         if response_1 is not None:
             messages.append({"role": "response_1", "content": response_1})
 

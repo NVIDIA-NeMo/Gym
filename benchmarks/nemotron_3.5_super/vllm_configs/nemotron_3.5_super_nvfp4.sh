@@ -1,6 +1,7 @@
 #!/bin/bash
 
 GYM_MODEL_PARAMS=(
+    "++model_endpoint_readiness_timeout_seconds=1200"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
 )
@@ -36,7 +37,7 @@ VLLM_COMMON_ARGS=(
     --mamba-cache-philox-rounds 5
     --mamba-cache-mode align
     --prefix-match-unit 16
-    --enable-mamba-fine-grained-prefix-cache
+    --enable-mamba-shared-prefix-checkpoint
     --linear-backend torch
     --compilation-config '{"pass_config": {"fuse_attn_quant": true}}'
     --model-loader-extra-config '{"enable_multithread_load": true, "num_threads": 96}'

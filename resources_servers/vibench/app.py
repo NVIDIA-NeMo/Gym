@@ -56,7 +56,7 @@ from typing import Any, ClassVar, Dict, List, Optional
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -208,7 +208,6 @@ class VibenchVerifyResponse(BaseMultiRewardVerifyResponse):
 
 
 class VibenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: VibenchResourcesServerConfig
 
     # Derived once per server: env_creator is a subprocess and the result is identical for

@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GDPVal with Pi in place of Stirrup: same resources server, judges and multi-stage driver as config.yaml.
+# Pi runs in the task sandbox the resources server lends it and reaches the task tools
+# (finish, abandon_task_finish, web_search, fetch_web_page) over MCP. The rows use the harness-neutral prompt.
+# See "Run another harness" in README.md for the run command and the model server settings Pi needs.
+config_paths:
+  - benchmarks/gdpval/config.yaml
+
+# Drop the Stirrup agent; the environment server below runs Pi instead.
+gdpval_stirrup_agent: null
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      allowed_agents: [pi_agent]
+      expose_tools_over_mcp: true
+
+gdpval_pi_agent:
+  responses_api_agents:
+    pi_agent:
+      entrypoint: app.py
+      description: GDPVal professional deliverable tasks with Pi in place of Stirrup
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      pi_version: 0.80.2
+      # Concurrent Pi runs, as Stirrup's concurrency. Keep it at least the environment server's
+      # max_concurrent_episodes: an episode beyond it waits with its sandbox started and its deadline running.
+      concurrency: 32
+      context_window: 262144
+      # Per model call.
+      max_output_tokens: 32768
+      # The Pi process, inside the environment server's default_episode_timeout_seconds.
+      timeout: 10800
+      session_close_timeout_seconds: 90
+      # A turn whose tool calls are all successful finish calls ends the run.
+      finish_tool_names: [finish, abandon_task_finish]
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark_harness_neutral.jsonl
+          prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+          prepare_script: benchmarks/gdpval/prepare_harness_neutral.py
+          num_repeats: 1
+
+gdpval_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_pi_agent
+      resources_tool_transports: [mcp]

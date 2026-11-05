@@ -1,5 +1,0 @@
--e nemo-gym[dev] @ ../../
-datasets
-swebench
-transformers
-tiktoken

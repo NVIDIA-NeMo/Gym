@@ -8,7 +8,9 @@ import ast
 import json
 import keyword
 import re
+import tomllib
 from dataclasses import dataclass
+from importlib.metadata import version
 from os.path import relpath
 from pathlib import Path
 from textwrap import dedent
@@ -17,8 +19,8 @@ from typing import Any, Mapping
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym import component_search_roots
-from nemo_gym.config_types import ConfigError
+from nemo_gym import PARENT_DIR, component_search_roots
+from nemo_gym.config import ConfigError
 from nemo_gym.environment.manifest import (
     Determinism,
     EnvironmentKind,
@@ -57,11 +59,21 @@ class ScaffoldResult:
 
 
 @dataclass(frozen=True)
+class _ReusedEnvironmentServer:
+    """The environment server a reused config puts in front of its bundled agent."""
+
+    instance: str
+    implementation: str
+    agent_fields: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _ReusedVerifier:
     selector: str
     config_reference: str
     resource_instance: str
     agent_instance: str | None
+    environment_server: _ReusedEnvironmentServer | None
 
 
 @dataclass(frozen=True)
@@ -75,6 +87,7 @@ class _Composition:
     resource_instance: str
     agent_implementation: str
     agent_instance: str
+    environment_instance: str
     dataset: ManifestDataset
     reward: Reward
     config_reference: str
@@ -207,10 +220,19 @@ def _composition(
         IntegrationProfile.EXTERNAL_AGENT_LOOP,
     }
     agent_implementation = f"{module_name}_agent" if custom_agent else "simple_agent"
+    reused_server = reused.environment_server if reused else None
+    reused_instances = {reused.resource_instance, reused.agent_instance} if reused else set()
+    if reused_server:
+        reused_instances.add(reused_server.instance)
     agent_instance = f"{module_name}_agent"
-    if reused and agent_instance in {reused.resource_instance, reused.agent_instance}:
+    if agent_instance in reused_instances:
         agent_instance = f"{module_name}_catalog_agent"
-    if reused and agent_instance in {reused.resource_instance, reused.agent_instance}:
+    # The workload inherits the reused server under its own name, never in place: another workload reusing the
+    # same scorer in one run would otherwise retire that shared name and leave this agent without a server.
+    environment_instance = f"{module_name}_environment_server"
+    if environment_instance in reused_instances:
+        environment_instance = f"{module_name}_catalog_environment_server"
+    if {agent_instance, environment_instance} & reused_instances:
         raise ScaffoldError(f"name {name!r} collides with instances in reused verifier {reused.selector!r}")
 
     base_path = f"{parent_name}/{name}"
@@ -241,6 +263,7 @@ def _composition(
         resource_instance=resource_instance,
         agent_implementation=agent_implementation,
         agent_instance=agent_instance,
+        environment_instance=environment_instance,
         dataset=dataset,
         reward=reward,
         config_reference=(
@@ -310,17 +333,32 @@ def _asset_config(composition: _Composition) -> str:
         config[composition.resource_instance] = {
             "resources_servers": {composition.resource_implementation: {"datasets": [dataset_dict]}}
         }
-    # Rollout collection dispatches to environment servers, so the agent needs one in front of it.
-    # NOTE(martas): for now this builds the legacy config structure
-    # should be migrated once we have any migrated agents
-    config[f"{composition.module_name}_environment_server"] = {
-        "environment_servers": {
-            "legacy_agent": {
-                "entrypoint": "app.py",
-                "agent_server": {"type": "responses_api_agents", "name": composition.agent_instance},
+    # Rollout collection dispatches to environment servers, so the agent needs exactly one in front of it.
+    reused_server = composition.reused_verifier.environment_server if composition.reused_verifier else None
+    if reused_server is not None:
+        # The reused config already fronts the agent that `_inherit_from` moves to a new name above. Move
+        # its environment server the same way and point it at the new name, as the benchmark configs that
+        # reuse a scorer do. A fresh server beside it would leave the inherited one naming a deleted agent.
+        environment_entry: dict[str, Any] = {
+            "_inherit_from": reused_server.instance,
+            "environment_servers": {
+                reused_server.implementation: {
+                    field: {"name": composition.agent_instance} for field in reused_server.agent_fields
+                }
+            },
+        }
+    else:
+        # NOTE(martas): for now this builds the legacy config structure
+        # should be migrated once we have any migrated agents
+        environment_entry = {
+            "environment_servers": {
+                "legacy_agent": {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": composition.agent_instance},
+                }
             }
         }
-    }
+    config[composition.environment_instance] = environment_entry
     if composition.rollout_driver:
         config["rollout_collection_driver"] = composition.rollout_driver
 
@@ -469,7 +507,7 @@ def _resource_component_files(
         directory / "README.md": readme,
         directory / "app.py": _resources_server_app(module_name),
         directory / "configs" / f"{module_name}.yaml": config,
-        directory / "requirements.txt": requirements,
+        directory / "pyproject.toml": requirements,
         directory / "tests" / "__init__.py": _license_header().removesuffix("\n"),
         directory / "tests" / "test_app.py": _resources_server_test(),
         directory / "tests" / "verifier_cases.jsonl": _verifier_cases(),
@@ -575,6 +613,8 @@ def _standalone_resources_server_readme() -> str:
         Code: ?
         Data: ?
 
+        Before first setup, run `uv lock` in this directory and commit `pyproject.toml` and `uv.lock`.
+
         Dependencies
         - nemo_gym: Apache 2.0
         ?
@@ -602,14 +642,15 @@ def _resources_server_app(module_name: str) -> str:
 
         from pydantic import ConfigDict
 
-        from nemo_gym.base_resources_server import (
+        from nemo_gym.server_runtime.base_resources_server import (
             BaseResourcesServerConfig,
             BaseVerifyRequest,
             BaseVerifyResponse,
             ReverifyMode,
             SimpleResourcesServer,
         )
-        from nemo_gym.verifier_fixture import VerifierFixture
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+        from nemo_gym.verification import VerifierFixture
 
 
         class {class_name}ResourcesServerConfig(BaseResourcesServerConfig):
@@ -628,8 +669,6 @@ def _resources_server_app(module_name: str) -> str:
 
 
         class {class_name}ResourcesServer({class_name}Verifier, SimpleResourcesServer):
-            ray_enabled = False
-
             config: {class_name}ResourcesServerConfig
 
 
@@ -642,6 +681,9 @@ def _resources_server_app(module_name: str) -> str:
 
         if __name__ == "__main__":
             {class_name}ResourcesServer.run_webserver()
+        elif is_nemo_gym_fastapi_entrypoint(__file__):
+            # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+            app = {class_name}ResourcesServer.run_webserver()  # noqa: F401
         """
     )
 
@@ -651,7 +693,7 @@ def _resources_server_test() -> str:
         """\
         import asyncio
 
-        from nemo_gym.verifier_fixture import exercise_verifier_fixture
+        from nemo_gym.verification import exercise_verifier_fixture
 
         from ..app import VERIFIER_FIXTURE
 
@@ -720,7 +762,7 @@ def _agent_files(root: Path, directory: Path, composition: _Composition) -> dict
         directory / "__init__.py": _license_header().removesuffix("\n"),
         directory / "README.md": f"# {composition.agent_implementation}\n\n{instruction}\n",
         directory / "app.py": _agent_app(composition.module_name, composition.profile),
-        directory / "requirements.txt": _requirements(directory, _gym_checkout_root(root)),
+        directory / "pyproject.toml": _requirements(directory, _gym_checkout_root(root)),
     }
 
 
@@ -730,14 +772,13 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.agents import Body
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import SimpleAgent
 
 
         class {class_name}Agent(SimpleAgent):
-            ray_enabled = False
-
             async def responses(
                 self,
                 request: Request,
@@ -751,8 +792,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.agents import Body
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import (
             SimpleAgent,
             SimpleAgentRunRequest,
@@ -761,8 +803,6 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
 
         class {class_name}Agent(SimpleAgent):
-            ray_enabled = False
-
             async def responses(
                 self,
                 request: Request,
@@ -785,6 +825,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
 
         if __name__ == "__main__":
             {class_name}Agent.run_webserver()
+        elif is_nemo_gym_fastapi_entrypoint(__file__):
+            # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+            app = {class_name}Agent.run_webserver()  # noqa: F401
         """
         )
     )
@@ -802,7 +845,7 @@ def _rollout_driver() -> str:
             _global_config_dict: Mapping[str, Any],
         ) -> None:
             """TODO: Replace this delegation with custom rollout coordination."""
-            from nemo_gym.rollout_collection import RolloutCollectionHelper
+            from nemo_gym.rollouts import RolloutCollectionHelper
 
             await RolloutCollectionHelper().run_from_config(rollout_collection_config)
         '''
@@ -814,9 +857,35 @@ def _gym_checkout_root(root: Path) -> Path | None:
 
 
 def _requirements(directory: Path, checkout_root: Path | None) -> str:
+    project_name = "gym-" + directory.name.replace("_", "-")
+    gym_dependency = "nemo-gym[dev]"
     if checkout_root is None:
-        return "nemo-gym[dev]\n"
-    return f"-e nemo-gym[dev] @ {relpath(checkout_root, directory)}\n"
+        # Generated code uses the installed Gym API, including APIs not yet on PyPI.
+        gym_dependency += f"=={version('nemo-gym')}"
+    text = (
+        _license_header()
+        + f'\n[project]\nname = "{project_name}"\nversion = "0.0.0"\n'
+        + f'requires-python = ">=3.13.14"\ndependencies = [{json.dumps(gym_dependency)}]\n'
+        + "\n[tool.uv]\npackage = false\n"
+    )
+    metadata_path = PARENT_DIR / "pyproject.toml"
+    if not metadata_path.is_file():
+        metadata_path = PARENT_DIR / "nemo_gym/resources/locked_project/pyproject.toml"
+    policy = tomllib.loads(metadata_path.read_text())["tool"]["uv"]
+    text += f"required-version = {json.dumps(policy['required-version'])}\n"
+    for key in ("constraint-dependencies", "override-dependencies", "exclude-dependencies"):
+        text += f"{key} = {json.dumps(policy.get(key, []))}\n"
+    sources = dict(policy.get("sources", {}))
+    if checkout_root is not None:
+        sources["nemo-gym"] = {"path": relpath(checkout_root, directory), "editable": True}
+    if sources:
+        text += "\n[tool.uv.sources]\n"
+        for name, source in sources.items():
+            fields = ", ".join(f"{key} = {json.dumps(value)}" for key, value in source.items())
+            text += f"{json.dumps(name)} = {{ {fields} }}\n"
+    text += '\n[project.optional-dependencies]\ntelemetry = ["nemo-gym[telemetry]"]\n'
+    text += "\n[tool.uv.workspace]\nmembers = []\n"
+    return text + "\n# Add dependencies here, then run `uv lock` and commit pyproject.toml and uv.lock.\n"
 
 
 def _server_entries(raw: Mapping[str, Any], server_type: str) -> list[tuple[str, str, Mapping[str, Any]]]:
@@ -868,6 +937,7 @@ def _resolve_reused_verifier(root: Path, selector: str) -> _ReusedVerifier:
     if len(agents) > 1 or (agents and agents[0][1] != "simple_agent"):
         raise ScaffoldError(f"reused verifier {selector!r} config may bundle only one simple_agent")
     agent_instance = None
+    environment_server = None
     if agents:
         agent_instance, _agent_implementation, agent_config = agents[0]
         resource_ref = agent_config.get("resources_server")
@@ -875,7 +945,63 @@ def _resolve_reused_verifier(root: Path, selector: str) -> _ReusedVerifier:
             raise ScaffoldError(
                 f"reused verifier {selector!r} simple_agent must reference resources instance {resource_instance!r}"
             )
-    return _ReusedVerifier(selector, config_reference, resource_instance, agent_instance)
+        environment_server = _reused_environment_server(raw, selector, agent_instance)
+    return _ReusedVerifier(selector, config_reference, resource_instance, agent_instance, environment_server)
+
+
+def _agent_reference_fields(server_config: Mapping[str, Any], agent_instance: str) -> tuple[str, ...]:
+    """Fields of an environment-server config that reference ``agent_instance``.
+
+    ``agent_server`` may leave its type out; any other field references an agent only when typed as one.
+    """
+    fields = []
+    for field, value in server_config.items():
+        if not isinstance(value, Mapping) or value.get("name") != agent_instance:
+            continue
+        default_type = "responses_api_agents" if field == "agent_server" else None
+        if value.get("type", default_type) == "responses_api_agents":
+            fields.append(str(field))
+    return tuple(fields)
+
+
+def _reused_environment_server(
+    raw: Mapping[str, Any], selector: str, agent_instance: str
+) -> _ReusedEnvironmentServer | None:
+    """The environment server in a reused config that fronts its bundled agent, if any.
+
+    The workload inherits this server under its own name, so only a server that can be inherited that way
+    is accepted.
+    """
+    fronting = [
+        _ReusedEnvironmentServer(instance, implementation, fields)
+        for instance, implementation, server_config in _server_entries(raw, "environment_servers")
+        if (fields := _agent_reference_fields(server_config, agent_instance))
+    ]
+    if not fronting:
+        return None
+    manual = "; compose the workload config by hand instead of using --reuse-verifier"
+    if len(fronting) > 1:
+        names = ", ".join(sorted(server.instance for server in fronting))
+        raise ScaffoldError(
+            f"reused verifier {selector!r} simple_agent must be fronted by at most one environment server, "
+            f"found: {names}{manual}"
+        )
+    server = fronting[0]
+    # Gym resolves `_inherit_from` against the configs as written, so inheriting a server that is itself
+    # inherited or copied would leave its own source unresolved.
+    if raw[server.instance].keys() & {"_inherit_from", "_copy"}:
+        raise ScaffoldError(
+            f"reused verifier {selector!r} environment server {server.instance!r} is itself derived with "
+            f"_inherit_from or _copy and cannot be inherited again{manual}"
+        )
+    # Inheriting retires the server's name, so a taskset route to that name would stop resolving.
+    routes = raw.get("environment_server_routes")
+    if isinstance(routes, Mapping) and server.instance in routes.values():
+        raise ScaffoldError(
+            f"reused verifier {selector!r} routes tasksets to environment server {server.instance!r}, "
+            f"which reuse would rename{manual}"
+        )
+    return server
 
 
 def _require_fixture_export(app_path: Path, selector: str) -> None:
