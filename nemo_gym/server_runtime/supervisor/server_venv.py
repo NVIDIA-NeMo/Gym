@@ -397,11 +397,23 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
     return f"cd {shlex.quote(str(dir_path))} && {shlex.join(setup_command)} && {activate_cmd}"
 
 
+def _is_external_server(dir_path: Path) -> bool:
+    """A server outside Gym's own servers: in no Gym checkout, and not shipped inside the installed wheel.
+
+    Its lock pins its own Gym source, so the locked installer would skip the parent's Gym; the legacy installer
+    gives it the parent's editable checkout or the parent's published version instead.
+    """
+    resolved = dir_path.resolve()
+    if _is_gym_checkout(resolved.parent.parent):
+        return False
+    return nemo_gym._is_editable_install or not resolved.is_relative_to(PARENT_DIR.resolve())
+
+
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
     """Prepare a component from its lock, or retain custom component setup."""
     # External components keep the pre-lock requirements/project contracts.
     # Managed component locks are enforced by repository CI, not user migration.
-    if not all((dir_path / name).is_file() for name in ("pyproject.toml", "uv.lock")):
+    if not all((dir_path / name).is_file() for name in ("pyproject.toml", "uv.lock")) or _is_external_server(dir_path):
         return _legacy_setup_env_command(dir_path, global_config_dict, prefix)
 
     venv_path = get_venv_path(dir_path, global_config_dict)
