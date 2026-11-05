@@ -22,8 +22,8 @@ import yaml
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
-from resources_servers.swebench_pro.app import SWEBenchProInstanceRequest, SWEBenchProResourcesServerConfig
-from resources_servers.swebench_pro.verification import VerificationResult, grade_output
+from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig
+from resources_servers.swebench_pro.verification import grade_output
 from resources_servers.swebench_pro_v2.app import SWEBenchProV2InstanceRequest, SWEBenchProV2ResourcesServer
 from resources_servers.swebench_pro_v2.task_data import TaskData
 from resources_servers.swebench_pro_v2.verification import (
@@ -219,20 +219,19 @@ def test_entryscript_enters_testbed_only_when_it_is_the_repository() -> None:
     assert "if [ ! -e /app/.git ] && [ -e /testbed/.git ]; then cd /testbed; else cd /app; fi" in script
 
 
-
 def test_entryscript_runs_the_configured_repairs_after_the_patch_and_before_test_sh() -> None:
     script = create_entryscript({"environment_repairs": ("stale_database_state",)})
 
-    assert script.index("> /workspace/patch_apply_status") < script.index("appendonlydir") < script.index("bash /tests/")
+    assert (
+        script.index("> /workspace/patch_apply_status") < script.index("appendonlydir") < script.index("bash /tests/")
+    )
     assert "appendonlydir" not in create_entryscript({})
 
 
 def test_v2_keeps_only_the_stale_database_repair_and_passes_it_to_the_verifier() -> None:
     root = Path(__file__).parents[3]
     config = yaml.safe_load((root / "resources_servers/swebench_pro_v2/configs/swebench_pro_v2.yaml").read_text())
-    repairs = config["swebench_pro_v2_resources_server"]["resources_servers"]["swebench_pro_v2"][
-        "environment_repairs"
-    ]
+    repairs = config["swebench_pro_v2_resources_server"]["resources_servers"]["swebench_pro_v2"]["environment_repairs"]
     inputs = make_server(environment_repairs=repairs)._verification_inputs(instance_request(), "agent patch")
 
     assert repairs == ["stale_database_state"]
