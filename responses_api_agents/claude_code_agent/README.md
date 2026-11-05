@@ -322,14 +322,31 @@ profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends 
 in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `claude_code_agent.responses_api_agents.claude_code_agent.sandbox_config`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+### Task-container settings
+
+These settings are off by default. They run Claude Code the way a harness started in the task
+container runs it, for benchmarks that grade such a harness (the
+[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#claude-code-in-the-task-sandbox)
+uses all of them).
+
+- `instruction_on_stdin` (sandbox sessions): pass the instruction on the CLI's stdin, as Harbor 0.24's
+  claude-code agent pipes it, instead of as an argument. It then never appears on a command line that an
+  agent's `pkill -f <word from its task>` could match.
+- `reasoning_effort`: passed to `--effort` (`low`, `medium`, `high`, `xhigh` or `max`), as Harbor passes
+  its reasoning effort.
+- `max_output_tokens`: the per-call output cap, as `CLAUDE_CODE_MAX_OUTPUT_TOKENS` (null keeps the CLI's
+  default).
+- `extra_env`: further client environment, e.g. `{API_TIMEOUT_MS: "3600000", CLAUDE_CODE_AUTO_COMPACT_WINDOW:
+  "1000000"}`. The variables the agent sets itself (endpoint, credentials, model, `CLAUDE_CONFIG_DIR`, the
+  output cap) are rejected.
+- `allow_root_workdir` (sandbox sessions): accept a task working directory of `/` (images without a
+  `WORKDIR`); the runtime and session files stay under `/tmp`, as a harness's own files do there.
+- `harbor_system_dependencies` (sandbox sessions): before installing Claude Code, run Harbor 0.24's
+  system-dependency step for its claude-code agent: curl, bash, nodejs, npm and procps, each installed with
+  the first package manager found (apt-get, dnf, yum, apk) when its commands are missing. Agents under
+  Harbor therefore have `node`, `npm`, `ps` and `pkill` even where the task image lacks them. A failed
+  install is logged and Claude Code runs anyway (`system_dependencies_timeout_seconds`, default 1800).

@@ -240,7 +240,7 @@ The adapter reaches the sandbox only through `AsyncSandbox`. The harness reaches
 A harness can get tools from two sources:
 
 1. **Built-in harness tools.** These run inside the task sandbox as part of the harness, such as a shell or a file editor. The adapter enables them through harness settings.
-2. **Tool grants from the Resources Server.** These arrive in `AgentSeedSessionRequest.tool_accesses`. The Environment Server's `resources_tool_transports` setting selects which grants it creates:
+2. **Tool grants from the Environment Server.** These arrive in `AgentSeedSessionRequest.tool_accesses`. The Environment Server's `resources_tool_transports` setting selects which grants it creates for the episode's Resources Server, and its `tool_servers` setting adds a required MCP grant for each other listed Resources server, such as a search server, falling back to the agent configuration's `tool_servers`:
 
 | Transport | Grant type | What the adapter receives |
 | --- | --- | --- |
@@ -319,9 +319,10 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Adapters that imple
 | Timeouts | Installation, execution, and per-phase close budgets, such as `sandbox_install_timeout_seconds` and `session_close_timeout_seconds`. Names differ by adapter; check its configuration class. |
 | `session_close_retry_window_seconds` | The close retry window: how long a closed session stays fenced and a retried close gets the saved reply. Cover the caller's retry horizon. |
 | `tool_accesses` | Static tool grants that are merged with each episode's grants. |
+| `tool_servers` | Resources servers whose MCP tools each episode grants, such as a search server. The Environment Server seeds them unless it sets its own list. |
 | `token_id_capture` | Enable for opaque external harnesses whose output has no token IDs, when collecting training data. |
 
-The Environment Server (`single_agent_turn`) binds the pair with `resources_server`, `agent_server`, and `resources_tool_transports`. Its base configuration also sets `max_concurrent_episodes`, `queue_timeout_seconds`, and the episode and cleanup timeouts.
+The Environment Server (`single_agent_turn`) binds the pair with `resources_server`, `agent_server`, `resources_tool_transports`, and `tool_servers`. Its base configuration also sets `max_concurrent_episodes`, `queue_timeout_seconds`, and the episode and cleanup timeouts.
 
 The episode timeout, `default_episode_timeout_seconds`, covers the whole episode: Resources Server seed, runtime installation, the harness run, agent close, and verification. Set it above the harness's own run timeout plus those budgets, or the deadline fires before verification. The task sandbox has its own lifetime: SWE-bench Pro and Terminal Bench 2.1 set `sandbox_config.ttl_s: 18000`, and OpenSandbox does not renew a sandbox by default. A harness that is still running when the sandbox expires fails the episode, so raise `ttl_s` in the benchmark declaration for runs that can last longer. Set `max_concurrent_episodes` and `queue_timeout_seconds` to admit episodes at the rate the agent can run them. Admission waits before the deadline starts; without it, every row starts its sandbox at once and waits inside its own deadline.
 

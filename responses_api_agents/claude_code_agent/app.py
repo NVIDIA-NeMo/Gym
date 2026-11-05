@@ -31,7 +31,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -86,9 +86,26 @@ from responses_api_agents.claude_code_agent.sandbox import (
     parse_artifact_observations,
 )
 from responses_api_agents.claude_code_agent.setup_claude_code import ensure_claude_code
+from responses_api_agents.claude_code_agent.system_dependencies import system_dependencies_command
 
 
 LOG = logging.getLogger(__name__)
+# Environment the agent sets itself; extra_env may not replace it.
+_MANAGED_ENV = frozenset(
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS",
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+        "CLAUDE_CODE_MAX_OUTPUT_TOKENS",
+        "CLAUDE_CONFIG_DIR",
+    }
+)
 # Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
 _BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
     [ "$(id -u)" = 0 ] || { echo "Claude Code sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
@@ -143,6 +160,44 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Sandbox sessions: pass the instruction on the CLI's stdin, as Harbor 0.24's claude-code agent pipes
+    # it, instead of as an argument. It then never appears on a command line that an agent's
+    # `pkill -f <word from its task>` could match.
+    instruction_on_stdin: bool = False
+    # Sandbox sessions: accept a task workdir of "/" (images without a WORKDIR). The runtime and session
+    # files then sit under /tmp inside it, as a harness's own files do there.
+    allow_root_workdir: bool = False
+    # Sandbox sessions: run Harbor 0.24's system-dependency step for its claude-code agent (curl, bash,
+    # nodejs, npm and procps, installed when missing) before installing Claude Code. A failed install is
+    # logged and Claude Code runs anyway.
+    harbor_system_dependencies: bool = False
+    system_dependencies_timeout_seconds: float = Field(default=1800, gt=0, allow_inf_nan=False)
+    # Claude Code's --effort (low, medium, high, xhigh or max), as Harbor passes its reasoning effort.
+    reasoning_effort: Optional[str] = None
+    # The per-call output cap, as CLAUDE_CODE_MAX_OUTPUT_TOKENS; None keeps the CLI's own default.
+    max_output_tokens: Optional[int] = Field(default=None, gt=0)
+    # Further Claude Code client environment, e.g. {API_TIMEOUT_MS: "3600000"}. The variables the agent
+    # sets itself (endpoint, credentials, model, CLAUDE_CONFIG_DIR, the output cap) are rejected.
+    extra_env: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("extra_env", mode="before")
+    @classmethod
+    def _stringify_numbers(cls, value: Any) -> Any:
+        # YAML and Hydra overrides turn API_TIMEOUT_MS=3600000 into an int.
+        if isinstance(value, Mapping):
+            return {
+                key: str(item) if isinstance(item, int) and not isinstance(item, bool) else item
+                for key, item in value.items()
+            }
+        return value
+
+    @field_validator("extra_env")
+    @classmethod
+    def _reject_managed_env(cls, value: dict[str, str]) -> dict[str, str]:
+        managed = sorted(_MANAGED_ENV & value.keys())
+        if managed:
+            raise ValueError(f"extra_env cannot set {', '.join(managed)}; use the agent's own settings")
+        return value
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -257,7 +312,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
     def _build_command(
         self,
         model: str,
-        instruction: str,
+        instruction: Optional[str],
         system_prompt: Optional[str] = None,
         mcp_config: Optional[str] = None,
         skills_active: bool = False,
@@ -289,6 +344,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         if self.config.bare and not skills_active:
             cmd.append("--bare")
         cmd += ["--model", model]
+        if self.config.reasoning_effort:
+            cmd += ["--effort", self.config.reasoning_effort]
         effective_mcp_config = mcp_config if mcp_config is not None else self.config.mcp_config
         if effective_mcp_config:
             cmd += ["--mcp-config", effective_mcp_config]
@@ -304,8 +361,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             cmd += ["--max-thinking-tokens", str(self.config.max_thinking_tokens)]
         if self.config.max_turns is not None:
             cmd += ["--max-turns", str(self.config.max_turns)]
-        cmd += ["--", instruction]
+        # Without an instruction argument, `claude -p` reads the instruction from stdin.
+        if instruction is not None:
+            cmd += ["--", instruction]
         return cmd
+
+    def _client_env(self) -> dict[str, str]:
+        """Client settings shared by local and sandbox launches: extra_env and the output cap."""
+        env = dict(self.config.extra_env)
+        if self.config.max_output_tokens is not None:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(self.config.max_output_tokens)
+        return env
 
     async def _run_claude_code(
         self,
@@ -342,6 +408,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": model,
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
+                **self._client_env(),
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
                 **_HEADLESS_RUN_ENV,
             }
@@ -590,11 +657,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
         workdir = access.workdir if access else spec.workdir
         path = PurePosixPath(workdir or "")
+        root_workdir = self.config.allow_root_workdir and path == PurePosixPath("/")
         if (
             not path.is_absolute()
             or ".." in path.parts
             or "\x00" in workdir
-            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+            or (path in (PurePosixPath("/"), PurePosixPath("/tmp")) and not root_workdir)
             or str(path).startswith(("/tmp/nemo-gym-claude-sessions", "/tmp/nemo-gym-claude-runtime-"))
         ):
             raise HTTPException(
@@ -626,11 +694,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+            dependencies = self.config.harbor_system_dependencies
+            setup_limit = self.config.sandbox_install_timeout_seconds + (
+                self.config.system_dependencies_timeout_seconds if dependencies else 0
+            )
+            async with asyncio.timeout(setup_limit):
                 if owns_sandbox:
                     await sandbox.start(spec)
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     self._check_sandbox_setup(result)
+                if dependencies:
+                    # Before anything else, as Harbor's install() runs it before installing Claude Code.
+                    await self._run_system_dependencies(sandbox)
                 result = await sandbox.exec(
                     _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
                     cwd="/",
@@ -657,6 +732,26 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             except BaseException:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
+
+    async def _run_system_dependencies(self, sandbox: AsyncSandbox) -> str:
+        """Harbor's ensure_system_dependencies for Claude Code, as the sandbox's default user (root for
+        Terminal-Bench task sandboxes). Harbor errors the trial when the install fails; here the failure
+        is logged and Claude Code runs without the packages, as it would without this step."""
+        started = monotonic()
+        result = await sandbox.exec(
+            system_dependencies_command(), timeout_s=self.config.system_dependencies_timeout_seconds
+        )
+        log = (result.stdout or "") + (result.stderr or "")
+        if result.return_code != 0 or result.error_type:
+            LOG.warning(
+                "Harbor's system dependency step failed (exit %s, error_type %s) after %.0fs; Claude Code runs "
+                "without it: %s",
+                result.return_code,
+                result.error_type,
+                monotonic() - started,
+                log[-2000:],
+            )
+        return log
 
     @staticmethod
     def _check_sandbox_setup(result: SandboxExecResult) -> None:
@@ -737,6 +832,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 ANTHROPIC_BASE_URL=base_url,
                 ANTHROPIC_AUTH_TOKEN="gym" if self.config.model_server else self.config.anthropic_api_key or "local",
             )
+        env.update(self._client_env())
         artifacts = None
         failure = None
         try:
@@ -744,8 +840,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             async with self.sem:
                 mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
                 skills_path = self._configured_skills_path()
+                stdin = self.config.instruction_on_stdin
                 command = self._build_command(
-                    model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
+                    model, None if stdin else prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
                 )
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
@@ -756,6 +853,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "settings": self._build_settings(),
                         "mcp_config": self._get_static_mcp_config() if mcp_config else None,
                         "skills_path": skills_path,
+                        **({"prompt": prompt} if stdin else {}),
                     },
                     timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
                     close_timeout=self.config.session_close_timeout_seconds,

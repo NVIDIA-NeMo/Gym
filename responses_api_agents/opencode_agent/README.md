@@ -72,6 +72,24 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+server's host; `model_and_tools` also allows the host of each MCP grant. Each
+allowed host is open on every port. The OpenSandbox policy is set when the sandbox
+is created, so a session that borrows a task sandbox rejects any value other than
+`inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
+the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or use an
+image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
+(see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
+Without either, the seed is accepted and each attempt then fails downloading OpenCode.
+Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the
+policy would block its host; under `model_and_tools`, a grant at an address the
+sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
+its owner's network policy. The policy is only as strong as the OpenSandbox server's
+egress mode: in `dns` mode only name resolution is filtered, so a hard-coded IP
+bypasses it; `dns+nft` also enforces it at the IP layer and is needed for full isolation.
+
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
 apt-get or apk when running as root; otherwise preinstall it.
@@ -157,19 +175,50 @@ model server by address, so the profile sets `use_absolute_ip: true` and keeps t
 on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
 harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
-instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`.
+instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`. It sets `network_access: model_only`,
+so the sandbox reaches only the model server; a search preset overrides it with `model_and_tools`. A restricted
+sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
+in the image.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
 
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+## Task-container settings
+
+These sandbox-session settings are off by default. They run OpenCode the way a harness started in
+the task container runs it, for benchmarks that grade such a harness (the
+[Terminal-Bench-Science profile](../../benchmarks/terminal_bench_science/README.md#opencode-in-the-task-sandbox)
+uses all of them). Local calls ignore them.
+
+- `model_base_url`, `model_api_key`: an OpenAI-compatible chat-completions base URL (with `/v1`) that
+  OpenCode calls directly from the sandbox as `model`, instead of a Gym `model_server` (set exactly one),
+  and its key (default `EMPTY`). Gym does not capture these calls, so the model-call correlation plugin
+  is not loaded.
+- `reasoning_effort`: sent as chat `reasoning_effort` on every request (the model's `reasoningEffort`
+  option), e.g. `max`.
+- `interleaved_reasoning_field`: the assistant-message field that replays each turn's reasoning
+  (default `reasoning_content`; set the field the endpoint reads, e.g. `reasoning`).
+- `output_token_policy: remaining_context`: requests carry no `max_tokens`, so the endpoint chooses the
+  output budget from the context left (default `fixed`: `max_output_tokens`).
+- `declare_model_limits: false`: the model's size stays unknown to OpenCode, so it compacts only when
+  the endpoint reports a context overflow (default true: `context_window` and `max_output_tokens`).
+- `allow_root_workdir`: accept a task working directory of `/` (images without a `WORKDIR`); the
+  runtime and session files then sit under `/tmp` inside it, as a harness's own files do there.
+- `argv_prompt_quoting`: send the instruction as `opencode run` builds it from one argv word, which is
+  what a model sees when a launcher passes the instruction as an argument: wrapped in double quotes,
+  inner quotes escaped, when it contains a space.
+- `raise_oom_score_adj`: make OpenCode and its tools the memory-cgroup OOM killer's preferred victims
+  (`oom_score_adj` 1000, or 0 when the sandbox starts below zero), not the exec daemon or the supervisor.
+- `verify_after_agent_error`: return a failed run (a nonzero exit, an error on the last assistant turn, no
+  terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is
+  in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
+  harness runner started OpenCode (not its own exit 125, 126 or 127), the required Gym MCP tools connected
+  and were confirmed, the run's output was captured, its last error is not a transient model-endpoint
+  failure (a retryable API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers
+  a command. A model error OpenCode reported itself (an API error or context overflow on a completed turn)
+  is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's
+  outcome policy. Anything else stays an execution error and the episode is retried.
 
 ## Configuration compatibility
 
