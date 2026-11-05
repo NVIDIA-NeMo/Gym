@@ -267,7 +267,11 @@ Confidence intervals are not clipped to the score bounds. A constant-score cell 
 
 ## Check exclusions and coverage
 
-`gym eval compare-suite` requires stored `repeat_level_metrics`. If the field is missing, regenerate aggregation; this command does not reconstruct repeat statistics from embedded rollout summaries. If either side has only one repeat, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
+`gym eval compare-suite` requires stored `repeat_level_metrics`. If the field is missing, regenerate aggregation; this command does not reconstruct repeat statistics from embedded rollout summaries.
+
+A repeat with no scored tasks can still contain token-usage accounting. When such a token-only row lacks a selected quality metric, suite comparison preserves the accounting in the source aggregate and omits the repeat from quality estimates, without assigning a zero score. The report lists the unscored repeat indices, warns about incomplete coverage, and suppresses affected confidence intervals. If a token-usage metric itself is selected, its available repeat observations remain usable.
+
+Each side needs at least two repeats with estimates for the selected metrics. If either side has fewer, Gym excludes the entire model–benchmark pair with a warning. Remaining eligible cells receive recomputed equal weights. The requested suite, exclusions, and effective weights are recorded; no eligible cells is an error.
 
 Every selected metric must be present in every included repeat. Gym does not silently remove missing metric values or change metric weights between repeats.
 

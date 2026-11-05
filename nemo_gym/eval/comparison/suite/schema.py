@@ -130,6 +130,7 @@ class SuiteRunSummary(_SuiteModel):
     repeat_count: int | None
     repeat_indices: list[int] = Field(default_factory=list)
     repeat_scores: list[float] = Field(default_factory=list)
+    unscored_repeat_indices: list[int] = Field(default_factory=list)
     summary: SuiteSampleSummary | None = None
     coverage: SuiteCoverage
 
