@@ -50,7 +50,7 @@ from nemo_gym.models._checkpoint import (
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
-from nemo_gym.models.token_capture.config import token_capture_config
+from nemo_gym.models.token_capture.config import check_one_capture_directory, token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
 from nemo_gym.models.token_capture.protocols import (
@@ -1178,6 +1178,8 @@ def install_model_call_capture(
     Consumers access records through ``TokenSource.freeze``.
     """
     capture_settings = token_capture_config(global_config_dict) if global_config_dict is not None else None
+    if global_config_dict is not None:
+        check_one_capture_directory(global_config_dict)
     token_store = make_token_store(global_config_dict) if global_config_dict is not None else None
     # Build this sink at app startup.
     # Each uvicorn worker constructs its own sink.
