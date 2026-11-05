@@ -812,6 +812,29 @@ def test_a_policy_key_that_differs_from_the_policy_model_is_refused_with_both_va
     assert "my-key" not in str(refused.value)
 
 
+@pytest.mark.parametrize(
+    ("url", "shown"),
+    [
+        ("https://gateway.example/v1?api_key=SECRET", "'https://gateway.example/v1?api_key=****'"),
+        ("https://user:SECRET@gateway.example/v1", "'https://user:****@gateway.example/v1'"),
+        (
+            ["https://gateway.example/v1?region=a&token=SECRET", "https://user:SECRET@other.example/v1"],
+            "['https://gateway.example/v1?region=****&token=****', 'https://user:****@other.example/v1']",
+        ),
+    ],
+    ids=["query_value", "password", "list"],
+)
+def test_a_conflicting_policy_url_is_shown_without_its_credentials(tmp_path: Path, url, shown: str) -> None:
+    raw = _policy_config(tmp_path, {})
+    raw["driver"]["benchmarks"]["gsm8k"] = {"run": {"policy_base_url": url}}
+
+    with pytest.raises(ValueError, match="driver.policy_model is also set") as refused:
+        SubmitConfig.model_validate(raw)
+
+    assert f"policy_base_url={shown} in the run" in str(refused.value)
+    assert "SECRET" not in str(refused.value)
+
+
 # --- A command benchmark reads the policy from its run keys, as NEMO_GYM_POLICY_* -----------------------------
 
 _DERIVED_POLICY_RUN = {

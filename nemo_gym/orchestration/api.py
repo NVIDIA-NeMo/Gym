@@ -35,6 +35,7 @@ from pydantic import (
     model_validator,
 )
 
+from nemo_gym.config.secret_utils import MASKED_VALUE, mask_url_passwords
 from nemo_gym.orchestration.executors.script_templates import bash_var
 
 
@@ -515,9 +516,23 @@ class BenchmarkRunConfig(_StrictModel):
         return ResumeConfig() if self.resumable is True else self.resumable
 
 
+# A query parameter's value in a URL, which may carry a credential (`?api_key=...`).
+_URL_QUERY_VALUE = re.compile(r"(?P<name>[?&][^=&#\s]*=)[^&#\s]*")
+
+
+def _without_url_credentials(value: Any) -> Any:
+    """`value` with the user-info password and every query value of each URL in it masked, also inside a list."""
+    if isinstance(value, str):
+        return _URL_QUERY_VALUE.sub(rf"\g<name>{MASKED_VALUE}", mask_url_passwords(value))
+    if isinstance(value, (list, tuple)):
+        return [_without_url_credentials(item) for item in value]
+    return value
+
+
 def _shown_policy_value(key: str, value: Any) -> str:
-    """A policy run value as a conflict message shows it; an API key is never printed."""
-    return "<redacted>" if key == "policy_api_key" else repr(value)
+    """A policy run value as a conflict message shows it, with no credential: an API key is never printed, and a
+    URL keeps neither its password nor its query values."""
+    return "<redacted>" if key == "policy_api_key" else repr(_without_url_credentials(value))
 
 
 class GymInstallConfig(_StrictModel):
