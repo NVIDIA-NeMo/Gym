@@ -46,6 +46,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
@@ -116,7 +117,7 @@ SUPPORTED_LLM_SETTINGS = frozenset(
 class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
     # Agent sessions take the benchmark from the Environment Server; there is no /run path.
     resources_server: Optional[ResourcesServerRef] = None
-    model_server: Optional[ModelServerRef] = None
+    model_server: ModelServerRef
     model: str = Field(description="Model name OpenHands sends to the Gym Model Server.")
     concurrency: int = Field(default=8, gt=0)
     timeout: int = Field(default=1800, gt=0, description="Seconds one activation may run.")
@@ -175,15 +176,28 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 "OpenHands runs its own terminal, file editor and task tracker and cannot use required tool grants: "
                 + ", ".join(required)
             )
-        if self.config.model_server is None:
-            raise AgentSeedRejectedError("OpenHands requires a sandbox-reachable Gym model_server")
+        global_config = self.server_client.global_config_dict
         access = body.sandbox_access
         owns_sandbox = access is None
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise AgentSeedRejectedError("OpenHands requires sandbox_access or a configured sandbox_provider")
-            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
-            workdir, provider_ref = spec.workdir, self.config.sandbox_provider
+            provider_ref = self.config.sandbox_provider
+            settings = {"workdir": "/app", **self.config.sandbox_config}
+            # Covers installation, the activation and cleanup, so the provider reclaims a sandbox a crash leaked.
+            settings.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
+            try:
+                settings["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **(settings.get("metadata") or {}),
+                    "gym-agent": "openhands",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
+                spec = SandboxSpec(**settings)
+            except (TypeError, ValueError) as error:
+                raise AgentSeedRejectedError(f"Invalid OpenHands sandbox configuration: {error}") from error
+            workdir = spec.workdir
         else:
             if not isinstance(access.connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("OpenHands supports only direct sandbox connections")
@@ -196,14 +210,14 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             or str(path).startswith((RUNTIME_PREFIX, SESSION_ROOT))
         ):
             raise AgentSeedRejectedError("OpenHands sandbox workdir must be absolute and separate from its own files")
-        provider_config = resolve_provider_config(provider_ref, self.server_client.global_config_dict)
         try:
+            provider_config = resolve_provider_config(provider_ref, global_config)
             # The runner calls the Model Server from inside the sandbox, where loopback is the sandbox itself.
             assert_model_url_reachable_from_sandbox(
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
                 provider_name=next(iter(provider_config), None),
             )
-        except ValueError as error:
+        except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
 
         provider = create_provider(provider_config)
@@ -269,7 +283,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in supported or (name in ("stream", "background") and value is False):
                 continue
-            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+            if name == "metadata" and value is not None and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"OpenHands does not support request field {name}")
@@ -302,6 +316,9 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             "prompt": prompt,
             "system_message_suffix": system or None,
             "llm": {
+                # With "auto", OpenHands sends models its metadata marks as Responses API models (such as gpt-5)
+                # to /responses; the adapter's model connection is Chat Completions.
+                "api_mode": "chat",
                 **self.config.llm_settings,
                 # LiteLLM's openai provider sends Chat Completions to the base URL as given.
                 "model": f"openai/{self.config.model}",

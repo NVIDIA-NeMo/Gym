@@ -4,6 +4,10 @@ Runs the [OpenHands Software Agent SDK](https://github.com/OpenHands/software-ag
 benchmark's task sandbox, one conversation per agent session. The Environment Server (`single_agent_turn`)
 seeds the session, activates it once through `/v1/responses`, closes it, and only then verifies.
 
+This is not the harness behind `swe_agents`' `openhands` mode, which runs the nv-OpenHands fork of the
+OpenHands application in SWE task containers with its own SWE verification. This adapter runs the upstream
+SDK in any benchmark's task sandbox, and the benchmark's Resources Server verifies.
+
 | | |
 | --- | --- |
 | Harness | `openhands-sdk` and `openhands-tools` 1.59.0, with every dependency at the version `uv.lock` pins for the Agent Server |
@@ -11,7 +15,7 @@ seeds the session, activates it once through `/v1/responses`, closes it, and onl
 | Execution | Agent sessions only, in a borrowed task sandbox or an agent-owned one (`sandbox_provider`). No host path, no `/run` |
 | Model API | Chat Completions through the rollout-prefixed Gym Model Server URL |
 | Tools | OpenHands' terminal, file editor, task tracker, `finish` and `think`. No Resources Server tool grants |
-| Capability level | Evaluation, with Observability records (invocation, model-call references, tool calls with timing and status, context compactions) |
+| Capability level | Evaluation. Observability records are returned (invocation, model-call references, tool calls with timing and status, context compactions), but harness conformance has not been run |
 | Token IDs | Not captured; evaluation only |
 
 ## Configuration
@@ -44,35 +48,39 @@ Terminal-Bench 2.1 does not list `openhands_agent` in `allowed_agents` yet; star
 | Field | Meaning |
 | --- | --- |
 | `model` | Model name sent to the Model Server. OpenHands addresses it as `openai/<model>`. |
+| `concurrency` | Activations this server runs at once; later ones wait. |
 | `timeout` | Seconds one activation may run; a task's `metadata.agent_timeout_sec` can lower it. |
 | `max_iterations` | OpenHands' `max_iteration_per_run`. Reaching it ends the run as `incomplete`, and the work is graded. |
 | `condenser` | OpenHands' default `LLMSummarizingCondenser`. Its summaries use a copy of the agent's LLM, so they go to the same Model Server. |
 | `system_prompt` | Text appended to OpenHands' own system prompt, before the request's `instructions` and system message. |
 | `llm_settings` | OpenHands SDK `LLM` settings, limited to the names in `SUPPORTED_LLM_SETTINGS` in `app.py`. |
-| `sandbox_provider`, `sandbox_config` | Only for an agent-owned sandbox, when Resources supplies no `sandbox_access`. |
+| `sandbox_provider`, `sandbox_config` | Only for an agent-owned sandbox, when Resources supplies no `sandbox_access`. `ttl_s` defaults to `sandbox_install_timeout_seconds + timeout + 600`. `metadata` is the provider block's `default_metadata`, then `sandbox_config.metadata`, then the adapter's `gym-agent`, `gym-session` and `gym-rollout` labels. |
 | `sandbox_install_timeout_seconds` | Budget for runtime installation at seed. |
+| `session_close_timeout_seconds` | Budget for each phase of close: stopping the harness, copying its artifacts, and releasing the sandbox. |
 
 The adapter owns the model connection: the base URL, a placeholder API key (the Model Server holds the
 provider credentials), the `agent` usage ID, and an `x-session-id` header set to the episode's capture key,
 which is also the invocation ID. `llm_settings` cannot change these, and OpenHands silently ignores unknown
 setting names, so the adapter refuses every name outside its list, along with settings that write files
-(completion logs, tokenizer downloads), call other models (fallbacks), or stream. The shipped config sets
-`reasoning_effort: null`, because OpenHands otherwise sends `reasoning_effort: high` to models it believes
-support it; keep sampling and reasoning controls on the Model Server.
+(completion logs, tokenizer downloads), call other models (fallbacks), or stream. `api_mode` defaults to
+`chat`, because OpenHands' `auto` mode sends models its metadata marks as Responses API models (such as
+gpt-5) to `/responses`. The shipped config sets `reasoning_effort: null`, because OpenHands otherwise sends
+`reasoning_effort: high` to models it believes support it; keep sampling and reasoning controls on the Model
+Server.
 
 ## Requests
 
 An activation accepts one user text message with an optional leading system message, `instructions`,
-`model` (the configured one), and `metadata.agent_timeout_sec`. Every other request field, including
-`temperature`, `top_p`, `max_output_tokens` and `tools`, is refused with HTTP 422.
+`model` (the configured one), and `metadata` that is empty or holds only `agent_timeout_sec`. Every other
+request field, including `temperature`, `top_p`, `max_output_tokens` and `tools`, is refused with HTTP 422.
 
 ## Session lifecycle
 
 **Seed** refuses, with a final 422, a required tool grant (OpenHands uses its own tools), a non-direct
-sandbox connection, a seed with neither `sandbox_access` nor `sandbox_provider`, a missing `model_server`,
-a workdir that is relative or overlaps the adapter's own directories, and a loopback Model Server URL for a
-remote sandbox (start the servers with `++use_absolute_ip=true`). Optional grants are ignored. Seed then
-installs the runtime, or reuses a healthy one, and uploads the runner.
+sandbox connection, a seed with neither `sandbox_access` nor `sandbox_provider`, an invalid
+`sandbox_provider` or `sandbox_config`, a workdir that is relative or overlaps the adapter's own directories,
+and a loopback Model Server URL for a remote sandbox (start the servers with `++use_absolute_ip=true`).
+Optional grants are ignored. Seed then installs the runtime, or reuses a healthy one, and uploads the runner.
 
 **Runtime installation** uses Gym's `SandboxPythonRuntime`. The Agent Server host builds the runtime with `uv`:
 a pinned python-build-standalone CPython 3.13.14 and the OpenHands packages for the sandbox's platform, at the
@@ -87,7 +95,7 @@ the same sandbox. The task image's Python is never used or changed.
 the task's workdir. The interpreter runs through an `openhands-gym` link beside the runtime's `python/`
 directory, so `pkill python3` or `pkill -f python` in a task cannot stop it. The runner builds the agent the
 way OpenHands' default preset does (terminal, file editor, task tracker, default condenser, CLI-mode system
-prompt) with two deliberate changes: the terminal uses the subprocess backend, because the tmux backend
+prompt) with three deliberate changes: the terminal uses the subprocess backend, because the tmux backend
 starts a tmux server that daemonizes out of the supervised process group; bash history goes to the session
 directory; and bracketed paste is turned off (see below). It appends each OpenHands event to
 `events.jsonl` as it happens and writes `result.json` at the end. The supervisor's SIGTERM, at the deadline
@@ -130,10 +138,12 @@ including condenser summaries, has a usage record; otherwise it stays unknown.
 
 ## Observations
 
-The bundle holds an `AgentInvocation` (status, stop reason, duration, model-call references from OpenHands'
-per-call usage records and response IDs), a `ToolCallObservation` for each tool call (timed from when the
-runner saw the action and its result), a `ContextCompactionObservation` for each condensation, and a
-`SandboxObservation`. Gaps name what the events do not show, such as token counts around a compaction.
+The bundle holds an `AgentInvocation` (status, stop reason, duration, and references to the agent's own
+model calls from OpenHands' per-call usage records and response IDs), a `ToolCallObservation` for each tool
+call (timed from when the runner saw the action and its result), a `ContextCompactionObservation` for each
+condensation, which references the condenser's summary call, and a `SandboxObservation`. The condenser's
+calls carry the same `x-session-id` header as the agent's, so the Model Server captures them under this
+invocation. Gaps name what the events do not show, such as token counts around a compaction.
 
 ## Limits
 
@@ -154,4 +164,5 @@ gym env test +entrypoint=responses_api_agents/openhands_agent
 ```
 
 `tests/test_sandbox_runner.py` runs the real runner process against a stand-in for the SDK, including a
-SIGTERM during the run.
+SIGTERM during the run. `tests/test_sandbox.py` stages an activation through Gym's harness runner with that
+stand-in and covers rollout stops before launch and before the first event.

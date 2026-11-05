@@ -218,11 +218,13 @@ def classify_error(chain: list[dict[str, Any]]) -> tuple[str, Optional[int]]:
     types = {entry.get("type") for entry in chain}
     if types & _CONTEXT_LIMIT_ERRORS:
         return MODEL_CONTEXT_LIMIT, None
+    # LiteLLM gives its Timeout and APIConnectionError a status code (408, 500) that no response carried, and
+    # OpenHands raises the latter as LLMServiceUnavailableError, so a transport error decides before any status.
+    if types & _TRANSPORT_ERRORS:
+        return MODEL_TRANSPORT_ERROR, None
     status = error_status_code(chain)
     if status is not None:
         return MODEL_REQUEST_ERROR, status
-    if types & _TRANSPORT_ERRORS:
-        return MODEL_TRANSPORT_ERROR, None
     return "unknown", None
 
 

@@ -5,7 +5,9 @@
 import asyncio
 import importlib.metadata
 import json
+import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -20,9 +22,16 @@ from unittest.mock import AsyncMock
 import pytest
 from packaging.requirements import Requirement
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxPythonRuntime
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    ROLLOUT_STOP_METADATA_KEY,
+    SandboxPythonRuntime,
+    SandboxSession,
+)
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.openhands_agent import sandbox as adapter
-from responses_api_agents.openhands_agent.tests.test_app import seed
+from responses_api_agents.openhands_agent.tests.test_app import agent, seed
 from responses_api_agents.openhands_agent.tests.test_sandbox_runner import STUB
 
 
@@ -175,6 +184,107 @@ async def test_collection_without_events_fails_with_the_runner_stderr(tmp_path):
     state = local_state(tmp_path)
     (tmp_path / "stderr.log").write_text("Traceback: ImportError: openhands")
     with pytest.raises(RuntimeError, match="recorded no events: Traceback: ImportError: openhands"):
+        await state.collect_artifacts()
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_result_is_logged_and_left_to_the_activation(tmp_path, caplog):
+    state = local_state(tmp_path)
+    (tmp_path / "events.jsonl").write_text('[1.0, {"kind": "MessageEvent"}]\n')
+    with caplog.at_level(logging.WARNING, logger=adapter.LOG.name):
+        collected = await state.collect_artifacts()
+    assert collected.result is None
+    assert "Could not read OpenHands result.json" in caplog.text
+
+
+class SupervisedSandbox:
+    """Keeps uploads by path and answers the supervised launch with ``receipt``, once ``finish`` is set.
+
+    The harness never writes events.jsonl.
+    """
+
+    uploads_independent_of_execs = True
+    sandbox_id = "sbx"
+
+    def __init__(self, receipt: dict):
+        self.receipt = receipt
+        self.files: dict[str, str] = {}
+        self.commands: list[str] = []
+        self.launched, self.finish = asyncio.Event(), asyncio.Event()
+
+    async def upload(self, source, target):
+        self.files[target] = Path(source).read_text()
+
+    async def download(self, source, target):
+        if source not in self.files:
+            raise FileNotFoundError(source)
+        Path(target).write_text(self.files[source])
+
+    async def exec(self, command, *, cwd=None, timeout_s=None, **_):
+        self.commands.append(command)
+        receipt = re.search(r"--receipt (\S+)", command)
+        if receipt:
+            self.launched.set()
+            await self.finish.wait()
+            self.files[receipt.group(1)] = json.dumps(self.receipt)
+            return exec_result(code=self.receipt["return_code"] or 0)
+        if "echo absent" in command:
+            return exec_result("absent\n")
+        return exec_result()
+
+
+def supervised_state(sandbox: SupervisedSandbox) -> adapter.OpenHandsSandboxSession:
+    session = SandboxSession(sandbox=sandbox, session_dir="/s", workdir="/app", harness="OpenHands")
+    return adapter.OpenHandsSandboxSession(request=seed(), session=session, interpreter="/rt/openhands-gym")
+
+
+BODY = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
+
+
+@pytest.mark.asyncio
+async def test_a_rollout_stop_before_launch_is_graded_as_an_empty_stopped_run():
+    # The supervisor finds the stop request and never starts the harness: no events, no return code.
+    sandbox = SupervisedSandbox({"cleanup_confirmed": True, "return_code": None, "timed_out": True, "error": None})
+    sandbox.finish.set()
+    state = supervised_state(sandbox)
+    assert await state.session.expire(timeout=1, reason="budget") is True
+    response = await agent()._activate(state, BODY, prompt="Build it", system="")
+    assert (response.status, response.metadata["stop_reason"], response.output) == ("incomplete", "timeout", [])
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "budget"}
+    # OpenHands never ran, so collection reads nothing from the sandbox.
+    assert not [command for command in sandbox.commands if "stderr.log" in command or "events.jsonl" in command]
+
+
+@pytest.mark.asyncio
+async def test_a_rollout_stop_before_the_first_event_is_graded_as_an_empty_stopped_run():
+    sandbox = SupervisedSandbox({"cleanup_confirmed": True, "return_code": 143, "timed_out": True, "error": None})
+    state = supervised_state(sandbox)
+    activation = asyncio.create_task(agent()._activate(state, BODY, prompt="Build it", system=""))
+    await asyncio.wait_for(sandbox.launched.wait(), timeout=5)
+    assert await state.session.expire(timeout=1, reason="budget") is True
+    sandbox.finish.set()
+    response = await asyncio.wait_for(activation, timeout=5)
+    assert (response.status, response.metadata["stop_reason"], response.output) == ("incomplete", "timeout", [])
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "budget"}
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_without_events_is_still_a_runner_failure():
+    # Without a rollout stop, a harness that recorded nothing by its deadline failed; the episode is retried.
+    sandbox = SupervisedSandbox({"cleanup_confirmed": True, "return_code": 143, "timed_out": True, "error": None})
+    sandbox.finish.set()
+    with pytest.raises(RuntimeError, match="exit 143") as error:
+        await agent()._activate(supervised_state(sandbox), BODY, prompt="Build it", system="")
+    assert "recorded no events" in str(error.value.__cause__)
+
+
+@pytest.mark.asyncio
+async def test_a_stopped_run_whose_events_cannot_be_read_is_still_a_failure(tmp_path):
+    state = local_state(tmp_path)
+    state.session.expired = True
+    # events.jsonl exists but cannot be read, so the run may have recorded work that would be lost.
+    (tmp_path / "events.jsonl").mkdir()
+    with pytest.raises(RuntimeError, match="recorded no events"):
         await state.collect_artifacts()
 
 

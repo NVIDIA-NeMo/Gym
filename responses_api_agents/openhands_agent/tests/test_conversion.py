@@ -164,6 +164,11 @@ def test_condenser_calls_count_toward_usage():
             recorded({"kind": "ConversationErrorEvent", "code": "MaxIterationsReached", "detail": "limit"}),
             ("incomplete", "max_iterations"),
         ),
+        (
+            result(execution_status="error"),
+            recorded({"kind": "ConversationErrorEvent", "code": "MaxBudgetReached", "detail": "spent"}),
+            ("incomplete", "max_budget"),
+        ),
         (result(execution_status="error"), [], ("failed", "error")),
         (result(status="terminated", execution_status="running"), [], ("incomplete", "cancelled")),
         (None, [], ("failed", "runner_error")),
@@ -188,6 +193,25 @@ def test_deadline_wins_over_the_runner_result():
             (MODEL_REQUEST_ERROR, 502),
         ),
         ([{"type": "LLMTimeoutError"}], (MODEL_TRANSPORT_ERROR, None)),
+        # LiteLLM sets status codes on its timeout and connection errors, though no response carried them.
+        (
+            [
+                {"type": "ConversationRunError", "status_code": None},
+                {"type": "LLMTimeoutError", "status_code": None},
+                {"type": "Timeout", "status_code": 408},
+            ],
+            (MODEL_TRANSPORT_ERROR, None),
+        ),
+        (
+            [
+                {"type": "ConversationRunError", "status_code": None},
+                {"type": "LLMServiceUnavailableError", "status_code": None},
+                {"type": "APIConnectionError", "status_code": 500},
+            ],
+            (MODEL_TRANSPORT_ERROR, None),
+        ),
+        ([{"type": "BadRequestError", "status_code": 400}], (MODEL_REQUEST_ERROR, 400)),
+        ([{"type": "ServiceUnavailableError"}], (MODEL_REQUEST_ERROR, 503)),
         ([{"type": "ValueError"}], ("unknown", None)),
     ],
 )

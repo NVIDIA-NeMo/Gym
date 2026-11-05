@@ -25,6 +25,9 @@ def note(**entry):
     with open(LOG, "a") as handle:
         handle.write(json.dumps(entry) + "\\n")
 
+# Some OpenHands modules read OH_PERSISTENCE_DIR once, at import.
+note(imported_with=os.environ.get("OH_PERSISTENCE_DIR"))
+
 class Event:
     def __init__(self, kind, **fields):
         self.fields = {"kind": kind, **fields}
@@ -63,6 +66,7 @@ class _Stats:
 class Conversation:
     def __init__(self, agent, workspace, persistence_dir, callbacks, max_iteration_per_run, visualizer, delete_on_close):
         note(conversation={"workspace": workspace, "persistence_dir": persistence_dir, "max": max_iteration_per_run})
+        note(environ={name: os.environ.get(name) for name in ("OH_PERSISTENCE_DIR", "OPENHANDS_SUPPRESS_BANNER")})
         self.callbacks = callbacks
         self.state = _State()
         self.conversation_stats = _Stats()
@@ -165,6 +169,24 @@ def test_finished_run_records_events_result_and_the_harness_configuration(tmp_pa
     condenser_llm = [entry["llm"] for entry in log if "llm" in entry][1]
     assert condenser_llm["base_url"] == "http://model/ng-rollout/r/v1" and condenser_llm["usage_id"] == "condenser"
     assert {"closed": True} in log
+
+
+def test_runner_hands_openhands_the_session_settings(tmp_path, stub):
+    process, session = start(tmp_path, stub, "finish")
+    assert process.wait(timeout=60) == 0
+    log = notes(tmp_path)
+    workspace = {"workspace": str(tmp_path / "work"), "persistence_dir": str(session / "state"), "max": 7}
+    assert {"conversation": workspace} in log
+    assert {"context": {"system_message_suffix": "Extra"}} in log
+    # OpenHands' per-user state goes to the session, not the task's home, from the first import on.
+    assert {"environ": {"OH_PERSISTENCE_DIR": str(session / "state"), "OPENHANDS_SUPPRESS_BANNER": "1"}} in log
+    assert {"imported_with": str(session / "state")} in log
+    assert [entry["llm"] for entry in log if "llm" in entry][0] == {
+        "model": "openai/m",
+        "base_url": "http://model/ng-rollout/r/v1",
+    }
+    result = json.loads((session / "result.json").read_text())
+    assert result["ended_at"] >= result["started_at"]
 
 
 def test_error_records_the_exception_chain_with_its_status(tmp_path, stub):

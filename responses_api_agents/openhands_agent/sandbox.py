@@ -174,6 +174,9 @@ class OpenHandsSandboxSession(AgentSessionState):
 
     async def collect_artifacts(self) -> OpenHandsArtifacts:
         """Copy the event log, the run result and the end of stderr; a missing result is reported later."""
+        if self.session.expired_before_launch:
+            # A rollout stop arrived before launch, so OpenHands never ran.
+            return OpenHandsArtifacts(events="", result=None, stderr="")
         sandbox = self.session.sandbox
         stderr = ""
         try:
@@ -186,11 +189,17 @@ class OpenHandsSandboxSession(AgentSessionState):
         try:
             events = await read_text(sandbox, path=self.path("events.jsonl"))
         except Exception as error:
+            if self.session.expired and await self._events_absent():
+                # A rollout stop can end the runner after launch but before it records its first event.
+                LOG.warning("OpenHands recorded no events before a rollout stop ended it; keeping an empty run")
+                return OpenHandsArtifacts(events="", result=None, stderr=stderr)
             logs = await self.session.read_output_log()
             raise RuntimeError(f"OpenHands runner recorded no events: {(stderr or logs)[-16000:]}") from error
         try:
             result = await read_text(sandbox, path=self.path("result.json"))
         except Exception:
+            # The activation judges a missing result: graded after a deadline, otherwise a runner failure.
+            LOG.warning("Could not read OpenHands result.json", exc_info=True)
             result = None
         try:
             runtime = json.loads(await read_text(sandbox, path=self.path("runtime.json")))
@@ -198,3 +207,18 @@ class OpenHandsSandboxSession(AgentSessionState):
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         return OpenHandsArtifacts(events=events, result=result, stderr=stderr)
+
+    async def _events_absent(self) -> bool:
+        """Whether the session directory exists without events.jsonl; an unclear answer counts as present."""
+        directory = shlex.quote(self.session.session_dir)
+        events = shlex.quote(self.path("events.jsonl"))
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {events} ]; then echo present; elif [ -d {directory} ]; then echo absent; fi",
+                cwd="/",
+                timeout_s=10,
+            )
+        except Exception:
+            LOG.warning("Could not check for OpenHands events after a rollout stop", exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type and (probe.stdout or "").strip() == "absent"
