@@ -67,14 +67,21 @@ def start_mcp(cli: Path, *, required: list[str], log: Path) -> tuple[Any, dict, 
     deadline = time.monotonic() + MCP_CONNECT_TIMEOUT_S + 30
     while not socket.exists():
         if process.poll() is not None:
-            raise MCPUnavailable(f"The MCP CLI exited with {process.returncode}: {log.read_text()[-2000:]}")
+            raise MCPUnavailable(
+                f"The MCP CLI exited with {process.returncode}: {log.read_text(errors='replace')[-2000:]}"
+            )
         if time.monotonic() > deadline:
             raise MCPUnavailable("The MCP CLI did not start in time")
         time.sleep(0.1)
     # The headers the grants carry are no longer needed on disk once every server has connected.
     cli.with_name("mcp_servers.json").unlink(missing_ok=True)
     listed = subprocess.run(
-        [sys.executable, "-E", "-s", str(cli), "list"], capture_output=True, text=True, timeout=120, check=False
+        [sys.executable, "-E", "-s", str(cli), "list"],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=120,
+        check=False,
     )
     if listed.returncode != 0:
         raise MCPUnavailable(f"Listing MCP tools failed: {listed.stderr.strip()}")
@@ -189,6 +196,11 @@ def build_agent(payload: dict[str, Any], *, attribute_calls: bool):
     class Agent(DefaultAgent):
         """``DefaultAgent`` whose step-by-step save cannot leave a half-written trajectory behind a forced stop."""
 
+        def execute_actions(self, message: dict) -> list[dict]:
+            # Saved before the commands run: a command that kills this process leaves the model's call on disk.
+            self.save(self.config.output_path)
+            return super().execute_actions(message)
+
         def save(self, path: Path | None, *extra_dicts: dict) -> dict:
             data = self.serialize(*extra_dicts)
             if path:
@@ -223,7 +235,7 @@ def main() -> int:
         return 2
     input_path, output_path = map(Path, sys.argv[1:])
     payload = json.loads(input_path.read_text())
-    # The staged input names the rollout's model URL; the model's shell has no use for it.
+    # The staged input is read once.
     input_path.unlink()
     return run(payload, input_path.parent, output_path)
 

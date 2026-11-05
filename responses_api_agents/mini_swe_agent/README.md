@@ -49,9 +49,35 @@ The step limit (500) and command timeout (30 seconds) in that config follow the 
 template's `step_limit` and `step_timeout` set mini-SWE's `agent.step_limit` and the environment's command timeout;
 `/run` reads the same two fields.
 
-**Capability level:** Evaluation and Observability. The close bundle reports one invocation with the model calls,
-conversation and status, a timed observation for every bash call, and the agent sandbox's outcome.
-Token IDs are not captured; use Gym's `token_id_capture` for training.
+**Capability level:** Evaluation. The close bundle already carries Observability evidence (one invocation with model
+calls and conversation, a timed observation for every bash call, the agent sandbox's outcome), but Harness
+Conformance cannot end a mini-SWE run until its scripted provider recognizes the submission command
+([#5376](https://github.com/NVIDIA-NeMo/Gym/pull/5376)); Observability will be claimed once `mini_swe` is registered
+and passes.
+
+Evaluation only: token IDs and logprobs are not wired up, and training has not been validated. MCP calls in the
+response output are rebuilt from the CLI's records; the model emitted only the bash calls.
+
+### mini-SWE adapters
+
+[`miniswe_sandboxed_agent`](../miniswe_sandboxed_agent/README.md) also runs mini-SWE 2.4.6 through agent sessions, and
+the Terminal Bench 4 and Terminal-Bench-Science presets use it. It installs mini-SWE in the sandbox at setup, as the
+task user, from PyPI, so the sandbox needs PyPI access, and it reports `miniswe_termination`. This adapter installs a
+runtime built on the agent server at seed, so the sandbox needs no network; it runs mini-SWE under Gym's process
+supervisor, can start its own sandbox, serves `mcp` tool grants, and reports `mini_swe_termination`. Which of the two
+stays Gym's session adapter for mini-SWE is not decided yet.
+
+### Pairings and limits
+
+- Terminal Bench 4 Harbor task folders (after `gym dataset pull terminal_bench_4`), in the sandbox the Harbor
+  environment server lends.
+- `example_single_tool_call` behind `single_agent_turn_legacy` with `resources_tool_transports: [mcp]`, in a sandbox
+  the agent starts.
+
+No Resources Server lists `mini_swe_agent` in `allowed_agents`, and it has not been evaluated on Terminal Bench 2.1.
+Tasks that set a `SandboxAccess.user` (Harbor tasks with `[agent].user`) or whose workdir is `/` or `/tmp` are
+refused. The sandbox needs glibc 2.28 or newer, or musl, and about 450 MB under `/tmp` (see
+[Installation](#installation)).
 
 ### Where it runs
 
@@ -63,8 +89,9 @@ Token IDs are not captured; use Gym's `token_id_capture` for training.
 
 There is no host path: `/v1/responses` without an agent session answers HTTP 422. The seed is refused with HTTP 422
 for a required `direct_http` grant, a `SandboxAccess.user` (mini-SWE runs as the sandbox's default user), a relative
-`workdir`, and a loopback Model Server URL that a remote sandbox cannot reach. `SandboxAccess.env` is applied to every
-bash command.
+`workdir` or one that is not disjoint from the session directory (such as `/` or `/tmp`), a loopback Model Server URL
+that a remote sandbox cannot reach, and a task context that is not a JSON object or declares an MCP server without a
+name. `SandboxAccess.env` is applied to every bash command.
 
 ### Installation
 
@@ -98,17 +125,23 @@ episode's capture key, which is also the reported invocation ID. LiteLLM's and m
 Model Server keeps its retry policy. Request fields are handled as follows:
 
 - Forwarded to every model call: `instructions`, `temperature`, `top_p`, `max_output_tokens` (a per-call cap),
-  `reasoning`, `parallel_tool_calls`, `tool_choice`.
+  `reasoning`, `parallel_tool_calls`, `tool_choice`. LiteLLM drops a field that an OpenAI model in its cost map does
+  not support (`mini.yaml` sets `drop_params`).
 - Read by the adapter: the text of every `input` message in order is the task; `metadata.agent_timeout_sec` and the
   seed's `agent_timeout_sec` can only shorten `sandbox_runner_timeout_seconds`; `model` must match the configured
   model. `tools` is not forwarded: mini-SWE offers the model only its bash tool, and granted tools are reached through it.
+  A request with `tools` and no MCP server to reach them is refused with HTTP 422; set `resources_tool_transports: [mcp]`.
 - Any other field with a non-default value is refused with HTTP 422.
 
 ### Tools
 
-mini-SWE's bash tool runs each command in a new shell in the task's working directory. MCP servers reach it through a
-task-local CLI ([`mcp_cli.py`](mcp_cli.py)), which keeps every server's session open for the run: the task's prompt
-lists their tools as JSON schemas and the command that calls them. The servers are:
+mini-SWE's bash tool runs each command in a new shell in the task's working directory. A command that leaves a
+background process holding its output open returns at the command timeout (`step_timeout`), and its process group, the
+background job included, is killed; start task services with output redirected, for example `nohup cmd > log 2>&1 &`.
+
+MCP servers reach the bash tool through a task-local CLI ([`mcp_cli.py`](mcp_cli.py)), which keeps every server's
+session open for the run: the task's prompt lists their tools as JSON schemas and the command that calls them. The
+servers are:
 
 - The episode's `mcp` tool grants (`resources_tool_transports: [mcp]`), with their URL and headers.
 - The task's own MCP servers from the Harbor task context (`/tmp/.nemo-gym/task.json`), with its `skills_dir`
@@ -119,6 +152,9 @@ A required server, and every server a task declares, must connect before the fir
 activation fails without inference. An optional server that does not connect is left out of the prompt. Each MCP
 call is placed in the response after the bash call that made it, as `mcp__<server>__<tool>` with its result, so
 verifiers that read tool calls see it. It is not a tool-call observation of its own: the model requested the bash call.
+The CLI's call records are written inside the sandbox by the user that runs the agent's commands, so only records for
+the run's MCP servers are reported; a line that is not one is left out and declared as an `mcp_call_record_invalid`
+gap, and a run without MCP servers reports no MCP call.
 mini-SWE saves no observation for its submission command; the runner keeps that command's output, which ends the
 response and the reported conversation.
 
@@ -127,13 +163,17 @@ response and the reported conversation.
 | mini-SWE ended with | Response | Verified |
 | --- | --- | --- |
 | `Submitted` | `completed` | Yes |
-| `LimitsExceeded`, `TimeExceeded`, a context-window error, or Gym's deadline | `incomplete`; `mini_swe_termination` names it | Yes |
-| No exit status: the run was killed mid-step, by its own command or an OOM kill | `incomplete`, `killed` | Yes |
+| `LimitsExceeded`, `TimeExceeded`, a context-window error, Gym's deadline after a model call returned, or a rollout stop | `incomplete`; `mini_swe_termination` names it | Yes |
+| Gym's deadline before any model call returned | `failed`, `Timeout`, with `ng_agent_outcome` `model_transport_error` | By the outcome policy, which retries it by default |
+| No exit status: the run was killed mid-step, by its own command or an OOM kill. The runner saves before each step's commands run, so the step's model call is kept. | `incomplete`, `killed` | Yes |
+| No exit status: close stopped the run | `incomplete`, `cancelled` | No: a closed episode is not verified |
 | A model call that failed (LiteLLM's error, such as `RateLimitError`) or `RepeatedFormatError` | `failed` with `ng_agent_outcome` | By the Environment Server's outcome policy |
-| No trajectory, a required MCP server that did not connect, or another exception | HTTP 500, retryable | No |
+| No trajectory (the runner died before its first model call returned), a required MCP server that did not connect, or another exception | HTTP 500, retryable | No |
 
-Usage is reported only when every model call, including responses mini-SWE rejected for their format, has a usage
-record. LiteLLM's response-ID envelope is decoded so model-call references join Gym's captured calls.
+Each model call may take the whole run's budget, so a first call slower than the whole budget is retried rather than
+graded. Usage is reported only when every model call, including responses mini-SWE rejected for their format, has a
+usage record. A rejected response stays in the output without its function calls, which never ran. LiteLLM's
+response-ID envelope is decoded so model-call references join Gym's captured calls.
 
 ## Overview
 

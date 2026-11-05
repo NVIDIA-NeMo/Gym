@@ -5,8 +5,9 @@
 mini-SWE saves each model response (``object: response``) with its parsed bash actions, then one
 ``function_call_output`` per action. A submission saves no output: its exit message carries the command's timing.
 A response rejected for its format is kept in the next message's ``extra.response``; it counts as a model call but
-mini-SWE does not replay it. MCP calls that a bash command made through the task-local CLI come from
-``mcp_calls.jsonl`` and are placed after the bash call that made them.
+mini-SWE does not replay it, and its function calls, which never ran, are left out of the response output. MCP calls
+that a bash command made through the task-local CLI come from ``mcp_calls.jsonl`` and are placed after the bash call
+that made them.
 """
 
 import base64
@@ -72,6 +73,8 @@ class Projection:
     responses: list[NeMoGymResponse] = field(default_factory=list)
     tools: list[NativeToolCall] = field(default_factory=list)
     mcp_calls: list[dict] = field(default_factory=list)
+    # The 1-based positions in ``responses`` of responses mini-SWE rejected for their format; their calls never ran.
+    rejected: set[int] = field(default_factory=set)
     # A saved model response that is not a valid Responses API object; projection stops before it.
     invalid_response: bool = False
 
@@ -85,11 +88,15 @@ class Projection:
     def output(self) -> list:
         """Response output: each model response, then for each of its bash calls the MCP calls it made and its result.
 
+        A response mini-SWE rejected for its format keeps its other items but not its function calls, which never ran.
         An MCP call whose bash call is not in the projection, such as one from a background process, comes last.
         """
         owners = {tool.tool_call_id for tool in self.tools}
         items = []
         for index, response in enumerate(self.responses, start=1):
+            if index in self.rejected:
+                items.extend(item for item in response.output if item.type != "function_call")
+                continue
             items.extend(response.output)
             for tool in self.tools:
                 if tool.model_index != index:
@@ -147,6 +154,8 @@ def project(trajectory: dict | None, mcp_calls: list[dict]) -> Projection:
                 projection.invalid_response = True
                 break
             projection.responses.append(validated)
+            if message.get("object") != "response":
+                projection.rejected.add(len(projection.responses))
             projection.history.append(
                 {"input": list(conversation), "timestamp": extra.get("timestamp", response.get("created_at", 0))}
             )

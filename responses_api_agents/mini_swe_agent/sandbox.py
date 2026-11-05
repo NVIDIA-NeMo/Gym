@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import (
     OUTPUT_LOG_FILE,
+    AgentSeedRejectedError,
     AgentSessionState,
     SandboxCommand,
     SandboxPythonRuntime,
@@ -49,7 +50,9 @@ MINI_SWE_RUNTIME = SandboxPythonRuntime(
     requirements=_requirement_lines(_RUNTIME_FILES / "requirements.in"),
     import_check=(
         # LiteLLM would otherwise fetch its model cost map from GitHub at import; the check makes no network call.
-        "import os; os.environ.update(LITELLM_LOCAL_MODEL_COST_MAP='true', MSWEA_SILENT_STARTUP='true'); "
+        # mini-SWE makes its config directory at import; keep it in the check's HOME, not in the task's XDG_CONFIG_HOME.
+        "import os; os.environ.update(LITELLM_LOCAL_MODEL_COST_MAP='true', MSWEA_SILENT_STARTUP='true', "
+        "MSWEA_GLOBAL_CONFIG_DIR=os.path.join(os.environ['HOME'], 'mini-swe-agent')); "
         f"import minisweagent; assert minisweagent.__version__ == {MINI_SWE_VERSION!r}, minisweagent.__version__; "
         "from minisweagent.models.litellm_response_model import LitellmResponseModel; "
         "from mcp.client.streamable_http import streamable_http_client"
@@ -83,12 +86,15 @@ class MiniSWEArtifacts:
 
     ``trajectory`` is mini-SWE's native transcript, saved after every step; ``None`` when the run saved none.
     ``output`` is the runner's account of how the run ended; ``None`` when the runner was killed before writing it.
+    ``invalid_mcp_calls`` counts the lines of ``mcp_calls.jsonl`` that are not a call record for one of the run's
+    MCP servers; they are left out of ``mcp_calls``.
     """
 
     trajectory: dict[str, JsonValue] | None
     output: dict[str, JsonValue] | None
     mcp_calls: list[dict[str, JsonValue]]
     log: str
+    invalid_mcp_calls: int = 0
 
 
 @dataclass
@@ -128,9 +134,12 @@ class MiniSWESession(AgentSessionState):
         """The task's own MCP servers and skills directory, from the file a Harbor environment server writes.
 
         A read that ran and found nothing returns ``{}``; a provider failure raises, because running the task without
-        the tools it declares would score a silent zero.
+        the tools it declares would score a silent zero. A file that is not a JSON object is the task's own error, so
+        the seed is refused rather than retried.
         """
-        result = await self.session.sandbox.exec(f"cat {TASK_CONTEXT_FILE} 2>/dev/null || true", cwd="/", timeout_s=30)
+        path = quote(TASK_CONTEXT_FILE)
+        # A file that exists but cannot be read fails the read instead of passing for an absent one.
+        result = await self.session.sandbox.exec(f"if [ -e {path} ]; then cat {path}; fi", cwd="/", timeout_s=30)
         if result.error_type is not None or result.return_code != 0:
             raise RuntimeError(
                 f"The sandbox could not read {TASK_CONTEXT_FILE}: {result.error_type or result.return_code}"
@@ -141,9 +150,9 @@ class MiniSWESession(AgentSessionState):
         try:
             context = json.loads(text)
         except json.JSONDecodeError as error:
-            raise RuntimeError(f"{TASK_CONTEXT_FILE} is not JSON") from error
+            raise AgentSeedRejectedError(f"{TASK_CONTEXT_FILE} is not JSON") from error
         if not isinstance(context, dict):
-            raise RuntimeError(f"{TASK_CONTEXT_FILE} is not a JSON object")
+            raise AgentSeedRejectedError(f"{TASK_CONTEXT_FILE} is not a JSON object")
         return context
 
     async def close(self, timeout: float) -> None:
@@ -189,8 +198,7 @@ class MiniSWESession(AgentSessionState):
         output = await self._read_json(f"{directory}/output.json")
         if output is not None:
             self.runtime_info = parse_runtime_info(output.get("runtime"))
-        calls_text = await self._read_optional(f"{directory}/mcp_calls.jsonl")
-        mcp_calls = [json.loads(line) for line in (calls_text or "").splitlines() if line.strip()]
+        mcp_calls, invalid_mcp_calls = await self._read_mcp_calls(f"{directory}/mcp_calls.jsonl")
         logs = []
         # Trimmed in the sandbox: a long run's output need not cross the provider.
         for name in (OUTPUT_LOG_FILE, "mcp.log"):
@@ -199,7 +207,45 @@ class MiniSWESession(AgentSessionState):
             )
             if tail.stdout:
                 logs.append(f"[{name}]\n{tail.stdout}")
-        return MiniSWEArtifacts(trajectory=trajectory, output=output, mcp_calls=mcp_calls, log="\n".join(logs))
+        return MiniSWEArtifacts(
+            trajectory=trajectory,
+            output=output,
+            mcp_calls=mcp_calls,
+            log="\n".join(logs),
+            invalid_mcp_calls=invalid_mcp_calls,
+        )
+
+    async def _read_mcp_calls(self, path: str) -> tuple[list[dict[str, JsonValue]], int]:
+        """The MCP call records for the run's servers, and how many lines were not one.
+
+        The model's commands run as the user that appends to the file, so a line can be partial, malformed or written
+        by the model itself. A run without MCP servers made no calls, and its file is not read.
+        """
+        if not self.mcp_servers:
+            return [], 0
+        names = {server["name"] for server in self.mcp_servers}
+        calls: list[dict[str, JsonValue]] = []
+        invalid = 0
+        for line in (await self._read_optional(path) or "").splitlines():
+            if not line.strip():
+                continue
+            try:
+                call = json.loads(line)
+            except json.JSONDecodeError:
+                invalid += 1
+                continue
+            if (
+                isinstance(call, dict)
+                and isinstance(call.get("server"), str)
+                and call["server"] in names
+                and isinstance(call.get("tool"), str)
+                and isinstance(call.get("output"), str)
+                and isinstance(call.get("tool_call_id"), str | None)
+            ):
+                calls.append(call)
+            else:
+                invalid += 1
+        return calls, invalid
 
     async def _read_optional(self, path: str) -> str | None:
         exists = await self.session.sandbox.exec(f"test -f {quote(path)}", cwd="/", timeout_s=30)

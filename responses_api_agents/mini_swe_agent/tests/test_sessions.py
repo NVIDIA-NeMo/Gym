@@ -4,14 +4,19 @@
 
 import asyncio
 import json
-from types import SimpleNamespace
+import sys
+import typing
+from contextlib import AsyncExitStack, asynccontextmanager
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
+    ROLLOUT_STOP_METADATA_KEY,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -20,17 +25,21 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.data.tasks.harbor import HarborMCPServer
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.mini_swe_agent import app as app_module
+from responses_api_agents.mini_swe_agent import mcp_cli
 from responses_api_agents.mini_swe_agent.app import MiniSWEAgent, MiniSWEAgentConfig
 from responses_api_agents.mini_swe_agent.sandbox import HarnessProcessInfo, MiniSWEArtifacts, MiniSWESession
-from responses_api_agents.mini_swe_agent.tests.test_trajectory import native_trajectory
+from responses_api_agents.mini_swe_agent.tests.test_trajectory import model_response, native_trajectory
 
 
 SANDBOX_ACCESS = {
     "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {"sandbox_id": "task-box"}},
     "workdir": "/app",
 }
+# The real read, before the sandbox fixture stubs it.
+READ_TASK_CONTEXT = MiniSWESession.read_task_context
 
 
 def config(**overrides) -> MiniSWEAgentConfig:
@@ -135,6 +144,7 @@ def finish_run(
     timed_out: bool = False,
     output: dict | None = None,
     mcp_calls: list | None = None,
+    invalid_mcp_calls: int = 0,
 ) -> AsyncMock:
     """Make the session's execute end as a run that left these artifacts and this supervisor receipt."""
     artifacts = MiniSWEArtifacts(
@@ -142,6 +152,7 @@ def finish_run(
         output=output if output is not None else {"runtime": {"hostname": "box", "pid": 7, "python": "/py"}},
         mcp_calls=mcp_calls or [],
         log="",
+        invalid_mcp_calls=invalid_mcp_calls,
     )
 
     async def execute(*, stage_activation, collect, timeout, close_timeout):
@@ -173,7 +184,11 @@ def body(**overrides) -> NeMoGymResponseCreateParamsNonStreaming:
         ({"sandbox_access": None}, "sandbox_access or a configured sandbox_provider"),
         ({"sandbox_access": SANDBOX_ACCESS | {"user": "agent"}}, "task user is unsupported"),
         ({"sandbox_access": SANDBOX_ACCESS | {"workdir": "app"}}, "absolute task workdir"),
-        ({"sandbox_access": SANDBOX_ACCESS | {"workdir": "/tmp"}}, "outside its session directory"),
+        ({"sandbox_access": SANDBOX_ACCESS | {"workdir": "/tmp"}}, "disjoint from its session directory"),
+        (
+            {"sandbox_access": SANDBOX_ACCESS | {"workdir": "/tmp/nemo-gym-mini-swe-sessions/x"}},
+            "disjoint from its session directory",
+        ),
         (
             {"tool_accesses": [DirectHTTPToolAccess(name="tools", required=True, base_url="http://r:1")]},
             "supports only MCP tool grants",
@@ -230,6 +245,114 @@ async def test_an_owned_seed_starts_a_sandbox_with_a_ttl_and_never_reads_task_co
     assert spec.metadata == {"team": "gym", "run": "smoke", "agent_session_id": "session"}
     assert state.session.owns_sandbox
     sandbox.task_context.assert_not_awaited()
+
+
+async def test_an_owned_seed_serves_the_episodes_mcp_grants(agent, sandbox) -> None:
+    agent.config.sandbox_provider = "sandbox"
+
+    state = await asyncio.wait_for(
+        agent._seed_agent_session_state(seed(sandbox_access=None, tool_accesses=[mcp_grant(required=True)])), timeout=5
+    )
+
+    assert state.session.owns_sandbox
+    assert [(server["name"], server["headers"]) for server in state.mcp_servers] == [
+        ("task_tools", {"Authorization": "Bearer t"})
+    ]
+    assert state.required_mcp_servers == ["task_tools"]
+    sandbox.task_context.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("task_json", "reason"),
+    [
+        ("{oops", "is not JSON"),
+        ("[1]", "is not a JSON object"),
+        ('{"mcp_servers": [{"transport": "sse", "url": "http://tools/sse"}]}', "MCP server without a name"),
+    ],
+)
+def test_task_data_errors_are_final_refusals(agent, sandbox, monkeypatch, task_json, reason) -> None:
+    monkeypatch.setattr(MiniSWESession, "read_task_context", READ_TASK_CONTEXT)
+    close = AsyncMock()
+    monkeypatch.setattr(MiniSWESession, "close", close)
+    sandbox.box.exec.return_value = SimpleNamespace(return_code=0, stdout=task_json, stderr="", error_type=None)
+
+    # The same task data fails every attempt, so the seed is refused instead of retried.
+    assert reason in check_agent_seed_rejected(agent.setup_webserver(), seed())
+    close.assert_awaited_once()
+
+
+def fake_mcp_sdk(monkeypatch) -> list[tuple]:
+    """Stand-ins for the runtime's MCP 2 SDK that record which client each server reached."""
+    opened: list[tuple] = []
+
+    @asynccontextmanager
+    async def streams(*key):
+        opened.append(key)
+        yield "read", "write"
+
+    class ClientSession:
+        def __init__(self, read, write):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def initialize(self):
+            pass
+
+    class AsyncClient:
+        def __init__(self, *, headers, timeout):
+            self.headers = headers
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    modules = {
+        "httpx2": SimpleNamespace(AsyncClient=AsyncClient, Timeout=lambda *args, **kwargs: None),
+        "mcp": SimpleNamespace(ClientSession=ClientSession, StdioServerParameters=SimpleNamespace),
+        "mcp.client.sse": SimpleNamespace(sse_client=lambda url, headers=None: streams("sse", url, headers)),
+        "mcp.client.stdio": SimpleNamespace(
+            stdio_client=lambda parameters: streams("stdio", parameters.command, tuple(parameters.args))
+        ),
+        "mcp.client.streamable_http": SimpleNamespace(
+            streamable_http_client=lambda url, http_client: streams("streamable_http", url, http_client.headers)
+        ),
+    }
+    for name, module in modules.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setitem(sys.modules, "mcp.client", ModuleType("mcp.client"))
+    return opened
+
+
+@pytest.mark.parametrize("transport", typing.get_args(HarborMCPServer.model_fields["transport"].annotation))
+async def test_each_harbor_task_server_transport_reaches_its_mcp_client(
+    agent, sandbox, monkeypatch, transport
+) -> None:
+    # The file the Harbor environment server writes: HarborMCPServer dumps under mcp_servers.
+    declared = HarborMCPServer(
+        name="task_tools", transport=transport, url="http://tools:8000/mcp", command="serve-tools", args=["--fast"]
+    )
+    sandbox.task_context.return_value = {"mcp_servers": [declared.model_dump(mode="json")], "skills_dir": None}
+    state = await asyncio.wait_for(agent._seed_agent_session_state(seed()), timeout=5)
+    (server,) = state.mcp_servers
+    opened = fake_mcp_sdk(monkeypatch)
+
+    async with AsyncExitStack() as stack:
+        await mcp_cli.connect(server, stack)
+
+    expected = {
+        "stdio": ("stdio", "serve-tools", ("--fast",)),
+        "sse": ("sse", "http://tools:8000/mcp", None),
+        "streamable-http": ("streamable_http", "http://tools:8000/mcp", None),
+    }
+    assert opened == [expected[transport]]
+    assert state.required_mcp_servers == ["task_tools"]
 
 
 async def test_a_task_server_that_harbor_also_grants_is_connected_once_and_required(agent, sandbox) -> None:
@@ -291,8 +414,9 @@ async def test_one_activation_runs_once_and_identical_retries_join_it(agent) -> 
     bind(agent, state)
     execute = finish_run(state, trajectory=native_trajectory())
 
-    first, second = await asyncio.gather(
-        agent.responses(http_request(state), body()), agent.responses(http_request(state), body())
+    first, second = await asyncio.wait_for(
+        asyncio.gather(agent.responses(http_request(state), body()), agent.responses(http_request(state), body())),
+        timeout=5,
     )
 
     assert execute.await_count == 1
@@ -315,6 +439,86 @@ async def test_unknown_session_is_a_conflict_not_a_host_run(agent) -> None:
     with pytest.raises(HTTPException) as error:
         await agent.responses(SimpleNamespace(session={"agent_session_id": "nope"}, path_params={}), body())
     assert error.value.status_code == 409
+
+
+async def test_request_tools_need_an_mcp_server_to_reach_them(agent) -> None:
+    state = state_for(agent)
+    bind(agent, state)
+    finish_run(state, trajectory=native_trajectory())
+    tools = [{"type": "function", "name": "get_weather", "parameters": {}, "strict": False}]
+
+    # Without one, the episode would run without its tools and score a silent zero.
+    with pytest.raises(HTTPException, match="only through MCP grants") as error:
+        await agent.responses(http_request(state), body(tools=tools))
+    assert error.value.status_code == 422 and state.task is None
+
+    state.mcp_servers = [{"name": "task_tools"}]
+    response = await asyncio.wait_for(agent.responses(http_request(state), body(tools=tools)), timeout=5)
+    assert response.status == "completed"
+
+
+async def test_a_disconnected_waiter_does_not_cancel_the_shared_activation(agent) -> None:
+    state = state_for(agent)
+    bind(agent, state)
+    execute = finish_run(state, trajectory=native_trajectory())
+    inner, started, release = execute.side_effect, asyncio.Event(), asyncio.Event()
+
+    async def slow(**kwargs):
+        started.set()
+        await release.wait()
+        return await inner(**kwargs)
+
+    execute.side_effect = slow
+    first = asyncio.create_task(agent.responses(http_request(state), body()))
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    first.cancel()  # The Environment Server's request was dropped.
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(first, timeout=5)
+    assert not state.task.done()
+    release.set()
+    retried = await asyncio.wait_for(agent.responses(http_request(state), body()), timeout=5)
+
+    assert retried.status == "completed" and execute.await_count == 1
+
+
+def test_the_http_session_lifecycle_runs_once_and_refuses_activation_after_close(agent, sandbox, monkeypatch) -> None:
+    runs = []
+
+    async def execute(self, *, stage_activation, collect, timeout, close_timeout):
+        runs.append(self.session_dir)
+        self.launch_started = True
+        self.cleanup = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
+        self.artifacts = MiniSWEArtifacts(
+            trajectory=native_trajectory(), output={"runtime": {"hostname": "box", "pid": 7}}, mcp_calls=[], log=""
+        )
+        return self.artifacts
+
+    monkeypatch.setattr(SandboxSession, "execute", execute)
+    monkeypatch.setattr(SandboxSession, "close", AsyncMock())
+    request = seed()
+    rollout = f"/ng-rollout/{request.episode_id.capture_key}/v1/responses"
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        session_id = created.json()["agent_session_id"]
+        assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
+        assert client.post("/ng-rollout/other-1/v1/responses", json={"input": "task"}).status_code == 409
+        first = client.post(rollout, json={"input": "task"})
+        assert first.status_code == 200, first.text
+        assert first.json()["status"] == "completed"
+        assert client.post(rollout, json={"input": "task"}).json() == first.json()
+        assert client.post(rollout, json={"input": "changed"}).status_code == 409
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": session_id, "episode_id": request.episode_id.model_dump(mode="json")},
+        )
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["cleanup_confirmed"] is True
+        assert closed.json()["agent_observations"]["source"] == "mini_swe"
+        assert closed.json().get("resources_cookies") is None
+        assert client.post(rollout, json={"input": "task"}).status_code == 409
+    assert len(runs) == 1
 
 
 @pytest.mark.parametrize(
@@ -386,6 +590,13 @@ def test_the_run_budget_is_the_ceiling_shortened_by_the_task(agent, seed_budget,
     assert agent._agent_timeout_sec(state, body(metadata=metadata)) == expected
 
 
+def test_the_command_timeout_never_outlasts_the_run(agent) -> None:
+    state = state_for(agent)
+
+    assert agent._activation_payload(state, body(), timeout=10)["config"]["environment"]["timeout"] == 10
+    assert agent._activation_payload(state, body(), timeout=0.2)["config"]["environment"]["timeout"] == 1
+
+
 async def test_a_submitted_run_is_completed_with_usage_and_observations(agent) -> None:
     state = state_for(agent)
     finish_run(state, trajectory=native_trajectory())
@@ -436,6 +647,74 @@ async def test_a_deadline_stop_is_incomplete_with_partial_work(agent) -> None:
     assert state.observations.records[-1].outcome == "timeout"
 
 
+@pytest.mark.parametrize(
+    "trajectory",
+    [None, {"info": {"exit_status": ""}, "messages": native_trajectory()["messages"][:2]}],
+    ids=["before-the-first-save", "system-and-task-only"],
+)
+async def test_a_run_that_timed_out_before_any_model_call_returned_fails_as_a_transport_error(
+    agent, trajectory
+) -> None:
+    state = state_for(agent)
+    finish_run(state, trajectory=trajectory, return_code=143, timed_out=True)
+
+    response = await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+    # Each model call may take the whole budget: a Model Server that never answered is not the agent's result.
+    assert (response.status, response.metadata["mini_swe_termination"]) == ("failed", "Timeout")
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+    invocation = state.observations.records[0]
+    assert (invocation.status, invocation.stop_reason) == ("failed", "wall_time")
+
+
+async def test_a_rollout_stop_before_the_first_save_is_incomplete_and_marked(agent) -> None:
+    state = state_for(agent)
+    execute = finish_run(state, trajectory=None, return_code=None, timed_out=True, output={})
+    inner = execute.side_effect
+
+    async def expired(**kwargs):
+        artifacts = await inner(**kwargs)
+        # What SandboxSession.expire leaves behind when POST /rollouts/<key>/stop ended the run.
+        state.session._expire_requested, state.session.expire_reason = True, "operator"
+        state.runtime_info = None
+        return artifacts
+
+    execute.side_effect = expired
+
+    response = await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+    assert (response.status, response.output) == ("incomplete", [])
+    assert response.metadata["mini_swe_termination"] == "timeout"
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "operator"}
+    gaps = [gap.code for gap in state.observations.gaps]
+    assert "native_trajectory_unavailable" in gaps and "runtime_info_unavailable" in gaps
+    assert "usage_unavailable" not in gaps
+    assert state.observations.records[-1].outcome == "timeout"
+
+
+async def test_usage_stays_unknown_on_the_response_when_one_call_reported_none(agent) -> None:
+    trajectory = native_trajectory()
+    trajectory["messages"][4]["extra"]["response"] = model_response("resp_rejected", usage=False)
+    state = state_for(agent)
+    finish_run(state, trajectory=trajectory)
+
+    response = await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+    assert response.status == "completed" and response.usage is None
+    assert "usage_unavailable" in [gap.code for gap in state.observations.gaps]
+
+
+async def test_a_saved_response_that_is_not_a_responses_object_is_retryable(agent) -> None:
+    trajectory = native_trajectory()
+    trajectory["messages"][5]["output"] = "not a list"
+    state = state_for(agent)
+    finish_run(state, trajectory=trajectory)
+
+    with pytest.raises(RuntimeError, match="not a valid Responses API object"):
+        await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+
 async def test_a_run_killed_mid_step_is_the_agents_own_result(agent) -> None:
     trajectory = native_trajectory()
     trajectory["info"]["exit_status"] = ""
@@ -445,6 +724,37 @@ async def test_a_run_killed_mid_step_is_the_agents_own_result(agent) -> None:
     response = await agent._activate(state, body())
 
     assert (response.status, response.metadata["mini_swe_termination"]) == ("incomplete", "killed")
+
+
+async def test_a_run_close_stopped_is_cancelled_when_its_activation_returns_before_close_cancels_it(agent) -> None:
+    trajectory = native_trajectory()
+    trajectory["info"]["exit_status"] = ""
+    # The submission command was running when close stopped the harness: mini-SWE saved no exit message.
+    del trajectory["messages"][-1]
+    state = state_for(agent)
+    # What sandbox_runner.py writes when the supervisor's SIGTERM follows the stop request close wrote.
+    output = {"runtime": {"hostname": "box", "pid": 7}, "stop_reason": "cancelled", "error": None, "mcp": None}
+    finish_run(state, trajectory=trajectory, return_code=143, output=output)
+
+    response = await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+    assert (response.status, response.metadata["mini_swe_termination"]) == ("incomplete", "cancelled")
+    invocation, *tools, sandbox_record = state.observations.records
+    assert invocation.stop_reason == "cancelled"
+    assert (tools[-1].status, tools[-1].error_type) == ("cancelled", "invocation_cancelled")
+    assert sandbox_record.outcome == "cancelled"
+    assert "native_trajectory_partial" in [gap.code for gap in state.observations.gaps]
+
+
+async def test_a_submitted_run_that_raced_close_keeps_its_own_outcome(agent) -> None:
+    state = state_for(agent)
+    output = {"runtime": {"hostname": "box", "pid": 7}, "stop_reason": "cancelled", "error": None, "mcp": None}
+    finish_run(state, trajectory=native_trajectory(), output=output)
+
+    response = await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+    assert (response.status, response.metadata["mini_swe_termination"]) == ("completed", "completed")
+    assert state.observations.records[-1].outcome == "completed"
 
 
 @pytest.mark.parametrize(
@@ -535,6 +845,16 @@ async def test_mcp_calls_reach_the_response_for_verifiers(agent) -> None:
     assert "mcp__task_tools__get_weather" in [getattr(item, "name", None) for item in response.output]
 
 
+async def test_mcp_call_records_left_out_are_a_declared_gap(agent) -> None:
+    state = state_for(agent)
+    finish_run(state, trajectory=native_trajectory(), invalid_mcp_calls=2)
+
+    await asyncio.wait_for(agent._activate(state, body()), timeout=5)
+
+    (gap,) = [gap for gap in state.observations.gaps if gap.code == "mcp_call_record_invalid"]
+    assert (gap.invocation_id, gap.detail) == ("rollout", "2")
+
+
 # -- close -----------------------------------------------------------------------------------------------------------
 
 
@@ -542,7 +862,7 @@ async def test_close_returns_the_activation_observations_and_cleanup(agent) -> N
     state = state_for(agent)
     finish_run(state, trajectory=native_trajectory())
     bind(agent, state)
-    await agent.responses(http_request(state), body())
+    await asyncio.wait_for(agent.responses(http_request(state), body()), timeout=5)
     state.session.close = AsyncMock()
 
     closed = await agent._close_agent_session_state(state)
@@ -559,7 +879,7 @@ async def test_close_after_a_failed_activation_reports_its_partial_run(agent) ->
     finish_run(state, trajectory=trajectory, return_code=1)
     state.task = asyncio.create_task(agent._activate(state, body()))
     with pytest.raises(RuntimeError):
-        await state.task
+        await asyncio.wait_for(state.task, timeout=5)
     state.session.close = AsyncMock()
 
     closed = await agent._close_agent_session_state(state)
@@ -584,9 +904,14 @@ async def test_close_cancels_a_running_activation_after_stopping_the_harness(age
 
     async def run_forever(**kwargs):
         started.set()
-        await asyncio.sleep(3600)
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            order.append("activation cancelled")
+            raise
 
     async def close(*, timeout):
+        await asyncio.sleep(0.05)  # Stopping the harness and collecting its files take sandbox round trips.
         order.append("harness stopped")
 
     state.session.execute = AsyncMock(side_effect=run_forever)
@@ -597,10 +922,63 @@ async def test_close_cancels_a_running_activation_after_stopping_the_harness(age
 
     await asyncio.wait_for(agent._close_agent_session_state(state), timeout=5)
 
-    assert order == ["harness stopped"]
+    assert order == ["harness stopped", "activation cancelled"]
     assert state.task.cancelled()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(waiter, timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("timed_out", "stop_reason", "outcome"), [(False, "cancelled", "cancelled"), (True, "wall_time", "timeout")]
+)
+async def test_close_reports_the_partial_run_of_an_activation_it_stopped(
+    agent, timed_out, stop_reason, outcome
+) -> None:
+    state = state_for(agent)
+    trajectory = native_trajectory()
+    trajectory["info"]["exit_status"] = ""
+    del trajectory["messages"][-1]
+    started = asyncio.Event()
+
+    async def run_until_stopped(**kwargs):
+        state.session.launch_started = True
+        started.set()
+        await asyncio.sleep(3600)
+
+    async def stop(*, timeout):
+        # The harness was stopped; SandboxSession collected the run's files before release.
+        state.session.cleanup = {"cleanup_confirmed": True, "return_code": 143, "timed_out": timed_out, "error": None}
+        state.session.artifacts = MiniSWEArtifacts(trajectory=trajectory, output=None, mcp_calls=[], log="")
+
+    state.session.execute = AsyncMock(side_effect=run_until_stopped)
+    state.session.close = AsyncMock(side_effect=stop)
+    bind(agent, state)
+    waiter = asyncio.create_task(agent.responses(http_request(state), body()))
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    closed = await asyncio.wait_for(agent._close_agent_session_state(state), timeout=5)
+
+    invocation, *tools, sandbox_record = closed.agent_observations.records
+    assert (invocation.status, invocation.stop_reason) == ("incomplete", stop_reason)
+    assert len(invocation.model_calls) == 3
+    # The submission command was running when the run stopped: mini-SWE saved no observation for it.
+    assert (tools[-1].status, tools[-1].error_type) == (outcome, f"invocation_{outcome}")
+    assert (sandbox_record.outcome, sandbox_record.exit_code) == (outcome, 143)
+    assert "native_trajectory_partial" in [gap.code for gap in closed.agent_observations.gaps]
+    assert closed.cleanup_confirmed is True
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(waiter, timeout=5)
+
+
+async def test_an_observation_build_failure_at_close_still_returns_a_gap(agent, monkeypatch) -> None:
+    state = state_for(agent)
+    state.session.artifacts = MiniSWEArtifacts(trajectory=native_trajectory(), output=None, mcp_calls=[], log="")
+    state.session.close = AsyncMock()
+    monkeypatch.setattr(MiniSWEAgent, "_observations", MagicMock(side_effect=ValueError("malformed")))
+
+    closed = await asyncio.wait_for(agent._close_agent_session_state(state), timeout=5)
+
+    assert [gap.code for gap in closed.agent_observations.gaps] == ["observation_capture_failed"]
 
 
 def test_the_session_template_resolves_to_this_agent() -> None:

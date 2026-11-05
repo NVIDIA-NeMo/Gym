@@ -133,6 +133,25 @@ def test_the_projection_keeps_every_model_call_and_replays_only_accepted_respons
     ]
 
 
+def test_a_call_in_a_response_mini_swe_rejected_never_reaches_the_response_output() -> None:
+    trajectory = native_trajectory()
+    # mini-SWE runs only bash calls: a direct call to another tool fails the format check and never runs.
+    rejected = model_response("resp_rejected", call_id="call_weather")
+    rejected["output"][1]["name"] = "get_weather"
+    trajectory["messages"][4]["extra"]["response"] = rejected
+
+    projection = project(trajectory, [])
+
+    items = projection.output()
+    assert "call_weather" not in [getattr(item, "call_id", None) for item in items]
+    assert "msg_resp_rejected" in [item.id for item in items if item.type == "message"]
+    # The call was made and billed, so it keeps its model-call reference and its usage.
+    assert projection.usage.total_tokens == 45
+    invocation = AgentInvocation(invocation_id="r")
+    observation_records(projection, invocation=invocation, model_server=MODEL, sandbox_id=None, stopped=None)
+    assert [ref.response_id for ref in invocation.model_calls] == ["resp_1", "resp_rejected", "resp_2"]
+
+
 def test_tool_status_and_timing_come_from_the_saved_observations() -> None:
     trajectory = native_trajectory()
     trajectory["messages"][3] = observation("call_1", "boom", returncode=2, timed=False, timestamp=150.0)

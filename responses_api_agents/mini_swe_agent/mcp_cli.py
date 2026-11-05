@@ -109,12 +109,17 @@ async def hold(server: dict, connection: dict, ready: asyncio.Event) -> None:
 
 async def dispatch(connections: dict[str, dict], message: dict) -> object:
     if message["operation"] == "list":
-        return {
-            name: {"error": connection["error"]}
-            if "error" in connection
-            else {"tools": await list_tools(connection["session"])}
-            for name, connection in connections.items()
-        }
+        listing = {}
+        for name, connection in connections.items():
+            if "error" in connection:
+                listing[name] = {"error": connection["error"]}
+                continue
+            # A connected server whose listing fails is reported like one that did not connect; the runner decides.
+            try:
+                listing[name] = {"tools": await list_tools(connection["session"])}
+            except Exception as error:
+                listing[name] = {"error": describe(error)}
+        return listing
     started_at, started = time.time(), time.monotonic()
     try:
         connection = connections.get(message["server"], {"error": "not granted"})

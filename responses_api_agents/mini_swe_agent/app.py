@@ -285,8 +285,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             or not workdir.startswith("/")
             or ".." in PurePosixPath(workdir).parts
             or PurePosixPath(SESSION_ROOT).is_relative_to(workdir)
+            or PurePosixPath(workdir).is_relative_to(SESSION_ROOT)
         ):
-            raise AgentSeedRejectedError("mini-SWE needs an absolute task workdir outside its session directory")
+            raise AgentSeedRejectedError("mini-SWE needs an absolute task workdir disjoint from its session directory")
 
         global_config = get_global_config_dict()
         provider_config = resolve_provider_config(provider_ref, global_config)
@@ -375,7 +376,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         granted = {grant.name for grant in grants}
         for server in task_context.get("mcp_servers") or []:
             if not isinstance(server, dict) or not isinstance(server.get("name"), str):
-                raise RuntimeError("The task declares an MCP server without a name")
+                raise AgentSeedRejectedError("The task declares an MCP server without a name")
             if server["name"] in granted:
                 # A Harbor environment server can also grant the task's own server, under its own name.
                 required.extend([server["name"]] if server["name"] not in required else [])
@@ -509,11 +510,20 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 ObservationGap(
                     code="native_trajectory_partial",
                     invocation_id=invocation.invocation_id,
-                    detail="mini-SWE saves after each step; a step the stop interrupted is absent.",
+                    detail="mini-SWE saves after each model call and each step; work the stop interrupted is absent.",
                 )
             )
         if state.runtime_info is None:
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if artifacts.invalid_mcp_calls:
+            # Lines of mcp_calls.jsonl that are not a call record for one of the run's MCP servers; left out.
+            gaps.append(
+                ObservationGap(
+                    code="mcp_call_record_invalid",
+                    invocation_id=invocation.invocation_id,
+                    detail=str(artifacts.invalid_mcp_calls),
+                )
+            )
         cleanup = state.session.cleanup
         sandbox_outcome = stopped or ("completed" if status in ("completed", "incomplete") else "failed")
         return AgentObservationBundle(
@@ -555,12 +565,14 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         messages = trajectory.get("messages") or [{}]
         error = str((messages[-1].get("extra") or {}).get("exception_str") or "")
         timed_out = cleanup["timed_out"]
+        # Close stopped the run; the activation can still return before close cancels it.
+        cancelled = not timed_out and (state.session.closing or output.get("stop_reason") == "cancelled")
         if cleanup["return_code"] == RUNNER_MCP_UNAVAILABLE_EXIT and not timed_out:
             # No model call was made: the episode's tools were unavailable, not the agent's doing.
             raise RuntimeError(
                 f"mini-SWE task MCP servers are unavailable: {(output.get('error') or {}).get('message')}"
             )
-        if artifacts.trajectory is None and not timed_out:
+        if artifacts.trajectory is None and not (timed_out or cancelled):
             raise RuntimeError(f"mini-SWE saved no trajectory: {output.get('error') or artifacts.log[-2000:]}")
 
         projection = project(artifacts.trajectory, artifacts.mcp_calls)
@@ -568,7 +580,13 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             raise RuntimeError("mini-SWE saved a model response that is not a valid Responses API object")
         native_result = {"exit_status": exit_status, "error": error}
         failed = False
-        if timed_out:
+        if timed_out and not projection.responses and not state.session.expired:
+            # Each model call may take the whole budget, so a Model Server that never answered ends at the deadline:
+            # a transport failure, not the agent's result. A rollout stop keeps its timeout.
+            exit_status, error = "Timeout", "no model call returned before the run's deadline"
+            native_result = {"exit_status": exit_status, "error": error}
+            termination, status, failed = exit_status, "failed", True
+        elif timed_out:
             termination, status = "timeout", "incomplete"
         elif exit_status == "Submitted":
             termination, status = "completed", "completed"
@@ -576,8 +594,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             termination, status = exit_status, "incomplete"
         elif exit_status is None:
             # mini-SWE records an exit status whenever its loop ends, even on an exception, so a saved trajectory
-            # without one means the run was killed mid-step: by the agent's own command, or by an OOM kill.
-            termination, status = "killed", "incomplete"
+            # without one means the run was stopped by close or killed mid-step: by the agent's own command, or by an
+            # OOM kill.
+            termination, status = "cancelled" if cancelled else "killed", "incomplete"
         elif self.classify_outcome(native_result).failure_kind != "unknown":
             termination, status, failed = exit_status, "failed", True
         else:
@@ -608,8 +627,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
                 ),
             },
         )
+        # A run that ended on its own before close stopped it keeps its own outcome.
+        stopped = "timeout" if timed_out else "cancelled" if cancelled and exit_status is None else None
         state.observations = self._observations(
-            state, artifacts, stopped="timeout" if timed_out else None, status="failed" if failed else status
+            state, artifacts, stopped=stopped, status="failed" if failed else status
         )
         if projection.usage is None and projection.responses:
             state.observations.gaps.append(ObservationGap(code="usage_unavailable"))
@@ -629,6 +650,10 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         state = self._require_agent_session(agent_session_id)
+        if body.tools and not state.mcp_servers:
+            raise HTTPException(
+                422, "mini-SWE reaches request tools only through MCP grants; set resources_tool_transports: [mcp]"
+            )
         if state.request.episode_id.capture_key != rollout_id:
             raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
         if state.task is None:

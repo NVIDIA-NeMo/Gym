@@ -3,8 +3,9 @@
 """The in-sandbox runner: how a run ends, the supervisor's stop, and task MCP servers.
 
 The runner needs only the standard library to start; mini-SWE itself is imported from the sandbox runtime. Tests that
-run real mini-SWE 2.4.6 need that runtime's interpreter in ``MINI_SWE_RUNTIME_PYTHON``, for example a venv built
-from ``runtime/requirements.in`` with ``-c runtime/requirements.txt --override runtime/overrides.txt``.
+run real mini-SWE 2.4.6 need that runtime's interpreter in ``MINI_SWE_RUNTIME_PYTHON``, a venv built from
+``runtime/requirements.in`` with ``-c runtime/requirements.txt --override runtime/overrides.txt``; conftest.py builds
+one when ``uv`` is on PATH.
 """
 
 import json
@@ -21,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from responses_api_agents.mini_swe_agent import sandbox_runner
+from responses_api_agents.mini_swe_agent.trajectory import project
 
 
 RUNNER = Path(sandbox_runner.__file__)
@@ -41,7 +43,9 @@ HARNESS_VARIABLES = (
 def restore_process_state(monkeypatch):
     """The runner owns its process: it sets mini-SWE's variables and ignores SIGTERM on the way out."""
     for name in HARNESS_VARIABLES:
-        monkeypatch.delenv(name, raising=False)
+        # Recorded before removal, so what the runner sets is removed again after the test.
+        monkeypatch.setenv(name, "")
+        monkeypatch.delenv(name)
     handler = signal.getsignal(signal.SIGTERM)
     yield
     signal.signal(signal.SIGTERM, handler)
@@ -102,6 +106,8 @@ def test_the_supervisors_sigterm_stops_the_loop_and_says_why(tmp_path, monkeypat
     def interrupted():
         if stop_requested:
             (tmp_path / "stop.request").write_text("")
+        # Without the runner's handler, this signal would stop pytest itself.
+        assert signal.getsignal(signal.SIGTERM) not in (signal.SIG_DFL, signal.SIG_IGN)
         os.kill(os.getpid(), signal.SIGTERM)
         time.sleep(5)
         raise AssertionError("SIGTERM did not stop the loop")
@@ -190,7 +196,10 @@ def test_a_required_mcp_server_that_did_not_connect_stops_the_run_before_any_mod
 
 
 def test_an_mcp_server_process_that_exits_before_it_is_ready_stops_the_run(tmp_path, monkeypatch) -> None:
-    (tmp_path / "mcp_cli.py").write_text("import sys; print('no servers file', file=sys.stderr); sys.exit(4)\n")
+    # A byte that is not UTF-8 in the server's output still leaves a readable reason.
+    (tmp_path / "mcp_cli.py").write_text(
+        "import sys; sys.stderr.buffer.write(b'\\xff no servers file\\n'); sys.exit(4)\n"
+    )
     monkeypatch.setattr(sandbox_runner, "build_agent", lambda payload, attribute_calls: pytest.fail("ran"))
     mcp = {"servers": ["task_tools"], "required": ["task_tools"]}
 
@@ -293,7 +302,7 @@ def scripted_model():
         server.shutdown()
 
 
-def stage_run(tmp_path: Path, model: ScriptedModel) -> tuple[Path, Path, Path]:
+def stage_run(tmp_path: Path, model: ScriptedModel, *, command_timeout: int = 30) -> tuple[Path, Path, Path]:
     session_dir, workdir, home = tmp_path / "session", tmp_path / "task", tmp_path / "home"
     for directory in (session_dir, workdir, home):
         directory.mkdir()
@@ -302,7 +311,7 @@ def stage_run(tmp_path: Path, model: ScriptedModel) -> tuple[Path, Path, Path]:
         session_dir,
         config={
             "agent": {"step_limit": 5, "cost_limit": 0},
-            "environment": {"cwd": str(workdir), "timeout": 30},
+            "environment": {"cwd": str(workdir), "timeout": command_timeout},
             "model": {
                 "model_class": "litellm_response",
                 "model_name": "openai/served-model",
@@ -388,3 +397,48 @@ def test_real_mini_swe_saves_its_steps_when_the_supervisor_stops_it(tmp_path, sc
     assert trajectory["info"]["exit_status"] == ""
     assert [m.get("type") for m in trajectory["messages"] if m.get("type")] == ["function_call_output"]
     assert json.loads((session_dir / "output.json").read_text())["stop_reason"] == "wall_time"
+
+
+@needs_runtime
+def test_real_mini_swe_keeps_the_model_call_of_a_step_whose_command_killed_it(tmp_path, scripted_model) -> None:
+    # The command kills the runner (its parent) before mini-SWE's end-of-step save.
+    model = scripted_model(["kill -9 $PPID"])
+    session_dir, workdir, home = stage_run(tmp_path, model)
+
+    process = launch(session_dir, workdir, home)
+    log, _ = process.communicate(timeout=120)
+
+    assert process.returncode == -signal.SIGKILL, log.decode()
+    assert not (session_dir / "output.json").exists()
+    # The runner saved the trajectory before the command ran: the model's call is there, with no exit status.
+    trajectory = json.loads((session_dir / "trajectory.json").read_text())
+    assert trajectory["info"]["exit_status"] == ""
+    projection = project(trajectory, [])
+    assert [response.id for response in projection.responses] == ["resp_0"]
+    assert [(tool.tool_call_id, tool.output) for tool in projection.tools] == [("call_0", None)]
+
+
+@needs_runtime
+def test_a_background_process_holding_stdout_open_does_not_hang_the_run(tmp_path, scripted_model) -> None:
+    model = scripted_model(
+        ["sh -c 'echo $$ > bg.pid; exec sleep 300' &", "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"]
+    )
+    session_dir, workdir, home = stage_run(tmp_path, model, command_timeout=3)
+
+    process = launch(session_dir, workdir, home)
+    try:
+        log, _ = process.communicate(timeout=120)
+    finally:
+        background = workdir / "bg.pid"
+        if background.exists():
+            try:
+                os.kill(int(background.read_text()), signal.SIGKILL)
+            except (ProcessLookupError, ValueError):
+                pass
+
+    assert process.returncode == 0, log.decode()
+    trajectory = json.loads((session_dir / "trajectory.json").read_text())
+    assert trajectory["info"]["exit_status"] == "Submitted"
+    first = next(m for m in trajectory["messages"] if m.get("type") == "function_call_output")
+    # mini-SWE kills the command's process group at the command timeout, background job included.
+    assert first["extra"]["exception_type"] == "TimeoutExpired"

@@ -21,6 +21,9 @@ from responses_api_agents.mini_swe_agent import mcp_cli
 
 
 RUNTIME_PYTHON = os.environ.get("MINI_SWE_RUNTIME_PYTHON")
+needs_runtime = pytest.mark.skipif(
+    not RUNTIME_PYTHON, reason="set MINI_SWE_RUNTIME_PYTHON to a mini-SWE 2.4.6 runtime"
+)
 
 
 class FakeSession:
@@ -104,6 +107,27 @@ async def test_list_reports_each_servers_tools_or_why_it_did_not_connect(monkeyp
     assert listing == {"ok": {"tools": [{"name": "get_weather"}]}, "down": {"error": "ConnectError: refused"}}
 
 
+async def test_a_server_whose_listing_fails_is_reported_without_failing_the_others(monkeypatch) -> None:
+    broken = object()
+
+    async def list_tools(session):
+        if session is broken:
+            raise ExceptionGroup("listing", [ConnectionResetError("peer closed")])
+        return [{"name": "get_weather"}]
+
+    monkeypatch.setattr(mcp_cli, "list_tools", list_tools)
+
+    listing = await mcp_cli.dispatch(
+        {"ok": {"session": object()}, "flaky": {"session": broken}}, {"operation": "list"}
+    )
+
+    # The runner then applies the required-server policy to it, as to a server that did not connect.
+    assert listing == {
+        "ok": {"tools": [{"name": "get_weather"}]},
+        "flaky": {"error": "ConnectionResetError: peer closed"},
+    }
+
+
 def test_a_call_without_json_arguments_shows_the_usage(capsys) -> None:
     assert mcp_cli.main(["mcp_cli.py", "call", "task_tools"]) == 2
     assert "call SERVER TOOL 'JSON_ARGUMENTS'" in capsys.readouterr().err
@@ -132,7 +156,7 @@ server.run("stdio")
 """
 
 
-@pytest.mark.skipif(not RUNTIME_PYTHON, reason="set MINI_SWE_RUNTIME_PYTHON to a mini-SWE 2.4.6 runtime")
+@needs_runtime
 def test_the_cli_keeps_real_sessions_open_across_calls(short_dir) -> None:
     tmp_path = short_dir
     shutil.copy(mcp_cli.__file__, tmp_path / "mcp_cli.py")
@@ -173,3 +197,102 @@ def test_the_cli_keeps_real_sessions_open_across_calls(short_dir) -> None:
         serve.wait(timeout=10)
     records = [json.loads(line) for line in (tmp_path / "mcp_calls.jsonl").read_text().splitlines()]
     assert [(r["tool_call_id"], r["tool"], r["is_error"]) for r in records] == [("call_9", "get_weather", False)] * 2
+
+
+AUTHENTICATED_SERVER = """
+import asyncio, json, socket, sys
+
+import uvicorn
+from mcp.server.mcpserver import MCPServer
+
+server = MCPServer("weather")
+
+
+@server.tool()
+def get_weather(city: str) -> str:
+    \"\"\"Today's weather.\"\"\"
+    return f"sunny in {city}"
+
+
+def guarded(app):
+    async def wrapped(scope, receive, send):
+        if scope["type"] == "http" and dict(scope["headers"]).get(b"authorization") != b"Bearer t":
+            await send({"type": "http.response.start", "status": 401, "headers": []})
+            await send({"type": "http.response.body", "body": b"unauthorized"})
+            return
+        await app(scope, receive, send)
+
+    return wrapped
+
+
+async def main(port_file):
+    ports, serving = {}, []
+    for name, app in {"streamable_http": server.streamable_http_app(), "sse": server.sse_app()}.items():
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        ports[name] = sock.getsockname()[1]
+        serving.append(uvicorn.Server(uvicorn.Config(guarded(app), log_level="warning")).serve(sockets=[sock]))
+    open(port_file, "w").write(json.dumps(ports))
+    await asyncio.gather(*serving)
+
+
+asyncio.run(main(sys.argv[1]))
+"""
+
+
+@needs_runtime
+def test_the_grant_headers_authenticate_discovery_and_calls_over_both_http_transports(short_dir) -> None:
+    tmp_path = short_dir
+    shutil.copy(mcp_cli.__file__, tmp_path / "mcp_cli.py")
+    (tmp_path / "server.py").write_text(AUTHENTICATED_SERVER)
+    host = subprocess.Popen([RUNTIME_PYTHON, str(tmp_path / "server.py"), str(tmp_path / "ports.json")])
+    cli = [RUNTIME_PYTHON, "-E", "-s", str(tmp_path / "mcp_cli.py")]
+    serve = None
+    try:
+        deadline = time.monotonic() + 60
+        while not (tmp_path / "ports.json").exists():
+            assert host.poll() is None and time.monotonic() < deadline
+            time.sleep(0.1)
+        ports = json.loads((tmp_path / "ports.json").read_text())
+        token = {"Authorization": "Bearer t"}
+        http_url = f"http://127.0.0.1:{ports['streamable_http']}/mcp"
+        servers = [
+            {"name": "http", "transport": "streamable_http", "url": http_url, "headers": token},
+            # Harbor's default transport for a task's own server.
+            {"name": "sse", "transport": "sse", "url": f"http://127.0.0.1:{ports['sse']}/sse", "headers": token},
+            {"name": "no_token", "transport": "streamable_http", "url": http_url},
+        ]
+        (tmp_path / "mcp_servers.json").write_text(json.dumps(servers))
+        serve = subprocess.Popen([*cli, "serve"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        while not (tmp_path / "mcp.sock").exists():
+            assert serve.poll() is None, serve.stdout.read().decode()
+            assert time.monotonic() < deadline
+            time.sleep(0.1)
+
+        listed = subprocess.run([*cli, "list"], capture_output=True, text=True, timeout=60, check=True)
+        listing = json.loads(listed.stdout)
+
+        assert [tool["name"] for tool in listing["http"]["tools"]] == ["get_weather"]
+        assert [tool["name"] for tool in listing["sse"]["tools"]] == ["get_weather"]
+        # Without the grant's headers the server refuses the session, and the CLI reports it instead of its tools.
+        assert set(listing["no_token"]) == {"error"}
+        for name in ("http", "sse"):
+            called = subprocess.run(
+                [*cli, "call", name, "get_weather", '{"city": "SF"}'],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                env={**os.environ, mcp_cli.TOOL_CALL_ID_VARIABLE: f"call_{name}"},
+                check=True,
+            )
+            assert json.loads(called.stdout)["content"][0]["text"] == "sunny in SF"
+    finally:
+        for process in (serve, host):
+            if process is not None:
+                process.terminate()
+                process.wait(timeout=10)
+    records = [json.loads(line) for line in (tmp_path / "mcp_calls.jsonl").read_text().splitlines()]
+    assert [(r["tool_call_id"], r["server"], r["is_error"]) for r in records] == [
+        ("call_http", "http", False),
+        ("call_sse", "sse", False),
+    ]
