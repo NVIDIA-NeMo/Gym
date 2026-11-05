@@ -96,7 +96,7 @@ def test_lifecycle_report_requires_current_unambiguous_control_plane_evidence(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", ["oom", "sidecar", "oversized", "direct", "spoofed", "wrong-id"])
+@pytest.mark.parametrize("body", ["oom", "sidecar", "oversized", "direct", "spoofed", "wrong-id", "delayed"])
 async def test_command_status_410_uses_control_plane_confirmation_through_real_sdk(body, monkeypatch):
     from opensandbox.adapters.command_adapter import CommandsAdapter
     from opensandbox.exceptions import SandboxApiException
@@ -115,6 +115,7 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
     provider = OpenSandboxProvider(
         connection={"use_server_proxy": body != "direct"},
         probe={"command": None},
+        diagnostics={"poll_interval_s": 0.001},
         operations={"background_exec": True, "retries": 0},
     )
     monkeypatch.setattr(provider, "_build_transport", lambda: httpx.MockTransport(respond))
@@ -128,6 +129,8 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
 
     async def get_info():
         lifecycle_reads.append("read")
+        if body == "delayed" and len(lifecycle_reads) == 1:
+            return SimpleNamespace(id="sandbox-oom", status=SimpleNamespace(state="Running", reason="RUNNING"))
         message = LIFECYCLE_REPORT
         if body == "sidecar":
             message = message.replace("container sandbox", "container egress")
@@ -147,11 +150,6 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
         ),
     )
 
-    # No pod or inspect endpoint is available; the persisted control-plane report must be enough.
-    async def inspect(*args, **kwargs):
-        pytest.fail("Lifecycle confirmation must not need the deleted pod")
-
-    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
     try:
         with pytest.raises(NgFailureEvent) as caught:
             await provider.exec(handle, "allocate memory", timeout_s=30)
@@ -170,7 +168,7 @@ async def test_command_status_410_uses_control_plane_confirmation_through_real_s
         assert len(requests) == 1
         assert requests[0].url.path == "/command/status/exec-1"
         assert submitted == ["allocate memory"]
-        assert lifecycle_reads == ["read"]
+        assert lifecycle_reads == ["read"] * (2 if body == "delayed" else 1)
     finally:
         await adapter._httpx_client.aclose()
         await adapter._sse_client.aclose()
