@@ -103,7 +103,7 @@ The CLI must exit before
 its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
-but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
+but permits connection release. A successful close fences the session and keeps its saved reply for `session_close_retry_window_seconds` (default 300).
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
@@ -268,7 +268,7 @@ These sandbox-session settings are off by default; unset, sessions behave as des
 above. Local calls do not use them. Each is general-purpose: the sandbox owner (usually
 the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
 checks or reads them without any benchmark-specific logic. Seed refuses an unusable
-setting or owner-supplied input with `AgentSeedRejectedError`, a final 422, so the
+setting or owner-supplied input with `AgentSeedRejectedError`, a terminal 422, so the
 episode fails once with the reason; a failure a retry can fix stays a 5xx. In the
 sandbox, their checks, staging, import and export need only a POSIX shell and coreutils
 (`sha256sum`, and `tar` for an archive); the agent server reads OpenCode's session store

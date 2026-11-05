@@ -1233,7 +1233,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _check_sandbox_setup(command: str, result: SandboxExecResult, *, pinned: str | None = None) -> None:
-        """Raise on a failed setup step; a ``pinned`` file that fails its checks refuses the seed (a final 422)."""
+        """Raise on a failed setup step; a ``pinned`` file that fails its checks refuses the seed (a terminal 422)."""
         if pinned is not None and result.return_code == _INPUT_REJECTED and result.error_type is None:
             raise AgentSeedRejectedError(format_error_message(f"Pinned {pinned} rejected", stderr=result.stderr or ""))
         if result.return_code != 0 or result.error_type is not None:
