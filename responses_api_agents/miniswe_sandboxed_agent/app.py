@@ -73,8 +73,8 @@ LOGGER = logging.getLogger(__name__)
 DEPRECATION_WARNING = (
     "DEPRECATED: miniswe_sandboxed_agent is configured for its legacy /run path (resources_server is set), which "
     "will be removed after the environment-server migration. Run Harbor tasks on episode sessions instead "
-    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run terminal_bench_4 --agent "
-    "miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
+    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run --benchmark "
+    "terminal_bench_4/miniswe, or gym eval run terminal_bench_4 --agent miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
     "See responses_api_agents/miniswe_sandboxed_agent/README.md#harbor-episodes."
 )
 

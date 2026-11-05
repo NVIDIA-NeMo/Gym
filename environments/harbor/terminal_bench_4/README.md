@@ -2,7 +2,8 @@
 
 The 66 Terminal Bench 4 tasks also run as plain Harbor task folders through the generic `harbor` environment
 server, without the `terminal_bench_4` benchmark's own server. The dataset comes from Harbor's package store,
-pinned by content hash. The legacy benchmark folder, `benchmarks/terminal_bench_4/`, is untouched.
+pinned by content hash. The `terminal_bench_4/miniswe` benchmark runs this entry with mini-SWE at the Artificial
+Analysis settings (`gym eval run --benchmark terminal_bench_4/miniswe`; see `benchmarks/terminal_bench_4/README.md`).
 
 ```sh
 gym dataset pull terminal_bench_4
@@ -44,15 +45,9 @@ prepare to pin the same redis build. The 3 H100 tasks run on a GPU deployment wh
 server's `gpu_sandbox_provider` names its config block (for example `sandbox_gpu`); without one they run on the
 default provider and fail to schedule. `--exclude-tasks` and `--only-tasks` select subsets.
 
-Settings live in four places (see `environment_servers/harbor/README.md`). For a like-for-like comparison
-with the legacy benchmark's server, which sets `CIRCLE_NODE_TOTAL=3` for `nextjs-performance`, write that
-override beside the fetched tasks; the loader applies it and nothing else changes:
-
-```toml
-# environments/harbor/terminal_bench_4/dataset.toml, below the [gym] source line
-[gym.tasks."nextjs-performance".environment]
-env = { CIRCLE_NODE_TOTAL = "3" }
-```
+Settings live in four places (see `environment_servers/harbor/README.md`). `dataset.toml` sets
+`CIRCLE_NODE_TOTAL=3` for `nextjs-performance`, as the legacy benchmark's server does, so its test sharding matches
+the task's two-CPU allocation; the loader applies it and nothing else changes.
 
 Deployment settings go in the `sandbox` and `sandbox_gpu` provider blocks of the merged configuration (`env.yaml` or a `--config` overlay): Compose networking and
 the shared-memory label as documented in the harbor README, and, for `gym dataset validate` on the three images

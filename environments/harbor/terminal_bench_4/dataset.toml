@@ -5,3 +5,7 @@
 [gym]
 # Harbor's package store, tag 4.0.0 (66 tasks). A pull of this reference lands here too.
 source = "harbor:terminal-bench/terminal-bench@4.0.0"
+
+# As the legacy benchmark's server sets it: the test sharding matches the task's two-CPU allocation.
+[gym.tasks."nextjs-performance".environment]
+env = { CIRCLE_NODE_TOTAL = "3" }

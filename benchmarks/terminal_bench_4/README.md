@@ -6,7 +6,13 @@
 
 - `terminal_bench_4/miniswe`: mini-SWE **2.4.6** `DefaultAgent`, with upstream
   `mini.yaml` prompts, native bash tool calls through Gym's Responses model
-  adapter, and task-local MCP CLI.
+  adapter, and task-local MCP CLI. It runs the task folders of
+  [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)
+  through the Harbor environment server (`harbor_target` in `miniswe.yaml`).
+- `terminal_bench_4/miniswe_run` (deprecated): the same harness over the legacy
+  `/run` relay of the TB4 resources server. It stays for comparison until that
+  server is retired. The sections from "Failure scoring" to "Infra validation"
+  describe this path.
 
 ## Artificial Analysis comparison
 
@@ -102,8 +108,38 @@ traffic. Dynamic allowlists and offline Compose are not supported by this adapte
 ## Run
 
 ```sh
-gym eval prepare --benchmark terminal_bench_4/miniswe
-gym eval run --benchmark terminal_bench_4/miniswe \
+gym dataset pull terminal_bench_4
+gym eval run --benchmark terminal_bench_4/miniswe --sandbox opensandbox \
+  --config environments/harbor/terminal_bench_4/harbor_sandbox.yaml \
+  --config DEPLOYMENT_OVERLAY.yaml \
+  --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
+  --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8
+```
+
+The Harbor environment server starts each task's sandbox and Compose group,
+lends the sandbox to mini-SWE's agent session, closes the agent, and then grades
+in the task's separate verifier. Each row carries the official instruction and
+the task's 8-hour agent budget; mini-SWE renders the instruction with its
+`mini.yaml` templates. A task's MCP servers and skills directory reach mini-SWE
+in `/tmp/.nemo-gym/task.json`. MCP tasks also need Python venv/pip for its
+pinned task-local `mcp==1.29.0` client. The episode bound (54,000 seconds,
+`++tb4_episode_timeout_sec`) covers harness setup, the agent budget and the
+slowest verifier.
+
+`DEPLOYMENT_OVERLAY.yaml` holds the deployment's settings: Compose networking
+and runtime labels in the `sandbox` block, and a `sandbox_gpu` block named by
+`harbor_environment_server.environment_servers.harbor.gpu_sandbox_provider` for
+the three H100 tasks (see
+[Compose tasks on OpenSandbox](../../environment_servers/harbor/README.md#compose-tasks-on-opensandbox)).
+Select tasks with `--only-tasks` and `--exclude-tasks`. `--agent-type` runs
+another harness on the same tasks; `++tb4_max_steps`, `++tb4_step_timeout_sec`
+and `++tb4_agent_max_timeout_sec` apply to mini-SWE only.
+
+### The `/run` profile
+
+```sh
+gym eval prepare --benchmark terminal_bench_4/miniswe_run
+gym eval run --benchmark terminal_bench_4/miniswe_run \
   --model-type vllm_model --model-url http://MODEL_HOST:8000/v1 \
   --model MODEL_NAME --output results/tb4/rollouts.jsonl --concurrency 8 \
   ++use_absolute_ip=true ++tb4_split_sandbox_endpoints=true
@@ -112,13 +148,11 @@ gym eval run --benchmark terminal_bench_4/miniswe \
 mini-SWE's loop runs in the resources process, using its existing sandbox and
 calling the Gym model server. The agent endpoint forwards the collector's run
 request and returns the result; it does not manage task environments.
-MCP tasks also need Python venv/pip
-for its pinned task-local `mcp==1.29.0` client.
 
 Select tasks during preparation:
 
 ```sh
-gym eval prepare --benchmark terminal_bench_4/miniswe \
+gym eval prepare --benchmark terminal_bench_4/miniswe_run \
   '++prepare_script_args.task_names=[formal-crypto,interleaved-vigenere,ks-solver-cpp]'
 ```
 
