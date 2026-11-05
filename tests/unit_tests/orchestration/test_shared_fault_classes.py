@@ -20,7 +20,6 @@ from nemo_gym.core import failure_kinds
 from nemo_gym.orchestration import recovery
 from nemo_gym.orchestration.recovery import (
     GateCriteria,
-    fault_class,
     fault_report,
     gate_summary_from_collected,
     trial_verdict,
@@ -34,18 +33,19 @@ from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
 
 
 def test_the_gate_uses_the_shared_classifier():
-    from nemo_gym.core.failure_kinds import FailureClass, classify_failure
+    from collections import Counter
+
+    from nemo_gym.core.failure_kinds import classify_failure
 
     for kind in failure_kinds.FAILURE_KINDS | failure_kinds.GATE_DERIVED_KINDS:
-        assert fault_class(kind) == classify_failure(failure_kind=kind)
-    assert fault_class("provider_not_registered") == FailureClass.UNKNOWN
-    assert fault_class("rollout_allocation_ended") == FailureClass.EVALUATION
+        category = classify_failure(failure_kind=kind)
+        assert fault_report(Counter({kind: 1}), 1)[category]["kinds"] == {kind: 1}
+    assert fault_report(Counter({"provider_not_registered": 1}), 1)["unknown"]["count"] == 1
 
 
 def test_a_command_the_harness_refused_is_the_models_fault():
     from collections import Counter
 
-    assert fault_class("agent_command_not_allowed") == "model"
     report = fault_report(Counter({"agent_command_not_allowed": 1}), 100)
     assert report["model"]["kinds"] == {"agent_command_not_allowed": 1}
     assert report["evaluation"]["count"] == 0
@@ -386,23 +386,25 @@ def test_trial_health_uses_the_final_event_stage(stage, expected):
     collected = _stage_zero(stage)
     _, (_, _, report), _ = _gate(collected)
     assert report[expected]["kinds"] == {"provider_oom_killed": 1}
-    assert fault_class("provider_oom_killed", stage=stage) == expected
 
 
 def test_gate_configuration_roundtrip_changes_class_without_changing_saved_facts():
-    from nemo_gym.orchestration.recovery import decide_from_collected
+    from nemo_gym.orchestration.recovery import RecoveryDecision, RecoveryOutcomePolicyConfig, decide_from_collected
 
     collected = _stage_zero("agent")
-    criteria = GateCriteria.model_validate(
+    policy = RecoveryOutcomePolicyConfig.model_validate(
         {
             "classification": {
                 "by_stage": {"agent": {"by_failure_kind": {"provider_oom_killed": "evaluation"}}},
             }
         }
     )
-    criteria = GateCriteria.model_validate_json(criteria.model_dump_json())
-    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
-    gate = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None, criteria=criteria)
+    policy = RecoveryOutcomePolicyConfig.model_validate_json(policy.model_dump_json())
+    decision = decide_from_collected(
+        collected, max_infra_retries=1, max_walltime_s=None, live_job=False, outcome_policy=policy
+    )
+    decision = RecoveryDecision.model_validate_json(decision.model_dump_json())
+    gate = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
     assert gate["evaluation_health"]["evaluation"]["kinds"] == {"provider_oom_killed": 1}
     assert gate["evaluation_health"]["status"] == "FAIL"
     assert (
@@ -511,3 +513,48 @@ def test_recovery_rejects_zero_scoring_through_a_class_rule():
 
     with pytest.raises(ValueError, match="does not support count_as_zero"):
         RecoveryOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})
+
+
+@pytest.mark.parametrize("saved_class, expected", [(None, 1), ("unknown", 0)])
+def test_cli_health_uses_saved_launcher_classification_and_exports_unknown(
+    tmp_path, monkeypatch, saved_class, expected
+):
+    import json
+
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    collected = _stage_zero("agent")
+    if saved_class is not None:
+        collected.results[0]["failure_outcome_attribution"] = saved_class
+    output = tmp_path / "benchmark" / "artifacts" / "rollouts.jsonl"
+    output.parent.mkdir(parents=True)
+    output.write_text(json.dumps(collected.results[0]) + "\n")
+    RunArtifacts(output).aggregate_metrics_json_fpath.write_text(
+        json.dumps([{"agent_ref": {"type": "responses_api_agents", "name": "agent"}, "agent_metrics": {"score": 0.0}}])
+    )
+    (tmp_path / "resolved-config.yaml").write_text(
+        json.dumps(
+            {
+                "driver": {
+                    "benchmarks": {
+                        "benchmark": {
+                            "resumable": {
+                                "recovery_outcome_policy": {
+                                    "classification": {
+                                        "by_stage": {
+                                            "agent": {"by_failure_kind": {"provider_oom_killed": "evaluation"}}
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    metrics = _prepare_run_health_metrics(output)
+    assert metrics["health/trial/unclassified"] == int(saved_class == "unknown")
+    assert metrics["health/trial/failed_lower_bound"] == expected

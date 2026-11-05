@@ -113,6 +113,8 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_RECONCILE_STATE,
     REQUEUE_UNKNOWN_REASON,
 )
+from nemo_gym.rollouts.rollout_recovery import applied_failure_class as _applied_class
+from nemo_gym.rollouts.rollout_recovery import failure_stage as _policy_stage
 from nemo_gym.utils.path_utils import RERUN_MASKED_JOURNAL_NAME
 
 
@@ -661,19 +663,6 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
     return (kind if isinstance(kind, str) else None), status
 
 
-def _policy_stage(row: Mapping[str, Any]) -> FailureStage | None:
-    """Read the selected failure's stage; recovered observations supply no final context."""
-    events, selected_id = row.get(FAILURE_EVENTS), row.get(FAILURE_ID)
-    if isinstance(selected_id, str):
-        selected = events.get(selected_id) if isinstance(events, Mapping) else None
-        stage = selected.get("stage") if isinstance(selected, Mapping) else None
-    else:
-        record = row.get("_ng_failure_record")
-        failure = record.get("failure") if isinstance(record, Mapping) else None
-        stage = failure.get("stage") if isinstance(failure, Mapping) else row.get("_ng_failure_stage")
-    return cast(FailureStage, stage) if stage in get_args(FailureStage) else None
-
-
 def _recovery_action(
     row: Mapping[str, Any], kind: str, policy: RecoveryOutcomePolicyConfig, *, http_status: int | None
 ) -> OutcomeAction:
@@ -748,7 +737,9 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     return chain or None
 
 
-def _replay_refusal(row: Mapping[str, Any]) -> str | None:
+def _replay_refusal(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
     from nemo_gym.rollouts.rollout_recovery import (
         has_recorded_grade,
@@ -759,7 +750,7 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     )
 
     # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
-    infrastructure = is_infrastructure_agent_timeout(row)
+    infrastructure = is_infrastructure_agent_timeout(row, classification=classification)
     if not infrastructure and (has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row)):
         return "the row kept an answer that a rerun would replace"
     if not infrastructure and has_recorded_grade(row):
@@ -783,9 +774,11 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
+def _policy_replay_is_unsupported(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
-    return _replay_refusal(row) is not None
+    return _replay_refusal(row, classification=classification) is not None
 
 
 def _retry_kind(row: Mapping[str, Any]) -> str | None:
@@ -971,7 +964,11 @@ def decide_recovery(
                 )
                 continue
             judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
-            if not judge and identity in managed and is_infrastructure_agent_timeout(row):
+            if (
+                not judge
+                and identity in managed
+                and is_infrastructure_agent_timeout(row, classification=policy.classification)
+            ):
                 # A graded agent timeout whose window held a server-side fault (Harbor's graded zero): the Store
                 # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
                 # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
@@ -1020,10 +1017,14 @@ def decide_recovery(
                         )
                     )
                     continue
-                infrastructure = masked_infrastructure_kind(row)
+                infrastructure = masked_infrastructure_kind(row, classification=policy.classification)
                 fact = managed.get(identity)
                 spent = fact.attempts if fact is not None else 0
-                kept = masked_without_artifact_kind(row) if infrastructure is None and fact is not None else None
+                kept = (
+                    masked_without_artifact_kind(row, classification=policy.classification)
+                    if infrastructure is None and fact is not None
+                    else None
+                )
                 if kept is not None:
                     if fact.rerun_approved:
                         infrastructure = kept  # the Store counts the approved row as a failed attempt
@@ -1139,7 +1140,7 @@ def decide_recovery(
             spent = fact.attempts if fact else 0
             cap = fact.max_attempts if fact else default_max_attempts
             state = IdentityState.UNKNOWN
-            if not _policy_replay_is_unsupported(last):
+            if not _policy_replay_is_unsupported(last, classification=policy.classification):
                 action = _sidecar_action(last, policy)
                 if action == OutcomeAction.FAIL or last.get(TERMINAL) is True:
                     policy_stopped = True
@@ -1152,7 +1153,9 @@ def decide_recovery(
                     state=state,
                     attempts=spent,
                     max_attempts=cap,
-                    reason=_replay_refusal(last) if state == IdentityState.UNKNOWN else None,
+                    reason=_replay_refusal(last, classification=policy.classification)
+                    if state == IdentityState.UNKNOWN
+                    else None,
                     failure_kind=last.get("failure_kind"),
                     failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                     events=_events(last),
@@ -1203,7 +1206,7 @@ def decide_recovery(
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
             policy_stopped |= state == IdentityState.TERMINAL
-        elif is_answered_agent_deadline(last):
+        elif is_answered_agent_deadline(last, classification=policy.classification):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
             # Collection's metrics score it only when its producer marked it a counted zero.
             state = IdentityState.MODEL_FINAL
@@ -1238,7 +1241,7 @@ def decide_recovery(
                 reason = f"{reason}: {derived[2]}"
         elif derived is not None and derived[1]:
             # The policy's own request failed: the model's final result, unless a resume would run it again.
-            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last):
+            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last, classification=policy.classification):
                 state = IdentityState.MODEL_FINAL
             else:
                 state = IdentityState.UNKNOWN
@@ -1251,12 +1254,17 @@ def decide_recovery(
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
-        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(last):
+        elif action == OutcomeAction.VERIFY or _policy_replay_is_unsupported(
+            last, classification=policy.classification
+        ):
             # Only a judge failure has a supported saved-answer path. A failed verification can retain a finished
             # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
             # has no durable model-operation budget accounting: replay must not silently replenish that budget.
             state = IdentityState.UNKNOWN
-            reason = _replay_refusal(last) or "the policy verifies a failure that has no saved judge answer"
+            reason = (
+                _replay_refusal(last, classification=policy.classification)
+                or "the policy verifies a failure that has no saved judge answer"
+            )
         elif spent < cap:
             state = IdentityState.RETRYABLE
         else:
@@ -1266,7 +1274,9 @@ def decide_recovery(
                 identity=identity,
                 state=state,
                 # The kind its retry selects on stays agent_timeout; the counted kind names the server-side fault.
-                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE if is_infrastructure_agent_timeout(last) else kind,
+                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE
+                if is_infrastructure_agent_timeout(last, classification=policy.classification)
+                else kind,
                 http_status=_policy_evidence(last)[1],
                 stage=_policy_stage(last),
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
@@ -2973,9 +2983,8 @@ class GateCriteria(BaseModel):
     # request timed out after its upload) is the model's fault. True by default: the deployment serving the evaluated
     # model is part of what is evaluated, so its slowness is on the model's side, never the evaluation's. A
     # self-hosted evaluation that owns the serving deployment may set it to false, and the timeout then counts as a
-    # server fault (evaluation-side). Applied by the trial gate (``fault_class``).
+    # server fault (evaluation-side). Applied by the trial gate (``classify_failure``).
     policy_timeout_counts_as_model: bool = Field(default=True, strict=True)
-    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
 
     @field_validator("max_response_failure_fraction", "max_trial_failure_fraction", mode="before")
     @classmethod
@@ -2989,7 +2998,7 @@ class GateCriteria(BaseModel):
             raise ValueError("expected a finite number in (0, 1]")
         return float(value)
 
-    def report(self) -> dict[str, Any]:
+    def report(self, *, classification: FailureClassificationConfig | None = None) -> dict[str, Any]:
         """The effective criterion and the accepted, unapplied fractions, as reported beside the gate results."""
         rule = "strictly below, before rounding"
         return {
@@ -2997,7 +3006,7 @@ class GateCriteria(BaseModel):
                 "max_failure_fraction": GATE_FAILURE_LIMIT,
                 "passes": rule,
                 "policy_timeout_counts_as_model": self.policy_timeout_counts_as_model,
-                "classification": self.classification.model_dump(mode="json"),
+                "classification": (classification or FailureClassificationConfig()).model_dump(mode="json"),
             },
             "response": {"max_failure_fraction": self.max_response_failure_fraction, "applied": False},
             "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "applied": False},
@@ -3158,6 +3167,7 @@ def _observed_trial_operations(
     inside one completed operation is recovered the same way (``policy_recovery`` receives its counts): each failed
     attempt is an event of that operation and of the row, and the answer is the final attempt's.
     """
+    classification = decision_classification(decision, classification)
     decision = _health_view(decision)
     from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
@@ -3891,7 +3901,12 @@ def _last_captured_call(calls: list) -> Any:
     return last
 
 
-def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> set[Identity]:
+def infrastructure_timeouts(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    classification: FailureClassificationConfig | None = None,
+) -> set[Identity]:
     """Scored identities whose graded result is an agent timeout with a server-side fault in its window.
 
     A Harbor graded zero a run without a Store cannot reopen (``is_infrastructure_agent_timeout``): it stays in the
@@ -3903,7 +3918,8 @@ def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvid
     return {
         _identity(row)
         for row in ((collected.results or []) if collected is not None else [])
-        if _identity(row) in scored and is_infrastructure_agent_timeout(row)
+        if _identity(row) in scored
+        and is_infrastructure_agent_timeout(row, classification=decision_classification(decision, classification))
     }
 
 
@@ -3926,9 +3942,10 @@ def final_zero_trials(
     budget the window cannot hold. The policy's last call is its last captured one when its invocations reference
     none, since another model's capture may follow.
     """
+    classification = decision_classification(decision, classification)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
-    infrastructure = infrastructure_timeouts(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     for row in (collected.results or []) if collected is not None else []:
         reward = row.get("reward")
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
@@ -4559,19 +4576,6 @@ def _health_classification(
     )
 
 
-def fault_class(
-    kind: Any,
-    *,
-    stage: FailureStage | None = None,
-    http_status: int | None = None,
-    policy_timeout_counts_as_model: bool = True,
-    classification: FailureClassificationConfig | None = None,
-) -> FailureClass:
-    """Shared classification of a counted trial failure, including explicit unknown context."""
-    config = _health_classification(classification, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
-    return classify_failure(failure_kind=kind, stage=stage, http_status=http_status, config=config)
-
-
 def _incomplete_answer(row: Mapping[str, Any]) -> bool:
     """Whether the row's saved answer is a response left incomplete, without an error. An incomplete status alone
     says nothing about why: an agent also marks an answer incomplete that holds no message."""
@@ -4985,19 +4989,6 @@ def _recovered_note(joined: Mapping[str, int]) -> str:
     )
 
 
-def _applied_class(row: Mapping[str, Any]) -> FailureClass | None:
-    """An applied result's class wins over later classification configuration, including unknown."""
-    action, attribution = row.get("failure_outcome_action"), row.get("failure_outcome_attribution")
-    if (
-        isinstance(action, str)
-        and action in OutcomeAction
-        and isinstance(attribution, str)
-        and attribution in FailureClass
-    ):
-        return FailureClass(attribution)
-    return None
-
-
 def _row_fault_class(
     row: Mapping[str, Any], fault: str, classification: FailureClassificationConfig | None
 ) -> FailureClass:
@@ -5028,6 +5019,16 @@ def _row_fault_class(
     return classify_failure(failure_kind=fault, config=classification)
 
 
+def decision_classification(
+    decision: RecoveryDecision, explicit: FailureClassificationConfig | None = None
+) -> FailureClassificationConfig:
+    """The resolved recovery policy snapshot supplies the same mapping to all health readers."""
+    if explicit is not None:
+        return explicit
+    saved = decision.outcome_policy or {}
+    return FailureClassificationConfig.model_validate(saved.get("classification", {}))
+
+
 def trial_faults(
     decision: RecoveryDecision,
     collected: CollectedEvidence | None,
@@ -5036,9 +5037,10 @@ def trial_faults(
     classification: FailureClassificationConfig | None = None,
 ) -> Counter:
     """Count final trial failures once; classify selected outcomes, never recovered observations."""
+    classification = decision_classification(decision, classification)
     decision = _health_view(decision)
     final_zero = final_zero_trials(decision, collected, classification=classification)
-    infrastructure = infrastructure_timeouts(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     kinds = Counter()
     failures = {_identity(row): row for row in (collected.failures if collected else [])}
     for evidence in decision.evidence:
@@ -5155,7 +5157,7 @@ def trial_verdict(
 ) -> tuple[bool | None, str, dict[str, Any] | None]:
     """Evaluation health: evaluation-side trial faults over the expected trials, including repeats.
 
-    The counted failures are ``trial_faults``; a model fault (``fault_class``) is reported with its kind and never
+    The counted failures are ``trial_faults``; a model fault (``classify_failure``) is reported with its kind and never
     fails. Only the evaluation-side share is judged against the limit: at or above it the gate fails. Below it, it
     passes only with an exact count, when actual per-identity operation outcomes cover the observed model/tool and
     grading path of every trial that is not a recorded failure (``_observed_trial_operations``); an observed grading
@@ -5172,7 +5174,8 @@ def trial_verdict(
     if not decision.complete or trials <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})", None
     classification = _health_classification(
-        classification, policy_timeout_counts_as_model=policy_timeout_counts_as_model
+        decision_classification(decision, classification),
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
     )
     attributions = Counter()
     kinds = trial_faults(decision, collected, attributions=attributions, classification=classification)
@@ -5393,8 +5396,9 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     population = trial_population(decision)
     if population <= 0:
         return None
-    final_zero = final_zero_trials(decision, collected)
-    infrastructure = infrastructure_timeouts(decision, collected)
+    classification = decision_classification(decision)
+    final_zero = final_zero_trials(decision, collected, classification=classification)
+    infrastructure = infrastructure_timeouts(decision, collected, classification=classification)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     responses: Counter = Counter()
     for row in (collected.results or []) if collected is not None else []:
@@ -5668,7 +5672,7 @@ def gate_summary_from_collected(
         decision,
         collected,
         policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model,
-        classification=criteria.classification,
+        classification=decision_classification(decision),
     )
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
@@ -5680,7 +5684,7 @@ def gate_summary_from_collected(
         health_passed=trial_passed,
         health_reasons=[] if trial_passed else [trial_reason],
     )
-    task["criteria"] = criteria.report()
+    task["criteria"] = criteria.report(classification=decision_classification(decision))
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
@@ -5921,7 +5925,9 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 
 
-def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
+def masked_without_artifact_kind(
+    row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None
+) -> str | None:
     """The kind of a masked result that is never measured nor run again, though infrastructure left it unmeasured; else None.
 
     A masked result ``masked_infrastructure_kind`` rejects only because it kept a saved answer (so every other rule of
@@ -5933,7 +5939,7 @@ def masked_without_artifact_kind(row: Mapping[str, Any]) -> str | None:
     """
     from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
 
-    kind = masked_kept_answer_kind(row)
+    kind = masked_kept_answer_kind(row, classification=classification)
     return kind if kind is not None and reverification_cause(row) is None else None
 
 
