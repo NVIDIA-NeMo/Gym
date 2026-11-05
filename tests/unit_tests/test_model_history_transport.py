@@ -800,7 +800,11 @@ def test_exhausted_pool_waits_for_the_active_response(overlapping_model_server, 
         try:
             assert model.first_ready.wait(5), "Root request did not reach the upstream server"
             child_result = executor.submit(
-                child_client.post, f"{url}/responses", json=child_request, headers={"x-session-id": "child"}, timeout=10
+                child_client.post,
+                f"{url}/responses",
+                json=child_request,
+                headers={"x-session-id": "child"},
+                timeout=10,
             )
             assert waiting.wait(5), "Child request did not wait for the occupied connection"
             assert not child_result.done()
