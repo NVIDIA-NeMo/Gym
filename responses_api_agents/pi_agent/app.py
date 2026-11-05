@@ -65,7 +65,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.models import ResponsesConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -280,7 +280,7 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
                 # Match the other adapters: reasoning belongs in reasoning items,
                 # not in the final text consumed by benchmark verifiers.
                 output_items.extend(
-                    ResponsesConverter(return_token_id_information=False).postprocess_assistant_message_dict(
+                    ChatCompletionsConverter(return_token_id_information=False).postprocess_assistant_message_dict(
                         {"role": "assistant", "content": "\n".join(texts)}
                     )
                 )

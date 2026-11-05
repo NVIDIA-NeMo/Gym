@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models._checkpoint import GenerationCutRecord, ModelRecord, PolicyGate, _Ticket
 from nemo_gym.models._checkpoint_workers import PolicyCoordinator, PolicyWorkerLink
 from nemo_gym.models.token_capture.lineage import FileLineageStore
@@ -87,7 +87,7 @@ def worker_link(socket_path: str, lost: Optional[list[str]] = None) -> PolicyWor
 def held_call(gate: PolicyGate, capture_key: str, model_call_id: str, request_items: list) -> _Ticket:
     ticket = gate.enter(capture_key)
     ticket.capture = CaptureContext(
-        rollout_id=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
+        capture_key=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
     )
     return ticket
 

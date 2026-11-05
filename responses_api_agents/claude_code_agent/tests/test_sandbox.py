@@ -272,6 +272,8 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     ]
     assert payload["env"]["ANTHROPIC_BASE_URL"] == "https://model.example"
     assert "HOME" not in payload["env"]
+    # A backgrounded command would keep the CLI, and so the run, alive after the final answer.
+    assert payload["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
