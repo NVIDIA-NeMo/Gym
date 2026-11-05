@@ -1113,9 +1113,9 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.25.1,<5" },
     { name = "nemo-gym", extras = ["dev", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
-    { name = "nooa", git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=051472343211914222e24ce36d8752f4e86bbe43" },
-    { name = "nooa-bench", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz", subdirectory = "packages/nooa-bench" },
-    { name = "nooa-cli", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz", subdirectory = "packages/nooa-cli" },
+    { name = "nooa", git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=19caab169b018476ac433d040f6ae3f06aeff101" },
+    { name = "nooa-bench", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz", subdirectory = "packages/nooa-bench" },
+    { name = "nooa-cli", url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz", subdirectory = "packages/nooa-cli" },
 ]
 provides-extras = ["telemetry"]
 
@@ -1902,35 +1902,26 @@ wheels = [
 
 [[package]]
 name = "nooa"
-version = "0.0.11.dev226"
-source = { git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=051472343211914222e24ce36d8752f4e86bbe43#051472343211914222e24ce36d8752f4e86bbe43" }
+version = "0.0.11.dev393"
+source = { git = "https://github.com/NVIDIA-NeMo/labs-OO-Agents.git?rev=19caab169b018476ac433d040f6ae3f06aeff101#19caab169b018476ac433d040f6ae3f06aeff101" }
 dependencies = [
-    { name = "anthropic" },
     { name = "httpx" },
     { name = "litellm" },
     { name = "msgpack" },
-    { name = "openai" },
-    { name = "openinference-semantic-conventions" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-sdk" },
+    { name = "openinference-instrumentation-litellm" },
     { name = "pydantic" },
-]
-
-[package.optional-dependencies]
-mcp = [
-    { name = "mcp" },
 ]
 
 [[package]]
 name = "nooa-bench"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz", subdirectory = "packages/nooa-bench" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz", subdirectory = "packages/nooa-bench" }
 dependencies = [
     { name = "click" },
     { name = "nooa" },
     { name = "nooa-cli" },
 ]
-sdist = { hash = "sha256:f617fad9ed7619b3428049c4ab8f3f06376e3dbf178d69423d7eee0a178e1b7a" }
+sdist = { hash = "sha256:486c5246cbe18a7e253063f835cfb4ae5c39b6820d2922253cb3218af12a6dff" }
 
 [package.metadata]
 requires-dist = [
@@ -1942,28 +1933,24 @@ requires-dist = [
 [[package]]
 name = "nooa-cli"
 version = "0.0.6"
-source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/051472343211914222e24ce36d8752f4e86bbe43.tar.gz", subdirectory = "packages/nooa-cli" }
+source = { url = "https://github.com/NVIDIA-NeMo/labs-OO-Agents/archive/19caab169b018476ac433d040f6ae3f06aeff101.tar.gz", subdirectory = "packages/nooa-cli" }
 dependencies = [
     { name = "click" },
-    { name = "nooa", extra = ["mcp"] },
+    { name = "nooa" },
     { name = "prompt-toolkit" },
-    { name = "pydantic" },
     { name = "pyyaml" },
-    { name = "rich" },
 ]
-sdist = { hash = "sha256:f617fad9ed7619b3428049c4ab8f3f06376e3dbf178d69423d7eee0a178e1b7a" }
+sdist = { hash = "sha256:486c5246cbe18a7e253063f835cfb4ae5c39b6820d2922253cb3218af12a6dff" }
 
 [package.metadata]
 requires-dist = [
-    { name = "click", specifier = ">=8.2" },
-    { name = "nooa", extras = ["mcp"] },
+    { name = "click", specifier = ">=8.1.0" },
+    { name = "nooa" },
     { name = "numpy", marker = "extra == 'datascience'", specifier = ">=1.24.0" },
     { name = "pandas", marker = "extra == 'datascience'", specifier = ">=2.0.0" },
     { name = "plotly", marker = "extra == 'datascience'", specifier = ">=5.0.0" },
-    { name = "prompt-toolkit", specifier = ">=3.0.52,<3.1.0" },
-    { name = "pydantic", specifier = ">=2.5.0" },
+    { name = "prompt-toolkit", specifier = ">=3.0.52" },
     { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rich", specifier = ">=14.3.3" },
     { name = "scikit-learn", marker = "extra == 'datascience'", specifier = ">=1.3.0" },
     { name = "scipy", marker = "extra == 'datascience'", specifier = ">=1.10.0" },
     { name = "tree-sitter", marker = "extra == 'ast'", specifier = ">=0.23.0" },
@@ -2094,12 +2081,45 @@ wheels = [
 ]
 
 [[package]]
-name = "openinference-semantic-conventions"
-version = "0.1.41"
+name = "openinference-instrumentation"
+version = "0.1.75"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/53/be/e1fe52e3ae242695101144e058edfdd8e412a58ce04e2e2b410268683b05/openinference_semantic_conventions-0.1.41.tar.gz", hash = "sha256:78d4ffd9d1f2f89cb4bd58a0afe5a460475ce3d76a4d993f50fb0ce8bf4129a3", size = 15789, upload-time = "2026-10-01T18:22:33.408Z" }
+dependencies = [
+    { name = "openinference-semantic-conventions" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-sdk" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ce/e0/6e3b7158b37772957b2eee4ba6814bb731e85b1b0422b48029378912641b/openinference_instrumentation-0.1.75.tar.gz", hash = "sha256:a857e46ee739936529ce2ef3be0dd12417eb174825877f00cf4415c54bfbe92a", size = 47484, upload-time = "2026-10-31T04:07:23.687Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/74/fa/a5197690b860f8a5b43e56aba4a34e0b42db6548b45dd6ceda9ab8980c63/openinference_semantic_conventions-0.1.41-py3-none-any.whl", hash = "sha256:4c55f59427436da842c7aae871965399ef92b8909b41e02c076e1092b4c12e51", size = 12678, upload-time = "2026-10-01T18:22:32.275Z" },
+    { url = "https://files.pythonhosted.org/packages/16/b4/fec2f589101696a4bef7014c95dc1dc23818b82135410d4959ebeea0afb1/openinference_instrumentation-0.1.75-py3-none-any.whl", hash = "sha256:1c0e32802772d9137b35a80101769b066b8f5f620487c5f3c589470a463cfe5e", size = 55003, upload-time = "2026-10-31T04:07:22.412Z" },
+]
+
+[[package]]
+name = "openinference-instrumentation-litellm"
+version = "0.1.53"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "openinference-instrumentation" },
+    { name = "openinference-semantic-conventions" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-instrumentation" },
+    { name = "opentelemetry-sdk" },
+    { name = "setuptools" },
+    { name = "wrapt" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/cb/00/dcab0aceec6b9d9ff5e680d7839247338efdf5bb7431debc8bccf3f2b8bb/openinference_instrumentation_litellm-0.1.53.tar.gz", hash = "sha256:bb5c956c1467cd3e4aaab5dbbb47100c49e568b24c77f13b8a0a9d7affd0fc5d", size = 122271, upload-time = "2026-11-04T20:39:33.17Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0a/df/6683392d145beec32c2d61385da7e9f9c86a8594690483fa279180c7fdd3/openinference_instrumentation_litellm-0.1.53-py3-none-any.whl", hash = "sha256:f8b389372cf80b5ca3869da6d6d0e9cbc67509aa900ba673f0f1a5dbf72d96c2", size = 26285, upload-time = "2026-11-04T20:39:31.825Z" },
+]
+
+[[package]]
+name = "openinference-semantic-conventions"
+version = "0.1.43"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/7e/dc/b3def81b3e243571ac4a96d41f44945f3c2c999c2a9c822b272ed4667e47/openinference_semantic_conventions-0.1.43.tar.gz", hash = "sha256:c12b213e8cbaa74c8fbf021d2959e244aceb39b5cefeb2c2cd8316235f2a905b", size = 16212, upload-time = "2026-10-29T22:13:22.01Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9f/11/02848572db2e9986f271853175cba2026d8ae46359d69d90deb19027f49f/openinference_semantic_conventions-0.1.43-py3-none-any.whl", hash = "sha256:058cf01935df390775605a87df07840dbd80ac1a92800a329c169b0d633f64ce", size = 12974, upload-time = "2026-10-29T22:13:20.246Z" },
 ]
 
 [[package]]
@@ -3240,6 +3260,15 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f7/86/5185061a1fcc41d18c5dc2463969b3a3964b31d9ac67b2fb05d4c7ff7670/scipy-1.18.0-cp314-cp314t-musllinux_1_2_x86_64.whl", hash = "sha256:9aac6192fac56bf2ca534389d24623f07b39ff83317d58287285e7fbd622ff76", size = 37472480, upload-time = "2026-06-19T15:01:35.136Z" },
     { url = "https://files.pythonhosted.org/packages/31/8e/f04c68e39919a010d34f2ee1367fd705b0a25a02f609d755f0bfbc0a15fc/scipy-1.18.0-cp314-cp314t-win_amd64.whl", hash = "sha256:e40baea28ae7f5475c779741e2d90b1247c78531207b49c7030e698ff81cee3f", size = 37365390, upload-time = "2026-06-19T15:01:38.091Z" },
     { url = "https://files.pythonhosted.org/packages/d5/19/969dc072906c84dd0a3b05dcf57ea750936087d7873549e408b35cfc3f97/scipy-1.18.0-cp314-cp314t-win_arm64.whl", hash = "sha256:368e0a705903c466aa5f08eefb39e6b1b6b2d659e7352a31fd9e2438365be0f8", size = 25279661, upload-time = "2026-06-19T15:01:40.817Z" },
+]
+
+[[package]]
+name = "setuptools"
+version = "84.2.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/70/b3/c19426f783614d625699a4b247faf628ea9ab1db228674491767b417f9e1/setuptools-84.2.1.tar.gz", hash = "sha256:3ff8b3b5492a0aa66960f4419365a86b84e013070d4313e4d4a6894f5d64d6bc", size = 1230289, upload-time = "2026-10-20T19:01:37.742Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ef/55/6dc6d6bb953bdfc52519a0059592c52b6e3b8ad51cf8256dffceb55b0610/setuptools-84.2.1-py3-none-any.whl", hash = "sha256:ca140b45d5325a9478f880e351484f62fef15f336462e449ca0c03c873d589c2", size = 876263, upload-time = "2026-10-20T19:01:35.678Z" },
 ]
 
 [[package]]
