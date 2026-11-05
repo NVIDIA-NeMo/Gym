@@ -186,6 +186,8 @@ jobs:
       - name: Check reusable result cache budget
         id: result-budget
         if: success() && inputs.engine == 'pants' && inputs.execution_mode == 'incremental'
+        env:
+          RESULT_BUDGET_BYTES: ${{ matrix.job == 'core' && matrix.shard == 0 && '1073741824' || '536870912' }}
         run: |
           eligible=$(python3 - <<'PYTHON'
           import json
@@ -207,11 +209,11 @@ jobs:
           allocated=$(du --summarize --block-size=1 "$result_store" | cut -f1)
           bytes=$(( apparent > allocated ? apparent : allocated ))
           echo "Reusable result store: $apparent apparent, $allocated allocated bytes"
-          # Four core shards plus sandbox total at most 2.5 GiB, leaving room for the
-          # unchanged uv policy and shared launcher within the 5 GiB cap. The
-          # retention monitor removes older generations before enforcing that cap.
-          if (( bytes > 536870912 )); then
-            echo 'Reusable result store exceeds its 512 MiB shard budget' >&2
+          # Core shard zero gets 1 GiB for the migration test; the other four
+          # native slots get 512 MiB each (3 GiB total). The retention monitor
+          # removes older generations and enforces the aggregate 5 GiB cap.
+          if (( bytes > RESULT_BUDGET_BYTES )); then
+            echo "Reusable result store exceeds its $RESULT_BUDGET_BYTES byte shard budget" >&2
             exit 1
           fi
           echo 'populated=true' >> "$GITHUB_OUTPUT"

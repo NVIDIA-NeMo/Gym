@@ -4,10 +4,13 @@
 
 import hashlib
 import json
+import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from incremental import AUDITED_FILES, declared_files, eligibility
 from runtime_fingerprint import external_configuration, fingerprint
@@ -87,6 +90,35 @@ class IncrementalTest(unittest.TestCase):
             self.write("resources_servers/a/config.yaml", json.dumps({"defaults": [str(first)]}))
             self.stage()
             self.assertEqual(external_configuration(self.root), {str(first), str(second)})
+
+    def test_pex_interpreter_path_is_allowed_but_other_tools_and_drift_fail(self):
+        from scripts.pants.native_core import incremental_runtime as runtime
+
+        (self.root / "runtime-inputs.json").write_text(
+            json.dumps(
+                {
+                    "roots": [str(Path(sys.base_prefix).resolve())],
+                    "paths": [],
+                    "fingerprint": {"sha256": "expected"},
+                }
+            )
+        )
+        environment = dict(runtime.ENVIRONMENT)
+        environment["PATH"] = str(Path(sys.executable).parent) + os.pathsep + environment["PATH"]
+        with patch.object(runtime, "NATIVE", self.root), patch.dict(os.environ, environment, clear=True):
+            with patch.object(runtime, "fingerprint", return_value={"sha256": "expected"}):
+                runtime.verify()
+                alias = self.root / "pex-venv"
+                alias.symlink_to(sys.prefix, target_is_directory=True)
+                os.environ["PATH"] = os.path.relpath(alias / "bin") + os.pathsep + runtime.ENVIRONMENT["PATH"]
+                runtime.verify()
+                os.environ["PATH"] = "/unexpected/tools:" + runtime.ENVIRONMENT["PATH"]
+                with self.assertRaisesRegex(RuntimeError, "PATH"):
+                    runtime.verify()
+            os.environ["PATH"] = environment["PATH"]
+            with patch.object(runtime, "fingerprint", return_value={"sha256": "changed"}):
+                with self.assertRaisesRegex(RuntimeError, "runtime changed"):
+                    runtime.verify()
 
 
 if __name__ == "__main__":

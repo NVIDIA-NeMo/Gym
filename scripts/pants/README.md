@@ -113,8 +113,10 @@ by runner platform, job, shard, implementation contract and dependency digest.
 The sampled source is the final key segment; a compatible prior-source archive
 may restore before Pants evaluates its declared inputs. Every successful native
 shard with an eligible batch owns its result archive, including sandbox if it
-later gains eligible targets. Only primary-key misses save. Each store must fit
-512 MiB by both apparent and allocated size. Forced process stores and native
+later gains eligible targets. Only primary-key misses save. Core shard zero,
+which contains the current migration candidate, has a 1 GiB store budget; each
+other native slot has 512 MiB. Both apparent and allocated size must fit. Forced
+process stores and native
 named dependency trees are not archived; their repeated PEX/setup cost remains
 part of measured CI time. Forced controls neither restore nor save result stores.
 
@@ -129,7 +131,7 @@ The monitor bounds branch-scoped experiment caches to 5 GiB: remove obsolete
 contracts and older source generations per job/shard/key/version, then optional
 workspace engine archives before reusable results. UV and shared launcher
 archives retain their existing policy. The five possible native stores total at
-most 2.5 GiB, but the monitor must still check actual aggregate usage and retain
+most 3 GiB, but the monitor must still check actual aggregate usage and retain
 cache inventories. Inspect actual restore/save outcomes for every comparison.
 
 ## Evidence

@@ -25,7 +25,24 @@ def verify() -> None:
     if str(Path(sys.base_prefix).resolve()) not in expected["roots"]:
         raise RuntimeError("Actual native interpreter differs from the verified runtime")
     for name, value in ENVIRONMENT.items():
-        if os.environ.get(name) != value:
+        accepted = {value}
+        if name == "PATH":
+            # PEX prepends its own declared virtualenv's bin directory. Reject
+            # every other added search path; do not normalize ambient tools.
+            accepted |= {
+                str(Path(sys.executable).parent) + os.pathsep + value,
+                str(Path(sys.prefix) / "bin") + os.pathsep + value,
+            }
+            actual = os.environ.get(name, "")
+            prefix, separator, suffix = actual.partition(os.pathsep)
+            if separator and suffix == value and Path(prefix).resolve() == (Path(sys.prefix) / "bin").resolve():
+                accepted.add(actual)
+        if os.environ.get(name) not in accepted:
+            if name == "PATH":
+                raise RuntimeError(
+                    f"Incremental PATH differs: actual={os.environ.get(name)!r}, "
+                    f"executable={sys.executable!r}, prefix={sys.prefix!r}"
+                )
             raise RuntimeError(f"Incremental environment differs for {name}")
     if not os.environ.get("PYTEST_XDIST_WORKER"):
         actual = fingerprint(expected["roots"], expected["paths"])

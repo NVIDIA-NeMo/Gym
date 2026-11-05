@@ -144,6 +144,9 @@ def execute_batch(
         batch_environment["PANTS_LOCAL_STORE_DIR"] = str(Path(store) / ("reusable" if cacheable else "forced"))
     options = []
     if cacheable:
+        # PEX builds its PATH from this subsystem option after pytest extra env.
+        # Pin the actual search path rather than inherit the CI launcher's tools.
+        options.append("--pex-executable-search-paths=['/usr/bin', '/bin']")
         options.append(
             "--test-extra-env-vars=" + json.dumps([f"{key}={value}" for key, value in INCREMENTAL_ENVIRONMENT.items()])
         )
