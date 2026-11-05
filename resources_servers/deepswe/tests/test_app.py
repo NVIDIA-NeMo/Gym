@@ -1443,9 +1443,8 @@ async def test_diagnostic_oom_event_without_execution_observation_does_not_choos
 
 
 @pytest.mark.parametrize("kind", [PROVIDER_OOM_KILLED, "provider_unavailable"])
-@pytest.mark.parametrize("failure_class", [FailureClass.MODEL, FailureClass.EVALUATION])
 async def test_recovered_verifier_keeps_original_sandbox_failure_without_changing_its_score(
-    task_assets: Path, monkeypatch: MonkeyPatch, kind: str, failure_class: FailureClass
+    task_assets: Path, monkeypatch: MonkeyPatch, kind: str
 ) -> None:
     error = _sandbox_failure(kind, "first verifier sandbox failed")
     server, created = _rollout_server(
@@ -1453,16 +1452,6 @@ async def test_recovered_verifier_keeps_original_sandbox_failure_without_changin
         monkeypatch,
         verifier_results=[error, VerifierResult(evaluation_completed=True, reward=1.0)],
     )
-    server.config = DeepSWEResourcesServerConfig.model_validate(
-        server.config.model_dump()
-        | {
-            "outcome_policy": {
-                "classification": {"by_stage": {"verification": {"by_failure_kind": {kind: failure_class}}}},
-                "by_stage": {"verification": {"by_failure_class": {failure_class: "retry"}}},
-            },
-        }
-    )
-
     response, log = await _verify(server)
 
     assert (response.reward, response.evaluation_completed, response.mask_sample) == (1.0, True, False)
@@ -1668,7 +1657,7 @@ async def test_verifier_uses_shared_class_override_for_actions_and_saved_result(
                 "classification": {
                     "by_stage": {"verification": {"by_failure_kind": {"provider_unavailable": "model"}}}
                 },
-                "by_stage": {"verification": {"by_failure_class": {"model": action}}},
+                "by_stage": {"verification": {"default_action": "fail", "by_failure_class": {"model": action}}},
             },
         }
     )
