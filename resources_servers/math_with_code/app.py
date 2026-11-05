@@ -62,8 +62,9 @@ class ExecutePythonResponse(BaseModel):
 
 def _session_worker(child_conn, max_execution_time: int):
     """Runs forever in its own process, keeping globals between calls."""
-    # A forked worker inherits the server's Python handlers, such as uvicorn's SIGTERM handler, which would turn
-    # _SessionHandle.close's terminate() into a no-op and leave only SIGKILL after the joins time out.
+    # A forkserver child starts with the forkserver's default handlers, so this reset is defensive. A worker forked
+    # from the server itself would inherit uvicorn's SIGTERM handler, which turns _SessionHandle.close's terminate()
+    # into a no-op and leaves only SIGKILL after the waits time out.
     signal.signal(signal.SIGTERM, signal.SIG_DFL)
     signal.signal(signal.SIGINT, signal.SIG_DFL)
     exec_globals = {
@@ -129,8 +130,12 @@ class _SessionHandle:
     """Light wrapper around one long-lived worker process."""
 
     def __init__(self, max_execution_time: int):
-        # Fork would retain the server's accepted sockets and prevent idle connections from closing.
-        context = multiprocessing.get_context("spawn")
+        """Start the worker; the first one blocks for seconds while the forkserver starts, so call this in a thread."""
+        # A worker forked from the server would retain its listening and accepted sockets and keep idle connections
+        # open. The forkserver is a fresh interpreter without them that imports this module once, so each worker
+        # forks in milliseconds. "__main__" preloads a server started as a script, __name__ a module import (tests).
+        context = multiprocessing.get_context("forkserver")
+        context.set_forkserver_preload(["__main__", __name__])
         parent_conn, child_conn = context.Pipe()
         self._conn = parent_conn
         self._proc = context.Process(
@@ -149,22 +154,31 @@ class _SessionHandle:
             return reply["out"], reply["err"], reply["res"]
         raise RuntimeError(reply["error"])
 
-    def close(self):
-        """Stop the worker, escalating to terminate and then kill; raise if it is still alive."""
+    async def close(self) -> None:
+        """Stop the worker, escalating to terminate and then kill; raise if it is still alive.
+
+        It waits on the event loop rather than in an executor thread: execs hold executor threads for as long as the
+        model's code runs, and a close queued behind them could never stop the workers that would free them.
+        """
         try:
             self._conn.send({"cmd": "close"})
         except (BrokenPipeError, EOFError, OSError):
             pass
-        self._proc.join(timeout=1)
+        await self._wait_for_exit(1)
         if self._proc.is_alive():
             # Still running user code, which the alarm stops only after max_execution_time.
             self._proc.terminate()
-            self._proc.join(timeout=5)
+            await self._wait_for_exit(5)
         if self._proc.is_alive():
             self._proc.kill()
-            self._proc.join(timeout=5)
+            await self._wait_for_exit(5)
         if self._proc.is_alive():
             raise RuntimeError(f"Python worker process {self._proc.pid} is still alive after SIGKILL")
+
+    async def _wait_for_exit(self, timeout_s: float) -> None:
+        deadline = time.monotonic() + timeout_s
+        while self._proc.is_alive() and time.monotonic() < deadline:
+            await asyncio.sleep(0.01)
 
 
 # ------------------------------
@@ -204,14 +218,14 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     async def execute_python(self, request: Request, body: ExecutePythonRequest) -> ExecutePythonResponse:
         sid = request.session[SESSION_ID_KEY]
         loop = asyncio.get_running_loop()
-        # Close removes the worker in a thread before marking the fence. Serialize publication with that whole
-        # operation, so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
+        # Close awaits the worker's stop before marking the fence. Serialize publication with that whole operation,
+        # so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
         async with self._fence.locked(sid):
             if self._fence.closed_episode(sid) is not None or sid in self._verified_sessions:
                 raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
             try:
                 if sid not in self._sessions:
-                    self._sessions[sid] = _SessionHandle(self.config.max_execution_time)
+                    self._sessions[sid] = await asyncio.to_thread(_SessionHandle, self.config.max_execution_time)
                 handle = self._sessions[sid]
             except Exception as e:
                 return ExecutePythonResponse(success=False, stdout="", stderr="", error_message=str(e))
@@ -315,8 +329,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         """Stop the session's worker process; one that survives stays registered, so a later cleanup retries it."""
         handle = self._sessions.get(session_id)
         if handle is not None:
-            # Only the blocking join runs in a thread; the registry is read and changed on the event loop.
-            await asyncio.to_thread(handle.close)
+            await handle.close()
             # A concurrent cleanup may already have dropped it, and a later call may have started another.
             if self._sessions.get(session_id) is handle:
                 del self._sessions[session_id]

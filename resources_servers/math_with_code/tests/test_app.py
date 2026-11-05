@@ -16,9 +16,10 @@ import asyncio
 import multiprocessing
 import signal
 import socket
+import threading
 import time
 from typing import Any, Dict
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from app import (
@@ -38,10 +39,11 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
+    ResourcesParticipant,
     ResourcesSeedSessionRequest,
     ResourcesSessionLostError,
+    check_resources_session_contract,
 )
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 class TestApp:
@@ -199,7 +201,7 @@ class _UnstoppableHandle:
         self.stoppable = False
         self.close_attempts = 0
 
-    def close(self) -> None:
+    async def close(self) -> None:
         self.close_attempts += 1
         if not self.stoppable:
             raise RuntimeError("Python worker process 1234 is still alive after SIGKILL")
@@ -293,8 +295,6 @@ class TestResourcesSessions:
         assert server._verified_sessions.get("rs-1") is None
 
     async def test_checkpoint_retire_releases_owned_worker_and_retries_failure(self) -> None:
-        from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
-
         server, _ = _session_server()
         request = MagicMock()
         request.session = {SESSION_ID_KEY: "rs-1"}
@@ -344,6 +344,28 @@ class TestResourcesSessions:
             finish_close.set()
             await asyncio.gather(close, call, return_exceptions=True)
 
+    async def test_worker_starts_off_the_event_loop(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        worker = MagicMock()
+        worker.exec.return_value = ("", "", "1")
+
+        def start_worker(max_execution_time: int) -> MagicMock:
+            # The first worker waits while the forkserver starts and imports the server module.
+            time.sleep(1)
+            return worker
+
+        monkeypatch.setattr("app._SessionHandle", start_worker)
+        call = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
+        started = time.monotonic()
+        await asyncio.sleep(0.1)
+
+        assert time.monotonic() - started < 0.5
+        assert (await call).result == "1"
+        assert server._sessions == {"rs-1": worker}
+
     def test_session_contract(self) -> None:
         server, app = _session_server()
 
@@ -372,20 +394,22 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert "rs-1" not in server._session_episodes
 
-    def test_worker_busy_in_user_code_is_terminated(self) -> None:
+    async def test_worker_busy_in_user_code_is_terminated(self) -> None:
         handle = _SessionHandle(max_execution_time=60)
         assert handle.exec("2 + 2")[2] == "4"
         # Send the cell without waiting for its reply, so the worker is busy when the close arrives.
         handle._conn.send({"cmd": "exec", "code": "import time\ntime.sleep(60)"})
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
         started = time.monotonic()
-        handle.close()
+        await handle.close()
 
         assert not handle._proc.is_alive()
         assert time.monotonic() - started < 10
 
-    def test_forked_worker_does_not_keep_the_servers_sigterm_handler(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_forked_worker_does_not_keep_the_servers_sigterm_handler(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         # Under uvicorn the server has a Python SIGTERM handler, which a forked worker would inherit.
         fork_context = multiprocessing.get_context("fork")
         monkeypatch.setattr("app.multiprocessing.get_context", lambda method: fork_context)
@@ -396,28 +420,26 @@ class TestResourcesSessions:
             signal.signal(signal.SIGTERM, previous)
         assert handle.exec("2 + 2")[2] == "4"
         handle._conn.send({"cmd": "exec", "code": "import time\ntime.sleep(60)"})
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
         started = time.monotonic()
-        handle.close()
+        await handle.close()
 
         assert not handle._proc.is_alive()
-        # join(1) for the close message, then terminate() ends it at once; only SIGKILL would take 5 s more.
+        # 1 s for the close message, then terminate() ends it at once; only SIGKILL would take 5 s more.
         assert time.monotonic() - started < 3
         assert handle._proc.exitcode == -signal.SIGTERM
 
-    def test_worker_does_not_retain_server_sockets(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # Reproduce Linux's default fork constructors even when the test host defaults to spawn.
-        fork_context = multiprocessing.get_context("fork")
-        monkeypatch.setattr("app.multiprocessing.Pipe", fork_context.Pipe)
-        monkeypatch.setattr("app.multiprocessing.Process", fork_context.Process)
+    async def test_worker_does_not_retain_server_sockets(self) -> None:
+        # The socket is open when the worker starts, as the server's sockets are; a worker forked from this process
+        # would keep its own copy open.
         server_socket, peer = socket.socketpair()
         peer.settimeout(1)
         handle = _SessionHandle(max_execution_time=10)
 
         def execute(code: str) -> str:
             handle._conn.send({"cmd": "exec", "code": code})
-            assert handle._conn.poll(15), "Python worker did not reply"
+            assert handle._conn.poll(60), "Python worker did not reply"
             reply = handle._conn.recv()
             assert reply["ok"], reply
             return reply["res"]
@@ -432,21 +454,68 @@ class TestResourcesSessions:
         finally:
             server_socket.close()
             peer.close()
-            handle.close()
+            await handle.close()
 
-    def test_worker_that_outlives_sigkill_raises(self) -> None:
+    async def test_worker_ignoring_sigterm_is_killed_within_bound(self) -> None:
+        handle = _SessionHandle(max_execution_time=60)
+        assert handle.exec("1")[2] == "1"
+        code = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\ntime.sleep(120)"
+        handle._conn.send({"cmd": "exec", "code": code})
+        await asyncio.sleep(0.5)
+
+        started = time.monotonic()
+        await handle.close()
+        elapsed = time.monotonic() - started
+
+        assert not handle._proc.is_alive()
+        assert handle._proc.exitcode == -signal.SIGKILL
+        # 1 s for the close message and 5 s for terminate(), then kill() ends it at once.
+        assert 5.5 < elapsed < 8, elapsed
+
+    async def test_release_does_not_queue_behind_blocked_execs(self) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        assert (await server.execute_python(request, ExecutePythonRequest(code="1"))).result == "1"
+        worker = server._sessions["rs-1"]._proc
+        # Model code can catch the worker's alarm, so its exec holds a default-executor thread until the worker stops.
+        code = "import time\nwhile True:\n    try:\n        time.sleep(60)\n    except Exception:\n        pass"
+        stuck = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code=code)))
+        await asyncio.sleep(0.5)
+        # Stand-ins for other sessions' blocked execs take the rest of the default executor's threads.
+        unblock = threading.Event()
+        blocked = [asyncio.get_running_loop().run_in_executor(None, unblock.wait) for _ in range(64)]
+        try:
+            started = time.monotonic()
+            await asyncio.wait_for(server.release_session_state("rs-1"), timeout=11)
+
+            # The busy worker could not read the close message, so terminate() stopped it after the first wait.
+            assert time.monotonic() - started < 6
+            assert worker.exitcode == -signal.SIGTERM and server._sessions == {}
+            assert not (await stuck).success
+        finally:
+            unblock.set()
+            if worker.is_alive():
+                worker.kill()
+            await asyncio.gather(stuck, *blocked, return_exceptions=True)
+
+    async def test_worker_that_outlives_sigkill_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         handle = _SessionHandle(max_execution_time=10)
         real_proc = handle._proc
         handle._proc = MagicMock(spec=multiprocessing.Process, pid=real_proc.pid)
         handle._proc.is_alive.return_value = True
+        # Skip the waits, which would only time out against the mock.
+        monkeypatch.setattr(handle, "_wait_for_exit", AsyncMock())
         try:
             with pytest.raises(RuntimeError, match="still alive after SIGKILL"):
-                handle.close()
+                await handle.close()
             handle._proc.terminate.assert_called_once()
             handle._proc.kill.assert_called_once()
         finally:
+            monkeypatch.undo()
             handle._proc = real_proc
-            handle.close()
+            await handle.close()
 
     def test_failed_stop_leaves_session_open_for_a_retry(self) -> None:
         server, app = _session_server()
@@ -563,7 +632,7 @@ class TestResourcesSessions:
         worker = server._sessions[session_id]
         close = worker.close
 
-        def fail_close() -> None:
+        async def fail_close() -> None:
             raise RuntimeError("worker still alive")
 
         monkeypatch.setattr(worker, "close", fail_close)

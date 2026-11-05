@@ -127,19 +127,22 @@ gym eval run --no-serve \
 ### Sessions
 
 Each rollout gets its own Python worker process, which keeps variables between `execute_python` calls. The rollout's
-session cookie keys it, and the first `execute_python` call starts it. Workers use a fresh Python interpreter so they
-do not inherit the server's open sockets. The first call includes interpreter and numerical-library startup time;
-later calls reuse the same worker and variables.
+session cookie keys it, and the first `execute_python` call starts it. Workers fork from a forkserver, a separate
+Python process that imports the server module once, so they do not inherit the server's open sockets and each starts in
+milliseconds. The server's first worker also waits while the forkserver starts and imports the module and its numerical
+libraries; later calls reuse the same worker and variables.
 
 - Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
   `/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when
   `/verify` never ran, escalating to SIGTERM and then SIGKILL for a worker still running code. A worker that survives
-  SIGKILL makes the close fail, so the caller retries it. Closing an unknown or already closed session succeeds, and a
-  seed that arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. An
-  `execute_python` call for a closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one
-  returns a masked sample with reward 0.
+  SIGKILL makes the close fail, so the caller retries it. Closing an unknown session, or closing again with the same
+  `episode_id`, succeeds; a close with another `episode_id` gets 409. A seed that arrives after its session closed is
+  refused with 409 for `session_close_retry_window_seconds`. An `execute_python` call for a closed session gets 404
+  with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with reward 0.
 - Under an Agent's own `/run`, the deprecated cookie seed takes the row itself and stops any previous worker before
-  resetting the same cookie ID. The first tool call starts a new worker; `/verify` (or `/end_session`) stops it.
+  resetting the same cookie ID. The first tool call starts a new worker; `/verify` (or `/end_session`) stops it. After
+  `/verify`, an `execute_python` call on that cookie gets 404 with `failure_kind: session_lost` until the cookie is
+  seeded again or `session_close_retry_window_seconds` passes.
 
 ### Additional Details
 
