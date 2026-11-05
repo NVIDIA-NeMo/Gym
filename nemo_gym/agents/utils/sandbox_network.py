@@ -21,6 +21,7 @@ def restrict_sandbox_network(
     provider: SandboxProvider,
     model_base_url: str,
     tool_urls: Sequence[str] = (),
+    required_tool_urls: Sequence[str] = (),
 ) -> SandboxSpec:
     """Return ``spec`` with egress limited to the model server and, for ``model_and_tools``, the tool servers.
 
@@ -28,17 +29,29 @@ def restrict_sandbox_network(
     co-hosted services stay reachable. The policy is fixed when the sandbox is created: it applies only to a
     sandbox the agent creates, never to a task sandbox borrowed from Resources.
 
+    ``tool_urls`` are the MCP grants the harness keeps; ``required_tool_urls`` are those of them the episode requires.
+    ``model_only`` blocks every tool host, so a required grant would fail only after the sandbox and the runtime
+    exist; it is refused here instead.
+
     A configuration that cannot be enforced (an explicit provider policy as well, a provider without network
-    policies, or an endpoint the sandbox cannot reach) raises ``AgentSeedRejectedError``, so the seed fails once
-    with HTTP 422 instead of being retried; it is still a ``ValueError``.
+    policies, an endpoint the sandbox cannot reach, or a required tool grant under ``model_only``) raises
+    ``AgentSeedRejectedError``, so the seed fails once with HTTP 422 instead of being retried; it is still a
+    ``ValueError``.
     """
     if network_access == "inherit":
         return spec
-    if "network_policy" in spec.provider_options:
+    provider_options = spec.provider_options or {}
+    if "network_policy" in provider_options:
         raise AgentSeedRejectedError("Set network_access or sandbox_config.provider_options.network_policy, not both")
+    if network_access == "model_only" and required_tool_urls:
+        raise AgentSeedRejectedError(
+            "network_access model_only blocks the hosts of the required tool grants ("
+            + ", ".join(required_tool_urls)
+            + "); use model_and_tools"
+        )
     urls = [model_base_url, *(tool_urls if network_access == "model_and_tools" else ())]
     try:
         policy = restricted_network_policy(provider.name, urls)
     except ValueError as error:
         raise AgentSeedRejectedError(str(error)) from error
-    return replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
+    return replace(spec, provider_options={**provider_options, "network_policy": policy})
