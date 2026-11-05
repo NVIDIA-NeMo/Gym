@@ -21,4 +21,5 @@ nemo_fabric_agent:
       fabric_config: ???
       relay: false
       send_model_base_url: true
+      adapter_project: null
       datasets: []

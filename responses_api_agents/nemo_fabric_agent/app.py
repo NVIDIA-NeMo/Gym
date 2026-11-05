@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 from asyncio import Semaphore
@@ -479,6 +480,9 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     # Adapters whose model schema has no base_url (Factory Droid reads custom endpoints from its own settings)
     # reject a config that sets it. False leaves models.default.base_url out.
     send_model_base_url: bool = True
+    # A uv project, relative to this server, whose environment runs the adapter. The agent syncs it at startup and
+    # passes its interpreter to Fabric as ADAPTER_PYTHON. Hermes uses one because it needs Python 3.14.
+    adapter_project: Optional[str] = None
 
 
 class NeMoFabricAgentRunRequest(BaseRunRequest):
@@ -497,6 +501,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
     sem: Semaphore | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _relay_supported: Optional[bool] = None
+    _adapter_python: Optional[str] = None
 
     def _adapter_supports_relay(self, fabric_config: FabricConfig, base_dir: str) -> bool:
         """Whether the adapter descriptor declares the Relay telemetry provider. Planned once per agent."""
@@ -504,13 +509,19 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             adapter = _mapping(Fabric().plan(fabric_config, base_dir=base_dir).to_mapping().get("adapter"))
             self._relay_supported = "relay" in _mapping(_mapping(adapter.get("telemetry")).get("providers"))
             if self._relay_supported and self.config.adapter_id == "nvidia.fabric.hermes":
-                # Hermes declares Relay, but only a Hermes Agent build with Relay support can start with it.
-                from nemo_fabric_adapters.hermes.telemetry import validate_hermes_relay_compatibility
-
-                try:
-                    validate_hermes_relay_compatibility()
-                except RuntimeError as error:
-                    LOG.warning("%s", error)
+                # Hermes declares Relay, but only a Hermes Agent build with Relay support can start with it. Check in
+                # the interpreter that runs the adapter.
+                check = subprocess.run(
+                    [
+                        self._adapter_python or sys.executable,
+                        "-c",
+                        "from nemo_fabric_adapters.hermes.telemetry import validate_hermes_relay_compatibility as v; v()",
+                    ],
+                    capture_output=True,
+                    text=True,
+                )
+                if check.returncode != 0:
+                    LOG.warning("%s", check.stderr.strip().splitlines()[-1] if check.stderr.strip() else check)
                     self._relay_supported = False
             if not self._relay_supported:
                 LOG.warning("%s does not support NeMo Relay, so it runs without Relay", self.config.adapter_id)
@@ -518,6 +529,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, __context: Any) -> None:
         self.sem = Semaphore(self.config.concurrency)
+        if self.config.adapter_project:
+            project = Path(__file__).parent / self.config.adapter_project
+            subprocess.run(["uv", "sync", "--locked", "--project", str(project)], check=True)
+            self._adapter_python = str(project / ".venv" / "bin" / "python")
 
     def _resources_server_base_url(self) -> str:
         config = get_first_server_config_dict(
@@ -658,7 +673,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
             # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task
             # images is the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
-            os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
+            os.environ.setdefault("ADAPTER_PYTHON", self._adapter_python or sys.executable)
             result = await Fabric().run(
                 fabric_config,
                 base_dir=workspace,

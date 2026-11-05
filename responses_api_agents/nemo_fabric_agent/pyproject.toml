@@ -7,13 +7,12 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent,nooa,openclaw,openhands,relay]==0.6.0",
-    # The openhands extra installs the adapter only. These are the OpenHands packages NeMo Fabric 0.6.0 validates.
+    "nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent,nooa,openclaw,openhands,relay]==0.6.1",
+    # The openhands extra installs the adapter only. These are the OpenHands packages NeMo Fabric 0.6.1 validates.
     "openhands-sdk==1.50.0",
     "openhands-tools==1.50.0",
     # LiteLLM 1.103 and later import mcp 2 types, while nemo-gym pins mcp<2.
     "litellm>=1.83.0,<1.103",
-    "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4",
     "tokenizers>=0.22.2",
 ]
 
@@ -26,10 +25,9 @@ constraint-dependencies = [
     "pyarrow>=25.0.1",
     "transformers>=5.17.0",
 ]
-# Unlike the root policy, wcwidth and pathspec stay installed: OpenHands tools import them.
 override-dependencies = [
     "spacy>=3.8.13",
-    "wcwidth",
+    "wcwidth; sys_platform == 'never'",
     "opencv-python-headless; sys_platform == 'never'",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
@@ -37,13 +35,9 @@ override-dependencies = [
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
-    "pathspec",
+    "pathspec; sys_platform == 'never'",
     "openai==2.44.0",
     "pyjwt==2.15.1",
-    # hermes-agent pins pillow==12.2.0 exactly, while openhands-sdk 1.50.0 needs >=12.3.0.
-    "pillow==12.3.0",
-    # hermes-agent pins packaging==26.0 exactly, while the Codex harness in NeMo Fabric 0.6.0 needs >=26.2.
-    "packaging>=26.2",
     "certifi>=2026.10.19",
 ]
 exclude-dependencies = [

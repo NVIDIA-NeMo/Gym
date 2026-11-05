@@ -11,6 +11,6 @@ Set `relay: true` to record each run with [NeMo Relay](https://github.com/NVIDIA
 built from Relay's ATIF trajectory, unless the adapter's own output has more tool outputs or reasoning (Relay's ATIF
 records no reasoning), and `fabric_result.relay_atif` holds the trajectories, since the Relay files are removed
 after the run. Adapters without Relay support, and Hermes without a Hermes Agent build that supports Relay, run
-without it. Relay is experimental: in NeMo Fabric 0.6.0 several adapters record tool calls without their outputs,
+without it. Relay is experimental: in NeMo Fabric 0.6.1 several adapters record tool calls without their outputs,
 and mini-SWE-agent runs fail more often with it. Claude and Codex record through a Relay gateway that accepts a
 plain-HTTP model URL only on loopback, so give them an HTTPS or loopback model URL.
