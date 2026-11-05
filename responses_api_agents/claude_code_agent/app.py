@@ -38,6 +38,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
@@ -596,9 +597,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         access = body.sandbox_access
         owns_sandbox = access is None
         if self.config.network_access == "model_and_tools":
-            raise HTTPException(422, "Claude uses no tool grants; set network_access to model_only or inherit")
+            raise AgentSeedRejectedError("Claude uses no tool grants; set network_access to model_only or inherit")
         if not owns_sandbox and self.config.network_access != "inherit":
-            raise HTTPException(422, "Claude network_access applies only to a sandbox it creates, not a borrowed one")
+            raise AgentSeedRejectedError(
+                "Claude network_access applies only to a sandbox it creates, not a borrowed one"
+            )
         if owns_sandbox and not self.config.sandbox_provider:
             raise HTTPException(422, "Claude requires sandbox_access or a configured sandbox_provider")
         spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
@@ -619,19 +622,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         provider_ref = access.connection.provider_config_ref if access else self.config.sandbox_provider
         provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
         if owns_sandbox:
-            if self.config.network_access != "inherit":
-                try:
-                    spec = restrict_sandbox_network(
-                        spec,
-                        network_access=self.config.network_access,
-                        provider_name=provider.name,
-                        # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
-                        # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
-                        model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
-                    )
-                except BaseException:
-                    await provider.aclose()
-                    raise
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider_name=provider.name,
+                    # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
+                    # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
+                    model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:

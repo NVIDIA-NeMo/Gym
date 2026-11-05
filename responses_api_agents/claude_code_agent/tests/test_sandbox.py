@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, Request
+from fastapi.testclient import TestClient
 
-from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentSeedSessionRequest
+from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentSeedRejectedError, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.claude_code_agent import app
@@ -54,7 +55,7 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
     constructor = MagicMock(return_value=remote)
     constructor.connect = AsyncMock(return_value=remote)
     monkeypatch.setattr(app, "AsyncSandbox", constructor)
-    provider = SimpleNamespace(aclose=AsyncMock())
+    provider = SimpleNamespace(name="local", aclose=AsyncMock())
     monkeypatch.setattr(app, "create_provider", lambda config: provider)
     install = AsyncMock()
     monkeypatch.setattr(app, "install_sandbox_runtime", install)
@@ -130,24 +131,33 @@ async def test_model_only_allows_the_endpoint_the_cli_calls(monkeypatch, setting
         assert instance._resolve_call_base_url("rollout") == ""
 
 
-@pytest.mark.asyncio
-async def test_unenforceable_network_access_is_a_terminal_seed_refusal(monkeypatch):
+@pytest.mark.parametrize(
+    ("provider_name", "provider_options", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, "not both"),
+        ("docker", {}, "requires the OpenSandbox network-policy provider"),
+    ],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(monkeypatch, provider_name, provider_options, reason):
     constructor = MagicMock()
     monkeypatch.setattr(app, "AsyncSandbox", constructor)
-    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
     monkeypatch.setattr(app, "create_provider", lambda config: provider)
     instance = agent(
         sandbox_provider="sandbox",
-        sandbox_config={"workdir": "/app", "provider_options": {"network_policy": {}}},
+        sandbox_config={"workdir": "/app", "provider_options": provider_options},
         anthropic_base_url="http://model.example:9000",
         network_access="model_only",
     )
-    with pytest.raises(HTTPException, match="not both") as refused:
-        await instance._seed_agent_session_state(seed(borrowed=False))
+    body = seed(borrowed=False)
+    with TestClient(instance.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
     # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
-    assert refused.value.status_code == 422
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
     constructor.assert_not_called()
     provider.aclose.assert_awaited_once()
+    assert body.agent_session_id not in instance._session_records
 
 
 @pytest.mark.asyncio
@@ -162,7 +172,7 @@ async def test_unusable_network_access_is_rejected_before_connecting(monkeypatch
     create_provider = MagicMock()
     monkeypatch.setattr(app, "create_provider", create_provider)
     instance = agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app"}, network_access=network_access)
-    with pytest.raises(HTTPException, match=message):
+    with pytest.raises(AgentSeedRejectedError, match=message):
         await instance._seed_agent_session_state(seed(borrowed=borrowed))
     create_provider.assert_not_called()
     constructor.assert_not_called()

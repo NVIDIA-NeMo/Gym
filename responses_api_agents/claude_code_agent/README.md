@@ -262,10 +262,16 @@ sandbox**. These two options are mutually exclusive and require
 `sandbox_executable_sha256`.
 
 `network_access: model_only` limits an agent-owned sandbox's egress to the model
-endpoint's host, which the uploaded runtime allows. The OpenSandbox policy is set
-when the sandbox is created, so a session that borrows a task sandbox rejects any
-value other than `inherit` (the default, the provider's network). Claude uses no
-tool grants, so `model_and_tools` is rejected.
+endpoint's host, which the uploaded runtime allows. With neither `model_server` nor
+`anthropic_base_url` set, that host is `api.anthropic.com`, which the CLI then calls.
+The OpenSandbox policy is set when the sandbox is created, so a session that borrows
+a task sandbox rejects any value other than `inherit` (the default, the provider's
+network), and so does a provider without network policies. `network_access` cannot
+be combined with `sandbox_config.provider_options.network_policy`. Claude uses no
+tool grants, so `model_and_tools` is rejected. Each of these refusals fails the seed
+with HTTP 422. Under `model_only` the image must already include `bash`: the step that
+installs a missing one on a root image runs after the sandbox starts, when the package
+mirrors are out of reach.
 
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
 the endpoint must be reachable from the sandbox. With `model_server`, only
