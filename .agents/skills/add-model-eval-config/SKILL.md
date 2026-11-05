@@ -51,8 +51,8 @@ sees no tool call, and every rollout ends in a format error and scores 0.0.
 ## 2. Write the policy service
 
 Write everything site-specific (images, paths, account, partition, hosts) as `${oc.env:VAR}` and
-export the variables before you submit; an angle-bracket placeholder does not validate. This is the
-smallest config that resolves and runs:
+export the variables before you submit. Fill the angle-bracket values first: a placeholder does not
+validate. This is the smallest config that resolves and runs:
 
 ```yaml
 services:
@@ -113,10 +113,11 @@ otel:
   enabled: false # on by default; it needs the collector in the job's environment
 ```
 
-`driver.gym_install.ref` is the Gym the job installs and scores the run with: a full commit of
-public Gym that has your benchmark, never a branch. Recovery (`gym eval resubmit --recover`) reads
+`driver.gym_install.ref` is the Gym the job installs and scores the run with: the full 40-character
+hash of a commit reachable from public Gym's `main` or a release tag, with your benchmark; never a
+branch, and a tag resolved to its commit. Recovery (`gym eval resubmit --recover`) reads
 the run with that commit. The CLI you submit with may be newer than the pinned commit; the job
-still installs the pinned one. Install the CLI as run-and-babysit-eval (step 1) describes. Site `#SBATCH`
+still installs the pinned one. Install the CLI as run-and-babysit-eval (section 1) describes. Site `#SBATCH`
 directives (a QoS, a node to avoid) go in `compute.cluster.extra_args`, without leading dashes:
 `{qos: <qos>, exclude: <node>}`.
 
@@ -208,7 +209,7 @@ config points at it instead of restating it.
 | --- | --- | --- |
 | `services.<name>` | The vLLM deployment of the model. | Section 2. |
 | `driver.policy_model`, `driver.policy_model_type` | Which service is the policy, and the client Gym talks to it with. | Sections 2 and 3. Submit fills in `policy_base_url`, `policy_model_name` and `policy_api_key` in every benchmark's `run`. |
-| `driver.gym_install.ref` | The Gym commit the job installs, which holds the benchmark and scores the run. | A full 40-character commit hash reachable from the public repository's `main` branch or a release tag, with the benchmark. A tag resolves to its commit: recovery and export read the saved hash. |
+| `driver.gym_install.ref` | The Gym commit the job installs, which holds the benchmark and scores the run. | Section 2. |
 | `driver.benchmarks.<benchmark>.prepare` | Overrides for `gym eval prepare`, which builds the benchmark's data in the job before it runs. | The benchmark's config path. |
 | `driver.benchmarks.<benchmark>.run` | Overrides for `gym eval run`: the benchmark's config, the dataset type to run, and the model settings of section 3. | The benchmark's config path and its dataset's `type`; your section 3 keys. |
 | `driver.benchmarks.<benchmark>.resumable` | Resuming across allocations (`max_retries`, `max_walltime`). | run-and-babysit-eval. |
@@ -295,49 +296,17 @@ environment and the config values they read:
 
 Ask for what you do not know instead of inventing it: the cluster, its login host, the account and
 partition, the serving and driver images, the checkpoint path and the output directory. Write each as
-`${oc.env:VAR}` (section 2) and name the variables to export. Pin `driver.gym_install.ref` to a commit
-the job can clone: the full 40-character hash of a commit reachable from the public repository's
-`main` branch or a release tag, that has `benchmarks/<name>/`. A commit that exists only in a pull request may not clone.
+`${oc.env:VAR}` (section 2) and name the variables to export.
 
 ### Example: IFEval
 
-`benchmarks/ifeval/` needs no judge and no credentials for its data. Its `config.yaml` chains to
-`resources_servers/instruction_following/configs/instruction_following.yaml` and reads
-`benchmarks/ifeval/data/ifeval_benchmark.jsonl` (541 prompts, one repeat each). Its `prepare.py`
-downloads them from the upstream repository, and its dataset is `type: benchmark`. The download reads
-the upstream default branch, so the Gym commit does not pin the data: check that the prepared file still
-has 541 rows, and compare the run's materialized inputs when you compare two runs. With a small
-reasoning model from the Hub as the policy, the complete config is:
+`benchmarks/ifeval/` needs no judge and no credentials. Its `config.yaml` chains to
+`resources_servers/instruction_following/configs/instruction_following.yaml`, and its `prepare.py`
+downloads the prompts from the upstream default branch, so the Gym commit does not pin the data: compare
+the runs' materialized inputs when you compare two runs. Its block is:
 
 ```yaml
-services:
-  policy:
-    type: vllm
-    container: ${oc.env:SERVING_IMAGE}
-    model: Qwen/Qwen3-8B
-    served_model_name: qwen3-8b
-    tensor_parallel_size: 1
-    number_of_instances: 4 # one replica per GPU
-    node_pool: gpu
-    health_check:
-      timeout_seconds: 1800
-    extra_args: >-
-      --max-model-len 40960
-      --max-num-seqs 256
-      --reasoning-parser qwen3
-      --generation-config auto
-    env:
-      HF_HOME: lit:/cache/huggingface
-    mounts:
-      - ${oc.env:CACHE_DIR}:/cache
-
 driver:
-  container: ${oc.env:GYM_DRIVER_IMAGE}
-  policy_model: policy
-  policy_model_type: vllm_model
-  gym_install:
-    repo: https://github.com/NVIDIA-NeMo/gym
-    ref: <full Gym commit>
   benchmarks:
     ifeval:
       prepare:
@@ -348,36 +317,14 @@ driver:
       resumable:
         max_retries: 3
         max_walltime: "08:00:00"
-
-job:
-  output_path: ${oc.env:OUTPUT_DIR}
-
-compute:
-  cluster:
-    type: slurm
-    account: ${oc.env:SLURM_ACCOUNT}
-    hostname: ${oc.env:SLURM_LOGIN_HOST}
-    walltime: "04:00:00"
-    node_pools:
-      gpu:
-        partition: ${oc.env:SLURM_PARTITION}
-        nodes: 1
-        gpus_per_node: 4
-
-otel:
-  enabled: false
 ```
 
-The model's half is the `policy` service and the three `policy_*` driver keys; everything under
-`benchmarks.ifeval` comes from the benchmark's directory. Qwen3 reasons by default and the shipped
-`vllm_model` client already expects a reasoning parser, so this model needs no section 3 keys; a model
-that does adds them to the same `run` mapping. Validate it as section 5 describes. In the `--dry-run`
-script the job runs `gym eval prepare '+config_paths=[benchmarks/ifeval/config.yaml]'` and then
-`gym eval run --model-type vllm_model` with `+config_paths=[benchmarks/ifeval/config.yaml]`,
-`+split=benchmark` and the three policy keys submit filled in.
-
-Validate it (section 5) and smoke it (section 6), then hand the same file to run-and-babysit-eval to
-run and babysit.
+The rest is section 2. A policy that reasons by default and is served with `--reasoning-parser` (Qwen3,
+for example) needs no section 3 keys, because the shipped `vllm_model` client already expects the parser;
+a model that needs them adds them to the same `run` mapping. In the `--dry-run` script the job runs
+`gym eval prepare '+config_paths=[benchmarks/ifeval/config.yaml]'`, then `gym eval run --model-type
+vllm_model` with the same `+config_paths`, `+split=benchmark` and the three policy keys submit filled in.
+Validate it (section 5) and smoke it (section 6), then hand the file to run-and-babysit-eval.
 
 ## 5. Validate without GPUs
 
@@ -420,9 +367,9 @@ driver:
 
 `limit` counts tasks; the run log prints the tasks and the rows they become. Bound the smoke to
 one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
-when it completes, it cancels the chain's pending follow-up and sentinel itself (see run-and-babysit-eval, step 2).
+when it completes, it cancels the chain's pending follow-up and sentinel itself (see run-and-babysit-eval, section 2).
 Then follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
-<benchmark> --recover --inspect` and `gym eval health-check` (run-and-babysit-eval, step 6). Look for answers that end mid-thought (the output token
+<benchmark> --recover --inspect` and `gym eval health-check` (run-and-babysit-eval, section 6). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser
 or `uses_reasoning_parser` is wrong), and tool calls that arrive as plain text (the tool-call
 parser is wrong). For a tool-using benchmark also count the tool calls: `ng_perf.num_tool_calls` in `rollouts.jsonl`
