@@ -49,6 +49,7 @@ from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import SESSION_LOST, validate_failure_kind
+from nemo_gym.core.outcome_policy import OutcomeAction
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -176,6 +177,14 @@ class BaseVerifyRequest(BaseRunRequest):
 
 class BaseVerifyResponse(BaseVerifyRequest):
     reward: float
+    failure_outcome_action: OutcomeAction | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description=(
+            "Failure outcome decision already applied by the owning boundary; "
+            "independent of completion and attribution."
+        ),
+    )
     ng_verifier_invocations: list[VerifierInvocation] = Field(default_factory=list, exclude_if=lambda value: not value)
 
     mask_sample: bool = Field(

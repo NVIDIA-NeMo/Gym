@@ -163,10 +163,6 @@ class DeepSWEVerifyRequest(DeepSWEInstanceRequest, BaseVerifyRequest):
 class DeepSWEVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
-    agent_failure_action: OutcomeAction | None = Field(
-        default=None, description="The configured outcome policy action applied to an admitted agent failure."
-    )
-
     failure_report: FailureReport | None = Field(default=None, exclude_if=lambda value: value is None)
 
     task_id: str
@@ -615,8 +611,6 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             agent_oom_observation = None
             agent_oom_event = None
             if raw_agent_observation is not None:
-                # Recovery's _agent_sandbox_oom_zero checks saved policy results against this evidence contract;
-                # keep its observation/event checks aligned when changing admission here.
                 agent_oom_observation = SandboxObservation.model_validate_json(raw_agent_observation)
                 if (
                     agent_oom_observation.role != "agent"
@@ -846,7 +840,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "inconclusive_attempts": inconclusive_attempts,
                 "replayed_saved_patch": replayed,
                 "mask_sample": not result.evaluation_completed and agent_failure_action != OutcomeAction.COUNT_AS_ZERO,
-                "agent_failure_action": agent_failure_action,
+                "failure_outcome_action": agent_failure_action,
                 "failure_kind": PROVIDER_OOM_KILLED
                 if agent_oom_observation is not None
                 else (None if result.evaluation_completed else failure_kind),

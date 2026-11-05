@@ -271,9 +271,6 @@ NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 # An ``agent_timeout`` whose window held a recorded server-side fault (``is_infrastructure_agent_timeout`` in
 # ``nemo_gym.rollouts.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
-# An admitted agent-execution sandbox OOM explicitly scored zero by the benchmark's outcome policy.
-# Provider OOM observations alone remain evaluation-side; verifier sandbox OOMs are never this class.
-AGENT_SANDBOX_OOM = "agent_sandbox_oom"
 INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 INVALID_REQUEST_PARAMETER = "invalid_request_parameter"
 GRADING_WITHOUT_VERDICT = "grading_without_verdict"
@@ -286,7 +283,6 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
         MODEL_SERVER_ERROR,
         NON_POLICY_MODEL_REJECTION,
         AGENT_TIMEOUT_INFRASTRUCTURE,
-        AGENT_SANDBOX_OOM,
         INVALID_OUTPUT_BUDGET,
         INVALID_REQUEST_PARAMETER,
     }

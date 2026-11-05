@@ -2824,7 +2824,7 @@ class TestRolloutCollection:
                             "mask_sample": not count_as_zero,
                             "evaluation_completed": False,
                             "sandbox_handle": "agent-sandbox",
-                            "agent_failure_action": "count_as_zero" if count_as_zero else "fail",
+                            "failure_outcome_action": "count_as_zero" if count_as_zero else "fail",
                             "failure_report": report,
                             "failure_kind": PROVIDER_OOM_KILLED,
                             "failure_reason": "OpenSandbox confirmed OOMKilled after agent dispatch",
@@ -2886,7 +2886,7 @@ class TestRolloutCollection:
             assert "reward" not in oom_row
             assert len(aggregated["verify_responses"]) == 1
         assert oom_row["failure_kind"] == PROVIDER_OOM_KILLED
-        assert oom_row["agent_failure_action"] == ("count_as_zero" if count_as_zero else "fail")
+        assert oom_row["failure_outcome_action"] == ("count_as_zero" if count_as_zero else "fail")
         assert oom_row["ng_agent_observations"]["records"][0]["failure_id"] == failure.event_id
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
@@ -2898,13 +2898,13 @@ class TestRolloutCollection:
         # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
         # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
         from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
-        from tests.unit_tests.test_evaluation_health import _run
+        from tests.unit_tests.orchestration.test_evaluation_health import _run
 
         collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
         decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
         assert decision.counts == ({"scored": 2} if count_as_zero else {"terminal": 1, "scored": 1})
         assert metric_coverage(decision, collected)["trials"] == (2 if count_as_zero else 1)
-        assert trial_faults(decision, collected) == (Counter({"agent_sandbox_oom": 1}) if count_as_zero else {})
+        assert trial_faults(decision, collected) == (Counter({PROVIDER_OOM_KILLED: 1}) if count_as_zero else {})
 
         # A handled FAIL is terminal, not a failed attempt to resample on resume.
         dispatched.clear()
