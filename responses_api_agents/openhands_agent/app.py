@@ -63,7 +63,7 @@ from responses_api_agents.openhands_agent.sandbox import (
     OPENHANDS_VERSION,
     RUNNER_NAME,
     RUNNER_SOURCE,
-    RUNTIME_ROOT,
+    RUNTIME_PREFIX,
     SESSION_ROOT,
     OpenHandsArtifacts,
     OpenHandsSandboxSession,
@@ -193,7 +193,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             not path.is_absolute()
             or ".." in path.parts
             or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
-            or str(path).startswith((RUNTIME_ROOT, SESSION_ROOT))
+            or str(path).startswith((RUNTIME_PREFIX, SESSION_ROOT))
         ):
             raise AgentSeedRejectedError("OpenHands sandbox workdir must be absolute and separate from its own files")
         provider_config = resolve_provider_config(provider_ref, self.server_client.global_config_dict)

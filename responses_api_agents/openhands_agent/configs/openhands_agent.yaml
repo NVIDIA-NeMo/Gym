@@ -30,6 +30,6 @@ openhands_agent:
       # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
       sandbox_provider: null
       sandbox_config: {}
-      # Cold installs download about 150 MB of locked packages from PyPI into the sandbox.
+      # The first seed for each sandbox glibc level builds the runtime on this host with uv, which takes minutes.
       sandbox_install_timeout_seconds: 1200
       session_close_timeout_seconds: 60

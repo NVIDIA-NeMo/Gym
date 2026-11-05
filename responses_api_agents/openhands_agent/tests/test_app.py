@@ -112,7 +112,7 @@ async def test_seed_installs_the_runtime_and_keeps_its_files_outside_the_task(mo
     monkeypatch.setattr(app, "AsyncSandbox", constructor)
     provider = SimpleNamespace(aclose=AsyncMock())
     monkeypatch.setattr(app, "create_provider", lambda config: provider)
-    prepare = AsyncMock(return_value="/tmp/nemo-gym-openhands-runtime/fp-x86_64/interp/bin/openhands-gym")
+    prepare = AsyncMock(return_value=adapter.INTERPRETER)
     monkeypatch.setattr(app, "prepare_runtime", prepare)
     instance = agent(sandbox_provider="sandbox", sandbox_config={"workdir": "/app"})
     state = await instance._seed_agent_session_state(seed(borrowed=borrowed))
@@ -161,7 +161,7 @@ def session_state(**session):
         "sandbox": SimpleNamespace(sandbox_id="nemo-gym-task"),
     }
     return adapter.OpenHandsSandboxSession(
-        request=seed(), session=SimpleNamespace(**{**defaults, **session}), interpreter="/rt/interp/bin/openhands-gym"
+        request=seed(), session=SimpleNamespace(**{**defaults, **session}), interpreter="/rt/openhands-gym"
     )
 
 

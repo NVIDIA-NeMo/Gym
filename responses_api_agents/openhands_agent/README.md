@@ -6,8 +6,8 @@ seeds the session, activates it once through `/v1/responses`, closes it, and onl
 
 | | |
 | --- | --- |
-| Harness | `openhands-sdk` and `openhands-tools` 1.59.0, every dependency hash-locked in `sandbox_requirements.txt` |
-| Python in the sandbox | Standalone CPython 3.13.14 (python-build-standalone 20260805), verified on the Agent Server and uploaded |
+| Harness | `openhands-sdk` and `openhands-tools` 1.59.0, with every dependency at the version `uv.lock` pins for the Agent Server |
+| Python in the sandbox | Standalone CPython 3.13.14 with the harness installed, built on the Agent Server host and uploaded |
 | Execution | Agent sessions only, in a borrowed task sandbox or an agent-owned one (`sandbox_provider`). No host path, no `/run` |
 | Model API | Chat Completions through the rollout-prefixed Gym Model Server URL |
 | Tools | OpenHands' terminal, file editor, task tracker, `finish` and `think`. No Resources Server tool grants |
@@ -74,19 +74,22 @@ a workdir that is relative or overlaps the adapter's own directories, and a loop
 remote sandbox (start the servers with `++use_absolute_ip=true`). Optional grants are ignored. Seed then
 installs the runtime, or reuses a healthy one, and uploads the runner.
 
-**Runtime installation** (`install_openhands_runtime.sh`) needs Linux x86_64 or aarch64 with glibc, bash,
-tar, gzip, sha256sum, flock, tee, `mv -T`, a writable `/tmp`, and access to PyPI: pip downloads the locked
-packages (about 1.1 GB installed). A cold install took 32 s on a Slurm compute node. The runtime is keyed by a
-fingerprint of the Python build, the installer and the lock file, published atomically under
-`/tmp/nemo-gym-openhands-runtime/`, and reused by later seeds in the same sandbox. The task image's Python is
-never used or changed.
+**Runtime installation** uses Gym's `SandboxPythonRuntime`. The Agent Server host builds the runtime with `uv`:
+a pinned python-build-standalone CPython 3.13.14 and the OpenHands packages for the sandbox's platform, at the
+versions installed in the Agent Server's own environment. The sandbox needs no network, no `uv` and no Python
+of its own, only Linux x86_64 or aarch64 with glibc 2.28 or later, bash, tar with gzip, and a writable `/tmp`.
+The first build for each glibc level takes minutes and is cached on the host under Gym's `cache_dir`; later
+seeds upload the cached archives. The runtime is published atomically in
+`/tmp/nemo-gym-openhands-runtime-<key>/`, keyed by everything that goes into it, and reused by later seeds in
+the same sandbox. The task image's Python is never used or changed.
 
 **Activation** runs `sandbox_runner.py` (uploaded as `openhands_runner`) under Gym's process supervisor in
-the task's workdir. The interpreter runs as `openhands-gym`, so `pkill python3` or `pkill -f python` in a task
-cannot stop it. The runner builds the agent the way OpenHands' default preset does (terminal, file editor,
-task tracker, default condenser, CLI-mode system prompt) with two deliberate changes: the terminal uses the
-subprocess backend, because the tmux backend starts a tmux server that daemonizes out of the supervised
-process group; bash history goes to the session directory; and bracketed paste is turned off (see below). It appends each OpenHands event to
+the task's workdir. The interpreter runs through an `openhands-gym` link beside the runtime's `python/`
+directory, so `pkill python3` or `pkill -f python` in a task cannot stop it. The runner builds the agent the
+way OpenHands' default preset does (terminal, file editor, task tracker, default condenser, CLI-mode system
+prompt) with two deliberate changes: the terminal uses the subprocess backend, because the tmux backend
+starts a tmux server that daemonizes out of the supervised process group; bash history goes to the session
+directory; and bracketed paste is turned off (see below). It appends each OpenHands event to
 `events.jsonl` as it happens and writes `result.json` at the end. The supervisor's SIGTERM, at the deadline
 or on close, makes the runner write its result and close the terminal before it exits.
 
@@ -96,7 +99,7 @@ observation bundle, with an `agent_activation_interrupted` gap when no activatio
 
 ## Files written in the sandbox
 
-- `/tmp/nemo-gym-openhands-runtime/`: the shared runtime (kept after close).
+- `/tmp/nemo-gym-openhands-runtime-<key>/`: the shared runtime and its `openhands-gym` link (kept after close).
 - `/tmp/nemo-gym-openhands-sessions/<id>/`: runner input, events, result, logs, OpenHands' conversation
   state, task-tracker file and bash history (removed on close).
 - OpenHands' per-user directory (`~/.openhands`) is moved into the session directory with
@@ -135,7 +138,8 @@ runner saw the action and its result), a `ContextCompactionObservation` for each
 ## Limits
 
 - Resources Server tool grants (MCP or direct HTTP) are not supported; required grants are refused.
-- The sandbox needs PyPI access at seed; there is no offline install yet.
+- The first seed for each glibc level builds the runtime on the Agent Server host, which needs `uv` and
+  access to PyPI and GitHub (python-build-standalone) or mirrors of them.
 - Tool commands run as the task's user and can see the runtime. In the TB2.1 smoke, the agent found the
   runtime's Python with `find / -name "python*"` in an image without Python and used it to test its answer.
   The task's verifier never uses it, but the agent had an interpreter the task image does not provide.

@@ -3,53 +3,61 @@
 """OpenHands runtime installation and activation artifacts over the shared sandbox lifecycle."""
 
 import asyncio
-import hashlib
 import json
 import logging
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import TemporaryDirectory
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import HARNESS_RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxPythonRuntime,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
-from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
 
 
 LOG = logging.getLogger(__name__)
 
 OPENHANDS_VERSION = "1.59.0"
-RUNTIME_ROOT = "/tmp/nemo-gym-openhands-runtime"
+# openhands-tools pins func-timeout 4.3.5, which publishes only an sdist. The runtime installs wheels only, and
+# builds a requirement given as a direct URL from source on the Agent Server host; uv checks the URL's sha256.
+_FUNC_TIMEOUT_REQUIREMENT = (
+    "func-timeout @ https://files.pythonhosted.org/packages/"
+    "b3/0d/bf0567477f7281d9a3926c582bfef21bff7498fc0ffd3e9de21811896a0b/func_timeout-4.3.5.tar.gz"
+    "#sha256=74cd3c428ec94f4edfba81f9b2f14904846d5ffccc27c92433b8b5939b5575dd"  # pragma: allowlist secret
+)
+RUNTIME = SandboxPythonRuntime(
+    harness="openhands",
+    requirements=(
+        f"openhands-sdk=={OPENHANDS_VERSION}",
+        f"openhands-tools=={OPENHANDS_VERSION}",
+        _FUNC_TIMEOUT_REQUIREMENT,
+    ),
+    # The imports the runner needs, at the pinned version.
+    import_check=(
+        "import openhands.sdk, openhands.tools.file_editor, openhands.tools.task_tracker, openhands.tools.terminal, "
+        f"openhands.tools.preset.default; assert openhands.sdk.__version__ == {OPENHANDS_VERSION!r}, "
+        "openhands.sdk.__version__"
+    ),
+)
+# The runtime directory's name ends with a key of its inputs; the seed refuses a workdir under any of them.
+RUNTIME_PREFIX = RUNTIME.directory.rsplit("-", 1)[0]
+# The runner runs under this name, outside python/, so 'pkill python3' or 'pkill -f python' in a task cannot stop it.
+INTERPRETER = f"{RUNTIME.directory}/openhands-gym"
 SESSION_ROOT = "/tmp/nemo-gym-openhands-sessions"
 # The runner has no .py suffix in the sandbox, so 'pkill -f "\.py"' in a task cannot stop it.
 RUNNER_NAME = "openhands_runner"
 RUNNER_SOURCE = Path(__file__).with_name("sandbox_runner.py")
-_INSTALLER = Path(__file__).with_name("install_openhands_runtime.sh")
-_REQUIREMENTS = Path(__file__).with_name("sandbox_requirements.txt")
-# Astral python-build-standalone 20260805, CPython 3.13.14 install_only builds, with their published digests.
-# https://github.com/astral-sh/python-build-standalone/releases/tag/20260805
-_PYTHON_RELEASE = "20260805"
-_PYTHON_VERSION = "3.13.14"
-_PYTHON_SHA256 = {
-    "x86_64/gnu": "9f9ebf776b2d4913fe5a91508ab42e6ce17d266138f76a7782c05fa1c3cba1d1",  # pragma: allowlist secret
-    "aarch64/gnu": "4777d7df2edb47b96e53abad5e1b9df1b2a1a9b2f7bdba12b5c0122163b3fed9",  # pragma: allowlist secret
-}
 # Bounds what collect downloads from the runner's diagnostics.
 _STDERR_TAIL_BYTES = 1024 * 1024
-
-
-def runtime_fingerprint() -> str:
-    """Identify a runtime by everything that decides its contents."""
-    digest = hashlib.sha256()
-    digest.update(json.dumps([_PYTHON_RELEASE, _PYTHON_VERSION, _PYTHON_SHA256, OPENHANDS_VERSION]).encode())
-    digest.update(_INSTALLER.read_bytes())
-    digest.update(_REQUIREMENTS.read_bytes())
-    return digest.hexdigest()
 
 
 def check_exec(result: SandboxExecResult, what: str) -> None:
@@ -62,60 +70,18 @@ def check_exec(result: SandboxExecResult, what: str) -> None:
 
 
 async def prepare_runtime(sandbox: AsyncSandbox, *, timeout: float) -> str:
-    """Reuse or install the pinned OpenHands runtime in the sandbox; return its interpreter.
+    """Reuse or install the pinned OpenHands runtime in the sandbox; return the interpreter the runner uses.
 
-    The interpreter is a standalone CPython that the Agent Server downloads, verifies and uploads, so the
-    task image's Python is never used. The installer then installs the hash-locked OpenHands packages from
-    PyPI, which the sandbox must reach. Cold setup needs Linux x86_64 or aarch64 with glibc, bash, tar,
-    gzip, sha256sum, flock, tee, mv with -T support, and a writable /tmp.
+    The Agent Server builds the runtime with uv and uploads it (``SandboxPythonRuntime``), so the sandbox needs no
+    network and the task image's Python is never used.
     """
-    fingerprint = runtime_fingerprint()
-    scratch = f"/tmp/nemo-gym-openhands-setup-{uuid4().hex}"
-    script = scratch + ".sh"
-    await sandbox.upload(_INSTALLER, script)
-    probe = await sandbox.exec(shlex.join(["bash", script, "probe"]), cwd="/", timeout_s=60)
-    check_exec(probe, "sandbox probe")
-    target = (probe.stdout or "").strip()
-    if target not in _PYTHON_SHA256:
-        raise RuntimeError(f"Unsupported OpenHands sandbox platform: {target!r}")
-    runtime = f"{RUNTIME_ROOT}/{fingerprint}-{target.split('/')[0]}"
-    interpreter = f"{runtime}/interp/bin/openhands-gym"
-    cached = await sandbox.exec(shlex.join(["bash", script, "check", runtime, fingerprint]), cwd="/", timeout_s=120)
-    if cached.return_code == 0 and not cached.error_type:
-        await _remove_setup_files(sandbox, scratch, script)
-        return interpreter
-
-    arch, libc = target.split("/")
-    expected = _PYTHON_SHA256[target]
-    url = (
-        "https://github.com/astral-sh/python-build-standalone/releases/download/"
-        f"{_PYTHON_RELEASE}/cpython-{_PYTHON_VERSION}%2B{_PYTHON_RELEASE}-{arch}-unknown-linux-{libc}-install_only.tar.gz"
-    )
-    archive = await cached_download(url, sha256=expected)
-    with TemporaryDirectory(prefix="gym-openhands-runtime-") as directory:
-        local = Path(directory) / "python.tar.gz"
-        local.write_bytes(archive.read_bytes())
-        # Check the private copy too, so a cache replacement cannot change the bytes before upload.
-        if hashlib.sha256(local.read_bytes()).hexdigest() != expected:
-            raise RuntimeError(f"OpenHands Python artifact checksum mismatch for {target}")
-        await sandbox.upload(local, f"{scratch}/python.tar.gz")
-    await sandbox.upload(_REQUIREMENTS, f"{scratch}/requirements.txt")
-    requirements_sha256 = hashlib.sha256(_REQUIREMENTS.read_bytes()).hexdigest()
-    command = shlex.join(["bash", script, "install", runtime, fingerprint, expected, requirements_sha256])
-    check_exec(await sandbox.exec(command, cwd="/", timeout_s=timeout), "runtime installation")
-    # A failed installation keeps its scratch directory and log for diagnosis.
-    await _remove_setup_files(sandbox, scratch, script)
-    return interpreter
-
-
-async def _remove_setup_files(sandbox: AsyncSandbox, scratch: str, script: str) -> None:
-    try:
-        result = await sandbox.exec(f"rm -rf -- {shlex.quote(scratch)} {shlex.quote(script)}", cwd="/", timeout_s=60)
-        if result.return_code != 0 or result.error_type:
-            LOG.warning("Could not remove OpenHands setup files at %s", scratch)
-    except Exception:
-        # The runtime is ready; a cleanup transport failure must not fail the seed.
-        LOG.warning("Could not remove OpenHands setup files at %s", scratch, exc_info=True)
+    if not await RUNTIME.is_installed(sandbox):
+        await RUNTIME.install(sandbox, timeout_s=timeout)
+    link = shlex.quote(INTERPRETER)
+    # Concurrent seeds in one sandbox may race to create the link; either one's link serves.
+    command = f"test -L {link} || ln -s python/bin/python3 {link} || test -L {link}"
+    check_exec(await sandbox.exec(command, cwd="/", timeout_s=30), "interpreter link")
+    return INTERPRETER
 
 
 class HarnessProcessInfo(BaseModel):
