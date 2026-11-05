@@ -88,6 +88,12 @@ async def test_long_output_keeps_its_head_and_tail(shell):
     assert len(output) < 1100
 
 
+async def test_a_command_that_deletes_the_session_directory_leaves_the_next_command_working(shell):
+    await asyncio.wait_for(shell.run(f"rm -rf {shell.scratch}"), 10)
+
+    assert await asyncio.wait_for(shell.run("echo still"), 10) == ("still\n\n[exit code: 0]", "completed", None)
+
+
 @_LINUX_PROCESS_GROUPS
 async def test_stopping_the_crew_kills_a_running_command(shell):
     workdir = Path(shell.workdir)

@@ -110,6 +110,8 @@ class Shell:
 
     async def run(self, command: str) -> tuple[str, str, str | None]:
         """Run ``command``; return what the model sees, the call's status and its error type."""
+        # An earlier command may have deleted the session directory; the next one still runs.
+        self.scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=self.scratch) as output:
             try:
                 process = await asyncio.create_subprocess_exec(
@@ -324,19 +326,38 @@ class Transcript:
     def tool_calls(self) -> list[dict[str, Any]]:
         """Join each executed tool run to the model's call: CrewAI runs a call without passing its ID to the tool."""
         unmatched = list(self.tool_runs)
-        records = []
-        for call in (item for item in self.output if item["type"] == "function_call"):
+        calls = [item for item in self.output if item["type"] == "function_call"]
+        joined: dict[str, dict[str, Any]] = {}
+        # Exact matches across all calls first, so a call CrewAI refused (invalid arguments) cannot take the run of a
+        # later call by its name alone.
+        for call in calls:
             try:
                 arguments = json.loads(call["arguments"])
             except (json.JSONDecodeError, TypeError):
-                arguments = None
+                continue
             run = next(
                 (run for run in unmatched if run["name"] == call["name"] and run["arguments"] == arguments), None
-            ) or next((run for run in unmatched if run["name"] == call["name"]), None)
+            )
+            if run is not None:
+                unmatched.remove(run)
+                joined[call["call_id"]] = run
+        for call in calls:
+            if call["call_id"] not in joined:
+                run = next((run for run in unmatched if run["name"] == call["name"]), None)
+                if run is not None:
+                    unmatched.remove(run)
+                    joined[call["call_id"]] = run
+        records = []
+        for call in calls:
+            run = joined.get(call["call_id"])
             if run is None:
                 # CrewAI answered the call itself (an unknown tool or invalid arguments) without running a tool.
                 continue
-            unmatched.remove(run)
+            if "completed_at" not in run:
+                # Still running when the run ended; its cancellation reaches it on a later turn of the event loop.
+                run["status"], run["error_type"] = "cancelled", "cancelled"
+                run["completed_at"] = max(run["started_at"], time.time())
+                run["duration_ms"] = (run["completed_at"] - run["started_at"]) * 1000
             records.append(
                 {
                     "tool_call_id": call["call_id"],
@@ -572,12 +593,14 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
 
 async def _run_until_terminated(payload: dict[str, Any], output_path: Path, task_environment: dict[str, str]) -> None:
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, asyncio.current_task().cancel)
-    with tempfile.TemporaryDirectory(dir=output_path.parent) as scratch:
+    # A command may delete the session directory; the scratch files and the report then recreate it.
+    with tempfile.TemporaryDirectory(dir=output_path.parent, ignore_cleanup_errors=True) as scratch:
         try:
             output = await run(payload, scratch=Path(scratch), task_environment=task_environment)
         except BaseException as error:
             output = {"status": "failed", "error": repr(error), "traceback": traceback.format_exc()}
     # Written before the event loop shuts down: CrewAI's worker threads may still be unwinding.
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(output))
 
 

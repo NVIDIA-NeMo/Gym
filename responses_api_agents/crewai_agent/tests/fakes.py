@@ -31,19 +31,32 @@ class LendableLocalProvider(get_provider_class("local")):
 
 
 USAGE = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+# Not part of the response body: the stub sends these as Set-Cookie headers.
+_SET_COOKIES = "_set_cookies"
 
 
-def completion(content: str | None = None, *calls: tuple[str, dict], id: str, usage: bool = True) -> dict:
-    """A Chat Completions response with the assistant's text and tool calls."""
+def completion(
+    content: str | None = None,
+    *calls: tuple[str, dict],
+    id: str | None,
+    usage: bool = True,
+    finish_reason: str = "stop",
+    cookies: dict[str, str] | None = None,
+) -> dict:
+    """A Chat Completions response with the assistant's text and tool calls, and the cookies the server sets."""
     message: dict[str, Any] = {"role": "assistant", "content": content}
     if calls:
         message["tool_calls"] = [
             {"id": f"{id}-call-{i}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}
             for i, (name, args) in enumerate(calls)
         ]
-    body: dict[str, Any] = {"id": id, "choices": [{"index": 0, "message": message, "finish_reason": "stop"}]}
+    body: dict[str, Any] = {"choices": [{"index": 0, "message": message, "finish_reason": finish_reason}]}
+    if id is not None:
+        body["id"] = id
     if usage:
         body["usage"] = USAGE
+    if cookies:
+        body[_SET_COOKIES] = cookies
     return body
 
 
@@ -71,10 +84,13 @@ class ModelServer:
                     server.release.wait(60)
                     return
                 status, answer = (
-                    (answer, {"error": {"message": "rejected"}}) if isinstance(answer, int) else (200, answer)
+                    (answer, {"error": {"message": "rejected"}}) if isinstance(answer, int) else (200, dict(answer))
                 )
+                cookies = answer.pop(_SET_COOKIES, {})
                 payload = json.dumps(answer).encode()
                 self.send_response(status)
+                for name, value in cookies.items():
+                    self.send_header("Set-Cookie", f"{name}={value}; Path=/")
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()

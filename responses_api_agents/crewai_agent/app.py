@@ -31,13 +31,16 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
@@ -141,6 +144,14 @@ class CrewAIAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_install_timeout_seconds: float = Field(
         default=900, gt=0, allow_inf_nan=False, description="Time limit for installing CrewAI's runtime at seed."
     )
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox the agent starts: `model_only` allows only the model server's host, "
+            "`model_and_tools` also each MCP grant's host. A lent sandbox keeps its owner's network, so a session "
+            "that borrows one refuses any other value than `inherit`."
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -181,6 +192,13 @@ def _usage(usage: Mapping[str, int] | None) -> NeMoGymResponseUsage | None:
         input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=usage["cached"]),
         output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=usage["reasoning"]),
     )
+
+
+def _response_status(report: Mapping[str, Any]) -> tuple[str, dict[str, str] | None]:
+    """The activation's status and incomplete details: a final answer cut off at the output cap is incomplete."""
+    if report["status"] == "completed" and report["finish_reason"] == "length":
+        return "incomplete", {"reason": "max_output_tokens"}
+    return report["status"], None
 
 
 def _run_end(report: Mapping[str, Any] | None) -> tuple[str, str | None]:
@@ -235,6 +253,10 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             if access.user is not None:
                 # The runtime and the session's files are written as the sandbox's default user.
                 raise AgentSeedRejectedError("CrewAI does not support a SandboxAccess user override")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "CrewAI network_access applies only to a sandbox it starts, not a lent one"
+                )
             provider_ref, workdir = access.connection.provider_config_ref, access.workdir
         elif self.config.sandbox_provider is not None:
             spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
@@ -255,14 +277,23 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             )
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
+        grants = [
+            {
+                "name": grant.name,
+                "url": str(grant.connection.url),
+                "headers": dict(grant.connection.headers),
+                "required": grant.required,
+            }
+            for grant in accesses
+            if isinstance(grant, MCPToolAccess)
+        ]
 
         provider = create_provider(provider_config)
         try:
             if spec is None:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
             else:
-                sandbox = AsyncSandbox(provider)
-                await sandbox.start(
+                spec = restrict_sandbox_network(
                     replace(
                         spec,
                         # The provider reclaims a sandbox this process never stopped.
@@ -272,22 +303,19 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                         metadata=resolve_provider_metadata(provider_ref, global_config)
                         | dict(spec.metadata)
                         | {"nemo_gym_agent": self.config.name, "agent_session": body.agent_session_id[:63]},
-                    )
+                    ),
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[grant["url"] for grant in grants],
+                    required_tool_urls=[grant["url"] for grant in grants if grant["required"]],
                 )
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
         except BaseException:
             # No session owns the provider yet.
             await provider.aclose()
             raise
-        grants = [
-            {
-                "name": access.name,
-                "url": str(access.connection.url),
-                "headers": dict(access.connection.headers),
-                "required": access.required,
-            }
-            for access in accesses
-            if isinstance(access, MCPToolAccess)
-        ]
         state = CrewAISessionState(
             request=body,
             session=SandboxSession(
@@ -461,12 +489,8 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
     def _response(
         self, state: CrewAISessionState, instruction: _Instruction, report: Mapping[str, Any]
     ) -> NeMoGymResponse:
-        status = report["status"]
+        status, incomplete_details = _response_status(report)
         metadata = {"crewai_model_calls": str(report["model_calls"]), "crewai_tool_calls": str(report["tool_runs"])}
-        incomplete_details = None
-        if status == "completed" and report["finish_reason"] == "length":
-            # The final answer was cut off at the output cap.
-            status, incomplete_details = "incomplete", {"reason": "max_output_tokens"}
         if status == "incomplete" and incomplete_details is None:
             metadata["crewai_stop_reason"] = "timeout"
         response = NeMoGymResponse(
@@ -487,13 +511,17 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         return self.report_outcome(response, report)
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """A crew run that raised: the model request that failed, if one did; CrewAI's own errors are unknown."""
+        """A crew run that raised: the model request that failed, if one did; an empty answer is the model's invalid
+        output; CrewAI's other errors are unknown."""
         failure = native_result.get("model_failure") or {}
         status = failure.get("status")
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if failure.get("transport"):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if native_result.get("error_type") == "EmptyLLMResponseError":
+            # The model answered with neither text nor a tool call, also when CrewAI asked again.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return super().classify_outcome(native_result)
 
     def _observations(self, state: CrewAISessionState) -> AgentObservationBundle:
@@ -524,7 +552,9 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         invocation_id = report["invocation_id"]
         invocation = AgentInvocation(
             invocation_id=invocation_id,
-            status=report["status"],
+            # The response's status: a final answer cut off at the output cap makes it incomplete.
+            status=_response_status(report)[0],
+            stop_reason="timeout" if report["stop_reason"] == "wall_time" else None,
             error_type=error_type if outcome in ("failed", "oom") else None,
             duration_ms=report["duration_ms"],
             model_calls=[

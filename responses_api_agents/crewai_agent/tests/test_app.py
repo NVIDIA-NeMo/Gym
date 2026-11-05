@@ -507,3 +507,204 @@ async def test_without_a_lent_sandbox_the_agent_runs_in_its_own_and_stops_it(tmp
     [record] = _records(close, "sandbox")
     assert (record.role, record.outcome, record.teardown_confirmed) == ("agent", "completed", True)
     assert close.cleanup_confirmed is True
+
+
+@linux_only
+async def test_a_large_tool_result_reaches_the_model_whole(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    # Without a context window CrewAI assumes 4,096 tokens, where its compaction would move this result to a file.
+    model = _model(
+        monkeypatch,
+        completion(None, ("shell", {"command": "head -c 10000 /dev/zero | tr '\\0' x"}), id="chatcmpl-1"),
+        completion("Done.", id="chatcmpl-2"),
+    )
+    try:
+        await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    second = model.requests[1]["json"]
+    assert second["messages"][-1]["content"] == "x" * 10000 + "\n[exit code: 0]"
+    # No tool that would read a moved result is offered.
+    assert [tool["function"]["name"] for tool in second["tools"]] == ["shell"]
+
+
+@linux_only
+async def test_each_tool_result_is_recorded_once_in_call_order(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(
+        monkeypatch,
+        completion(None, ("shell", {"command": "echo one"}), id="chatcmpl-1"),
+        completion(None, ("shell", {"command": "echo two"}), id="chatcmpl-2"),
+        completion("Done.", id="chatcmpl-3"),
+    )
+    try:
+        response, close = await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    # Each later model call carries every earlier tool result again; the transcript holds each one once.
+    assert [
+        (item.type, getattr(item, "call_id", None), getattr(item, "output", None)) for item in response.output
+    ] == [
+        ("function_call", "chatcmpl-1-call-0", None),
+        ("function_call_output", "chatcmpl-1-call-0", "one\n\n[exit code: 0]"),
+        ("function_call", "chatcmpl-2-call-0", None),
+        ("function_call_output", "chatcmpl-2-call-0", "two\n\n[exit code: 0]"),
+        ("message", None, None),
+    ]
+    assert [tool.tool_call_id for tool in _records(close, "tool_call")] == ["chatcmpl-1-call-0", "chatcmpl-2-call-0"]
+
+
+@linux_only
+async def test_a_call_crewai_refused_does_not_take_the_execution_of_a_later_call(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(
+        monkeypatch,
+        # CrewAI answers a call with invalid arguments itself, without running the tool.
+        completion(None, ("shell", {"cmd": "echo bad"}), id="chatcmpl-1"),
+        completion(None, ("shell", {"command": "echo good"}), id="chatcmpl-2"),
+        completion("Done.", id="chatcmpl-3"),
+    )
+    try:
+        _, close = await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    assert [(tool.tool_call_id, tool.status) for tool in _records(close, "tool_call")] == [
+        ("chatcmpl-2-call-0", "completed")
+    ]
+
+
+@linux_only
+async def test_a_deadline_during_a_command_answers_incomplete_with_the_call_cancelled(
+    lent_sandbox, runtime, monkeypatch
+):
+    _, access = lent_sandbox
+    workdir = Path(access.workdir)
+    model = _model(
+        monkeypatch, completion(None, ("shell", {"command": "echo partial > partial.txt; sleep 30"}), id="chatcmpl-1")
+    )
+    try:
+        response, close = await _episode(_agent(timeout=5), access)
+    finally:
+        model.close()
+
+    assert response.status == "incomplete"
+    assert (workdir / "partial.txt").read_text() == "partial\n"
+    [invocation] = _records(close, "agent_invocation")
+    [tool] = _records(close, "tool_call")
+    assert (invocation.status, invocation.stop_reason) == ("incomplete", "timeout")
+    assert (tool.tool_call_id, tool.status, tool.error_type) == ("chatcmpl-1-call-0", "cancelled", "cancelled")
+    assert tool.completed_at >= tool.started_at
+    assert _records(close, "sandbox")[0].outcome == "timeout"
+
+
+@linux_only
+async def test_a_final_answer_cut_off_at_the_output_cap_is_incomplete(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, completion("Partial answ", id="chatcmpl-1", finish_reason="length"))
+    try:
+        response, close = await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    assert response.status == "incomplete"
+    assert response.incomplete_details.reason == "max_output_tokens"
+    # The invocation agrees with the response; the crew's use of the sandbox ended normally.
+    [invocation] = _records(close, "agent_invocation")
+    assert (invocation.status, invocation.stop_reason) == ("incomplete", None)
+    assert _records(close, "sandbox")[0].outcome == "completed"
+
+
+@linux_only
+async def test_a_rejected_model_request_after_a_command_does_not_run_the_task_again(
+    lent_sandbox, runtime, monkeypatch
+):
+    _, access = lent_sandbox
+    workdir = Path(access.workdir)
+    model = _model(
+        monkeypatch,
+        completion(None, ("shell", {"command": "echo run >> runs.txt"}), id="chatcmpl-1"),
+        400,
+        # What a second attempt at the task would get.
+        completion(None, ("shell", {"command": "echo run >> runs.txt"}), id="chatcmpl-2"),
+        completion("Done.", id="chatcmpl-3"),
+    )
+    try:
+        response, _ = await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    assert response.status == "failed"
+    assert len(model.requests) == 2
+    assert (workdir / "runs.txt").read_text() == "run\n"
+
+
+@linux_only
+async def test_an_empty_answer_is_the_models_invalid_output(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, completion("", id="chatcmpl-1"))
+    try:
+        response, _ = await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "agent_invalid_output"}
+
+
+@linux_only
+async def test_model_server_cookies_are_sent_back_on_later_calls(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(
+        monkeypatch,
+        completion(None, ("shell", {"command": "true"}), id="chatcmpl-1", cookies={"route": "backend-3"}),
+        completion("Done.", id="chatcmpl-2"),
+    )
+    try:
+        await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    assert [request["headers"].get("Cookie") for request in model.requests] == [None, "route=backend-3"]
+
+
+@linux_only
+async def test_a_model_reply_without_an_id_is_a_reference_gap(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, completion("Done.", id=None))
+    try:
+        _, close = await _episode(_agent(), access)
+    finally:
+        model.close()
+
+    assert _records(close, "agent_invocation")[0].model_calls == []
+    assert "model_call_reference_unavailable" in {gap.code for gap in close.agent_observations.gaps}
+
+
+@linux_only
+async def test_parallel_tool_calls_and_top_p_reach_the_model_with_the_tools(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, completion("Done.", id="chatcmpl-1"))
+    try:
+        await _episode(_agent(), access, _body(parallel_tool_calls=False, top_p=0.5))
+    finally:
+        model.close()
+
+    sent = model.requests[0]["json"]
+    assert (sent["parallel_tool_calls"], sent["top_p"], len(sent["tools"])) == (False, 0.5, 1)
+
+
+async def test_an_owned_sandbox_takes_the_network_policy_and_a_lent_one_refuses_it(
+    lent_sandbox, runtime, monkeypatch, tmp_path
+):
+    _, access = lent_sandbox
+    with pytest.raises(AgentSeedRejectedError, match="not a lent one"):
+        await _agent(network_access="model_only")._seed_agent_session_state(_seed(sandbox_access=access))
+
+    # The local provider has no network policies, so a restricted owned sandbox is refused before it starts.
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"sandbox": {"local": {}}})
+    agent = _agent(sandbox_provider="sandbox", sandbox_config={"workdir": str(tmp_path)}, network_access="model_only")
+    with pytest.raises(AgentSeedRejectedError):
+        await agent._seed_agent_session_state(_seed())

@@ -258,6 +258,12 @@ def build_crew(
         cache=False,
         memory=False,
         verbose=False,
+        # CrewAI would run a failed task again from the start, in the sandbox the first attempt already changed. A
+        # failure ends the run instead, and the Environment Server's outcome policy decides what follows.
+        max_retry_limit=0,
+        # Oversized tool results would move to temporary files that the model reads through an extra CrewAI tool,
+        # outside the shell and the grants the transcript records.
+        use_better_compaction=False,
     )
     # The instruction is the task's text as is. The crew is started without inputs, so CrewAI does not read the
     # braces in it as template variables.

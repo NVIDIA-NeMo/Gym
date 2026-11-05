@@ -15,6 +15,7 @@ benchmark:
         - codex_agent
         - opencode_agent
         - openclaw_agent
+        - crewai_agent
         - nooa_agent
       sandbox_config:
         # Leave 600s after the run's 30,000s episode deadline for bounded cleanup.
