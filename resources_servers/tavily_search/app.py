@@ -51,6 +51,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.verification import JUDGE_FAILURES, call_judge, is_judge_failure
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
@@ -313,17 +314,6 @@ def select_provider_domains(
     return ordered[:limit]
 
 
-def _reject_typed_seed(value: object) -> object:
-    # A body that names a resources_session_id, or carries typed episode_id and task_id objects, is a malformed typed
-    # seed and must not create a /run session. A dataset row's own scalar task_id does not make a body typed.
-    if isinstance(value, dict) and (
-        "resources_session_id" in value
-        or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
-    ):
-        raise ValueError("A resources session seed must satisfy ResourcesSeedSessionRequest")
-    return value
-
-
 class TavilyTypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
     """Validate typed search tasks without narrowing the legacy tool-service seed."""
 
@@ -422,7 +412,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self,
         request: Request,
-        body: ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(_reject_typed_seed)],
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         """Keep permissive legacy tool-service seeds; the base validates typed tasks and owns the lifecycle."""
         return await super().seed_session(body, request=request)
@@ -623,8 +614,10 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
-        # A judge can suspend while a cookie reseed or close arrives. Keep the old verifier from releasing the
-        # next run's metrics, and let close validate the identity retained after verification finishes.
+        # The session lock is held across the whole judge call, its retries included, so a seed (typed or cookie),
+        # close or checkpoint retirement of this session waits until verification finishes. That keeps this verify
+        # from releasing the next run's metrics and lets close check the identity verification retains. Tool calls
+        # take no lock and are not blocked.
         async with self._fence.locked(request.session[SESSION_ID_KEY]):
             return await self._verify_session(request, body)
 
