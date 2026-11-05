@@ -33,6 +33,8 @@ starts the rollout over from its input.
 If nothing crashes, it just keeps running.
 An episode becomes a restart only while no checkpoint is open,
 so the episodes a checkpoint exports and the restarts it reports never change during it.
+The one exception is fixed when admission closes: an agent or resources server reports a rollout whose first seed
+is still in flight as a restart of that checkpoint, since it has done no work worth saving.
 """
 
 import asyncio

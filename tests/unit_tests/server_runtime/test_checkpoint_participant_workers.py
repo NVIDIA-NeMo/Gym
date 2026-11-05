@@ -390,6 +390,34 @@ async def test_every_worker_s_restarts_reach_the_coordinator_which_refuses_a_sco
     assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["q-a2", "r"]
 
 
+async def test_every_worker_s_first_seeds_in_flight_are_restarts_of_the_checkpoint(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    def resources_worker() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(MagicMock(), "exported"), FastAPI()
+
+    async with coordinated(socket_dir, resources_worker) as deployment:
+        first, second = deployment.links
+        # Each worker is seeding a rollout's first session, and its /seed_session request is in flight.
+        for link, episode_id in ((first, EpisodeId(rollout_id="r")), (second, EpisodeId(rollout_id="q", attempt=2))):
+            link.participant.seed_started(episode_id)
+            link.participant.request_started(None, counted=True)
+        prepared = await deployment.controller.prepare(CheckpointRequest(**control(timeout=2)))
+        with pytest.raises(RestartInScopeError):
+            await deployment.controller.commit(
+                CommitRequest(
+                    **control(checkpoint_dir=str(tmp_path / "ckpt"), episode_ids=[{"rollout_id": "r", "attempt": 0}])
+                )
+            )
+        await deployment.controller.resume(CheckpointRequest(**control()))
+        after = deployment.participant.readiness()
+
+    # Prepare did not wait for either seed, and the coordinator reports both workers' seeds as restarts.
+    assert prepared["phase"] == "prepared" and prepared["report"]["restarts"] == ["q-a2", "r"]
+    # After resume they are ordinary seeds again.
+    assert after.restarts == []
+
+
 async def test_a_lost_worker_blocks_the_checkpoint_until_resume(socket_dir: str, tmp_path: Path) -> None:
     async with coordinated(socket_dir, environment_worker) as deployment:
         _, second = deployment.links

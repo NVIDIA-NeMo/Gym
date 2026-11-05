@@ -711,7 +711,7 @@ async def test_a_seed_arriving_during_an_open_checkpoint_waits_for_resume() -> N
     assert waited and participant.has_session("late")
 
 
-async def test_a_seed_in_progress_when_admission_closes_holds_up_prepare_and_is_exported() -> None:
+async def test_a_first_seed_in_progress_when_admission_closes_is_a_restart_of_that_checkpoint() -> None:
     participant = AgentSessionParticipant(Hooks())
     built = asyncio.Event()
 
@@ -724,13 +724,72 @@ async def test_a_seed_in_progress_when_admission_closes_holds_up_prepare_and_is_
     seeding = asyncio.create_task(seed())
     await asyncio.sleep(0.01)
     await participant.close_admission(CLOSE)
-    blocked = participant.readiness()
+    while_seeding = participant.readiness()
+    ready_while_seeding = participant.ready()
     built.set()
     await asyncio.wait_for(seeding, 5)
+    after_seed = participant.readiness()
+    # The seed registered its session while the checkpoint was open: the commit leaves it out.
+    exported_now = [record.session_key for record in await participant.export(None, checkpoint_id="c")]
+    await participant.open_admission()
+    await participant.close_admission(CLOSE)
+    # The next checkpoint captures the session like any other.
+    exported_next = [record.session_key for record in await participant.export(None, checkpoint_id="d")]
 
-    assert not blocked.ready and blocked.blockers == ["r"]
+    assert while_seeding.ready and ready_while_seeding and while_seeding.blockers == []
+    assert while_seeding.restarts == ["r"]
+    # The restarts do not change before the commit.
+    assert after_seed.ready and after_seed.restarts == ["r"]
+    assert exported_now == []
+    assert exported_next == ["s"]
+
+
+async def test_a_first_seed_that_fails_while_the_checkpoint_is_open_leaves_nothing_behind() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    failing = asyncio.Event()
+
+    async def seed() -> None:
+        async with participant.seeding("s", EpisodeId(rollout_id="r")):
+            await failing.wait()
+            raise RuntimeError("the sandbox setup failed")
+
+    seeding = asyncio.create_task(seed())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    failing.set()
+    with pytest.raises(RuntimeError, match="setup failed"):
+        await asyncio.wait_for(seeding, 5)
+    during = participant.readiness()
+    exported = await participant.export(None, checkpoint_id="c")
+    await participant.open_admission()
+
+    # Still a restart of this checkpoint: the controller re-sends the rollout either way.
+    assert during.ready and during.restarts == ["r"]
+    assert exported == [] and not participant.has_session("s")
+    assert participant.readiness().restarts == []
+
+
+async def test_a_seed_of_a_session_that_exists_still_holds_up_prepare_and_is_exported() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    rebound = asyncio.Event()
+
+    async def reseed() -> None:
+        # The environment seeds again, for example to re-bind a restored session to its rebuilt sandbox.
+        async with participant.seeding("s", episode_id):
+            await rebound.wait()
+            participant.open_session("s", episode_id, seed=True)
+
+    reseeding = asyncio.create_task(reseed())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    blocked = participant.readiness()
+    rebound.set()
+    await asyncio.wait_for(reseeding, 5)
+
+    assert not blocked.ready and blocked.blockers == ["r"] and blocked.restarts == []
     assert participant.readiness().ready
-    # The environment may record its boundary after the seed before the commit, so the session is exported.
     assert [record.session_key for record in await participant.export(None, checkpoint_id="c")] == ["s"]
 
 

@@ -494,7 +494,7 @@ async def test_a_seed_arriving_during_an_open_checkpoint_waits_for_resume(
     assert later.json()["phase"] == "prepared"
 
 
-async def test_a_seed_in_flight_when_admission_closes_holds_up_prepare_and_is_exported(tmp_path: Path) -> None:
+async def test_a_first_seed_in_flight_when_admission_closes_is_a_restart_of_that_checkpoint(tmp_path: Path) -> None:
     class SlowSeedServer(CounterServer):
         release: Any = None
 
@@ -507,19 +507,30 @@ async def test_a_seed_in_flight_when_admission_closes_holds_up_prepare_and_is_ex
     async with client:
         seed = asyncio.create_task(client.post("/ng-rollout/r/seed_session", json=SEED))
         await until(lambda: server._checkpoint.inflight == 1)
-        missed = await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
+        # Prepare does not wait for the seed: its rollout has done nothing worth saving.
+        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(timeout=0.1), headers=AUTH)
         server.release.set()
-        await seed
-        prepared = await client.post("/ng-control/v1/checkpoint/prepare", json=control(), headers=AUTH)
+        seeded = await seed
         commit = await client.post(
             "/ng-control/v1/checkpoint/commit", json=control(checkpoint_dir=str(tmp_path)), headers=AUTH
         )
         await client.post("/ng-control/v1/checkpoint/resume", json=control(), headers=AUTH)
+        # After resume the session is checkpointed like any other.
+        prepared_next = await client.post("/ng-control/v1/checkpoint/prepare", json=control("c2"), headers=AUTH)
+        commit_next = await client.post(
+            "/ng-control/v1/checkpoint/commit",
+            json=control("c2", checkpoint_dir=str(tmp_path / "next")),
+            headers=AUTH,
+        )
+        await client.post("/ng-control/v1/checkpoint/resume", json=control("c2"), headers=AUTH)
 
-    assert missed.json()["phase"] == "preparing"
+    assert seeded.status_code == 200
     assert prepared.json()["phase"] == "prepared"
-    # The environment may record its boundary after the seed before the commit, so the session is exported.
-    assert commit.json()["manifest"]["record_count"] == 1
+    assert prepared.json()["report"]["restarts"] == ["r"]
+    # The session the seed created while the checkpoint was open is left out with its episode.
+    assert commit.json()["manifest"]["record_count"] == 0
+    assert prepared_next.json()["phase"] == "prepared" and prepared_next.json()["report"]["restarts"] == []
+    assert commit_next.json()["manifest"]["record_count"] == 1
 
 
 class ReplayVerifyServer(CounterServer):
