@@ -103,6 +103,8 @@ jobs:
         working-directory: sample
         run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
       - name: Install Pants launcher
+        working-directory: controller
+        timeout-minutes: 7
         run: |
           pants_bin="$RUNNER_TEMP/pants-launcher/pants"
           mkdir -p "$(dirname "$pants_bin")"
@@ -111,6 +113,22 @@ jobs:
             --output "$pants_bin"
           echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
           chmod +x "$pants_bin"
+          # Retry launcher bootstrap only; the measured CI command runs once.
+          for attempt in 1 2 3; do
+            if pants_version=$(timeout --kill-after=10s 120s "$pants_bin" \
+                --no-pantsd --version); then
+              if [[ "$pants_version" != '2.30.2' ]]; then
+                echo "Unexpected Pants version: $pants_version" >&2
+                exit 1
+              fi
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              echo "Pants bootstrap failed after three attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
           echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
       - name: Install pinned uv for both core and sandbox arms
         run: |
