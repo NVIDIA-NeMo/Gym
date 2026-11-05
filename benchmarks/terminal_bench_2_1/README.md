@@ -2,9 +2,8 @@
 
 Terminal-Bench 2.1 evaluates agents on tasks in isolated containers. The benchmark
 prepares task data and owns sandbox setup, verification, and cleanup. Pi, Codex,
-OpenCode, and OpenClaw can run their model/tool loops in the task sandbox through
-Gym's Environment Server. CrewAI runs its crew in the Agent Server and its shell
-commands in the task sandbox.
+OpenCode, OpenClaw, and CrewAI can run their model/tool loops in the task sandbox
+through Gym's Environment Server.
 
 - Integration profile: `custom-gym-verifier`
 - Scorer: `terminal_bench_2_1`
@@ -116,8 +115,7 @@ Codex/OpenClaw sandbox sessions reject request-level `max_output_tokens`.
 
 Put `policy_base_url`, `policy_api_key`, and `policy_model_name` in your private
 `env.yaml`. The task container must reach the Gym Model Server; for Docker on a
-reachable host, use `++use_absolute_ip=true` as below. CrewAI calls the Model
-Server from the Agent Server, so its task containers need not reach it.
+reachable host, use `++use_absolute_ip=true` as below.
 
 ## Run a smoke task
 

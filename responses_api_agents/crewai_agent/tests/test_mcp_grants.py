@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""MCP tool grants: a real streamable-HTTP MCP server that admits only the episode's token."""
+"""MCP tool grants, called from the sandbox runner: a real streamable-HTTP MCP server that admits only the
+episode's token."""
 
 import socket
 import threading
@@ -9,29 +10,16 @@ from collections.abc import Iterator
 
 import pytest
 import uvicorn
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 
-from nemo_gym.agents import check_agent_seed_rejected
 from nemo_gym.server_runtime import MCPStreamableHTTPConnection, MCPToolAccess
-from responses_api_agents.crewai_agent.tests.test_app import (
-    _agent,
-    _close,
-    _completion,
-    _Model,
-    _respond,
-    _seed,
-    _seed_body,
-)
+from responses_api_agents.crewai_agent.tests.fakes import completion
+from responses_api_agents.crewai_agent.tests.test_app import _agent, _body, _episode, _model, _records, linux_only
 
 
+pytestmark = linux_only
 _TOKEN = "Bearer episode-token"
-
-
-@pytest.fixture(autouse=True)
-def fresh_http_client(monkeypatch):
-    # Each test client runs its own event loop; Gym's shared aiohttp client belongs to the loop that created it.
-    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
 
 
 def _require_token(app):
@@ -84,22 +72,27 @@ def _grant(url: str, *, name: str = "weather", required: bool = True, token: str
     )
 
 
-def test_a_granted_tool_is_discovered_called_and_its_result_reaches_the_model(mcp_url):
-    model = _Model(
-        _completion(None, ("get_weather", {"city": "Paris"}), ("broken", {"reason": "no"}), id="c1"),
-        _completion("The weather in Paris is sunny.", id="c2"),
+async def test_a_granted_tool_is_discovered_called_and_its_result_reaches_the_model(
+    mcp_url, lent_sandbox, runtime, monkeypatch
+):
+    _, access = lent_sandbox
+    model = _model(
+        monkeypatch,
+        completion(None, ("get_weather", {"city": "Paris"}), ("broken", {"reason": "no"}), id="c1"),
+        completion("The weather in Paris is sunny.", id="c2"),
     )
-    with TestClient(_agent(model).setup_webserver()) as client:
-        assert _seed(client, tool_accesses=[_grant(mcp_url)]).status_code == 200
-        response = _respond(client, {"input": "What is the weather in Paris?"})
-        closed = _close(client).json()
+    try:
+        response, close = await _episode(
+            _agent(), access, _body(input="What is the weather in Paris?"), tool_accesses=[_grant(mcp_url)]
+        )
+    finally:
+        model.close()
 
-    assert response.status_code == 200, response.text
+    assert response.status == "completed"
     first, second = model.requests
     # Grant tools keep their own names, which verifiers compare.
-    assert sorted(tool["function"]["name"] for tool in first["json"]["tools"]) == ["broken", "get_weather"]
-    output = response.json()["output"]
-    assert [item["name"] for item in output if item["type"] == "function_call"] == ["get_weather", "broken"]
+    assert sorted(tool["function"]["name"] for tool in first["json"]["tools"]) == ["broken", "get_weather", "shell"]
+    assert [item.name for item in response.output if item.type == "function_call"] == ["get_weather", "broken"]
     results = {
         message["tool_call_id"]: message["content"]
         for message in second["json"]["messages"]
@@ -107,49 +100,80 @@ def test_a_granted_tool_is_discovered_called_and_its_result_reaches_the_model(mc
     }
     assert results["c1-call-0"] == "The weather in Paris is sunny."
     assert "no" in results["c1-call-1"]
-    tools = {record["tool_call_id"]: record for record in closed["agent_observations"]["records"][1:]}
-    assert (tools["c1-call-0"]["status"], tools["c1-call-1"]["status"]) == ("completed", "failed")
-    assert tools["c1-call-1"]["error_type"] == "tool_error"
+    tools = {record.tool_call_id: record for record in _records(close, "tool_call")}
+    assert (tools["c1-call-0"].status, tools["c1-call-1"].status) == ("completed", "failed")
+    assert tools["c1-call-1"].error_type == "tool_error"
 
 
-def test_a_required_grant_that_does_not_connect_fails_the_seed_before_any_model_call(mcp_url):
-    model = _Model()
-    with TestClient(_agent(model).setup_webserver(), raise_server_exceptions=False) as client:
-        seeded = _seed(client, tool_accesses=[_grant(mcp_url, token="Bearer wrong")])
+async def test_a_required_grant_that_does_not_connect_fails_the_episode_before_any_model_call(
+    mcp_url, lent_sandbox, runtime, monkeypatch
+):
+    _, access = lent_sandbox
+    model = _model(monkeypatch)
+    try:
+        response, close = await _episode(_agent(), access, tool_accesses=[_grant(mcp_url, token="Bearer wrong")])
+    finally:
+        model.close()
 
-    # A 500 lets the Environment Server retry the episode; the crew never ran.
-    assert seeded.status_code == 500
+    # A 503 lets the Environment Server retry the episode; the crew never ran.
+    assert isinstance(response, HTTPException) and response.status_code == 503
+    assert model.requests == []
+    [record] = _records(close, "sandbox")
+    assert (record.outcome, record.error_type) == ("failed", "infrastructure_error")
+
+
+async def test_an_optional_grant_that_does_not_connect_is_skipped_with_a_gap(
+    mcp_url, lent_sandbox, runtime, monkeypatch
+):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, completion("No tools needed.", id="c1"))
+    try:
+        response, close = await _episode(
+            _agent(), access, tool_accesses=[_grant(mcp_url, required=False, token="Bearer wrong")]
+        )
+    finally:
+        model.close()
+
+    assert response.status == "completed"
+    assert [tool["function"]["name"] for tool in model.requests[0]["json"]["tools"]] == ["shell"]
+    assert "mcp_server_skipped" in {gap.code for gap in close.agent_observations.gaps}
+
+
+async def test_grants_whose_tool_names_collide_are_refused(mcp_url, lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch)
+    try:
+        response, _ = await _episode(
+            _agent(), access, tool_accesses=[_grant(mcp_url, name="weather"), _grant(mcp_url, name="forecast")]
+        )
+    finally:
+        model.close()
+
+    assert isinstance(response, HTTPException) and response.status_code == 422
+    assert "collide" in response.detail and "get_weather" in response.detail
     assert model.requests == []
 
 
-def test_an_optional_grant_that_does_not_connect_is_skipped_with_a_gap(mcp_url):
-    model = _Model(_completion("No tools needed.", id="c1"))
-    with TestClient(_agent(model).setup_webserver()) as client:
-        seeded = _seed(client, tool_accesses=[_grant(mcp_url, required=False, token="Bearer wrong")])
-        _respond(client)
-        closed = _close(client).json()
+@pytest.mark.parametrize(
+    ("offered", "served"),
+    [("get_weather", ["get_weather", "shell"]), ("get_forecast", None)],
+)
+async def test_request_tools_select_the_grant_tools_the_crew_offers(
+    mcp_url, lent_sandbox, runtime, monkeypatch, offered, served
+):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, completion("Done.", id="c1"))
+    declared = {"type": "function", "name": offered, "parameters": {"type": "object"}, "strict": False}
+    try:
+        response, _ = await _episode(
+            _agent(), access, _body(input="hi", tools=[declared]), tool_accesses=[_grant(mcp_url)]
+        )
+    finally:
+        model.close()
 
-    assert seeded.status_code == 200
-    assert "tools" not in model.requests[0]["json"]
-    assert "mcp_server_skipped" in {gap["code"] for gap in closed["agent_observations"]["gaps"]}
-
-
-def test_grants_whose_tool_names_collide_are_refused(mcp_url):
-    seed = _seed_body(tool_accesses=[_grant(mcp_url, name="weather"), _grant(mcp_url, name="forecast")])
-
-    detail = check_agent_seed_rejected(_agent(_Model()).setup_webserver(), seed)
-
-    assert "collide" in detail and "get_weather" in detail
-
-
-def test_request_tools_select_the_grant_tools_the_crew_offers(mcp_url):
-    model = _Model(_completion("Done.", id="c1"))
-    declared = {"type": "function", "name": "get_weather", "parameters": {"type": "object"}, "strict": False}
-    with TestClient(_agent(model).setup_webserver()) as client:
-        _seed(client, tool_accesses=[_grant(mcp_url)])
-        undeclared = _respond(client, {"input": "hi", "tools": [{**declared, "name": "get_forecast"}]})
-        response = _respond(client, {"input": "hi", "tools": [declared]})
-
-    assert undeclared.status_code == 422 and "none serves get_forecast" in undeclared.json()["detail"]
-    assert response.status_code == 200
-    assert [tool["function"]["name"] for tool in model.requests[0]["json"]["tools"]] == ["get_weather"]
+    if served is None:
+        assert isinstance(response, HTTPException) and response.status_code == 422
+        assert f"none serves {offered}" in response.detail
+    else:
+        assert response.status == "completed"
+        assert sorted(tool["function"]["name"] for tool in model.requests[0]["json"]["tools"]) == served

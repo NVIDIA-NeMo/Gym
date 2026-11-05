@@ -105,7 +105,7 @@ def install_runtime(harness: str) -> None:
         check=True,
     )
     if harness in ("hermes", "stirrup", "simple", "openclaw", "crewai"):
-        # Simple is built in; Hermes and CrewAI are locked; Stirrup and OpenClaw provision the task sandbox.
+        # Simple is built in; Hermes is locked; Stirrup, OpenClaw and CrewAI provision the task sandbox.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]

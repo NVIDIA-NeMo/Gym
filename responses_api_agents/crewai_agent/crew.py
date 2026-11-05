@@ -1,46 +1,29 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""CrewAI's model and tools for one activation, served from the Agent Server's event loop.
+"""CrewAI's model and tools for one activation, served from the sandbox runner's event loop.
 
 CrewAI 1.15 runs its agent loop as a Flow whose steps call the model and the tools synchronously from worker threads,
 even under ``Crew.akickoff()``. ``CrewRun`` hands each of those calls to the event loop and waits for it, so model
-requests go through Gym's aiohttp client and commands through the session's sandbox connection. Cancelling the run
-cancels every pending call and fails every later one, which stops the crew at its next step.
+requests and commands run as coroutines the runner can cancel. Cancelling the run cancels every pending call and fails
+every later one, which stops the crew at its next step.
+
+The runner imports this module only after ``configure_crewai()`` has set CrewAI's environment.
 """
 
 import asyncio
-import atexit
 import concurrent.futures
-import os
-import shutil
-import tempfile
 import threading
 from collections.abc import Awaitable, Callable, Coroutine
 from typing import Any, TypeVar
 
+from crewai import Agent, Crew, Process, Task
+from crewai.llms.base_llm import BaseLLM
+from crewai.mcp.content import content_blocks_to_text
+from crewai.tools import BaseTool
+from crewai.tools.tool_failure import ToolFailure, ToolFailureReason
+from crewai.utilities.pydantic_schema_utils import create_model_from_schema
+from crewai.utilities.string_utils import sanitize_tool_name
 from pydantic import BaseModel, Field, PrivateAttr
-
-
-# CrewAI reads these at import and at kickoff. A Gym run sends no telemetry or traces to CrewAI, does not check PyPI
-# for a newer release, and keeps CrewAI's replay database in a private directory instead of the user's data home.
-_STORAGE_DIR = tempfile.mkdtemp(prefix="nemo-gym-crewai-")
-atexit.register(shutil.rmtree, _STORAGE_DIR, True)
-os.environ.update(
-    CREWAI_DISABLE_TELEMETRY="true",
-    CREWAI_DISABLE_TRACKING="true",
-    CREWAI_TRACING_ENABLED="false",
-    CREWAI_DISABLE_VERSION_CHECK="true",
-    # An absolute path: CrewAI joins it under its data directory, which keeps an absolute path as is.
-    CREWAI_STORAGE_DIR=_STORAGE_DIR,
-)
-
-from crewai import Agent, Crew, Process, Task  # noqa: E402
-from crewai.llms.base_llm import BaseLLM  # noqa: E402
-from crewai.mcp.content import content_blocks_to_text  # noqa: E402
-from crewai.tools import BaseTool  # noqa: E402
-from crewai.tools.tool_failure import ToolFailure, ToolFailureReason  # noqa: E402
-from crewai.utilities.pydantic_schema_utils import create_model_from_schema  # noqa: E402
-from crewai.utilities.string_utils import sanitize_tool_name  # noqa: E402
 
 
 _T = TypeVar("_T")
@@ -91,7 +74,7 @@ class CrewRun:
             running = None
         if running is self._loop:
             coroutine.close()
-            raise RuntimeError("CrewAI made a blocking model or tool call on the Agent Server's event loop")
+            raise RuntimeError("CrewAI made a blocking model or tool call on the runner's event loop")
         future = asyncio.run_coroutine_threadsafe(coroutine, self._loop)
         with self._lock:
             self._pending.add(future)
@@ -130,7 +113,7 @@ ChatCompletion = Callable[[list[dict[str, Any]], list[dict[str, Any]] | None], A
 
 
 class GymChatLLM(BaseLLM):
-    """CrewAI's model: each call is one Chat Completions request through the Gym Model Server.
+    """CrewAI's model: each call is one Chat Completions request to the Gym Model Server.
 
     ``complete`` sends CrewAI's messages and tool schemas and returns the response's assistant message. Tool calls go
     back to CrewAI in the OpenAI shape its native function calling reads.
@@ -207,7 +190,7 @@ class ShellArguments(BaseModel):
 
 
 class ShellTool(BaseTool):
-    """CrewAI's shell tool: a bash command in the task sandbox."""
+    """CrewAI's shell tool: a bash command in the task's working directory."""
 
     name: str = "shell"
     args_schema: type[BaseModel] = ShellArguments

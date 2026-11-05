@@ -217,9 +217,9 @@ have a `timeout` field (OpenCode, Pi, CrewAI and OpenClaw); add a new harness wi
 field, so that it uses the probe timeout instead of the adapter's default.
 `ci.install_runtime` syncs the adapter's locked project (`pyproject.toml` and `uv.lock`)
 and then returns early only for the harnesses in its
-`("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes and CrewAI come from
-that project, Stirrup and OpenClaw install in the task sandbox during session setup, and
-Simple Agent is built in. For any other harness it installs a
+`("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes comes from that
+project, Stirrup, OpenClaw and CrewAI install in the task sandbox during session setup,
+and Simple Agent is built in. For any other harness it installs a
 pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
 so add a harness that installs its runtime in the task sandbox to that tuple. A
 data-driven registry entry could carry these per-harness settings and remove the

@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# CrewAI runs in the Agent Server, one crew turn per agent session. Its shell tool borrows the SandboxAccess the
-# Environment Server forwards, and MCP tool grants add the benchmark's tools. The run configuration binds the
-# benchmark and this agent; see the README for compositions.
+# CrewAI runs inside the task sandbox, one crew turn per agent session: the SandboxAccess the Environment Server
+# forwards, or, with sandbox_provider, a sandbox the agent starts itself. MCP tool grants add the benchmark's tools.
+# The run configuration binds the benchmark and this agent; see the README for compositions.
 crewai_agent:
   responses_api_agents:
     crewai_agent:

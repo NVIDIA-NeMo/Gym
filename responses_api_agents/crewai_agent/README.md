@@ -1,19 +1,23 @@
 # CrewAI Agent
 
 This adapter runs a [CrewAI](https://github.com/crewAIInc/crewAI) crew as a Gym harness, one crew turn per agent
-session. CrewAI is a Python framework, so the crew runs in the Agent Server process. Its model is the Gym Model
-Server, and its tools run where the episode puts them: a shell in the episode's task sandbox, and the tools of the
-episode's MCP grants. The sandbox is the one the Resources Server lends the session, which the adapter never stops,
-or, when it lends none and `sandbox_provider` is set, one the adapter starts and stops itself.
+session, inside the episode's task sandbox. The sandbox is the one the Resources Server lends the session, which the
+adapter never stops, or, when it lends none and `sandbox_provider` is set, one the adapter starts and stops itself. At
+seed the Agent Server installs a private Python runtime with CrewAI in the sandbox; the activation runs
+[`sandbox_runner.py`](sandbox_runner.py) there under Gym's process supervisor. The crew's tools are a shell in the
+task's working directory and the tools of the episode's MCP grants, and its model is the Gym Model Server.
 
-- Harness: `crewai==1.15.34`, pinned in [`pyproject.toml`](pyproject.toml) and locked in [`uv.lock`](uv.lock).
-- Execution: in process, under an Environment Server such as `single_agent_turn`. There is no `/run` route and no
-  host path: `/v1/responses` without a seeded agent session answers 409.
+- Harness: `crewai==1.15.34`, pinned in [`pyproject.toml`](pyproject.toml) and locked in [`uv.lock`](uv.lock). The
+  sandbox runtime installs the same version, with its dependencies at this server's versions.
+- Execution: a sandboxed harness under an Environment Server such as `single_agent_turn`, as
+  [Hermes](../hermes_agent/README.md) is. There is no `/run` route and no host path: `/v1/responses` without a seeded
+  agent session answers 409, and a seed with no sandbox to run in answers 422.
 - Capability level: Observability, plus Environment tools and task sandboxes. The close bundle carries an invocation
   record with every model-call reference, tool-call records with executor timing, and the agent's sandbox record. The
   [harness conformance probes](../../scripts/harness_conformance/README.md) for `crewai` meet P0 in all eight
   scenarios.
-- Training: not qualified. `token_id_capture` is untested.
+- Training: not qualified. `token_id_capture` is untested, and the runner's report is a file that the model's own
+  commands can write.
 
 ## Configure a pairing
 
@@ -21,7 +25,11 @@ or, when it lends none and `sandbox_provider` is set, one the adapter starts and
 `resources_server: null`, so the Environment Server binds the benchmark. Keep `num_workers: 1`: sessions live in the
 process that seeded them.
 
-### Terminal-Bench 2.1, with the shell in the task sandbox
+The crew calls the Model Server, and the MCP grants, from inside the sandbox, so both must be reachable from it at the
+addresses Gym gives out. Set `use_absolute_ip: true` unless the sandbox shares the host's network: a seed whose model
+URL is a loopback address is refused for a remote provider, and only logs a warning for local Docker.
+
+### Terminal-Bench 2.1, in the task sandbox
 
 Prepare the data as the [benchmark README](../../benchmarks/terminal_bench_2_1/README.md) describes, and save this as
 `run.yaml`:
@@ -34,6 +42,7 @@ config_paths:
   - responses_api_models/vllm_model/configs/vllm_model.yaml
   - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+use_absolute_ip: true
 environment_routing_mode: taskset
 environment_server_routes:
   terminal_bench_2_1: single_agent_turn
@@ -56,10 +65,9 @@ crewai_agent:
 ```
 
 Put `policy_base_url`, `policy_api_key` and `policy_model_name` in `env.yaml`, and export `OPENSANDBOX_DOMAIN` and
-`OPENSANDBOX_API_KEY`. The crew calls the Model Server from the Agent Server, so the task sandbox never needs to
-reach Gym: `use_absolute_ip` is not required. The benchmark declares `crewai_agent` in its `allowed_agents`.
-Materialized task rows take no request overrides, so put a per-call output cap on the Model Server
-(`sampling_overrides: {max_tokens: 8192}`) rather than on `gym eval run`:
+`OPENSANDBOX_API_KEY`. The benchmark declares `crewai_agent` in its `allowed_agents`. Materialized task rows take no
+request overrides, so put a per-call output cap on the Model Server (`sampling_overrides: {max_tokens: 8192}`) rather
+than on `gym eval run`:
 
 ```bash
 gym env start --config run.yaml
@@ -71,13 +79,16 @@ gym eval run --no-serve --config run.yaml \
 
 Swapping the benchmark changes configuration only. This composition runs
 [`example_single_tool_call`](../../resources_servers/example_single_tool_call/README.md) with its tools exposed over
-MCP, and no sandbox:
+MCP. That benchmark lends no sandbox, so the agent starts its own from `sandbox_provider`, here a Docker container:
 
 ```yaml
 config_paths:
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
   - responses_api_agents/crewai_agent/configs/crewai_agent.yaml
   - responses_api_models/vllm_model/configs/vllm_model.yaml
+  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
+
+use_absolute_ip: true
 
 example_single_tool_call:
   resources_servers:
@@ -98,6 +109,14 @@ example_single_tool_call_single_agent_turn:
         type: responses_api_agents
         name: crewai_agent
       resources_tool_transports: [mcp]
+
+crewai_agent:
+  responses_api_agents:
+    crewai_agent:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /workspace
 ```
 
 ```bash
@@ -109,44 +128,57 @@ gym eval run --no-serve --config run.yaml --agent crewai_agent \
 
 | Call | What the adapter does |
 | --- | --- |
-| Seed (`/v1/agent_sessions`) | Lists the tools of each MCP grant, then connects to the lent sandbox, or starts its own with `sandbox_config`, and uploads the shell's runner to `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory. |
-| Activation (`/ng-rollout/<capture key>/v1/responses`) | Builds one CrewAI agent and one task from the request and runs `Crew.akickoff()` once. Identical retries join the same run; a different request answers 409. |
-| Close (`/v1/agent_sessions/close`) | Cancels the crew's calls in flight and fails its later ones, cancels the activation, kills shell commands still running, removes the session directory, then disconnects from a lent sandbox or stops its own. Returns the observations. |
+| Seed (`/v1/agent_sessions`) | Connects to the lent sandbox, or starts its own from `sandbox_config`, then installs the CrewAI runtime unless one with the same key is already there, and stages the runner's files. A failed install releases a lent sandbox and stops the agent's own. |
+| Activation (`/ng-rollout/<capture key>/v1/responses`) | Uploads the activation's input to `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory, and runs the runner under Gym's process supervisor with the run's deadline. The runner builds one CrewAI agent and one task and runs `Crew.akickoff()` once. Identical retries join the same run; a different request answers 409. |
+| Close (`/v1/agent_sessions/close`) | Stops the runner through the supervisor, which reports when the runner's process group is gone, reads the runner's report, removes the session directory, then disconnects from a lent sandbox or stops its own. Returns the observations. |
 
-CrewAI 1.15 runs its agent loop as a Flow whose steps call the model and the tools synchronously from worker threads
-of the event loop's default executor, even under `akickoff()`. Each of those calls is handed back to the event loop,
-so model requests use Gym's aiohttp client and commands use the session's sandbox connection, and close can cancel
-them.
+The supervisor sends the runner `SIGTERM` at the deadline, on close and on a rollout stop. The runner then cancels the
+crew's calls in flight, kills a running shell command, and writes its report before it exits.
+
+### Runtime
+
+The runtime is a pinned standalone CPython with CrewAI, `aiohttp` and `mcp` installed at this server's versions,
+built by the Agent Server for the sandbox's architecture and C library with
+[`SandboxPythonRuntime`](../../nemo_gym/agents/utils/sandbox_python.py) and cached under `sandbox_python` in Gym's
+`cache_dir`. Building needs `uv` on the Agent Server and a wheel of every dependency for the sandbox's platform. The
+sandbox needs no Python, network or `uv` of its own. The runtime lives in `/tmp/nemo-gym-crewai-runtime-<key>`,
+outside the task directory and `HOME`, and a later session in the same sandbox reuses it.
+
+The runner gives CrewAI a private `HOME` and data directory in the session directory, switches off its telemetry,
+trace upload and PyPI version check, and starts shell commands with the task's own environment.
 
 ### Model calls
 
 Every CrewAI model call, including the summarization CrewAI runs when a conversation nears the model's context
-window, is one Chat Completions request to the Model Server's rollout-prefixed route
+window, is one Chat Completions request from the sandbox to the Model Server's rollout-prefixed route
 (`/ng-rollout/<capture key>[/training-token-capture]/v1/chat/completions`), with `x-session-id` set to the invocation
 ID and the Model Server's cookies sent back. HTTP 408, 425, 429 and 5xx are retried `max_model_retries` times with
 backoff; CrewAI also retries a rate-limited call up to three times on its own. CrewAI's own message keys, such as
 `cache_breakpoint`, are dropped before the request. Reasoning that the model returns is kept in the transcript; CrewAI
 does not send it back in later turns.
 
-CrewAI's telemetry, trace upload, PyPI version check and replay database in the user's home are switched off when
-the adapter imports CrewAI.
+CrewAI 1.15 runs its agent loop as a Flow whose steps call the model and the tools synchronously from worker threads,
+even under `akickoff()`. The runner hands each of those calls to its event loop, so the stop can cancel them.
 
 ### Tools
 
 | Tool | Source | Behavior |
 | --- | --- | --- |
-| `shell` | `SandboxAccess`, or the agent's own sandbox | Each call runs a fresh `bash` in the task directory with the owner's `SandboxAccess.env`, so `cd` and variables do not carry over. The command runs in a process group of its own and is killed with it after `shell_timeout_seconds`. Its combined stdout and stderr go to a file, so a background process it leaves cannot hold the exec open; background processes survive the command as task services. The model sees the output (head and tail beyond `shell_max_output_bytes`) and the exit code. |
-| Each tool of an `mcp` grant | `tool_accesses` | Listed at seed with the grant's URL and headers; each call opens a fresh MCP session over Gym's aiohttp client, as CrewAI's own MCP tools open a fresh client per call. Tools keep their own names, which verifiers compare, rather than CrewAI's server-prefixed names. A server error result reaches the model as a CrewAI `ToolFailure`. |
+| `shell` | The task sandbox | Each call runs a fresh `bash` in the task directory with the task's environment and the owner's `SandboxAccess.env`, so `cd` and variables do not carry over. The command runs in a process group of its own and is killed with it after `shell_timeout_seconds`. Its combined stdout and stderr go to a file, so a background process it leaves cannot hold the call open; background processes survive the command as task services. The model sees the output (head and tail beyond `shell_max_output_bytes`) and the exit code. |
+| Each tool of an `mcp` grant | `tool_accesses` | Listed when the activation starts, with the grant's URL and headers; each call opens a fresh MCP session from the sandbox, as CrewAI's own MCP tools open a fresh client per call. Tools keep their own names, which verifiers compare, rather than CrewAI's server-prefixed names. A server error result reaches the model as a CrewAI `ToolFailure`. |
 
-The task image needs `bash`, `head`, `tail`, `wc` and `sleep`; nothing is installed in the sandbox.
+The session token in each grant is readable inside the sandbox; it gives access only to that episode's tools.
 
-Seeds the adapter cannot serve answer 422: a required grant other than `mcp`, a sandbox connection other than
-`direct`, a relative `workdir` (lent or in `sandbox_config`), a `SandboxAccess.user` override, and tool names that collide (with `shell` or with
-each other) after CrewAI sanitizes them. A required MCP grant that does not list its tools fails the seed with 500,
-which the Environment Server retries; an optional one is skipped with an `mcp_server_skipped` gap.
+Seeds the adapter cannot serve answer 422: a required grant other than `mcp`, no lent sandbox and no
+`sandbox_provider`, a sandbox connection other than `direct`, a relative `workdir` (lent or in `sandbox_config`), a
+`SandboxAccess.user` override, and a loopback model URL for a remote sandbox provider.
+Activations that ask for tools the grants cannot provide answer 422: tool names that collide (with `shell` or with each
+other) after CrewAI sanitizes them, and request tools that no grant serves. A required MCP grant that does not list its
+tools fails the activation with 503 before the first model call, which the Environment Server retries; an optional one
+is skipped with an `mcp_server_skipped` gap.
 
-A sandbox or MCP grant that fails underneath the crew stops it at its next call, and the activation answers 503, so
-the episode is retried instead of graded.
+An MCP grant or the sandbox's `bash` that fails underneath the crew stops it at its next call, and the activation
+answers 503, so the episode is retried instead of graded.
 
 ### Request fields
 
@@ -164,11 +196,12 @@ the episode is retried instead of graded.
 
 The response holds the crew's transcript: reasoning items, assistant messages, function calls and the tool results
 CrewAI sent to the model. Usage is the sum over every model call, or unknown with a `model_call_usage_unavailable`
-gap when one call reported none. A run that hits `timeout` answers `incomplete` with its partial work, which is graded.
-A final answer cut off at the output cap answers `incomplete` with `max_output_tokens`. A failed model request answers
-`failed` with `ng_agent_outcome` naming `model_request_error` and its status; a transport failure names
-`model_transport_error`; any other CrewAI error is `unknown`. When CrewAI reaches `max_iter` it asks the model for a
-final answer, and the run counts as completed, as CrewAI counts it.
+gap when one call reported none. A run that hits `timeout` answers `incomplete` with its partial work, which is graded;
+a rollout stop does the same and adds its `ng_rollout_stop` marker. A final answer cut off at the output cap answers
+`incomplete` with `max_output_tokens`. A failed model request answers `failed` with `ng_agent_outcome` naming
+`model_request_error` and its status; a transport failure names `model_transport_error`; any other CrewAI error is
+`unknown`. When CrewAI reaches `max_iter` it asks the model for a final answer, and the run counts as completed, as
+CrewAI counts it.
 
 Close returns an `AgentObservationBundle` from `crewai_agent` with one `AgentInvocation` (its status, every model
 call's response ID and the conversation) and a `ToolCallObservation` per tool call with executor timing and status:
@@ -176,13 +209,14 @@ a nonzero exit is `failed`, a deadline is `timeout`. CrewAI does not pass a call
 joined to the model's calls by name and arguments; an execution that cannot be joined is a
 `tool_call_identity_unavailable` gap. Cached and reasoning token counts that a call does not report are gaps. A close
 before any activation returns an `observation_capture_failed` gap; a close that interrupts a run adds
-`agent_activation_interrupted`.
+`agent_activation_interrupted`, and a run that hits its deadline adds `agent_run_timeout`.
 
-The bundle also holds the agent's `SandboxObservation` of the sandbox it used. Its outcome is how the crew's run
-ended: `completed`, `failed` with the invocation's error type, `timeout` at the run's deadline, or `cancelled` when
-close came before the run finished. A failed provider teardown makes it `sandbox_error`. Close sends no trajectory of
-its own: rollout collection builds the turns from the captured calls, and joins every call that carried the session
-header to the invocation, including failed attempts that have no response ID.
+The bundle also holds the agent's `SandboxObservation` of the sandbox the crew ran in. Its outcome is how the crew's
+run ended: `completed`, `failed` with the invocation's error type, `timeout` at the run's deadline, `cancelled` when
+close came before the run finished, or `oom` when the provider confirms the runner was killed for memory. A sandbox
+the agent started and stopped has `teardown_confirmed`. Close reports `cleanup_confirmed` from the supervisor's
+receipt and sends no trajectory of its own: rollout collection builds the turns from the captured calls, and joins
+every call that carried the session header to the invocation, including failed attempts that have no response ID.
 
 ## Configuration
 
@@ -198,23 +232,23 @@ header to the invocation, including failed attempts that have no response ID.
 | `shell_timeout_seconds` | 600 | Deadline for one command. |
 | `shell_max_output_bytes` | 30000 | Command output shown to the model. |
 | `mcp_timeout_seconds` | 300 | Deadline for one MCP listing or call. |
-| `concurrency` | 16 | Crews running at once. Each model or tool call in flight holds a default-executor thread. |
+| `concurrency` | 16 | Crews running at once. |
 | `sandbox_provider` | `null` | Provider block for the agent's own sandbox, used only when the Environment Server lends none. |
-| `sandbox_config` | `{}` | `SandboxSpec` fields for that sandbox; `workdir` defaults to `/app`, `ttl_s` to `timeout` plus 600. |
+| `sandbox_config` | `{}` | `SandboxSpec` fields for that sandbox; `workdir` defaults to `/app`, `ttl_s` to `sandbox_install_timeout_seconds` plus `timeout` plus 600. |
+| `sandbox_install_timeout_seconds` | 900 | Time limit for installing the runtime at seed. |
 | `session_close_timeout_seconds` | 60 | Budget for each close step. |
 
 ## Limitations
 
-- A seed without `SandboxAccess` or `sandbox_provider` runs with grant tools only.
-- No host path or `/run` route.
-- `SandboxAccess.user` is refused: the shell's session files are written as the sandbox's default user.
+- No host path or `/run` route, and no session without a sandbox.
+- `SandboxAccess.user` is refused: the runtime and the session's files are written as the sandbox's default user.
 - Direct HTTP tool grants are not consumed; a required one is refused and an optional one is skipped.
+- The runner and the model's shell commands run as the same user in the same sandbox. A command such as
+  `pkill python3` can stop the runner, and a command can write the runner's report.
 - Tool results that CrewAI never sent to the model (the run ended right after the call) are missing from the
   transcript; their tool-call records keep the output.
 - A tool name that CrewAI's sanitizer changes (for example `getWeather` to `get_weather`) is offered to the model in
   the sanitized form; the transcript records the tool's own name.
-- CrewAI creates an encryption key for its credential store under the Agent Server user's data directory
-  (`~/.local/share/crewai/credentials`) on its first run; Gym never logs in to CrewAI.
 
 ## Tests
 
@@ -222,9 +256,10 @@ header to the invocation, including failed attempts that have no response ID.
 gym env test +entrypoint=responses_api_agents/crewai_agent
 ```
 
-The tests run real crews against a scripted Model Server, real `bash` through the local sandbox provider, and a real
-streamable-HTTP MCP server. The kill tests run on Linux only: macOS's bash 3.2 sometimes leaves a subshell of a killed
-process group running.
+The tests run real crews in the sandbox runner, with the host's CrewAI standing in for the sandbox runtime, against a
+stub Model Server, real `bash` through the local sandbox provider, and a real streamable-HTTP MCP server. The episode
+tests run on Linux only, because Gym's process supervisor needs it; so do the kill tests, because macOS's bash 3.2
+sometimes leaves a subshell of a killed process group running.
 
 The harness conformance probes give the agent its own local sandbox through `sandbox_provider` and run on Linux:
 
