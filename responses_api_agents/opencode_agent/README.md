@@ -97,8 +97,9 @@ Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
 non-root images must preinstall them. System `rg` is a best-effort optimization:
 setup tries apt-get or apk as root, but only warns if it is unavailable. OpenCode
-can then download ripgrep on demand; offline images should preinstall it.
-Cached matching OpenCode runtimes need no runtime download. Task dependencies are preserved.
+can then download ripgrep on demand; offline images should preinstall it, or pin one
+(see [Owner extensions](#owner-extensions)). Cached matching OpenCode runtimes need no
+runtime download. A pinned binary is never downloaded. Task dependencies are preserved.
 
 Local and sandbox execution share `runtime.OPENCODE_VERSION` and the model-call
 correlation plugin. The plugin is uploaded into each sandbox when model-call
@@ -120,7 +121,7 @@ The CLI must exit before
 its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
-but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
+but permits connection release. A successful close fences the session and keeps its saved reply for `session_close_retry_window_seconds` (default 300).
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
@@ -134,8 +135,9 @@ the task environment hook before accepting a gradable result. A missing or inval
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one text task, optional system/developer text and
-`instructions`. Unsupported controls, images, history replay and required direct-HTTP
-tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
+`instructions`. Request `temperature` and `top_p` are applied to every OpenCode agent
+(see [Owner extensions](#owner-extensions)). Other controls, images, history replay and
+required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
 fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
@@ -144,15 +146,21 @@ their status: a required grant that did not connect fails the activation, and an
 reported as an `mcp_server_skipped` gap. A run that called the model but left no readable status
 also fails, because nothing confirms its required tools; a run that failed for another reason keeps
 that cause. `context_window` and `max_output_tokens` are independent
-config settings; leave room for the prompt in the served model's context. Configure
-sampling on the Gym model server. Request-level overrides are not silently ignored.
+config settings; leave room for the prompt in the served model's context. Request-level overrides
+are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
+so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
+disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
+adapter then omits `tools` and passes `permission` exactly as given.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
 gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
-training token-ID/logprob support or benchmark accuracy.
+training token-ID/logprob support or benchmark accuracy. Sandbox observations use the shared
+`FailureStage` vocabulary: execution is `agent`, while OpenCode’s own setup failure events use `seed`.
+An existing failure stage is preserved when forwarded; scoring and retries belong to the caller’s outcome policy.
 
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
@@ -202,7 +210,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | Unsupported controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
@@ -255,7 +263,11 @@ confirmation. A final negative termination receipt fails the activation and skip
 verification; close releases the borrowed connection with `cleanup_confirmed: false`.
 The task sandbox remains available to its owner for verification or teardown.
 
-Ordinary single-turn sessions keep their existing protocol and evidence shape.
+Ordinary single-turn sessions keep their existing protocol. With `return_session_trajectory:
+true`, their close also returns the session's trajectory (one turn per saved assistant reply,
+compaction summaries excluded), so rollout collection joins captured calls to those turns and
+the summary call stays on the compaction record. Without it, collection builds one turn per
+captured call, and the summary call of a compaction is counted as a step too.
 
 ### Offline sandbox runtimes and native model identity
 
@@ -270,3 +282,125 @@ exist; the sandbox owner supplies mounts or image contents.
 `dummy_model` compatibility alias. Benchmarks can set the native ID to retain
 family-specific prompts, tools and defaults behind a Gym model route; the route
 still controls the actual provider/model. Native ID changes can affect scores.
+
+## Owner extensions
+
+These sandbox-session settings are off by default; unset, sessions behave as described
+above. Local calls do not use them. Each is general-purpose: the sandbox owner (usually
+the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
+checks or reads them without any benchmark-specific logic. Seed refuses an unusable
+setting or owner-supplied input with `AgentSeedRejectedError`, a terminal 422, so the
+episode fails once with the reason; a failure a retry can fix stays a 5xx. In the
+sandbox, their checks, staging, import and export need only a POSIX shell and coreutils
+(`sha256sum`, and `tar` for an archive); the agent server reads OpenCode's session store
+and checks archive members itself. OpenCode's `export` and `import` get
+`sandbox_path_prefix` ahead of `PATH`, as `run` does.
+
+### Request sampling
+
+A request's `temperature` and `top_p` reach every model call OpenCode makes for the
+activation. OpenCode 1.17.11 gives each agent its own sampling and none inherits from
+`build` (`title` fixes temperature 0.5), so the adapter sets both on all built-in agents:
+`build`, `plan`, `general`, `explore`, `compaction`, `title` and `summary`. An agent
+name OpenCode does not define would add an agent, so the list is version-specific: with
+another `opencode_version` (swe_together pins 1.15.13), a request `temperature` or `top_p`
+returns 422, as it did before the adapter applied request sampling.
+OpenCode sends `temperature` only for models that declare the capability, so a request
+temperature also sets `temperature: true` on the adapter's model entry. Without these
+fields the generated configuration is unchanged. Non-finite values return 422.
+
+### Owner-staged plugins
+
+`plugins` lists absolute sandbox paths of OpenCode plugin files staged by the sandbox
+owner. They load after Gym's own plugins (the observability header plugin when model-call
+capture is on, then `task_environment.mjs`), in the given order, in every activation.
+Seed checks that each path is a regular file and returns 422 otherwise. Their correctness
+is the owner's responsibility: OpenCode logs a plugin that fails to load and continues,
+so a plugin that matters must fail closed through its own receipt, as
+`task_environment.mjs` does with `task-environment.ready`. The adapter's environment is
+fixed, so plugins should read their settings from files beside them (`import.meta.url`).
+
+### Pinned offline runtime bundle
+
+The OpenCode binary is pinned with `sandbox_executable_path` and
+`sandbox_executable_sha256` (see
+[Offline sandbox runtimes and native model identity](#offline-sandbox-runtimes-and-native-model-identity));
+a binary that fails its checks is a retryable setup error. ripgrep and the plugin
+dependencies, which OpenCode would otherwise download at runtime, are pinned alike: an
+existing file inside the sandbox (`sandbox_<item>_path`, for example on a mounted cache or
+staged by the sandbox owner), plus `sandbox_<item>_sha256`, which is required with the
+path and is the only way to set one. The adapter copies the file, hashes the copy and
+uses only those bytes. A digest or health-check mismatch fails seed with 422. A missing
+file, or a health check that times out or is ended by a signal (such as the OOM
+killer's), is a retryable setup error.
+
+| Item | Fields | Where it goes | How to build it |
+| --- | --- | --- | --- |
+| ripgrep | `sandbox_ripgrep_path`, `sandbox_ripgrep_sha256` | `XDG_CACHE_HOME/opencode/bin/rg` in the session's private directories, where OpenCode 1.17.11 looks after `PATH`; it stays off task shells' `PATH`. Must answer `--version`. Replaces the installer's best-effort package install | ripgrep 15.1.0, which OpenCode 1.17.11 would download (`ripgrep-15.1.0-<arch>-unknown-linux-musl`) |
+| Plugin dependencies | `sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256` | Unpacked into `XDG_CONFIG_HOME/opencode` before launch by the sandbox's `tar`, once the agent server has checked a download of the verified copy: members must be files, folders or links that stay inside it, no member path or link target may pass through a link, and none may carry setuid, setgid or sticky bits; npm's `node_modules/.bin` links pass | See below |
+
+With any plugin configured (the adapter always configures `task_environment.mjs`),
+OpenCode 1.17.11 installs `@opencode-ai/plugin` into its config directory at every start
+unless `node_modules` exists and `package-lock.json` lists every dependency in
+`package.json`. Each session has a fresh private config directory, so without the bundle
+every start downloads about 63 MB from the npm registry; offline, start stalls about
+70 s before the install fails. To build the archive, start the pinned OpenCode once
+online with a fresh `XDG_CONFIG_HOME` and any plugin configured, then archive that
+directory's dependency files:
+
+```bash
+tar -C "$XDG_CONFIG_HOME/opencode" -czf opencode-1.17.11-plugin-dependencies.tar.gz \
+  package.json package-lock.json node_modules
+sha256sum opencode-1.17.11-plugin-dependencies.tar.gz
+```
+
+An `rg` already on the task `PATH` takes precedence over the pinned copy, as in stock
+OpenCode.
+
+### Session exports
+
+`export_dir` is an absolute sandbox directory chosen by the sandbox owner, outside the
+adapter's `/tmp/nemo-gym-opencode*` storage and outside the task workdir: seed refuses one
+that is the workdir, inside it or above it (422 when the paths show it, a setup error
+when only resolving links in the sandbox does). After harness termination is confirmed
+and before the session directory is removed, each activation's capture writes there:
+- `sessions.json`: the stored session tree, `[{"id", "parent_id"}]` in creation order,
+  written first so the owner can tell a failed export from an absent session;
+- `<session id>.json`: `opencode export <session id>` for the root and every child
+  session, each written atomically. A stale copy is removed before each export;
+- `<root id>.events.jsonl` (`<root id>.activation-<n>.events.jsonl` in continuation
+  sessions): the run's `--format json` event log, when one exists.
+
+The session tree comes from the session store that the agent server copies out for the
+capture. Each session is exported by a command of its own, with the session's private
+directories, from the task workdir, without the run's configuration, so no plugin loads
+again. An export counts only if OpenCode exits 0 and writes a JSON object. Writing shares
+the capture step's budget (`session_close_timeout_seconds`) and ends a tenth of it early;
+the provider stops an export still running then. A failure, including an exhausted
+budget, never fails the activation or blocks release: it is reported as an
+`export_dir_write_failed` observation gap whose detail names each failed session and
+why. Files the model's tools can reach are not a trusted
+channel; pick a fresh directory. The owner can then grade OpenCode's own transcript
+after agent close. In a sandbox the agent owns, the files last only as long as the
+provider keeps the sandbox's files after close: a provider that deletes the sandbox
+deletes them too.
+
+### Session import
+
+`session_import_path` is an absolute sandbox path where the owner may stage an OpenCode
+session export. If the file exists at seed, the adapter runs `opencode import` with the
+session's private directories, without plugins, from the task workdir with `PWD` set to
+it: OpenCode binds an imported session to the importing process's directory, and a
+session imported elsewhere runs its tools there and can hang. The agent server then reads
+the imported session from a copy of the session store. The first activation then
+continues that session with `--session`, and the imported messages are passed as
+`previous_message_ids`, so they stay out of output, usage and the trajectory, as in
+multi-turn continuation. A missing file leaves the session unchanged. An export OpenCode
+cannot import, or one that does not yield exactly one root session, fails seed with 422;
+an import that times out or is ended by a signal is a retryable setup error.
+
+### Working directory
+
+OpenCode takes its directory from `PWD` before the process working directory. `run`,
+`export` and `import` all start in the task workdir with `PWD` set to it (for `run`, the
+harness runner's `cd` sets it), so all three bind the session to the same directory.

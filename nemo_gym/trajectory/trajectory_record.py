@@ -25,7 +25,7 @@ from pydantic import (
 )
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.failure_kinds import validate_failure_kind
+from nemo_gym.core.failure_kinds import FailureStage, validate_failure_kind
 from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import ModelOperationObservation
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+NG_AGENT_SANDBOX_OBSERVATION_KEY = "ng_agent_sandbox_observation"
 # The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
 # collector's canonical projection.
 NG_TRAJECTORY_KEY = "ng_trajectory"
@@ -351,6 +352,9 @@ class SandboxObservation(ObservationModel):
     """Outcome and lifetime resource usage reported by a sandbox-owning harness."""
 
     kind: Literal["sandbox"] = "sandbox"
+    stage: FailureStage | None = Field(
+        default=None, description="Originating execution stage, when known to the caller."
+    )
     role: Literal["agent", "verifier", "environment"]
     provider: Optional[str] = None
     sandbox_id: Optional[str] = None
@@ -369,6 +373,10 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    failure_id: Optional[str] = Field(
+        default=None, description="Canonical failure event in the request failure report."
+    )
     observed_client_interval_s: Optional[float] = Field(
         default=None,
         ge=0,

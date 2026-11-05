@@ -77,7 +77,9 @@ score is masked as `judge_failed`.
 Assistant-attributed simulation failures, including Assistant contract
 rejections and non-session 4xx responses, receive an unmasked reward of zero.
 Simulation failures that NeMo User Sim attributes outside the Assistant receive
-a masked reward of zero. Transport failures, participant timeouts, session 404 and 409
+a masked reward of zero. Their `failure_kind` is the reported `failure_class`
+(prefixed `usersim:` unless it is a shared name), or `usersim:simulation_failed`
+when none is reported. Transport failures, participant timeouts, session 404 and 409
 responses, and 408, 425, 429, and 5xx responses produce no reward; they are
 written to `rollouts_failures.jsonl`. Guarded health rows are rejected at seed
 time because the pinned NeMo User Sim revision cannot run their user-side tool
@@ -88,12 +90,13 @@ activation safely.
 Each verification model request is bounded by
 `model_call_timeout_seconds` (300 seconds by default), and the full sequential
 evaluation is bounded by `evaluation_timeout_seconds` (1200 seconds by
-default). Seeded Resources Server sessions expire after `session_ttl_seconds`
+default). Seeded resources sessions expire after `session_ttl_seconds`
 (1980 seconds by default).
 
 The Environment Server registers cleanup before every seed request and closes
-participant and Resources Server sessions on every outcome. Closing is
-idempotent, and a short-lived tombstone prevents a delayed seed from recreating
-closed state. A verify for an unknown or closed Resources Server session returns
-a masked sample with `failure_kind` `session_lost`, and one whose seed outlived
+participant and resources sessions on every outcome. Closing is
+idempotent, and a fence that expires after `session_ttl_seconds` prevents a
+delayed seed from recreating closed state. A verify for an unknown or closed
+resources session returns a masked sample with `failure_kind`
+`session_lost`, and one whose seed outlived
 `session_ttl_seconds` a masked sample with `session_expired`.
