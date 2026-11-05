@@ -277,7 +277,7 @@ class TestResourcesSessions:
         # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
         assert not server.checkpoint_participant.is_open("rs-1")
         assert server._session_episodes == {}
-        assert server._verified_sessions.get("rs-1")[0] == (
+        assert server.session_identity("rs-1") == (
             EPISODE_ID,
             TaskId.model_validate(_seed("rs-1")["task_id"]),
         )
@@ -292,7 +292,7 @@ class TestResourcesSessions:
         monkeypatch.setattr(
             base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
         )
-        assert server._verified_sessions.get("rs-1") is None
+        assert not server.session_is_verified("rs-1")
 
     async def test_checkpoint_retire_releases_owned_worker_and_retries_failure(self) -> None:
         server, _ = _session_server()
@@ -365,6 +365,49 @@ class TestResourcesSessions:
         assert time.monotonic() - started < 0.5
         assert (await call).result == "1"
         assert server._sessions == {"rs-1": worker}
+
+    async def test_cancelled_worker_start_remains_owned_until_close(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        started, finish_start, constructed = threading.Event(), threading.Event(), threading.Event()
+        handles = []
+
+        def start_worker(max_execution_time: int) -> _SessionHandle:
+            started.set()
+            assert finish_start.wait(15)
+            handle = _SessionHandle(max_execution_time)
+            handles.append(handle)
+            constructed.set()
+            return handle
+
+        monkeypatch.setattr("app._SessionHandle", start_worker)
+        call = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
+        close = None
+        try:
+            assert await asyncio.to_thread(started.wait, 5)
+            call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            # The constructor thread still runs after cancellation, so its future must remain discoverable.
+            assert server.has_session_state("rs-1")
+            close = asyncio.create_task(
+                server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            )
+            await asyncio.sleep(0)
+            assert not close.done()
+            finish_start.set()
+            await asyncio.wait_for(close, 15)
+            assert len(handles) == 1 and not handles[0]._proc.is_alive()
+            assert not server.has_session_state("rs-1")
+            assert server.session_is_closed("rs-1")
+        finally:
+            finish_start.set()
+            await asyncio.gather(call, *([close] if close else []), return_exceptions=True)
+            assert await asyncio.to_thread(constructed.wait, 15)
+            for handle in handles:
+                await handle.close()
 
     def test_session_contract(self) -> None:
         server, app = _session_server()
@@ -525,13 +568,13 @@ class TestResourcesSessions:
         server._sessions["rs-1"] = handle
 
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
-        assert server._resources_session_fences.get("rs-1") is None
+        assert not server.session_is_closed("rs-1")
         assert server._sessions["rs-1"] is handle
 
         handle.stoppable = True
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
         assert server._sessions == {}
-        assert server._resources_session_fences.get("rs-1") == EPISODE_ID
+        assert server.session_is_closed("rs-1")
 
     def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         server, app = _session_server()
@@ -559,29 +602,36 @@ class TestResourcesSessions:
         assert response.json()["detail"]["failure_kind"] == "session_lost"
         assert server._sessions == {}
 
-    def test_execute_racing_close_stops_its_worker(self) -> None:
-        server, app = _session_server()
-        client = TestClient(app)
-        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+    async def test_execute_racing_close_stops_its_worker(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        executed, closed = threading.Event(), threading.Event()
         started_workers = []
         real_exec = _SessionHandle.exec
 
-        def exec_then_close(handle: _SessionHandle, code: str):
+        def exec_then_wait_for_close(handle: _SessionHandle, code: str):
             started_workers.append(handle._proc)
             result = real_exec(handle, code)
-            # The close lands while the call is still running, after it started the session's first worker.
-            server._resources_session_fences.fence("rs-1", EPISODE_ID)
+            executed.set()
+            assert closed.wait(15)
             return result
 
-        _SessionHandle.exec = exec_then_close
+        monkeypatch.setattr(_SessionHandle, "exec", exec_then_wait_for_close)
+        call = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1 + 1")))
         try:
-            response = client.post("/execute_python", json={"code": "1 + 1"})
+            assert await asyncio.to_thread(executed.wait, 15)
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+            closed.set()
+            with pytest.raises(ResourcesSessionLostError):
+                await call
+            assert server._sessions == {}
+            assert not started_workers[0].is_alive()
         finally:
-            _SessionHandle.exec = real_exec
-
-        assert response.status_code == 404
-        assert server._sessions == {}
-        assert not started_workers[0].is_alive()
+            closed.set()
+            await asyncio.gather(call, return_exceptions=True)
+            await server.release_session_state("rs-1")
 
     def test_verify_then_close(self) -> None:
         server, app = _session_server()
@@ -595,7 +645,7 @@ class TestResourcesSessions:
         assert not worker.is_alive()
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
 
-    def test_episode_seed_cannot_take_over_existing_agent_run_worker(self) -> None:
+    def test_typed_seed_cannot_take_over_existing_cookie_worker(self) -> None:
         server, app = _session_server()
         client = TestClient(app)
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
@@ -611,7 +661,7 @@ class TestResourcesSessions:
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {} and not worker._proc.is_alive()
 
-    def test_agent_run_seed_keeps_working(self) -> None:
+    def test_legacy_seed_keeps_working(self) -> None:
         server, app = _session_server()
         client = TestClient(app)
 
@@ -623,9 +673,7 @@ class TestResourcesSessions:
         assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {}
 
-    def test_agent_run_reseed_retries_failed_worker_release_before_reset(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_cookie_reseed_retries_failed_worker_release_before_reset(self, monkeypatch: pytest.MonkeyPatch) -> None:
         server, app = _session_server()
         client = TestClient(app, raise_server_exceptions=False)
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200

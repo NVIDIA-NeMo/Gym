@@ -132,6 +132,9 @@ Python process that imports the server module once, so they do not inherit the s
 milliseconds. The server's first worker also waits while the forkserver starts and imports the module and its numerical
 libraries; later calls reuse the same worker and variables.
 
+Cancelling the first tool request does not abandon a worker still starting in a thread. The server keeps that
+startup owned; close and checkpoint retirement wait for it, then stop the worker.
+
 - Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
   `/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when
   `/verify` never ran, escalating to SIGTERM and then SIGKILL for a worker still running code. A worker that survives
@@ -139,7 +142,7 @@ libraries; later calls reuse the same worker and variables.
   `episode_id`, succeeds; a close with another `episode_id` gets 409. A seed that arrives after its session closed is
   refused with 409 for `session_close_retry_window_seconds`. An `execute_python` call for a closed session gets 404
   with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with reward 0.
-- The deprecated agent-run seed sent by an agent's own `/run` takes the row itself and stops any previous worker before
+- Under an Agent's own `/run`, the cookie seed takes the row itself and stops any previous worker before
   resetting the same cookie ID. The first tool call starts a new worker; `/verify` (or `/end_session`) stops it. After
   `/verify`, an `execute_python` call on that cookie gets 404 with `failure_kind: session_lost` until the cookie is
   seeded again or `session_close_retry_window_seconds` passes.

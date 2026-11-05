@@ -204,6 +204,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
     config: PythonExecutorResourcesServerConfig
 
     _sessions: Dict[str, _SessionHandle] = PrivateAttr(default_factory=dict)
+    _starting_sessions: Dict[str, asyncio.Task[_SessionHandle]] = PrivateAttr(default_factory=dict)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -220,12 +221,24 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         loop = asyncio.get_running_loop()
         # Close awaits the worker's stop before marking the fence. Serialize publication with that whole operation,
         # so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
-        async with self._resources_session_locks.locked(sid):
-            if self._resources_session_fences.get(sid) is not None or sid in self._verified_sessions:
+        async with self.session_lock(sid):
+            if self.session_is_closed(sid) or self.session_is_verified(sid):
                 raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
             try:
                 if sid not in self._sessions:
-                    self._sessions[sid] = await asyncio.to_thread(_SessionHandle, self.config.max_execution_time)
+                    if sid not in self._starting_sessions:
+                        self._starting_sessions[sid] = asyncio.create_task(
+                            asyncio.to_thread(_SessionHandle, self.config.max_execution_time)
+                        )
+                    starting = self._starting_sessions[sid]
+                    # Cancelling the HTTP request cannot stop its constructor thread. Keep that task owned
+                    # until a later call or cleanup collects the worker it creates.
+                    try:
+                        self._sessions[sid] = await asyncio.shield(starting)
+                    except Exception:
+                        self._starting_sessions.pop(sid, None)
+                        raise
+                    self._starting_sessions.pop(sid, None)
                 handle = self._sessions[sid]
             except Exception as e:
                 return ExecutePythonResponse(success=False, stdout="", stderr="", error_message=str(e))
@@ -248,7 +261,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 stderr="",
                 error_message=str(e),
             )
-        if self._resources_session_fences.get(sid) is not None:
+        if self.session_is_closed(sid):
             # The session closed while this call ran, so stop the worker the call may have started.
             await self._cleanup_session(sid)
             raise ResourcesSessionLostError(f"math_with_code session {sid} closed during the call")
@@ -256,15 +269,15 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
 
     async def end_session(self, request: Request) -> ExecutePythonResponse:
         session_id = request.session[SESSION_ID_KEY]
-        await self._cleanup_session(session_id)
+        async with self.session_lock(session_id):
+            await self._cleanup_session(session_id)
         return ExecutePythonResponse(success=True, stdout="", stderr="")
 
     def has_session_state(self, session_id: str) -> bool:
-        return session_id in self._sessions
+        return session_id in self._sessions or session_id in self._starting_sessions
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Release state from a prior agent-run seed; the worker still starts on the first tool call."""
-        await self.release_session_state(session_id)
+        """The worker starts on the first tool call; the base releases a prior cookie run."""
 
     async def release_session_state(self, session_id: str) -> None:
         """Release the worker, retaining its reference if cleanup fails."""
@@ -272,13 +285,13 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: PythonMathVerifyRequest) -> PythonMathVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if self._resources_session_fences.get(session_id) is not None:
-            # An Environment Server verifies before it closes, so this verify is out of order; mask it.
-            return PythonMathVerifyResponse(
-                **(body.model_dump() | lost_session_verification(f"math_with_code session {session_id} is closed"))
-            )
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+                return PythonMathVerifyResponse(
+                    **(body.model_dump() | lost_session_verification(f"math_with_code session {session_id} is closed"))
+                )
 
-        try:
             expected = body.expected_result
 
             # Extract actual answer from final assistant message
@@ -317,16 +330,20 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 extracted_answer=actual,
                 accuracy=accuracy,
             )
-        finally:
-            # A successful verify reply ends checkpoint ownership. Keep failures retriable, and serialize
-            # cleanup with a tool's first allocation so no worker can be published after we release it.
-            async with self._resources_session_locks.locked(session_id):
-                await self.release_session_state(session_id)
-                if session_id not in self._verified_sessions:
-                    self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), None))
 
     async def _cleanup_session(self, session_id: str) -> None:
         """Stop the session's worker process; one that survives stays registered, so a later cleanup retries it."""
+        starting = self._starting_sessions.get(session_id)
+        if starting is not None:
+            try:
+                self._sessions[session_id] = await asyncio.shield(starting)
+            except Exception:
+                # A failed constructor returned no worker. Retrieving its exception also avoids leaving an
+                # unobserved task when its requesting HTTP call was cancelled.
+                logger.warning("Python worker startup failed for resources session %s", session_id, exc_info=True)
+                self._starting_sessions.pop(session_id, None)
+            else:
+                self._starting_sessions.pop(session_id, None)
         handle = self._sessions.get(session_id)
         if handle is not None:
             await handle.close()
