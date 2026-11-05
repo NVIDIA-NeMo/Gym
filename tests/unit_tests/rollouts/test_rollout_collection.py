@@ -11528,6 +11528,28 @@ class TestTurnsFromModelCalls:
         assert turn.reasoning_content == "think"
         assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
 
+    def test_messages_calls_split_the_content_blocks_and_their_thinking(self) -> None:
+        # Claude Code calls the Model Server's Anthropic Messages API.
+        thinking = {"type": "thinking", "thinking": "inspect first"}
+        tool_use = {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}
+        text = {"type": "text", "text": "Answer: 18"}
+        calls = [
+            self._call(
+                "first", {"type": "message", "role": "assistant", "content": [thinking, tool_use]}, started_at=1.0
+            ),
+            self._call("second", {"type": "message", "role": "assistant", "content": [text]}, started_at=2.0),
+        ]
+
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["first", "second"])], calls, resolved=True
+        )
+
+        assert turns[0].reasoning_content == [thinking]
+        assert turns[0].answer == [tool_use]
+        assert turns[1].reasoning_content is None
+        assert turns[1].answer == [text]
+        assert [turn.step_count for turn in turns] == [0, 1]
+
     def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
         from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 

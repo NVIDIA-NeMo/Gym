@@ -14,10 +14,11 @@ To use an agent that Gym does not integrate yet, see [Add an agent that is not l
 
 ## Sandboxed harnesses
 
-These adapters run a coding harness inside a task sandbox that a Resources server provides, and are driven by the `single_agent_turn` Environment Server. Each row summarizes the adapter's README; the README is the reference for supported features, runtime requirements, and limits.
+These adapters run a harness inside a sandbox and are driven by the `single_agent_turn` Environment Server. They borrow a task sandbox when the Resources server supplies one; otherwise a configured provider creates an agent-owned sandbox. Each row summarizes the adapter's README; the README is the reference for supported features, runtime requirements, and limits.
 
 | Harness | Model API | Resources tool grants | Token IDs and logprobs | SWE-bench Pro | Terminal Bench 2.1 |
 | --- | --- | --- | --- | --- | --- |
+| BrowseComp (`browsecomp_agent`) | Responses | Direct HTTP | Preserved from Model Server responses; sandbox path qualified for evaluation only | Not declared | Not declared |
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |

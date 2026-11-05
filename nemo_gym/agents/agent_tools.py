@@ -66,7 +66,8 @@ def restricted_network_policy(provider_name: str, urls: list[str]) -> dict[str, 
         raise ValueError("Restricted network access requires the OpenSandbox network-policy provider")
     targets = set()
     for url in urls:
-        targets.add(_reachable_host(url))
+        # The egress sidecar strips a query name's trailing dot, so a rule written with one would never match.
+        targets.add(_reachable_host(url).rstrip("."))
     return {"defaultAction": "deny", "egress": [{"action": "allow", "target": t} for t in sorted(targets)]}
 
 
@@ -100,6 +101,20 @@ async def seed_mcp_servers(
     return entries
 
 
+def verification_failure_fields(response: NeMoGymResponse | None = None) -> dict[str, Any]:
+    """Forward bounded diagnostic events, including a restored response's report, without selecting a failure."""
+    from nemo_gym.core.failure_records import FailureReport
+    from nemo_gym.core.failure_transport import RequestFailureLog
+
+    log = RequestFailureLog.current() or RequestFailureLog()
+    saved = getattr(response, "failure_report", None) if response is not None else None
+    if saved is not None:
+        log.add(FailureReport.model_validate(saved))
+    report = log.report
+    # Explicit None clears any unrelated report copied from the run-request body.
+    return {"failure_report": report.model_dump(mode="json") if report.events or report.omitted else None}
+
+
 async def verify_agent_response(
     client: ServerClient,
     server: ResourcesServerRef,
@@ -115,7 +130,9 @@ async def verify_agent_response(
         server_name=server.name,
         url_path="/verify",
         cookies=cookies,
-        json=body.model_dump(mode="json") | {"response": grading_response.model_dump(mode="json")},
+        json=body.model_dump(mode="json")
+        | {"response": grading_response.model_dump(mode="json")}
+        | verification_failure_fields(grading_response),
     )
     await raise_for_status(verified)
     result = await get_response_json(verified)

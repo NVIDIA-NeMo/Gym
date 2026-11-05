@@ -219,6 +219,7 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "browsecomp_agent",
         "claude_code_agent",
         "codex_agent",
         "harbor_oracle_agent",
@@ -242,7 +243,14 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
 LEGACY_AGENT_SERVER_TYPE = "legacy_agent"
 # Kept when a single_agent_turn_legacy server falls back to a legacy_agent relay; the rest only applies to sessions.
-_LEGACY_RELAY_KEPT_KEYS = ("entrypoint", AGENT_SERVER_REF_KEY_NAME, "host", "port", "num_workers")
+_LEGACY_RELAY_KEPT_KEYS = (
+    "entrypoint",
+    AGENT_SERVER_REF_KEY_NAME,
+    "host",
+    "port",
+    "num_workers",
+    "uvicorn_reuse_port",
+)
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.

@@ -221,6 +221,18 @@ def test_verify_after_close_is_masked(tmp_path: Path) -> None:
     assert "resources-session" not in server._session_id_to_metrics
 
 
+def test_a_masked_verify_still_reports_a_timed_out_rollout(tmp_path: Path) -> None:
+    client = TestClient(_server(tmp_path).setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=_seed()).status_code == 200
+    assert client.post("/close_session", json=_close()).status_code == 200
+    body = _verify_body("Answer: Paris Confidence: 90%")
+    body["response"]["timed_out"] = True
+
+    verified = client.post("/verify", json=body).json()
+
+    assert (verified["mask_sample"], verified["timed_out"]) == (True, 1)
+
+
 def test_a_caller_that_never_seeds_is_still_graded(tmp_path: Path) -> None:
     """A verify whose session the fence never closed, here one nobody seeded, is graded from the response."""
     client = TestClient(_server(tmp_path, workspace="per_session").setup_webserver(), raise_server_exceptions=False)
