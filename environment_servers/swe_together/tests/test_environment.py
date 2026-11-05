@@ -85,6 +85,30 @@ def server(tmp_path, **updates):
     return SWETEnvironmentServer.model_construct(config=config)
 
 
+@pytest.mark.parametrize(
+    ("skip_token_capture", "activation_path"),
+    [
+        (False, "/ng-rollout/one/training-token-capture/v1/responses"),
+        (True, "/ng-rollout/one/v1/responses"),
+    ],
+)
+def test_an_episode_that_skips_token_capture_activates_the_candidate_without_the_training_tag(
+    tmp_path, skip_token_capture, activation_path
+):
+    env = server(tmp_path)
+    env.server_client = SimpleNamespace(
+        global_config_dict={
+            "token_id_capture": {"enabled": True, "all_agents": True},
+            "policy": {"responses_api_agents": {"codex_agent": {}}},
+        }
+    )
+
+    assert (
+        env._activation_path(request().model_copy(update={"skip_token_capture": skip_token_capture}))
+        == activation_path
+    )
+
+
 def state(tmp_path, decisions):
     req = request()
     value = Episode(req, req.task.task_input.task_data, tmp_path, tmp_path)
