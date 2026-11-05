@@ -19,11 +19,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextvars import ContextVar
 from datetime import date
 from typing import Any, Optional
 
 import httpx
 from big_finance_harness.tools import ToolError
+from big_finance_harness.tools import fetch_url as upstream_fetch_url
 
 from resources_servers.big_finance.local_corpus import (
     FilingRecord,
@@ -42,6 +44,20 @@ from resources_servers.big_finance.sec_cache import (
 SUBMISSIONS_URL = "https://data.sec.gov/submissions/CIK{cik:0>10}.json"
 SUBMISSIONS_PAGE_URL = "https://data.sec.gov/submissions/{name}"
 DEFAULT_LIMIT = 20
+
+# Upstream FetchUrlTool.run resolves every URL's host to refuse private addresses. A URL
+# served from the offline corpus is never requested, and resolving it fails on nodes
+# without DNS, so the check is skipped only while such a URL is being served.
+_serving_from_corpus: ContextVar[bool] = ContextVar("big_finance_serving_from_corpus", default=False)
+_upstream_check_url_safe = upstream_fetch_url._check_url_safe
+
+
+def _check_url_safe(url: str) -> None:
+    if not _serving_from_corpus.get():
+        _upstream_check_url_safe(url)
+
+
+upstream_fetch_url._check_url_safe = _check_url_safe
 
 
 def _page_records(page: dict[str, Any]) -> list[FilingRecord]:
@@ -233,5 +249,12 @@ class AsOfFetchUrlTool(CachedFetchUrlTool):
             raise ToolError(f"fetch_url refuses {url!r}: filing {accession} postdates this task's as-of date {cutoff}")
 
     async def run(self, args: dict[str, Any], as_of: Optional[date] = None) -> str:
-        await self.check_as_of(str(args.get("url") or "").strip(), as_of)
-        return await super().run(args)
+        url = str(args.get("url") or "").strip()
+        await self.check_as_of(url, as_of)
+        if self._corpus is None or not _is_sec_url(url):
+            return await super().run(args)
+        token = _serving_from_corpus.set(True)
+        try:
+            return await super().run(args)
+        finally:
+            _serving_from_corpus.reset(token)

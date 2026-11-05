@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
+import socket
 from datetime import date
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -26,7 +28,7 @@ from big_finance_harness.tools import ToolError
 
 from resources_servers.big_finance.as_of_tools import AsOfEdgarSearchTool, AsOfFetchUrlTool
 from resources_servers.big_finance.local_corpus import LocalSecCorpus, archive_accession
-from resources_servers.big_finance.sec_cache import SecHttpCache
+from resources_servers.big_finance.sec_cache import CachedFetchUrlTool, SecHttpCache
 
 
 def _json_response(url: str, payload: dict) -> httpx.Response:
@@ -252,3 +254,34 @@ async def test_offline_fetch_url_serves_the_corpus_and_refuses_the_rest(
             await fetch.run({"url": url}, as_of)
     with pytest.raises(ToolError, match="filed on 2024-02-02"):
         await fetch.run({"url": f"{_ARCHIVE}/000032019324000006/q1.htm"}, as_of)
+
+
+async def test_offline_corpus_reads_need_no_dns_while_other_fetches_keep_the_address_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    resolved: list[str] = []
+
+    def no_dns(host, *args, **kwargs):
+        resolved.append(host)
+        raise socket.gaierror(socket.EAI_AGAIN, "Temporary failure in name resolution")
+
+    monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+    _, fetch = _offline_tools(tmp_path)
+    as_of = date(2023, 11, 3)
+    sec_url = f"{_ARCHIVE}/000032019323000106/aapl-20230930.htm"
+
+    assert "Net sales were 383,285." in await fetch.run({"url": sec_url}, as_of)
+    assert resolved == []
+
+    sec_result, web_result = await asyncio.gather(
+        fetch.run({"url": sec_url}, as_of),
+        fetch.run({"url": "https://example.com/news"}, as_of),
+        return_exceptions=True,
+    )
+    assert "Net sales were 383,285." in sec_result
+    assert isinstance(web_result, ToolError) and "could not resolve 'example.com'" in str(web_result)
+    assert resolved == ["example.com"]
+
+    live = CachedFetchUrlTool(cache=SecHttpCache(cache_dir=None, use_cache=False), sec_user_agent="Test t@e.com")
+    with pytest.raises(ToolError, match="could not resolve 'www.sec.gov'"):
+        await live.run({"url": sec_url})
