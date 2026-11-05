@@ -24,24 +24,24 @@ from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    sandbox_server_url,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -49,19 +49,22 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -137,6 +140,17 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
             records.append(ToolCallObservation.model_validate(tool))
         except Exception as error:
             failed(f"tool_calls[{index}]", error)
+    for index, compaction in enumerate(raw.get("compactions") or []):
+        try:
+            event = ContextCompactionObservation.model_validate(
+                {
+                    **compaction,
+                    "model_calls": [{**ref, "model_ref": model_server} for ref in compaction.get("model_calls", [])],
+                }
+            )
+            records.append(event)
+        except Exception as error:
+            failed(f"compactions[{index}]", error)
     return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
 
 
@@ -153,6 +167,10 @@ _REMOVED_OPTIONS = [
     "model_id",
     "task",
 ]
+_REMOVED_OPTION_MESSAGE = (
+    "Stirrup config includes removed options that are no longer supported: `{name}`\n"
+    "See migration guide for details: benchmarks/gdpval/README.md"
+)
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -161,11 +179,19 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_options(cls, data: Any) -> Any:
-        removed = [f"`{name}`" for name in _REMOVED_OPTIONS if name in (data or {})]
+        removed = [name for name in _REMOVED_OPTIONS if name in (data or {})]
         if removed:
-            raise ValueError(
-                f"Stirrup config includes removed options that are no longer supported: {', '.join(removed)}\n"
-                "See migration guide for details: benchmarks/gdpval/README.md"
+            # One error per option, located at its own key, so a config check names the exact field to delete.
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError("removed_option", _REMOVED_OPTION_MESSAGE, {"name": name}),
+                        loc=(name,),
+                        input=data[name],
+                    )
+                    for name in removed
+                ],
             )
         return data
 

@@ -31,15 +31,16 @@ from frontier_finance.metrics import MetricsReport
 from frontier_finance.models import EvalItem, ItemResult, Rubric
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_resources_server import BaseVerifyResponse
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.failure_kinds import JUDGE_FAILED, VERIFIER_ERROR
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    VERIFIER_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.server_runtime import BaseVerifyResponse
 from resources_servers.finance_agent_v2.task_data import FrontierFinanceTaskFields
 
 

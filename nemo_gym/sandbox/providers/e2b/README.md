@@ -73,9 +73,10 @@ provisioning the remaining images.
 | Section | Important fields |
 | --- | --- |
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
-| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, and `strict_resources`. |
+| `create` | Default template/mapping, sandbox `timeout_s`, timeout action `auto_resume`, `secure`, `allow_internet_access`, `network` (`allow_out`/`deny_out`), `custom_extension_params` (AgentEnv `customExtensionParams`; creates through `POST /sandboxes`), and `strict_resources`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
 | `operations` | Retry count and exponential-backoff delays for safe, retryable operations. |
+| `attribution` | Automatic `team` / `user` / `workload` / `run` metadata on every sandbox (on by default); see [Job Attribution](#job-attribution). |
 
 `SandboxSpec.ttl_s` overrides `create.timeout_s`. `SandboxSpec.ready_timeout_s` is a positive
 per-sandbox override for the E2B create request timeout; when omitted, the connection request
@@ -103,7 +104,7 @@ command timeout. `exec.default_timeout_s` is only the fallback when the provider
 | `workdir` | Used by the NeMo Gym facade as the default working directory for commands. |
 | `env` | Passed to E2B when the sandbox is created. |
 | `files` | Uploaded by the NeMo Gym facade after creation and before `start()` returns. |
-| `metadata` | Passed to E2B as string metadata. |
+| `metadata` | Passed to E2B as string metadata, merged over the [job attribution](#job-attribution) keys. |
 | `resources` | Fixed by the E2B template, not applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
 | `entrypoint` | Unsupported and rejected before creating a billable sandbox; define it in the E2B template. |
 | `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
@@ -111,16 +112,40 @@ command timeout. `exec.default_timeout_s` is only the fallback when the provider
 The bundled template builder can set CPU count and memory. Disk and GPU requirements need a
 suitable E2B template prepared through E2B tooling.
 
+## Job Attribution
+
+The provider merges `nemo-gym.nvidia.com/team`, `nemo-gym.nvidia.com/user`,
+`nemo-gym.nvidia.com/workload`, and `nemo-gym.nvidia.com/run` keys into each sandbox's
+metadata when they can be resolved, so E2B's and AgentENV's list API can filter by them:
+
+```python
+from e2b import AsyncSandbox, SandboxQuery
+
+paginator = AsyncSandbox.list(query=SandboxQuery(metadata={"nemo-gym.nvidia.com/run": "<run-id>"}))
+sandboxes = await paginator.next_items()
+```
+
+Each field resolves from the provider's `attribution` config, then `NEMO_GYM_TEAM` /
+`NEMO_GYM_USER` / `NEMO_GYM_WORKLOAD`, then the Slurm job variables (`SLURM_JOB_ACCOUNT` /
+`SLURM_JOB_USER` / `SLURM_JOB_NAME`). `user` falls back to the OS login name (`root` is
+ignored) and `workload` to the gym CLI's `NEMO_GYM_CONFIG_PATH`. Unresolved fields are
+omitted. `run` is `NEMO_GYM_RUN_ID`, else an id generated per process; the resolved metadata
+is logged once at the first create. Explicit `SandboxSpec.metadata` and `default_metadata`
+keys win over attribution keys. Set `attribution.enabled: false` to send only explicit
+metadata.
+
 ## Lifecycle and Reliability
 
 - Create is not automatically retried because an ambiguous transport failure could leave the
   first, billable sandbox running while a retry creates another one.
 - Rate-limit responses are returned without automatic retries so callers can choose an
   appropriate backoff window.
-- Close retries transient kill failures and treats an already-expired sandbox as closed. The
-  local handle is cleared only after E2B confirms the sandbox is killed or already absent.
-- The configured TTL is a remote cleanup backstop, not a replacement for `stop()` or a context
-  manager.
+- Close retries transient kill failures and treats an already-deleted sandbox as closed. It
+  also deletes paused sandboxes. The local handle is cleared only after E2B confirms the
+  sandbox is killed or already absent.
+- With the default `create.auto_resume: false`, the TTL deletes the sandbox and acts as a
+  remote cleanup backstop; it is not a replacement for `stop()` or a context manager. With
+  `auto_resume: true` the TTL pauses the sandbox instead, so it keeps its storage until closed.
 - Background commands can reconnect by process ID after a stream interruption. Output emitted
   before reconnection is not replayed, and a process that exits during the gap cannot be
   recovered. Reconnects share the original command wait budget rather than restarting it.

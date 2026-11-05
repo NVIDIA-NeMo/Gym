@@ -68,3 +68,10 @@ repos:
         entry: python scripts/update_env_list.py
         additional_dependencies: [pyyaml]
         files: ^README\.md$|^benchmarks/.*/config\.yaml$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
+      - id: import-linter
+        name: Check package layering (import-linter)
+        language: python
+        entry: lint-imports
+        additional_dependencies: ["import-linter==2.15"]
+        files: ^nemo_gym/.*\.py$|^pyproject\.toml$
+        pass_filenames: false

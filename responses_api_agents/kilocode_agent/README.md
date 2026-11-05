@@ -108,8 +108,9 @@ a config that uses `_inherit_from` cannot add new keys to `models`.
 - `context_window`: the served model's context window. Kilo measures the session against it, but only
   auto-compacts when `kilo_config` also sets `compaction.threshold_percent`; `0` turns the accounting
   off entirely. `model_server` only.
-- `max_output_tokens`: per-request output budget. Kilo asks for `min(this, 32000)`, its own
-  `OUTPUT_TOKEN_MAX`, so values above 32000 have no effect. Setting it too high fails silently — see
+- `max_output_tokens`: per-request output budget. The adapter also sets
+  `KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX`, so Kilo's default 32000-token ceiling does not
+  cap larger configured budgets. Setting it too high fails silently — see
   Sizing the output budget. `model_server` only.
 - `reasoning_field`: response field carrying reasoning text, written as `interleaved.field`. Gym model
   servers emit `reasoning_content`; Kilo turns interleaved reasoning off for custom OpenAI-compatible

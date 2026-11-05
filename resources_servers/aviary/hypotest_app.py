@@ -18,7 +18,7 @@ from hypotest.dataset_server import HypotestDataset, HypotestDatasetConfig
 from hypotest.env.interpreter_env import InterpreterEnv
 from pydantic import Field, JsonValue, model_validator
 
-from nemo_gym.failure_kinds import JUDGE_FAILED
+from nemo_gym.core import JUDGE_FAILED
 from resources_servers.aviary.app import AviaryResourcesServer
 from resources_servers.aviary.schemas import (
     AviaryAgentVerifyRequest,

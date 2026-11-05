@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import base64
 import json
+import logging
 import os
+import re
 import shlex
 import shutil
 import sqlite3
@@ -28,10 +31,11 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -45,15 +49,14 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
+from nemo_gym.trajectory import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
@@ -89,6 +92,28 @@ class TestOpenCodeSandboxedAgent:
             opencode_max_context_window=0,
             token_id_capture=True,
         )
+
+    @mark.parametrize("worker", [False, True])
+    def test_only_the_main_process_logs_the_deprecation_once(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch, worker: bool
+    ) -> None:
+        """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+        app_module._warn_deprecated_once.cache_clear()
+        monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+        with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+            for _ in range(2):
+                OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+
+        warnings = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
+        assert warnings == ([] if worker else [app_module.DEPRECATION_WARNING])
+        for phrase in (
+            "legacy /run",
+            "allowed_agents",
+            "sandbox_handle",
+            "vibench_agent",
+            "opencode_agent/README.md",
+        ):
+            assert phrase in app_module.DEPRECATION_WARNING
 
     async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
@@ -149,7 +174,9 @@ class TestOpenCodeSandboxedAgent:
     def test_opencode_export_to_output_items(
         self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr(
+            "nemo_gym.models.chat_completions_converter.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
 
         actual_output_items = OpenCodeSandboxedAgent._opencode_export_to_output_items(None, opencode_export_test_data)
         expected_output_items = [
@@ -347,7 +374,22 @@ class TestOpenCodeSandboxedAgent:
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
             ]
         )
-        sandbox_mock.download = AsyncMock()
+
+        async def download(remote: str, local: Path) -> None:
+            # Serve the plugin upload read-back from the real file; the export download is a no-op.
+            # The sandbox path carries a prefix the repo file does not, so strip it before looking:
+            # /tmp/nemo-gym-plugin-<name> lives under plugins/, /tmp/nemo-gym-<name> beside app.py.
+            name = Path(remote).name
+            for prefix, subdir in (("nemo-gym-plugin-", "plugins"), ("nemo-gym-", "")):
+                if name.startswith(prefix):
+                    stem = name[len(prefix) :]
+                    base = Path(app_module.__file__).parent
+                    source = base / subdir / stem if subdir else base / stem
+                    if source.is_file():
+                        local.write_bytes(source.read_bytes())
+                    return
+
+        sandbox_mock.download = AsyncMock(side_effect=download)
         sandbox_mock.upload = AsyncMock()
         monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
         monkeypatch.setattr(
@@ -365,7 +407,9 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.uuid4", MagicMock(return_value=MagicMock(hex=""))
         )
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", MagicMock(return_value=MagicMock(hex="")))
+        monkeypatch.setattr(
+            "nemo_gym.models.chat_completions_converter.uuid4", MagicMock(return_value=MagicMock(hex=""))
+        )
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.time", MagicMock(return_value=0.0))
 
         actual_response = await server.responses(
@@ -393,7 +437,7 @@ class TestOpenCodeSandboxedAgent:
             assert plugins == ["file:///user-plugin.js"]
 
         assert sandbox_mock.upload.await_count == (
-            len(server._runtime_plugins()) + int(observability_enabled) + int(stage_ripgrep)
+            len(server._plugin_uploads()) + int(observability_enabled) + int(stage_ripgrep)
         )
 
         expected_response = NeMoGymResponse(
@@ -485,8 +529,11 @@ class TestOpenCodeSandboxedAgent:
         if stage_ripgrep:
             expected_uploads.append(call(binary, "/tmp/nemo-gym-ripgrep-"))
         assert sandbox_mock.upload.await_args_list == expected_uploads
-        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_uploads) + 1]] == [
-            *(["upload"] * len(expected_uploads)),
+        # Each plugin upload is followed by its read-back; the patch and ripgrep stay plain uploads.
+        expected_calls = ["upload", "download"] * int(remaining_context)
+        expected_calls += ["upload"] * (int(observability_enabled) + int(stage_ripgrep))
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[: len(expected_calls) + 1]] == [
+            *expected_calls,
             "exec",
         ]
         assert not any(key.startswith("_ng_") for key in server._sandbox_id_to_run_result[""])
@@ -541,6 +588,180 @@ class TestOpenCodeSandboxedAgent:
             assert not (home / "agent-started").is_file()
         else:
             assert "nemo-gym-ripgrep" not in command
+
+    def _responses_request(self):
+        return MagicMock(
+            session={SESSION_ID_KEY: "my session"},
+            cookies={"sandbox_id": ""},
+            path_params={"rollout_id": "direct-call"},
+        )
+
+    def _mock_sandbox(self, monkeypatch: MonkeyPatch, server: OpenCodeSandboxedAgent) -> MagicMock:
+        """A sandbox whose run, session list and export succeed; the export file is read as empty."""
+        sandbox_mock = MagicMock()
+        sandbox_mock.exec = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    stdout="Shell: /bin/bash\nOpenCode run finished", stderr="", return_code=0, error_type=None
+                ),
+                SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+            ]
+        )
+        sandbox_mock.download = AsyncMock()
+        sandbox_mock.upload = AsyncMock()
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: False)
+        return sandbox_mock
+
+    async def test_responses_uploads_input_images_and_attaches_them_to_the_run(self, monkeypatch: MonkeyPatch) -> None:
+        """Each input_image data URI is decoded, uploaded under the fixed attachments directory with the
+        extension OpenCode's mime sniff expects, and passed with -f ahead of the unchanged text query."""
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+        uploaded: dict[str, tuple[bytes, int]] = {}
+
+        async def upload(local_path, remote_path):
+            # The staging file is deleted after the upload, so record it now.
+            uploaded[remote_path] = (Path(local_path).read_bytes(), Path(local_path).stat().st_mode & 0o777)
+
+        sandbox_mock.upload = AsyncMock(side_effect=upload)
+        png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+        jpeg = b"\xff\xd8\xff\xe0" + b"\x01" * 8
+        query = "What does the picture show? Answer: {your answer}"
+
+        await server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(
+                input=[
+                    {"role": "system", "content": "ignored by the adapter"},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": query},
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/png;base64," + base64.b64encode(png).decode(),
+                                "detail": "high",
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode(),
+                                "detail": "auto",
+                            },
+                        ],
+                    },
+                ],
+            ),
+        )
+
+        assert uploaded == {
+            "/tmp/nemo-gym-attachments/image-1.png": (png, 0o644),
+            "/tmp/nemo-gym-attachments/image-2.jpg": (jpeg, 0o644),
+        }
+        # Uploads precede the run, which is the only exec carrying the launch command.
+        assert [mock_call[0] for mock_call in sandbox_mock.mock_calls[:3]] == ["upload", "upload", "exec"]
+        tokens = shlex.split(sandbox_mock.exec.await_args_list[0].kwargs["command"])
+        run_tokens = tokens[tokens.index("run") :]
+        assert run_tokens[run_tokens.index("--thinking") :][:6] == [
+            "--thinking",
+            "-f",
+            "/tmp/nemo-gym-attachments/image-1.png",
+            "-f",
+            "/tmp/nemo-gym-attachments/image-2.jpg",
+            "--",
+        ]
+        assert run_tokens[run_tokens.index("--") + 1] == query
+        # Neither the image bytes nor their base64 reach the command line.
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        assert base64.b64encode(png).decode() not in command and "detail" not in command
+        assert server._sandbox_id_to_run_result[""]["opencode_attachment_count"] == 2
+        server._create_opencode_config.assert_awaited_once()
+        assert server._create_opencode_config.await_args.kwargs == {"image_input": True}
+
+    async def test_image_input_declares_the_model_vision_capable_only_when_asked(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        """OpenCode forwards an attached image only if the model declares image input (otherwise it substitutes
+        an ERROR text) and, unless its `attachment.image` limits are lifted, downscales and re-encodes any image
+        over 2000 px or 5 MiB of base64; a text-only turn keeps the config exactly as before."""
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            lambda _name, **kwargs: "http://model-server",
+        )
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"responses_create_params": {"input": "solve"}})
+
+        plain = await server._create_opencode_config(request)
+        vision = await server._create_opencode_config(request, image_input=True)
+
+        plain_model = plain["provider"]["nemo_gym"]["models"]["dummy_model"]
+        assert "modalities" not in plain_model
+        assert "attachment" not in plain
+        assert vision["provider"]["nemo_gym"]["models"]["dummy_model"] == plain_model | {
+            "modalities": {"input": ["text", "image"], "output": ["text"]}
+        }
+        assert vision["attachment"] == {"image": app_module.OPENCODE_IMAGE_LIMITS_UNRESTRICTED}
+        assert set(vision["attachment"]["image"]) == {"max_width", "max_height", "max_base64_bytes"}
+
+    @mark.parametrize(
+        ("image_part", "message"),
+        [
+            ({"image_url": "https://example.com/figure.png"}, "remote URL"),
+            ({"image_url": "data:image/bmp;base64,Qk0AAAAA"}, "media type 'image/bmp'"),
+            ({"image_url": "data:image/png,not-base64"}, "not a base64 data URI"),
+            ({"image_url": "data:image/png;base64,@@@"}, "invalid base64"),
+            ({"file_id": "file-123"}, "no image_url"),
+        ],
+    )
+    async def test_responses_rejects_images_opencode_cannot_attach_before_running(
+        self, monkeypatch: MonkeyPatch, image_part: dict, message: str
+    ) -> None:
+        """The sandbox has no internet and OpenCode's Read tool shows only PNG/JPEG/GIF/WebP, so such a row
+        fails explicitly, without an upload or a run."""
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+
+        with raises(ValueError, match=message):
+            await server.responses(
+                request=self._responses_request(),
+                body=NeMoGymResponseCreateParamsNonStreaming(
+                    input=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "input_text", "text": "Describe the figure."},
+                                {"type": "input_image", "detail": "high", **image_part},
+                            ],
+                        }
+                    ],
+                ),
+            )
+
+        assert not sandbox_mock.upload.await_count and not sandbox_mock.exec.await_count
+        assert "" not in server._sandbox_id_to_run_result
+
+    @mark.parametrize("content", ["hello", [{"type": "input_text", "text": "hello"}]])
+    async def test_text_only_turns_launch_without_attachment_flags(self, monkeypatch: MonkeyPatch, content) -> None:
+        """A string or single input_text turn stays the bare `-- <query>` launch with nothing uploaded for it."""
+        server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+
+        await server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": content}]),
+        )
+
+        command = sandbox_mock.exec.await_args_list[0].kwargs["command"]
+        # The f-string's line continuations fold the launch line into one; the query follows `--` directly.
+        assert "--thinking -- hello " in command and "nemo-gym-attachments" not in command
+        assert sandbox_mock.upload.await_count == 0
+        assert server._sandbox_id_to_run_result[""]["opencode_attachment_count"] == 0
+        assert server._create_opencode_config.await_args.kwargs == {"image_input": False}
 
     def test_missing_local_ripgrep_is_rejected(self, tmp_path: Path) -> None:
         with raises(ValidationError, match="Path does not point to a file"):
@@ -657,6 +878,212 @@ class TestOpenCodeSandboxedAgent:
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
 
+    async def test_create_opencode_config_merges_recursively(self, monkeypatch: MonkeyPatch) -> None:
+        """A nested override must not blow away its siblings in the generated config.
+
+        The old top-level dict spread meant `opencode_config.provider` dropped baseURL/apiKey and
+        `opencode_config.agent` dropped the generated title-disable, which is exactly what made
+        model.limit.input (the compaction trigger) unreachable from a benchmark yaml.
+        """
+        config_obj = self._create_config()
+        config_obj.opencode_max_context_window = 262144
+        config_obj.opencode_config = {
+            "agent": {"build": {"prompt": "You are a General Agent."}},
+            "provider": {"nemo_gym": {"models": {"dummy_model": {"limit": {"input": 65000}}}}},
+            "compaction": {"prune": False},
+        }
+        server = OpenCodeSandboxedAgent(config=config_obj, server_client=MagicMock(spec=ServerClient))
+        # Patch BOTH resolvers. get_server_url alone is not enough: the base URL goes through
+        # sandbox_server_url, which calls nemo_gym's own get_server_url via its module, so
+        # patching only this module's copy leaves the real lookup running against a config that
+        # has no registered servers -- ConfigKeyError on an empty key, from inside app code that
+        # is upstream and correct.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.get_server_url",
+            lambda _name: "http://model-server",
+        )
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            lambda _name, **_kwargs: "http://model-server",
+        )
+        request = MagicMock()
+        request.json = AsyncMock(return_value={"responses_create_params": {"input": "solve"}})
+
+        config = await server._create_opencode_config(request)
+
+        nemo_gym = config["provider"]["nemo_gym"]
+        assert nemo_gym["options"]["baseURL"] == "http://model-server/v1"
+        assert nemo_gym["options"]["apiKey"] == "dummy_key"  # pragma: allowlist secret
+        # The one overridden leaf changes; its siblings keep the generated window.
+        assert nemo_gym["models"]["dummy_model"]["limit"] == {"context": 262144, "input": 65000, "output": 262144}
+        # `agent` is NOT part of the generated config, so there are no siblings to preserve and
+        # the override lands whole. This used to assert a generated {"title": {"disable": true}},
+        # which no version of _create_opencode_config has ever emitted -- the run title is a CLI
+        # flag (`opencode run --title`), not config. The assertion could not fail for the right
+        # reason, only pass for a wrong one.
+        assert config["agent"]["build"]["prompt"] == "You are a General Agent."
+        # A nested override of a key with no generated counterpart still merges rather than being
+        # skipped, and `false` survives: only None and "" mean "not set", because false and 0 are
+        # meaningful opencode values.
+        assert config["compaction"] == {"prune": False}
+        assert config["compaction"] == {"prune": False}
+
+    def test_resolve_opencode_env_picks_a_stable_key_per_question(self) -> None:
+        config = self._create_config()
+        config.opencode_env = {"OPENCODE_ENABLE_EXA": "true", "EXA_API_KEYS": "k0:k1, k2\nk3"}
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        first = server._resolve_opencode_env("who invented the thing?")
+        # The pool itself never reaches the sandbox, only the single resolved key.
+        assert "EXA_API_KEYS" not in first
+        assert first["OPENCODE_ENABLE_EXA"] == "true"
+        assert first["EXA_API_KEY"] in {"k0", "k1", "k2", "k3"}
+        # Same question -> same key, so retries do not hop keys.
+        assert server._resolve_opencode_env("who invented the thing?") == first
+        # Different questions spread over the pool rather than all landing on one key.
+        assert len({server._resolve_opencode_env(f"question {i}")["EXA_API_KEY"] for i in range(50)}) == 4
+
+    def test_resolve_opencode_env_edge_cases(self) -> None:
+        config = self._create_config()
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # No pool configured -> nothing invented.
+        config.opencode_env = {"OPENCODE_ENABLE_EXA": "true"}
+        assert server._resolve_opencode_env("q") == {"OPENCODE_ENABLE_EXA": "true"}
+        # An explicit single key wins over the pool.
+        config.opencode_env = {"EXA_API_KEY": "pinned", "EXA_API_KEYS": "k0:k1"}
+        assert server._resolve_opencode_env("q") == {"EXA_API_KEY": "pinned"}
+        # An empty pool is not a key.
+        config.opencode_env = {"EXA_API_KEYS": "  "}
+        assert server._resolve_opencode_env("q") == {}
+
+    @mark.parametrize("via_stdin", [False, True], ids=("argv", "stdin"))
+    async def test_responses_builds_opencode_command(
+        self, opencode_export_test_data: Dict[str, Any], monkeypatch: MonkeyPatch, via_stdin: bool
+    ) -> None:
+        """The `opencode run` command carries opencode_env, and stdin mode delivers the query verbatim.
+
+        The question below is shaped like a real BrowseComp row: it starts with a quoted proper
+        noun, which argv mode mangles because run.ts re-wraps any space-bearing argv in double
+        quotes and backslash-escapes the inner ones.
+        """
+        question = 'Which "Company A" was founded after 2002? Say "unknown" if unsure.'
+        config = self._create_config()
+        config.opencode_env = {"OPENCODE_ENABLE_EXA": "true", "EXA_API_KEYS": "k0:k1"}
+        config.opencode_query_via_stdin = via_stdin
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+        sandbox_mock = MagicMock()
+
+        # Dispatch on the command rather than a fixed side_effect list. The export path issues
+        # several execs (install, session list, export, pwd) and a positional list silently
+        # mis-feeds them the moment that sequence changes -- which is how `session list` came to
+        # be handed "" and died in json.loads, surfacing as an unrelated assertion about
+        # await_args further down.
+        async def _exec(command: str = "", **_kwargs: Any) -> SimpleNamespace:
+            if "session list" in command:
+                return SimpleNamespace(
+                    stdout=json.dumps([{"id": "ses_123"}]), stderr="", return_code=0, error_type=None
+                )
+            if "pwd" in command:
+                return SimpleNamespace(stdout="my dir", stderr="", return_code=0, error_type=None)
+            return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+
+        sandbox_mock.exec = AsyncMock(side_effect=_exec)
+        sandbox_mock.download = AsyncMock()
+        # Maps sandbox_id -> sandbox. responses() runs opencode through `sandbox.exec`, so every
+        # command -- install, the run itself, `session list`, `export` -- lands on the same mock
+        # and is told apart by its text. An earlier version of this test stored a
+        # (sandbox, pty) tuple and asserted against a `pty.exec`, which no longer exists on this
+        # path; both made the run look like it never happened.
+        monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox_mock})
+        monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value=dict()))
+        # responses() also resolves the model/tool server URLs for the MCP wiring, independently
+        # of _create_opencode_config above. Without this the real lookup raises, responses()
+        # converts it into a failed response, pty.exec is never awaited, and the assertion below
+        # fails on await_args being None -- which reads like a command-building bug and is not.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.sandbox_server_url",
+            lambda _name, **_kwargs: "http://model-server",
+        )
+        # The export path also snapshots opencode's SQLite database to pick up subagent messages.
+        # That is a real file open, which Path.exists/read_text below cannot stand in for, and
+        # this test is about the COMMAND rather than observations -- those are covered by
+        # test_run_builds_observations_from_live_wal_snapshot, which builds an actual database.
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app._read_opencode_child_messages",
+            lambda _db_path, _root_session_id: [],
+        )
+        monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: True)
+        monkeypatch.setattr(
+            "responses_api_agents.opencode_sandboxed_agent.app.Path.read_text",
+            lambda self: json.dumps(opencode_export_test_data),
+        )
+
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "s"}, cookies={"sandbox_id": ""}, path_params={}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": question}]),
+        )
+
+        # Pick the `opencode run` exec out of the several the export path issues, rather than
+        # assuming a position. `next` raises StopIteration if the run never happened, which is a
+        # clearer failure than indexing into None.
+        run_commands = [
+            call.kwargs["command"]
+            for call in sandbox_mock.exec.await_args_list
+            if "opencode run" in (call.kwargs.get("command") or "")
+        ]
+        assert len(run_commands) == 1, f"expected exactly one `opencode run` exec, got {len(run_commands)}"
+        command = run_commands[0]
+        # The pool is resolved away; exactly one key is exported.
+        assert "OPENCODE_ENABLE_EXA=true" in command
+        assert "EXA_API_KEYS" not in command
+        assert re.search(r"EXA_API_KEY=k[01]\b", command)
+
+        # Recover the argv the sandbox shell would build. shlex is the right lexer here (a
+        # BrowseComp question contains both spaces and newlines, so neither splitlines nor a naive
+        # split survives it); `&&` separates the chained commands.
+        def chain(tokens: list[str]) -> list[list[str]]:
+            out: list[list[str]] = [[]]
+            for token in tokens:
+                if token == "&&":
+                    out.append([])
+                else:
+                    out[-1].append(token)
+            return out
+
+        commands = chain(shlex.split(command))
+
+        def run_argv(chained: list[list[str]]) -> list[str]:
+            # The run is prefixed by VAR=value assignments in the same chain entry, so slice from
+            # the binary rather than expecting it first.
+            for entry in chained:
+                for i in range(len(entry) - 1):
+                    if entry[i] == "opencode" and entry[i + 1] == "run":
+                        return entry[i:]
+            raise AssertionError(f"no `opencode run` in command: {command}")
+
+        argv = run_argv(commands)
+
+        if via_stdin:
+            # No positional message at all, so run.ts's `message` is "" and resolveRunInput returns
+            # the piped text untouched. A bare "--" would put us back on the quote-rewrapping path.
+            assert "--" not in argv, argv
+            # The question is piped in, not staged in a file and redirected.
+            assert "<" not in argv, argv
+
+            # `printf '%s' <question> | <VAR=value...> opencode run ...`: one && entry, because `|`
+            # binds tighter than `&&`. The chain therefore waits on the pipeline -- whose status is
+            # opencode's -- so the trailing `&& echo "OpenCode run finished"` still gates on the run.
+            pipeline = next(c for c in commands if c and c[0] == "printf")
+            assert pipeline[pipeline.index("%s") + 1] == question, pipeline
+            assert pipeline[pipeline.index("%s") + 2] == "|", pipeline
+            assert pipeline.index("|") < pipeline.index("opencode"), pipeline
+        else:
+            assert "<" not in argv, argv
+            assert argv[-2] == "--", argv
+            assert argv[-1] == question, argv
+
     @mark.parametrize(
         "database_name,snapshot_failure",
         [
@@ -668,6 +1095,7 @@ class TestOpenCodeSandboxedAgent:
         ],
     )
     @mark.parametrize("collect_observations", [True, False])
+    @mark.parametrize("multiple_verifier_observations", [True, False])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
@@ -676,6 +1104,7 @@ class TestOpenCodeSandboxedAgent:
         database_name: str,
         snapshot_failure: str | None,
         collect_observations: bool,
+        multiple_verifier_observations: bool,
     ) -> None:
         class Response:
             ok = True
@@ -846,6 +1275,23 @@ class TestOpenCodeSandboxedAgent:
                     "reward": 1.0,
                     "verifier_sandbox_observation": verifier_sandbox.model_dump(mode="json"),
                 }
+                | (
+                    {
+                        "verifier_sandbox_observations": [
+                            verifier_sandbox.model_copy(
+                                update={
+                                    "sandbox_id": "earlier-verifier",
+                                    "outcome": "sandbox_error",
+                                    "teardown_confirmed": False,
+                                    "cleanup_errors": ["close:TimeoutError"],
+                                }
+                            ).model_dump(mode="json"),
+                            verifier_sandbox.model_dump(mode="json"),
+                        ]
+                    }
+                    if multiple_verifier_observations
+                    else {}
+                )
             )
 
         server_client.post = AsyncMock(side_effect=post)
@@ -908,8 +1354,11 @@ class TestOpenCodeSandboxedAgent:
         ]
         assert [(record.role, record.sandbox_id) for record in sandbox_records] == [
             ("agent", "connected-sandbox"),
+            *([("verifier", "earlier-verifier")] if multiple_verifier_observations else []),
             ("verifier", "verify-sandbox"),
         ]
+        if multiple_verifier_observations:
+            assert sandbox_records[1].cleanup_errors == ["close:TimeoutError"]
         assert sandbox_records[0].provider == "opensandbox"
         assert sandbox_records[0].outcome == "completed"
         assert sandbox_records[0].wall_time_s is None
@@ -1077,7 +1526,7 @@ class TestBenchmarkLifecycle:
         config.tool_servers = [ResourcesServerRef(type="resources_servers", name="tavily")]
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
         monkeypatch.setattr(
-            "nemo_gym.sandbox.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
+            "nemo_gym.agents.agent_tools.sandbox_server_url", lambda _, **kwargs: "http://10.0.0.3:63123"
         )
         monkeypatch.setattr(app_module, "raise_for_status", AsyncMock())
         request = MagicMock(cookies={"session": "original"})
@@ -1210,9 +1659,21 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
     server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    async def download(remote: str, local: Path) -> None:
+        # The sandbox path carries a prefix the repo file does not: /tmp/nemo-gym-<name> lives
+        # beside app.py, /tmp/nemo-gym-plugin-<name> under plugins/. Strip before looking.
+        name = Path(remote).name
+        base = Path(app_module.__file__).parent
+        for prefix, subdir in (("nemo-gym-plugin-", "plugins"), ("nemo-gym-", "")):
+            if name.startswith(prefix):
+                stem = name[len(prefix) :]
+                local.write_bytes((base / subdir / stem if subdir else base / stem).read_bytes())
+                return
+
     sandbox = MagicMock(
         upload=AsyncMock(),
-        download=AsyncMock(),
+        download=AsyncMock(side_effect=download),
         exec=AsyncMock(
             side_effect=[
                 SimpleNamespace(stdout="", stderr="MCP unavailable", return_code=1, error_type=None),
@@ -1236,8 +1697,41 @@ async def test_required_mcp_failure_is_not_exported_or_scored(monkeypatch):
         Path(app_module.__file__).with_name("required-mcp.js"), "/tmp/nemo-gym-required-mcp.js"
     )
     assert sandbox.exec.await_count == 2
-    sandbox.download.assert_not_awaited()
+    # The only download is the plugin read-back: no export was pulled for an unscored rollout.
+    assert [awaited.args[0] for awaited in sandbox.download.await_args_list] == ["/tmp/nemo-gym-required-mcp.js"]
     assert not server._sandbox_id_to_run_result
+
+
+async def test_plugin_registration_and_upload_come_from_one_list(monkeypatch):
+    """Config-named and policy-driven plugins share one ordered list, one registration, one upload."""
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.opencode_plugins = ["nemo_gym_sentinel.js", "nemo_gym_web_guard.js"]
+    config.output_token_policy = "remaining_context"
+    config.tool_servers = [ResourcesServerRef(type="resources_servers", name="search")]
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(app_module, "sandbox_server_url", lambda _, **kwargs: "http://model.example:8000")
+    monkeypatch.setattr(
+        OpenCodeSandboxedAgent, "base_url_for_run", MagicMock(return_value="http://model.example:8000")
+    )
+    request = MagicMock()
+    request.json = AsyncMock(return_value={})
+
+    # The sentinel loads ahead of the guards it vouches for, and both prefixes survive unification.
+    assert (await server._create_opencode_config(request))["plugin"] == [
+        "file:///tmp/nemo-gym-plugin-nemo_gym_sentinel.js",
+        "file:///tmp/nemo-gym-plugin-nemo_gym_web_guard.js",
+        "file:///tmp/nemo-gym-remaining-context.js",
+        "file:///tmp/nemo-gym-required-mcp.js",
+    ]
+    # What gets registered is exactly what gets uploaded, in the same order.
+    assert [f"file://{remote}" for _, remote in server._plugin_uploads()] == (
+        await server._create_opencode_config(request)
+    )["plugin"]
+    assert all(local.is_file() for local, _ in server._plugin_uploads())
+
+    config.opencode_plugins = ["nemo_gym_sentinel.js", "not_a_plugin.js"]
+    with raises(FileNotFoundError, match="not_a_plugin.js"):
+        server._plugin_uploads()
 
 
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
@@ -1260,7 +1754,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
 ):
     from fastapi import Request
 
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
@@ -1437,3 +1931,103 @@ def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(tmp_pat
     bundle = parse_opencode_observations(db_path, "fallback")
 
     assert ("tool_timing_unavailable", "p1") in [(gap.code, gap.detail) for gap in bundle.gaps]
+
+
+@mark.parametrize("error", [TimeoutError("status read timed out"), OSError("provider unavailable")])
+async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(tmp_path, error):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=error), download=AsyncMock())
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    from nemo_gym.core import NgFailureEvent
+
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request, body)
+    # Reported at the agent boundary with the provider's error as its cause; the kind is unchanged.
+    assert caught.value.__cause__ is error
+    assert caught.value.failure_kind == "agent_route_failed" and caught.value.operation == "agent.sandbox_exec"
+    assert caught.value.failure_reason == (
+        f"[sandbox phase=agent reason={type(error).__name__} command=opencode_run] "
+        f"Agent operation agent.sandbox_exec failed: {type(error).__name__}"
+    )
+    sandbox.exec.assert_awaited_once()
+    sandbox.download.assert_not_awaited()
+    assert "session" not in server._sandbox_id_to_run_result
+    server.server_client.post.assert_not_called()
+
+
+@mark.parametrize("error_type", ["UnknownError", None])
+async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
+    from nemo_gym.core import NgFailureEvent
+    from nemo_gym.sandbox import SandboxExecResult
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            return_value=SandboxExecResult(
+                stdout="", stderr="unknown completion", return_code=-1, error_type=error_type
+            )
+        ),
+        download=AsyncMock(),
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request, body)
+    assert caught.value.failure_kind == "agent_route_failed"
+    assert caught.value.operation == "agent.sandbox_exec"
+    reason = f" reason={error_type}" if error_type else ""
+    assert caught.value.failure_reason == (
+        f"[sandbox phase=agent{reason} exit=-1 command=opencode_run] Sandbox command outcome cannot be classified"
+    )
+    sandbox.exec.assert_awaited_once()
+    sandbox.download.assert_not_awaited()
+    server.server_client.post.assert_not_called()
+
+
+async def test_a_provider_ending_the_agents_sandbox_records_its_code_status_and_sandbox(tmp_path):
+    from nemo_gym.core import NgFailureEvent, failure_report_for
+    from nemo_gym.sandbox import SandboxHandle
+
+    class SandboxApiException(Exception):
+        def __init__(self, message):
+            super().__init__(message)
+            self.message = message
+            self.status_code = 410
+            self.error = SimpleNamespace(code="SANDBOX::ENDED", message=message)
+
+    error = SandboxApiException("Sandbox ended (OOMKilled)")
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=error), download=AsyncMock())
+    sandbox._handle = SandboxHandle(sandbox_id="box-1", provider_name="opensandbox", raw=None)
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request, body)
+    assert caught.value.failure_reason.startswith(
+        "[sandbox phase=agent provider=opensandbox sandbox=box-1 reason=SANDBOX::ENDED http=410 command=opencode_run] "
+    )
+    # The provider's own message still travels beside it, as the event's foreign error.
+    own = failure_report_for(caught.value).events[caught.value.event_id]
+    assert own.foreign_error.message == "Sandbox ended (OOMKilled)" and own.foreign_error.http_status == 410

@@ -47,37 +47,39 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydot import graph_from_dot_file
 
 from nemo_gym import CACHE_DIR, PARENT_DIR, RESULTS_DIR
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
-    OmegaConf,
+    ModelServerRef,
+    get_first_server_config_dict,
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.config.global_config import OmegaConf
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_rollout_id,
 )
-from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.telemetry import Profiler
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,
     parse_replay_subagent_manifest,
     parse_replay_subagent_payload,
 )
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_model.app import split_responses_input_output_items
 
 
 OPENHANDS_CAPTURE_OVERLAY_DIR = Path(__file__).parent / "openhands_capture_overlay"
@@ -3036,7 +3038,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     config: SWEBenchWrapperConfig
 
     _sem: Optional[Semaphore] = None
-    _vllm_converter: Optional[VLLMConverter] = None
+    _vllm_converter: Optional[ChatCompletionsConverter] = None
     _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -3086,7 +3088,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
         self._sem = Semaphore(self.config.concurrency)
-        self._vllm_converter = VLLMConverter(return_token_id_information=True)
+        self._vllm_converter = ChatCompletionsConverter(return_token_id_information=True)
 
         return super().model_post_init(context)
 

@@ -74,6 +74,27 @@ install or rebind one. The existing `--agent-type` swap and automatic benchmark-
 still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `pi_agent.responses_api_agents.pi_agent.sandbox_config`.
+
+The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
+APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
+fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
+model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+
+```yaml
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports: []
+```
+
 ## Runtime and model requirements
 
 Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
@@ -126,7 +147,11 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   A finish call from a reply cut off at the output limit is not run, since its arguments may be cut off, and
   the model is asked to call it again. A reply counts as cut off when the server reports `length`, or when it
   used all of its `max_tokens`, as vLLM reports `tool_calls` for a reply it parsed a tool call from. Setup
-  fails if no granted server offers a listed tool. Without usable MCP grants the setting has no effect.
+  fails if no grant left in offers a listed tool. Names are matched without the grant, so another grant's tool of
+  the same name would end the run too: as for grant names, an optional grant that offers a listed tool another grant
+  offers is left out and recorded as an `mcp_server_skipped` gap, and two required grants that offer the same listed
+  tool fail setup.
+  Without usable MCP grants the setting has no effect.
 - Responses name MCP calls `mcp__<grant name>__<tool name>`; a Resources server's `/verify` strips its own
   grant's prefix. Observations and model calls keep the names the model saw.
 - The grant's headers are readable inside the sandbox, including by the model's tools. For a Resources
@@ -177,7 +202,7 @@ Services must use task-owned files rather than the temporary agent session direc
 The supervisor and the runner above Pi are bash scripts, so a task agent's
 `pkill -f python3`, `pkill python3` or `killall python3` does not end Pi.
 
-Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
@@ -223,8 +248,8 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
-- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run (default none;
-  uses Pi's `terminate`, available from Pi 0.69.0)
+- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
+  grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 
 ## Results and limits
@@ -239,7 +264,14 @@ captured observations.
 Pi does not set reward or masking policy.
 
 Response metadata includes `harness_execution: sandbox`, hostname, supervisor PID, and
-the pinned Pi version. Model-call references and tool observations are returned by agent close.
+the pinned Pi version. When `timeout` stops a run that was still working and in which no call of a
+`finish_tool_names` tool had succeeded, the metadata also has `stop_reason: wall_time`, as Stirrup reports a timeout,
+so a benchmark can tell a timeout from a run that ended without a submission. A run has ended once a reply stops
+(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless it is an empty
+`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (Pi 0.80.2 then
+exits with code 1, which fails the run). A timeout while Pi waits to retry a failed model call, or while
+the provider gives up on the supervisor after the deadline, is reported the same way. Model-call references and tool
+observations are returned by agent close.
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence
 is explicitly marked as gaps.
 

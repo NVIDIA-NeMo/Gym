@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import AgentTermination, SandboxedVerifyRequest, SandboxedVerifyResponse
 
@@ -43,8 +45,9 @@ def test_a_missing_reward_carries_the_exception_type(tmp_path):
         AgentTermination(reason="completed"),
     )
 
-    assert verified["_ng_failure_class"] == "infrastructure_error"
-    assert verified["_ng_failure_type"] == "SandboxTimeoutException"
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == "SandboxTimeoutException"
+    assert "_ng_failure_class" not in verified
 
 
 def _diagnostic(subphase, exception_type):
@@ -102,7 +105,7 @@ def test_an_agent_infrastructure_failure_stays_one_whatever_its_verifier_did(tmp
     assert verified["failure_kind"] is None
 
 
-@pytest.mark.parametrize("exception_type", ["TimeoutError", "RuntimeError"])
+@pytest.mark.parametrize("exception_type", ["TimeoutError", "RuntimeError", "VerifierStatusUnknownError"])
 def test_a_verifier_that_failed_on_infrastructure_is_not_scored(tmp_path, exception_type):
     """What run_verifier raises when a provider call times out within its budget (TimeoutError) or the sandbox
     reports no command outcome (RuntimeError)."""
@@ -113,9 +116,10 @@ def test_a_verifier_that_failed_on_infrastructure_is_not_scored(tmp_path, except
         [_diagnostic("verifier_execution", exception_type)],
     )
 
-    assert verified["_ng_failure_class"] == "infrastructure_error"
-    assert verified["_ng_failure_type"] == exception_type
-    assert verified["failure_kind"] is None
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == exception_type
+    assert "_ng_failure_class" not in verified
+    assert verified["failure_kind"] == "verifier_error"
 
 
 def test_a_verifier_that_did_not_start_stays_an_infrastructure_failure(tmp_path):
@@ -126,15 +130,17 @@ def test_a_verifier_that_did_not_start_stays_an_infrastructure_failure(tmp_path)
         [_diagnostic("verifier_setup", "VerifierStartTimeoutError")],
     )
 
-    assert verified["_ng_failure_class"] == "infrastructure_error"
-    assert verified["_ng_failure_type"] == "VerifierStartTimeoutError"
-    assert verified["failure_kind"] is None
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == "VerifierStartTimeoutError"
+    assert "_ng_failure_class" not in verified
+    assert verified["failure_kind"] == "verifier_error"
 
 
 def test_a_missing_reward_without_exception_info_names_the_missing_reward(tmp_path):
     verified = _verified(tmp_path, {}, AgentTermination(reason="completed"))
 
-    assert verified["_ng_failure_type"] == "MissingOfficialReward"
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == "MissingOfficialReward"
 
 
 def test_a_free_text_infrastructure_detail_is_not_a_type(tmp_path):
@@ -216,3 +222,88 @@ def test_partial_credit_is_the_passed_fraction_floored_at_the_official_reward(
     verified = _verified(tmp_path, result, AgentTermination(reason="completed"))
     assert verified["partial_credit"] == partial_credit
     assert verified["reward"] == (verifier_result or {}).get("rewards", {}).get("reward", 0.0)
+
+
+async def test_a_killed_agent_scores_zero_without_its_verifier(tmp_path, monkeypatch):
+    """A self-kill and a per-process OOM kill cannot be told apart once the agent is dead. Either ends the attempt,
+    which counts as a zero in the pass-rate denominator rather than as an infrastructure failure."""
+    for step in ("download_dir", "collect", "run_verifier", "cleanup"):
+        monkeypatch.setattr(lifecycle, step, AsyncMock())
+    termination = AgentTermination(reason="killed", exit_code=9, detail="mini-SWE command exited 9: ")
+    environment = SimpleNamespace(main=object(), closed=False, quiesce_agent=AsyncMock(), stop=AsyncMock())
+    session = SimpleNamespace(
+        termination=termination,
+        environment=environment,
+        result={},
+        diagnostics=[],
+        phase="verifying",
+        subphase=None,
+        persist=lambda: None,
+    )
+
+    await lifecycle.finalize_session(session, grade=True)
+
+    environment.quiesce_agent.assert_not_awaited()
+    lifecycle.collect.assert_not_awaited()
+    lifecycle.run_verifier.assert_not_awaited()
+    lifecycle.cleanup.assert_awaited_once_with(session)
+    assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}, "source": "agent_killed"}
+    assert session.result["exception_info"]["exception_type"] == "NonZeroAgentExitCodeError"
+    verified = _verified(tmp_path, session.result, termination, session.diagnostics)
+    assert (verified["reward"], verified["evaluation_completed"]) == (0.0, True)
+    assert verified["infrastructure_error"] is None and verified["failure_reason"] is None
+    assert "_ng_failure_class" not in verified
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_rejected_sandbox_credentials_at_setup_are_typed_and_reported_as_the_rows_kind(
+    tmp_path, monkeypatch, status
+):
+    import asyncio
+
+    from opensandbox.exceptions import SandboxApiException
+
+    async def refuse(session, loader):
+        raise SandboxApiException("Create sandbox failed: credentials are invalid", status_code=status)
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(lifecycle, "prepare_session", refuse)
+    monkeypatch.setattr(lifecycle, "exception", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lifecycle, "cleanup", nothing)
+    session = SimpleNamespace(
+        session_id="session-1", started=asyncio.Event(), request=SimpleNamespace(capture_rollout_id=None)
+    )
+
+    await TerminalBench4ResourcesServer._prepare_session(SimpleNamespace(_loader=None), session)
+
+    assert session.termination.reason == "infrastructure_error"
+    assert session.termination.failure_kind == "provider_credentials_rejected"
+    verified = _verified(tmp_path, {"exception_info": {"exception_type": "SandboxApiException"}}, session.termination)
+    assert verified["failure_kind"] == "provider_credentials_rejected"
+
+
+@pytest.mark.parametrize("status", [429, 500, None])
+async def test_other_sandbox_setup_failures_keep_no_kind(monkeypatch, status):
+    import asyncio
+
+    from opensandbox.exceptions import SandboxApiException
+
+    async def fail(session, loader):
+        raise SandboxApiException("Create sandbox failed", status_code=status)
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(lifecycle, "prepare_session", fail)
+    monkeypatch.setattr(lifecycle, "exception", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lifecycle, "cleanup", nothing)
+    session = SimpleNamespace(
+        session_id="session-1", started=asyncio.Event(), request=SimpleNamespace(capture_rollout_id=None)
+    )
+
+    await TerminalBench4ResourcesServer._prepare_session(SimpleNamespace(_loader=None), session)
+
+    assert session.termination.reason == "infrastructure_error"
+    assert session.termination.failure_kind is None
