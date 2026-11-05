@@ -262,3 +262,48 @@ class TestSharedClassification:
         ):
             with pytest.raises(ValidationError):
                 FailureClassificationConfig.model_validate(value)
+
+
+def test_classification_accepts_namespaced_producer_kinds_without_expanding_action_registry():
+    import pytest
+    from pydantic import ValidationError
+
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure, require_failure_kind
+    from nemo_gym.core.outcome_policy import OutcomePolicyConfig
+
+    kind = "lexmount_browser:quota_exhausted"
+    assert require_failure_kind(kind) == kind
+    assert classify_failure(failure_kind=kind) == "unknown"
+    config = FailureClassificationConfig.model_validate(
+        {
+            "by_failure_kind": {kind: "evaluation"},
+            "by_stage": {"agent": {"by_failure_kind": {kind: "model"}}},
+        }
+    )
+    assert classify_failure(failure_kind=kind, config=config) == "evaluation"
+    assert classify_failure(failure_kind=kind, stage="agent", config=config) == "model"
+    assert FailureClassificationConfig.model_validate_json(config.model_dump_json()) == config
+    with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+        FailureClassificationConfig(by_failure_kind={"lexmount_browser:quota_exhausted\n": "evaluation"})
+    # Action overrides retain their existing registered-kind restriction. A boundary
+    # handles custom names through class rules instead of silently widening its API.
+    with pytest.raises(ValidationError, match="Unregistered failure kinds"):
+        OutcomePolicyConfig(default_action="fail", by_failure_kind={kind: "retry"})
+
+
+def test_repeated_default_classification_avoids_rebuilding_config_and_custom_rules_do_not_leak(monkeypatch):
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure, reporting_failure_kind
+
+    custom = FailureClassificationConfig(by_failure_kind={"model_request_error": "evaluation"})
+    # Warm the read-only default before prohibiting additional allocations.
+    assert classify_failure(failure_kind="model_request_error") == "model"
+
+    def unexpected_config_build(*args, **kwargs):
+        raise AssertionError("Per-row classification rebuilt the default configuration")
+
+    monkeypatch.setattr(failure_kinds, "FailureClassificationConfig", unexpected_config_build)
+    for _ in range(100):
+        assert classify_failure(failure_kind="model_request_error", http_status=503) == "evaluation"
+        assert reporting_failure_kind("model_request_error", 503) == "model_server_error"
+        assert classify_failure(failure_kind="model_request_error", config=custom) == "evaluation"
+        assert classify_failure(failure_kind="model_request_error") == "model"

@@ -36,6 +36,7 @@ from __future__ import annotations
 import logging
 import re
 from enum import StrEnum
+from functools import cache
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
@@ -344,7 +345,9 @@ SERVER_FAULT_KINDS: frozenset[str] = frozenset(
 
 
 def _validate_classification_kinds[T](rules: dict[str, T]) -> dict[str, T]:
-    invalid = rules.keys() - FAILURE_KINDS - GATE_DERIVED_KINDS - {"unknown"}
+    invalid = {
+        kind for kind in rules.keys() - FAILURE_KINDS - GATE_DERIVED_KINDS - {"unknown"} if not is_namespaced(kind)
+    }
     if invalid:
         raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
     return rules
@@ -445,6 +448,12 @@ def _merge_stage_overrides(
     return merged
 
 
+@cache
+def _default_classification_config() -> FailureClassificationConfig:
+    """Private read-only default for classification; caller-created configs remain independent."""
+    return FailureClassificationConfig()
+
+
 def reporting_failure_kind(
     kind: str | None,
     http_status: object,
@@ -455,7 +464,7 @@ def reporting_failure_kind(
     """Project observed HTTP evidence to a reporting label without changing the event."""
     if type(http_status) is not int:
         return kind
-    config = config or FailureClassificationConfig()
+    config = config if config is not None else _default_classification_config()
     if not policy and http_status in config.non_policy_reporting_kind_by_status_code:
         return config.non_policy_reporting_kind_by_status_code[http_status] or kind
     return config.reporting_kind_by_status_code.get(http_status) or kind
@@ -470,7 +479,7 @@ def classify_failure(
     config: FailureClassificationConfig | None = None,
 ) -> FailureClass:
     """Interpret only supplied evidence; never walk causes or mutate the observed kind/stage."""
-    config = config or FailureClassificationConfig()
+    config = config if config is not None else _default_classification_config()
     if type(http_status) is int and http_status in config.by_status_code:
         return config.by_status_code[http_status]
     stage_rules = config.by_stage.get(stage)
