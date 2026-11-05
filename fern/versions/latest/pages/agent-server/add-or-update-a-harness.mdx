@@ -313,6 +313,8 @@ Adapter configurations extend `BaseResponsesAPIAgentConfig`. Adapters that imple
 | `num_workers` | Must be `1` for agent sessions. |
 | Version pin | The exact harness version, for example `pi_version: 0.80.2` or `codex_version: 0.144.4`. Pi, Codex, and OpenClaw reject a missing or inexact version. OpenCode defaults `opencode_version` to its pinned release and rejects an inexact value. Hermes has no version field; it pins `hermes-agent` in its `pyproject.toml`. |
 | `sandbox_provider`, `sandbox_config` | Used only for agent-owned sessions: a named provider block and the `SandboxSpec` fields. Leave `sandbox_provider` as `null` when the Resources Server supplies the sandbox. |
+| `network_access` | Egress of an agent-owned sandbox: `inherit` (the provider's network), `model_only`, or `model_and_tools`. See [Restrict the egress of an owned sandbox](#restrict-the-egress-of-an-owned-sandbox). |
+| `sandbox_runtime_dir` | A harness runtime baked into the sandbox image, for a sandbox that cannot download one. Setup checks that it runs the pinned version instead of installing. |
 | Timeouts | Installation, execution, and per-phase close budgets, such as `sandbox_install_timeout_seconds` and `session_close_timeout_seconds`. Names differ by adapter; check its configuration class. |
 | `session_close_retry_window_seconds` | How long a successful close response is replayed. Cover the caller's retry horizon. |
 | `tool_accesses` | Static tool grants that are merged with each episode's grants. |
@@ -344,6 +346,37 @@ Hermes, Pi, Codex, OpenCode, and OpenClaw select one of the following execution 
 The compatibility `/run` endpoint requires an explicit `resources_server` binding and uses the adapter's host path. Setting `resources_server: null` does not disable host execution through `/v1/responses`. Setting `sandbox_provider` enables agent-owned sessions, but it does not move sessionless calls into a sandbox. Reject a stale or invalid session binding instead of treating it as a host request.
 
 When the Resources Server supplies a sandbox, propagate setup and connection failures. Never run the task on the host or in a different sandbox instead. Host execution is a separate mode that you select explicitly, and it does not isolate the task. Prepare the sandbox runtime during seed, and do not install an unused copy on the Agent Server host. An optional host path may install its runtime on first use instead of at server startup. If it does, document that first-call setup, share concurrent installation attempts, surface installation failures, and let a later call retry. Host tools that every path requires still install at server startup.
+
+### Restrict the egress of an owned sandbox
+
+A sandbox that the adapter creates gets the provider's default network unless the adapter restricts it. On a benchmark graded on what the model knows, such as HLE, open egress lets the harness look answers up: a web-fetch tool or a `curl` in a shell is enough. The deprecated `*_sandboxed_agent` profiles set `network_access: model_only` for these benchmarks, so an adapter that creates sandboxes must offer the same control.
+
+Add a `network_access: SandboxNetworkAccess` field that defaults to `inherit`, and pass the spec of every owned sandbox through `restrict_sandbox_network` before you create the sandbox:
+
+```python
+from nemo_gym.agents import restrict_sandbox_network
+
+provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
+try:
+    spec = restrict_sandbox_network(
+        spec,
+        network_access=self.config.network_access,
+        provider_name=provider.name,
+        model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+        tool_urls=[str(access.connection.url) for access in mcp_grants_the_harness_uses],
+    )
+except BaseException:
+    await provider.aclose()  # no sandbox owns the provider yet
+    raise
+sandbox = AsyncSandbox(provider)
+```
+
+- `inherit` returns the spec unchanged. `model_only` allows only the host of the model endpoint. `model_and_tools` also allows the host of each MCP grant that the harness uses. Leave out grants that the adapter skips, so that an unused grant neither opens a host nor fails the seed. Each allowed host is open on every port.
+- Pass the endpoint that the harness actually calls. If the harness can call a model provider directly, without a Gym Model Server, pass that provider's endpoint.
+- The policy is fixed when the sandbox is created, so it applies only to an owned sandbox. A borrowed sandbox keeps the network that its owner gave it: in a borrowed session, reject any value other than `inherit` before connecting.
+- Refuse a configuration that you cannot enforce with `AgentSeedRejectedError`. The seed route returns it as a final HTTP 422 instead of a retryable 500, because another attempt cannot fix the configuration. `restrict_sandbox_network` already raises it for a provider without network policies (only OpenSandbox enforces them), for an explicit `sandbox_config.provider_options.network_policy` combined with `network_access`, and for an endpoint that the sandbox cannot reach. Raise it yourself for a value that the adapter does not support, such as `model_and_tools` in an adapter that takes no tool grants.
+- A restricted sandbox cannot download the harness runtime. Upload the runtime from the Agent Server, as Claude Code and `SandboxPythonRuntime` do, or accept a `sandbox_runtime_dir` that holds a runtime baked into the image, and check that it runs the pinned version instead of installing it, as Pi does. Document which of these the adapter supports.
+- A profile that composes the adapter onto a benchmark graded on the model's own knowledge should set `network_access: model_only`, as the deprecated agents' profiles do.
 
 ## Build the adapter with `nemo_gym.agents.utils`
 
@@ -573,7 +606,7 @@ Run the installation check at every seed, and reuse a compatible runtime if one 
 2. Check any preinstalled, mounted, or previously installed runtime against the pinned version and a health check that runs it. The existence of a directory does not prove the runtime is ready.
 3. Verify the checksums of pinned artifacts on the Agent Server host, upload them through the sandbox file API, and run the harness's installer in a private directory outside the task repository. Preserve the task's interpreters and libraries. If the installer resolves packages, constrain the harness's dependencies to the versions the adapter is tested with, for example with a constraints file generated from the agent environment; an exact pin on the harness alone lets its dependencies change between episodes.
 4. Mark the runtime as ready only after installation and its health check succeed. Handle partial installations and concurrent setup without exposing an incomplete runtime. On failure, keep the commands, exit codes, and logs.
-5. For offline support, provide the complete dependency set, including bootstrap interpreters, package dependencies, and native libraries. Uploading a CLI or ripgrep alone is not enough if the installer still downloads other dependencies. If it does download them, document that the sandbox needs network access to the package index.
+5. For offline support, provide the complete dependency set, including bootstrap interpreters, package dependencies, and native libraries. Uploading a CLI or ripgrep alone is not enough if the installer still downloads other dependencies. If it does download them, document that the sandbox needs network access to the package index. A sandbox restricted with `network_access` cannot reach it; see [Restrict the egress of an owned sandbox](#restrict-the-egress-of-an-owned-sandbox).
 
 <Note>
 The supervisor and the shared runner need only bash in the task image. Do not require Python in the sandbox for a CLI harness: check paths, install runtimes, and post-process output with shell commands or on the Agent Server.
@@ -811,6 +844,7 @@ Record evidence conformance and sandbox lifecycle validation separately, because
 - **Failures and races.** Test setup failures, request mapping, unsupported controls, isolation, retries, cancellation, close races, and termination failures. Include supervisor upload failures, close during upload, interpreter or supervisor bootstrap failures before launch, termination before transport cancellation, artifact capture before teardown, capture failures, and malformed optional diagnostics. Check that a final negative receipt releases a borrowed connection without making the activation gradable.
 - **Process termination.** Use real Linux processes. Cover tool commands in the harness group, with grandchildren, under a harness that exits on `SIGTERM` and one that must be killed, for both a deadline and a close. A tool in the harness group, or in its own session while the harness still runs, must not change the task after a confirmed receipt, and a detached service must survive. Check that every harness process shares the supervised process group, and that a zombie does not block confirmation. Read the process state from `/proc/<pid>/stat`, because `os.kill(pid, 0)` also succeeds for a zombie. Run the `sandbox`-marked tests with the local provider, which exposes a surviving process that holds the exec output pipe open.
 - **Test hygiene.** Bound every wait in lifecycle tests, for example with `asyncio.wait_for()`, so that a regression fails instead of hanging. Check that each new regression test fails when you revert the fix it covers.
+- **Network access.** For an adapter that creates sandboxes, test the policy that each `network_access` value produces: `inherit` leaves the spec unchanged, `model_only` allows only the model host, and `model_and_tools` adds the hosts of the grants that the harness uses but not of grants that it skips. Post seeds to `/v1/agent_sessions` with an explicit `network_policy` and with a provider without network policies, and check the 422, that no sandbox is created, that the provider is closed, and that no session record remains. Check that a borrowed session rejects a restricted value before connecting, and that a preinstalled runtime of the pinned version skips installation while a mismatch fails setup. In the real smoke test with `model_only`, confirm that the harness completes and that an unrelated host is unreachable from the sandbox.
 - **Task environment.** Confirm that tool shells keep the task's `HOME` and `XDG_*` directories, and that files a tool writes under `~` are visible to verification. Check that the harness does not unpack its runtime or caches into the task's home.
 - **Real smoke test.** Run a real model on a real task with tools and verification. Confirm that the harness runs in the sandbox, that the agent closes before verification, and that the sandbox owner cleans it up. Inspect failures, traces, artifacts, and grading coverage. To collect rows you prepared as the benchmark's README shows, start the servers with `gym env start --config <run.yaml>`, then run `gym eval run --no-serve --config <run.yaml> --input <tasks.jsonl> --output <run_dir>/rollouts.jsonl`. Without `--no-serve`, `gym eval run` accepts only the prepared dataset of the requested split. A configuration that resolves and validates can still fail when its servers start, so start them before you claim a pairing works.
 - **Composition.** Show a second compatible pairing that works through configuration changes alone. Record versions and unsupported combinations.
