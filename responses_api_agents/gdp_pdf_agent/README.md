@@ -81,6 +81,25 @@ also carries them as `agent_adaptations`, which the run's failure facts sum per 
 `failures.agent_adaptations`. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
 as a `multimodal_history_redacted` gap on the trajectory.
 
+## Agent sessions
+
+Under an agent session (`single_agent_turn` or `single_agent_turn_legacy`), the agent reads the manifest
+from the row's `agent_context` (`artifacts.document_manifest`, written by `benchmarks/gdp_pdf/prepare.py`)
+and resolves it under `documents_base_dir` when the session is seeded. A row without `agent_context`, a
+missing manifest, or a manifest rendered at a DPI other than `dpi` is refused with HTTP 422, so a session never
+answers without its document. The activation builds the same request as `run()` and runs the same backoff:
+
+- In a session, Simple Agent returns a model HTTP error as a failed response instead of raising it. The agent
+  reads the input limit from that response and retries with a smaller delivery, all within the one activation.
+- A document that does not fit even as text returns an empty failed response without an outcome, which the
+  Environment Server verifies as a zero attempt, as `run()` scores it.
+- Any other model error (a 5xx that is not an empty-body crash, 401, 403, 429) stays the
+  `model_request_error` failure Simple Agent reports. The Environment Server's outcome policy decides what
+  happens to it; `run()` instead scored most of these as a zero attempt or failed the run.
+- The delivery record goes into the response's `document_delivery` metadata as a JSON string, with
+  `pages_truncated` in it. A session's result has no top-level `document_delivery` or `agent_adaptations`.
+- Verification and its failures belong to the Environment Server, including `skip_verification`.
+
 ## Text-only models
 
 Set `include_images: false` to run a text-only policy model. This is a config change, not a code
