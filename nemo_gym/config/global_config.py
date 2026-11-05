@@ -111,6 +111,7 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
@@ -119,6 +120,8 @@ DRY_RUN_KEY_NAME = "dry_run"
 UVICORN_TIMEOUT_WORKER_HEALTHCHECK = "uvicorn_timeout_worker_healthcheck"
 SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME = "server_spinup_timeout_seconds"
 SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME = "server_shutdown_timeout_seconds"
+# How long the Gym servers may take to become ready when the config sets no limit.
+DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS = 600
 MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME = "model_endpoint_readiness_timeout_seconds"
 ALLOW_OPENAI_VERSION_SKEW_KEY_NAME = "allow_openai_version_skew"
 UV_CACHE_DIR_KEY_NAME = "uv_cache_dir"
@@ -168,6 +171,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    COMPONENT_EXTRAS_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
@@ -1804,7 +1808,9 @@ Set the keys individually, in a config or as overrides, e.g.:
 
             # Bound server startup independently of model-endpoint readiness. Multi-worker
             # supervisors can otherwise replace a deterministically failing worker forever.
-            global_config_dict.setdefault(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, 600)
+            global_config_dict.setdefault(
+                SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME, DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS
+            )
             global_config_dict.setdefault(SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME, 1)
 
             # How long `gym env start` waits for the model endpoints named in the config to accept
