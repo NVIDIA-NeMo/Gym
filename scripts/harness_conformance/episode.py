@@ -200,7 +200,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         )
         if scenario.compaction is not None:
             agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
-            if harness in ("opencode", "pi"):
+            if harness in ("opencode", "pi", "copilot"):
                 agent_config.update(context_window=32768 if scenario.compaction else 65536, max_output_tokens=8192)
             elif harness == "codex":
                 agent_config.update(model_context_window=32768, model_auto_compact_token_limit=24000)

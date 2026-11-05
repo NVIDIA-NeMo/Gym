@@ -2,34 +2,50 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import json
+import shlex
+import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    AgentSeedSessionRequest,
+    check_agent_seed_rejected,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.copilot_agent.app import (
     CopilotAgent,
     CopilotAgentConfig,
+    copilot_package,
+    copilot_package_metadata,
     parse_copilot_events,
     parse_copilot_usage,
 )
 
 
+MODULE = "responses_api_agents.copilot_agent.app"
+TARBALL = "https://registry.npmjs.org/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.103.tgz"
+SHA512 = bytes(range(64)).hex()
 RUNTIME = {
     "binary": "/tmp/nemo-gym-copilot-1.0.103/copilot",
     "dist_dir": "/tmp/nemo-gym-copilot-1.0.103/home/.cache/copilot/pkg/linux-x64/1.0.103",
     "package": "copilot-linux-x64",
     "version": "1.0.103",
-    "integrity": "sha512-test",
+    "sha512": SHA512,
 }
 
 
@@ -102,8 +118,29 @@ def otel(*spans) -> str:
     return "\n".join([tool, *spans]) + "\n"
 
 
+def staged(params: str) -> dict:
+    """The activation as harness_runner.sh sees it: params.sh sourced by bash."""
+    names = ("cwd", "stdin", "stdout", "stderr", "events")
+    script = 'source "$1"; printf "%s\\0" ' + " ".join(f'"${name}"' for name in names)
+    script += ' "${#command[@]}" "${command[@]}" "${env[@]}"'
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "params.sh"
+        path.write_text(params)
+        values = subprocess.run(
+            ["bash", "-c", script, "bash", str(path)], capture_output=True, text=True, check=True
+        ).stdout.split("\0")[:-1]
+    count = int(values[len(names)])
+    command = values[len(names) + 1 : len(names) + 1 + count]
+    env = dict(item.split("=", 1) for item in values[len(names) + 1 + count :])
+    return {**dict(zip(names, values)), "command": command, "env": env}
+
+
+def ok(stdout="") -> SimpleNamespace:
+    return SimpleNamespace(return_code=0, error_type=None, stdout=stdout, stderr="")
+
+
 class Sandbox:
-    """Provider double: records uploads, answers the installer, and plays one supervised run."""
+    """Provider double: records uploads, answers setup commands, and plays one supervised run."""
 
     def __init__(self):
         self.files = {}
@@ -112,23 +149,33 @@ class Sandbox:
         self.events = copilot_events()
         self.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), chat_span("chatcmpl-2", usage=(5, 2)))
         self.compaction_state = False
+        self.platform = "Linux\nx86_64\nglibc 2.31\n"
         self.stderr = ""
         self.exec = AsyncMock(side_effect=self.execute)
         self.stop = AsyncMock()
         self.disconnect = AsyncMock()
         self.launch = AsyncMock(side_effect=self.run)
+        # The Agent Server's registry lookup, patched in by the fixture.
+        self.metadata = AsyncMock(return_value=(TARBALL, SHA512))
         self.payload = None
 
     async def execute(self, command, **kwargs):
-        if "--compaction-state" in command:
-            return SimpleNamespace(return_code=0, error_type=None, stdout=json.dumps(self.compaction_state), stderr="")
+        if command.startswith("ls -1 -- ") and "/copilot-home/session-state" in command:
+            if self.compaction_state is None:
+                return SimpleNamespace(return_code=2, error_type=None, stdout="", stderr="No such file or directory")
+            path = shlex.split(command)[3].replace("*", "copilot-run-1")
+            kind = "session.compaction_complete" if self.compaction_state else "assistant.message"
+            self.files[path] = "\n".join(json.dumps({"type": event}) for event in ("session.start", kind)) + "\n"
+            return ok(path + "\n")
         if "--receipt" in command and "process_supervisor" in command:
             return await self.launch(command, **kwargs)
-        if "install_copilot_runtime.py" in command:
-            return SimpleNamespace(return_code=0, error_type=None, stdout=json.dumps(RUNTIME) + "\n", stderr="")
+        if command.startswith("uname -s;"):
+            return ok(self.platform)
+        if "install_copilot_runtime.sh" in command:
+            return ok("Downloading the package\n" + json.dumps(RUNTIME) + "\n")
         if "ln -s stop " in command:
             self.result["timed_out"] = True
-        return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+        return ok()
 
     async def upload(self, source, destination):
         self.files[destination] = Path(source).read_text()
@@ -137,12 +184,14 @@ class Sandbox:
         Path(destination).write_text(self.files[source])
 
     async def run(self, command, **kwargs):
-        payload_path = next(path for path in self.files if path.endswith("/input.json"))
-        self.payload = json.loads(self.files[payload_path])
-        directory = self.payload["directory"]
+        directory = next(path.rsplit("/", 1)[0] for path in self.files if path.endswith("/params.sh"))
+        self.payload = {"directory": directory, **staged(self.files[f"{directory}/params.sh"])}
         assert kwargs["cwd"] == "/app"
-        # The runner opts in to the neutral process name, so a task's `pkill python3` cannot stop it.
-        assert f"{directory}/sandbox_runner " in command and "/bin/gym-runner" in command
+        # The shared bash runner starts Copilot, so the task image needs no Python.
+        # The supervisor's argv follows "--"; its output redirection follows the argv.
+        harness = shlex.split(command.split(" -- ", 1)[1])[:-2]
+        assert harness == ["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
+        assert "gym-runner" not in command
         self.files[f"{directory}/cleanup.json"] = json.dumps(self.result)
         self.files[f"{directory}/runtime.json"] = json.dumps({"hostname": "task-container", "pid": 123})
         self.files[f"{directory}/events.jsonl"] = "\n".join(
@@ -154,15 +203,8 @@ class Sandbox:
         return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
 
 
-@pytest.fixture
-def setup():
-    sandbox = Sandbox()
-    client = MagicMock(spec=ServerClient)
-    client.global_config_dict = OmegaConf.create(
-        {"policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}}
-    )
-    client._build_server_base_url.return_value = "http://model.example:9000"
-    config = CopilotAgentConfig(
+def agent_config(**overrides) -> CopilotAgentConfig:
+    return CopilotAgentConfig(
         name="copilot",
         host="localhost",
         port=8001,
@@ -171,18 +213,29 @@ def setup():
         model_server={"type": "responses_api_models", "name": "policy"},
         model="test-model",
         session_close_timeout_seconds=1,
+        **overrides,
     )
-    module = "responses_api_agents.copilot_agent.app"
+
+
+@pytest.fixture
+def setup():
+    sandbox = Sandbox()
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = OmegaConf.create(
+        {"policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}}}
+    )
+    client._build_server_base_url.return_value = "http://model.example:9000"
     with (
-        patch(f"{module}.resolve_provider_config"),
+        patch(f"{MODULE}.resolve_provider_config"),
         patch(
-            f"{module}.get_global_config_dict",
+            f"{MODULE}.get_global_config_dict",
             return_value={"sandbox": {"local": {}, "default_metadata": {"provider": "test"}}},
         ),
-        patch(f"{module}.create_provider"),
-        patch(f"{module}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
+        patch(f"{MODULE}.create_provider"),
+        patch(f"{MODULE}.AsyncSandbox.connect", AsyncMock(return_value=sandbox)),
+        patch(f"{MODULE}.copilot_package_metadata", sandbox.metadata),
     ):
-        yield CopilotAgent(config=config, server_client=client), sandbox
+        yield CopilotAgent(config=agent_config(), server_client=client), sandbox
 
 
 def run_session(agent, body=None):
@@ -362,10 +415,14 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     )
     assert body["metadata"]["harness_execution"] == "sandbox"
     assert body["metadata"]["copilot_version"] == "1.0.103"
-    command, env = sandbox.payload["command"], sandbox.payload["env"]
+    command, env, directory = sandbox.payload["command"], sandbox.payload["env"], sandbox.payload["directory"]
     assert command[0] == RUNTIME["binary"] and command[1] == "--prompt=Fix the code"
     for flag in ("--allow-all-tools", "--no-ask-user", "--disable-builtin-mcps", "--no-auto-update"):
         assert flag in command
+    # Usage comes from the OpenTelemetry spans; Copilot's own usage file is not written.
+    assert "--usage-output-file" not in command
+    assert sandbox.payload["cwd"] == "/app" and sandbox.payload["stdin"] == "/dev/null"
+    assert sandbox.payload["events"] == f"{directory}/events.jsonl"
     assert command[command.index("--stream") + 1] == "off"
     assert command[command.index("--output-format") + 1] == "json"
     assert env["COPILOT_PROVIDER_BASE_URL"] == "http://model.example:9000/ng-rollout/copilot-smoke-a2/v1"
@@ -378,8 +435,22 @@ def test_session_runs_copilot_in_borrowed_sandbox(setup):
     # Tool shells keep the task environment.
     assert not ({"HOME", "PATH"} & set(env)) and not any(key.startswith("XDG_") for key in env)
     assert "COPILOT_PROVIDER_MAX_OUTPUT_TOKENS" not in env
-    install = next(c for c in sandbox.exec.await_args_list if "install_copilot_runtime.py" in c.args[0])
-    assert install.args[0].endswith("/tmp/nemo-gym-copilot-1.0.103 1.0.103 https://registry.npmjs.org")
+    # The Agent Server reads the package's digest from the registry; the sandbox installer checks the download.
+    sandbox.metadata.assert_awaited_once_with("https://registry.npmjs.org", "copilot-linux-x64", "1.0.103")
+    install = next(c for c in sandbox.exec.await_args_list if "install_copilot_runtime.sh" in c.args[0])
+    assert shlex.split(install.args[0]) == [
+        "bash",
+        f"{directory}/install_copilot_runtime.sh",
+        "/tmp/nemo-gym-copilot-1.0.103",
+        "1.0.103",
+        "copilot-linux-x64",
+        TARBALL,
+        SHA512,
+    ]
+    assert install.kwargs["cwd"] == "/"
+    assert sandbox.files[f"{directory}/{HARNESS_RUNNER_FILE}"] == HARNESS_RUNNER_SCRIPT.read_text()
+    # A CLI harness needs only bash in the task image.
+    assert not any("python" in call.args[0] for call in sandbox.exec.await_args_list)
     assert closed.status_code == 200, closed.text
     observations = closed.json()["agent_observations"]
     assert observations["source"] == "copilot"
@@ -430,8 +501,28 @@ def test_configured_limits_reach_copilot(setup):
     result, _ = run_session(agent)
     assert result.status_code == 200, result.text
     env, command = sandbox.payload["env"], sandbox.payload["command"]
-    assert (env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"], env["COPILOT_PROVIDER_MAX_OUTPUT_TOKENS"]) == ("32768", "4096")
+    # The context window holds the reply too; Copilot's limit is for the prompt alone.
+    assert (env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"], env["COPILOT_PROVIDER_MAX_OUTPUT_TOKENS"]) == ("28672", "4096")
     assert command[command.index("--reasoning-effort") + 1] == "low"
+
+
+@pytest.mark.parametrize("max_output_tokens", [8192, 9000])
+def test_output_limit_must_leave_room_for_the_prompt(max_output_tokens):
+    with pytest.raises(ValidationError, match="max_output_tokens must be smaller than context_window"):
+        agent_config(context_window=8192, max_output_tokens=max_output_tokens)
+    assert agent_config(context_window=8192, max_output_tokens=8191).max_output_tokens == 8191
+
+
+@pytest.mark.parametrize(
+    "prompt", ["Fix\0it", "x" * (131072 - len("--prompt=")), "ü" * 65532], ids=["nul", "too-long", "too-long-utf8"]
+)
+def test_prompt_that_cannot_be_one_argument_is_rejected(setup, prompt):
+    agent, _ = setup
+    with pytest.raises(HTTPException) as error:
+        agent._validate_request(NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": prompt}))
+    assert error.value.status_code == 422 and "one command-line argument" in error.value.detail
+    longest = "x" * (131072 - len("--prompt=") - 1)
+    assert agent._validate_request(NeMoGymResponseCreateParamsNonStreaming.model_validate({"input": longest}))[1]
 
 
 def test_omitted_provider_usage_stays_unknown(setup):
@@ -587,32 +678,204 @@ def test_sessionless_calls_and_compatibility_run_are_rejected(setup):
     sandbox.exec.assert_not_awaited()
 
 
-@pytest.mark.parametrize("option", ["no-sandbox", "required-tool", "no-model", "unpinned"])
-def test_unsupported_seed_is_refused_before_connection(setup, option):
+@pytest.mark.parametrize(
+    "option,reason",
+    [
+        ("no-sandbox", "sandbox_access or a configured sandbox_provider"),
+        ("relative-workdir", "workdir must be absolute"),
+        ("required-tool", "required grants: tools"),
+        ("no-model", "sandbox-reachable Gym model_server"),
+        ("unpinned", "exact copilot_version"),
+    ],
+)
+def test_unsupported_seed_is_refused_before_connection(setup, option, reason):
     agent, sandbox = setup
     body = seed()
     if option == "no-sandbox":
         body = seed(sandbox_access=False)
+    elif option == "relative-workdir":
+        body.sandbox_access.workdir = "app"
     elif option == "required-tool":
         body = seed(tool_accesses=[{"kind": "direct_http", "name": "tools", "base_url": "http://r", "required": True}])
     elif option == "no-model":
         agent.config.model_server = None
     else:
         agent.config.copilot_version = "latest"
-    check_agent_seed_rejected(agent.setup_webserver(), body)
+    assert reason in check_agent_seed_rejected(agent.setup_webserver(), body)
     sandbox.exec.assert_not_awaited()
+
+
+def test_optional_tool_grant_is_skipped(setup):
+    agent, sandbox = setup
+    body = seed(tool_accesses=[{"kind": "direct_http", "name": "tools", "base_url": "http://r", "required": False}])
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    assert created.status_code == 200, created.text
+
+
+@pytest.mark.parametrize(
+    "probe,package",
+    [
+        ("Linux\nx86_64\nglibc 2.31\n", "copilot-linux-x64"),
+        ("Linux\naarch64\nglibc 2.28\n", "copilot-linux-arm64"),
+        ("Linux\nx86_64\nmusl\n", "copilot-linuxmusl-x64"),
+        ("Linux\naarch64\nmusl\n", "copilot-linuxmusl-arm64"),
+    ],
+)
+def test_platform_probe_selects_the_package(probe, package):
+    assert copilot_package(probe) == package
+
+
+@pytest.mark.parametrize(
+    "probe,reason",
+    [
+        ("Darwin\narm64\nunknown\n", "Linux only"),
+        ("Linux\nppc64le\nglibc 2.31\n", "x86_64 and aarch64"),
+        ("Linux\nx86_64\nglibc 2.17\n", "glibc 2.28 or newer"),
+    ],
+)
+def test_unsupported_platform_is_refused_at_seed(setup, probe, reason):
+    agent, sandbox = setup
+    sandbox.platform = probe
+    assert reason in check_agent_seed_rejected(agent.setup_webserver(), seed())
+    sandbox.metadata.assert_not_awaited()
+    assert not any("install_copilot_runtime.sh" in call.args[0] for call in sandbox.exec.await_args_list)
+    sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("probe", ["Linux\nx86_64\nunknown\n", "Linux\nx86_64\n"])
+def test_unidentified_platform_is_an_error_to_retry(probe):
+    # Not AgentSeedRejectedError: an Environment Server retries a 500 with a fresh sandbox.
+    with pytest.raises(RuntimeError):
+        copilot_package(probe)
+
+
+class Reply:
+    """An aiohttp response double for the registry."""
+
+    def __init__(self, body, status=200):
+        self.body, self.status = body, status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise ClientResponseError(MagicMock(), (), status=self.status)
+
+    async def json(self, content_type="application/json"):
+        return self.body
+
+
+def registry(monkeypatch, reply) -> tuple[list[tuple[str, str]], dict]:
+    calls, cache = [], {}
+
+    async def request(method, url, **kwargs):
+        calls.append((method, url))
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    monkeypatch.setattr(f"{MODULE}.http_request", request)
+    monkeypatch.setattr(f"{MODULE}._PACKAGE_METADATA", cache)
+    return calls, cache
+
+
+async def test_package_metadata_is_read_once_on_the_host(monkeypatch):
+    integrity = "sha512-" + base64.b64encode(bytes(range(64))).decode()
+    calls, _ = registry(monkeypatch, Reply({"dist": {"tarball": TARBALL, "integrity": integrity}}))
+    for _ in range(2):
+        assert await copilot_package_metadata("https://registry.npmjs.org/", "copilot-linux-x64", "1.0.103") == (
+            TARBALL,
+            SHA512,
+        )
+    assert calls == [("GET", "https://registry.npmjs.org/@github/copilot-linux-x64/1.0.103")]
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        ClientConnectionError("connection refused"),
+        Reply({"error": "Not found"}, status=404),
+        Reply({"name": "@github/copilot-linux-x64"}),
+        Reply({"dist": {"tarball": TARBALL, "integrity": "sha1-AAAA"}}),
+        Reply({"dist": {"tarball": TARBALL, "integrity": "sha512-not base64"}}),
+    ],
+    ids=["transport", "status", "no-dist", "sha1", "malformed"],
+)
+async def test_package_metadata_failure_is_an_error_to_retry(monkeypatch, reply):
+    _, cache = registry(monkeypatch, reply)
+    with pytest.raises(RuntimeError, match="@github/copilot-linux-x64"):
+        await copilot_package_metadata("https://registry.npmjs.org", "copilot-linux-x64", "1.0.103")
+    # A later seed tries again.
+    assert cache == {}
+
+
+def test_unreachable_registry_fails_the_seed_for_retry(setup, monkeypatch):
+    agent, sandbox = setup
+    registry(monkeypatch, ClientConnectionError("connection refused"))
+    sandbox.metadata.side_effect = copilot_package_metadata
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert created.status_code == 500
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.launch.assert_not_awaited()
 
 
 async def test_install_failure_keeps_installer_output(setup):
     agent, sandbox = setup
-    ok = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
-    failed = SimpleNamespace(return_code=1, error_type=None, stdout="glibc 2.17 too old", stderr="exit status 1")
-    sandbox.exec.side_effect = [ok, failed, ok, ok, ok]
+    original = sandbox.execute
+
+    async def execute(command, **kwargs):
+        if "install_copilot_runtime.sh" in command:
+            return SimpleNamespace(return_code=1, error_type=None, stdout="curl: (6) no host", stderr="exit status 1")
+        return await original(command, **kwargs)
+
+    sandbox.exec.side_effect = execute
     with pytest.raises(RuntimeError) as error:
         await agent._seed_agent_session_state(seed())
-    assert "glibc 2.17 too old" in str(error.value) and "exit status 1" in str(error.value)
+    assert "curl: (6) no host" in str(error.value) and "exit status 1" in str(error.value)
     sandbox.disconnect.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("stdout", [None, "", "\n", "Downloading\nnot a record\n"])
+async def test_installer_without_a_runtime_record_fails_setup(setup, stdout):
+    agent, sandbox = setup
+    original = sandbox.execute
+
+    async def execute(command, **kwargs):
+        if "install_copilot_runtime.sh" in command:
+            return SimpleNamespace(return_code=0, error_type=None, stdout=stdout, stderr="installer diagnostics")
+        return await original(command, **kwargs)
+
+    sandbox.exec.side_effect = execute
+    with pytest.raises(RuntimeError, match="Copilot sandbox installation reported"):
+        await agent._seed_agent_session_state(seed())
+    sandbox.disconnect.assert_awaited_once()
+
+
+async def test_setup_is_bounded_by_the_install_budget(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_install_timeout_seconds = 0.2
+    original = sandbox.execute
+
+    async def execute(command, **kwargs):
+        if "install_copilot_runtime.sh" in command:
+            await asyncio.Event().wait()
+        return await original(command, **kwargs)
+
+    sandbox.exec.side_effect = execute
+    # The provider's own exec timeout is not the only bound: the whole setup shares the budget.
+    seeding = asyncio.create_task(agent._seed_agent_session_state(seed()))
+    done, _ = await asyncio.wait({seeding}, timeout=10)
+    if not done:
+        seeding.cancel()
+    assert done and isinstance(seeding.exception(), TimeoutError)
+    sandbox.disconnect.assert_awaited_once()
 
 
 def test_changed_activation_is_rejected_and_identical_retry_joins(setup):
@@ -684,6 +947,26 @@ def test_interrupted_activation_keeps_observations(setup):
 @pytest.mark.parametrize("spans", ["", "not-json", otel()])
 def test_absent_chat_spans_do_not_invent_zero_usage(spans):
     assert parse_copilot_usage(spans) is None
+
+
+@pytest.mark.parametrize("unreadable", ["[1, 2]", chat_span("chatcmpl-bg", usage=(500, 50))[:-20]])
+def test_unreadable_telemetry_makes_usage_unknown(unreadable):
+    usage = parse_copilot_usage(otel(chat_span("a", usage=(10, 3)), unreadable))
+    assert usage.telemetry_malformed and usage.response_ids == ["a"]
+    assert (usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.reasoning_tokens) == (None,) * 4
+
+
+def test_unreadable_telemetry_keeps_session_usage_unknown(setup):
+    agent, sandbox = setup
+    # A span cut off mid-write may be a background call with no event; summing the rest would publish a subtotal.
+    background = chat_span("chatcmpl-bg", usage=(500, 50))[:-20]
+    sandbox.otel = otel(chat_span("chatcmpl-1", usage=(10, 3)), chat_span("chatcmpl-2", usage=(5, 2)), background)
+    result, closed = run_session(agent)
+    assert result.json()["status"] == "completed" and result.json()["usage"] is None
+    observations = closed.json()["agent_observations"]
+    assert [call["response_id"] for call in observations["records"][0]["model_calls"]] == ["chatcmpl-1", "chatcmpl-2"]
+    gaps = {gap["code"] for gap in observations["gaps"]}
+    assert "model_usage_telemetry_malformed" in gaps and "partial_model_usage_unavailable" not in gaps
 
 
 def test_closed_session_rejects_activation_and_close_replays(setup):

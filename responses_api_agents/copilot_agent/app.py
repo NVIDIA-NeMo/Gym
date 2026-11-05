@@ -19,6 +19,7 @@ rollout-prefixed Gym Model Server with ``COPILOT_OFFLINE=true``, so it never con
 """
 
 import asyncio
+import base64
 import json
 import logging
 import re
@@ -31,12 +32,14 @@ from time import time
 from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
+from aiohttp import ClientError, ClientTimeout
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue, ValidationError, model_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
-    RUNNER_FILE,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentOutcome,
     AgentSeedRejectedError,
@@ -49,6 +52,7 @@ from nemo_gym.agents import (
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
 )
+from nemo_gym.client import request as http_request
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
@@ -69,6 +73,7 @@ from nemo_gym.core import (
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
+    SandboxExecResult,
     SandboxSpec,
     create_provider,
     resolve_provider_config,
@@ -92,25 +97,88 @@ SOURCE = "copilot"
 _EXACT_VERSION = re.compile(r"\d+\.\d+\.\d+")
 # Copilot 1.0.103 reports an unreachable BYOK provider with this message and no status code.
 _TRANSPORT_MESSAGES = ("Could not connect to", "fetch failed", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "timed out")
+_MIN_GLIBC = (2, 28)
+# One exec reports the OS, the CPU and the C library; the Agent Server selects the package from it.
+_PLATFORM_PROBE = (
+    "uname -s; uname -m; "
+    "if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else getconf GNU_LIBC_VERSION || echo unknown; fi"
+)
+# Linux passes one argument of at most this many bytes, including its terminating NUL.
+_MAX_ARGUMENT_BYTES = 131072
+_PACKAGE_METADATA: dict[tuple[str, str, str], tuple[str, str]] = {}
 
 
 def _sandbox_prepare_command(directory: str) -> str:
-    """POSIX sh: the supervisor and the installer need python3 before anything else runs."""
+    """POSIX sh: the supervisor, the harness runner and the installer need bash before anything else runs."""
     return f"""set -eu
-if ! command -v python3 >/dev/null 2>&1; then
-    [ "$(id -u)" = 0 ] || {{ echo "Copilot in the task sandbox requires python3: preinstall it or use a root image." >&2; exit 1; }}
+if ! command -v bash >/dev/null 2>&1; then
+    [ "$(id -u)" = 0 ] || {{ echo "Copilot in the task sandbox requires bash: preinstall it or use a root image." >&2; exit 1; }}
     if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache python3
+        apk add --no-cache bash
     elif command -v apt-get >/dev/null 2>&1; then
         apt-get update
-        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 ca-certificates
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash
     else
-        echo "Copilot in the task sandbox requires python3 (automatic installation requires apt-get or apk)." >&2
+        echo "Copilot in the task sandbox requires bash (automatic installation requires apt-get or apk)." >&2
         exit 1
     fi
 fi
 mkdir -p {shlex.quote(directory)}
 """
+
+
+def copilot_package(probe: str) -> str:
+    """Select the npm platform package from ``_PLATFORM_PROBE`` output.
+
+    A platform Copilot cannot run on is refused; output the probe could not have produced is an error.
+    """
+    lines = [line.strip() for line in probe.strip().splitlines()]
+    if len(lines) != 3:
+        raise RuntimeError(f"Unexpected Copilot sandbox platform probe output: {probe!r}")
+    system, machine, libc = lines
+    if system != "Linux":
+        raise AgentSeedRejectedError(f"Copilot sandbox sessions support Linux only, not {system}")
+    arch = {"x86_64": "x64", "aarch64": "arm64", "arm64": "arm64"}.get(machine)
+    if arch is None:
+        raise AgentSeedRejectedError(f"Copilot supports x86_64 and aarch64 sandboxes, not {machine}")
+    if libc == "musl":
+        return f"copilot-linuxmusl-{arch}"
+    glibc = re.fullmatch(r"glibc (\d+)\.(\d+)(?:\.\d+)*", libc)
+    if glibc is None:
+        raise RuntimeError(f"Copilot requires glibc or musl; could not identify the sandbox C library: {libc!r}")
+    if tuple(map(int, glibc.groups())) < _MIN_GLIBC:
+        raise AgentSeedRejectedError(
+            f"Copilot requires glibc {'.'.join(map(str, _MIN_GLIBC))} or newer; this sandbox has {libc}"
+        )
+    return f"copilot-linux-{arch}"
+
+
+async def copilot_package_metadata(registry: str, package: str, version: str) -> tuple[str, str]:
+    """Return the tarball URL and SHA-512 (hex) that the registry publishes for a pinned platform package.
+
+    Read on the Agent Server, once per registry, package and version; the sandbox installer checks the
+    download against this digest. A failed read is an error to retry, not a refusal of the seed.
+    """
+    key = (registry, package, version)
+    if key not in _PACKAGE_METADATA:
+        url = f"{registry.rstrip('/')}/@github/{package}/{version}"
+        try:
+            async with await http_request("GET", url, timeout=ClientTimeout(total=60)) as response:
+                response.raise_for_status()
+                metadata = await response.json(content_type=None)
+            tarball, integrity = metadata["dist"]["tarball"], metadata["dist"]["integrity"]
+        except (ClientError, TimeoutError, ValueError, LookupError, TypeError) as error:
+            raise RuntimeError(f"Cannot read Copilot package metadata from {url}: {error!r}") from error
+        if not isinstance(tarball, str) or not isinstance(integrity, str) or not integrity.startswith("sha512-"):
+            raise RuntimeError(f"Unsupported npm integrity for @github/{package}@{version}: {integrity!r}")
+        try:
+            digest = base64.b64decode(integrity.removeprefix("sha512-"), validate=True).hex()
+        except ValueError as error:
+            raise RuntimeError(f"Malformed npm integrity for @github/{package}@{version}: {integrity!r}") from error
+        if len(digest) != 128:
+            raise RuntimeError(f"Malformed npm integrity for @github/{package}@{version}: {integrity!r}")
+        _PACKAGE_METADATA[key] = (tarball, digest)
+    return _PACKAGE_METADATA[key]
 
 
 def _timestamp(value: Any) -> Optional[float]:
@@ -266,6 +334,7 @@ class CopilotUsage:
     response_ids: list[str]
     compaction_usage_unavailable: bool = False
     compaction_state_unavailable: bool = False
+    telemetry_malformed: bool = False
 
 
 def parse_copilot_usage(otel: Optional[str], *, compaction_state: bool | None = False) -> Optional[CopilotUsage]:
@@ -277,7 +346,8 @@ def parse_copilot_usage(otel: Optional[str], *, compaction_state: bool | None = 
     Copilot 1.0.103 omits compaction calls from its spans. Persisted session events
     also detect late compaction with no following chat span. Observed compaction
     or an unavailable native event store makes aggregate usage unknown. Per-call
-    counts remain in Gym model capture.
+    counts remain in Gym model capture. So does an unreadable line, such as a span
+    cut off mid-write, which may have been a call with no transcript event.
     """
     if otel is None:
         return None
@@ -285,14 +355,19 @@ def parse_copilot_usage(otel: Optional[str], *, compaction_state: bool | None = 
     response_ids: list[str] = []
     observed_calls = 0
     compacted = compaction_state is True
+    malformed = False
     for line in otel.split("\n"):
         if not line.strip():
             continue
         try:
             record = json.loads(line)
         except (ValueError, RecursionError):
+            malformed = True
             continue
-        if not isinstance(record, dict) or record.get("type") != "span":
+        if not isinstance(record, dict):
+            malformed = True
+            continue
+        if record.get("type") != "span":
             continue
         attributes = record.get("attributes") if isinstance(record.get("attributes"), dict) else {}
         if attributes.get("gen_ai.operation.name") != "chat":
@@ -318,14 +393,16 @@ def parse_copilot_usage(otel: Optional[str], *, compaction_state: bool | None = 
                 totals[key] = None
     if not observed_calls:
         return None
+    unknown = compacted or compaction_state is None or malformed
     return CopilotUsage(
-        input_tokens=None if compacted or compaction_state is None else totals["input"],
-        output_tokens=None if compacted or compaction_state is None else totals["output"],
-        cached_tokens=None if compacted or compaction_state is None else totals["cached"],
-        reasoning_tokens=None if compacted or compaction_state is None else totals["reasoning"],
+        input_tokens=None if unknown else totals["input"],
+        output_tokens=None if unknown else totals["output"],
+        cached_tokens=None if unknown else totals["cached"],
+        reasoning_tokens=None if unknown else totals["reasoning"],
         response_ids=response_ids,
         compaction_usage_unavailable=compacted,
         compaction_state_unavailable=compaction_state is None,
+        telemetry_malformed=malformed,
     )
 
 
@@ -340,7 +417,10 @@ class CopilotAgentConfig(BaseResponsesAPIAgentConfig):
     concurrency: int = Field(default=8, gt=0)
     timeout: int = Field(default=900, gt=0)
     context_window: Optional[int] = Field(
-        default=None, gt=0, description="Prompt-token limit for the BYOK model; Copilot's default when unset."
+        default=None,
+        gt=0,
+        description="Total context tokens for the BYOK model; Copilot's prompt limit is this minus max_output_tokens. "
+        "Copilot's default when unset.",
     )
     max_output_tokens: Optional[int] = Field(
         default=None, gt=0, description="Per-model-call output limit, sent as max_tokens; unset sends none."
@@ -351,6 +431,16 @@ class CopilotAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def _output_fits_in_context(self) -> "CopilotAgentConfig":
+        if (
+            self.context_window is not None
+            and self.max_output_tokens is not None
+            and self.max_output_tokens >= self.context_window
+        ):
+            raise ValueError("max_output_tokens must be smaller than context_window, which includes it")
+        return self
 
 
 class CopilotAgentRunRequest(BaseRunRequest):
@@ -432,51 +522,9 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             invocation_id=f"copilot-{uuid4().hex}",
         )
         try:
-            if owns_sandbox:
-                await sandbox.start(spec)
-                state.sandbox_id = sandbox.sandbox_id
-                # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
-                workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
-                if workspace.return_code != 0 or workspace.error_type:
-                    raise RuntimeError(
-                        f"Cannot create Copilot sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
-                    )
-            prepared = await sandbox.exec(
-                _sandbox_prepare_command(directory), timeout_s=self.config.sandbox_install_timeout_seconds
-            )
-            if prepared.return_code != 0 or prepared.error_type:
-                details = "\n".join(part for part in (prepared.stderr, prepared.stdout) if part)
-                raise RuntimeError(
-                    f"Cannot prepare Copilot session (exit {prepared.return_code}, "
-                    f"error_type={prepared.error_type}): {details[-16000:]}"
-                )
-            # Install only the agent runtime; Resources has already prepared the task.
-            installer = "install_copilot_runtime.py"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            runtime_dir = f"/tmp/nemo-gym-copilot-{self.config.copilot_version}"
-            installed = await sandbox.exec(
-                " ".join(
-                    shlex.quote(part)
-                    for part in (
-                        "python3",
-                        "-I",
-                        f"{directory}/{installer}",
-                        runtime_dir,
-                        self.config.copilot_version,
-                        self.config.npm_registry,
-                    )
-                ),
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if installed.return_code != 0 or installed.error_type:
-                details = "\n".join(part for part in (installed.stderr, installed.stdout) if part)
-                raise RuntimeError(
-                    f"Copilot sandbox installation failed (exit {installed.return_code}, "
-                    f"error_type={installed.error_type}): {details[-16000:]}"
-                )
-            state.runtime = CopilotRuntime.model_validate_json(installed.stdout.strip().splitlines()[-1])
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            # The owned sandbox's TTL counts on setup ending within this budget.
+            async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                await self._install(state, spec if owns_sandbox else None)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -485,6 +533,47 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                 raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
+
+    async def _install(self, state: CopilotSandboxSession, spec: Optional[SandboxSpec]) -> None:
+        """Start an owned sandbox, then install or reuse the runtime; Resources has already prepared the task."""
+        sandbox, directory, workdir = state.session.sandbox, state.session.session_dir, state.session.workdir
+        if spec is not None:
+            await sandbox.start(spec)
+            state.sandbox_id = sandbox.sandbox_id
+            # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
+            workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
+            if workspace.return_code != 0 or workspace.error_type:
+                raise RuntimeError(
+                    f"Cannot create Copilot sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                )
+        prepared = await sandbox.exec(
+            _sandbox_prepare_command(directory), timeout_s=self.config.sandbox_install_timeout_seconds
+        )
+        _check_setup(prepared, "Cannot prepare Copilot session")
+        probe = await sandbox.exec(_PLATFORM_PROBE, cwd="/", timeout_s=30)
+        _check_setup(probe, "Cannot identify the Copilot sandbox platform")
+        package = copilot_package(probe.stdout or "")
+        version = self.config.copilot_version
+        tarball, sha512 = await copilot_package_metadata(self.config.npm_registry, package, version)
+        installer = "install_copilot_runtime.sh"
+        await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+        runtime = f"/tmp/nemo-gym-copilot-{version}"
+        installed = await sandbox.exec(
+            shlex.join(["bash", f"{directory}/{installer}", runtime, version, package, tarball, sha512]),
+            cwd="/",
+            timeout_s=self.config.sandbox_install_timeout_seconds,
+        )
+        _check_setup(installed, "Copilot sandbox installation failed")
+        # The installer prints its runtime record last.
+        lines = (installed.stdout or "").strip().splitlines()
+        if not lines:
+            details = (installed.stderr or "")[-16000:]
+            raise RuntimeError(f"Copilot sandbox installation reported no runtime: {details}")
+        try:
+            state.runtime = CopilotRuntime.model_validate_json(lines[-1])
+        except ValidationError as error:
+            raise RuntimeError(f"Copilot sandbox installation reported a malformed runtime: {lines[-1]!r}") from error
+        await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop Copilot before verification, retaining a borrowed sandbox."""
@@ -531,6 +620,12 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             if any(part.get("type") != "input_text" for part in parts):
                 raise HTTPException(422, "Copilot only supports text input")
             content = "".join(part.get("text", "") for part in parts)
+        if "\0" in content or len(content.encode()) + len("--prompt=") >= _MAX_ARGUMENT_BYTES:
+            raise HTTPException(
+                422,
+                f"Copilot takes the prompt as one command-line argument: it must contain no NUL character "
+                f"and be shorter than {_MAX_ARGUMENT_BYTES - len('--prompt=')} bytes",
+            )
         return body.model_copy(update={"input": items}).model_copy(deep=True), content
 
     def _command(self, state: CopilotSandboxSession, prompt: str) -> list[str]:
@@ -550,8 +645,6 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             "off",
             "--output-format",
             "json",
-            "--usage-output-file",
-            f"{directory}/usage.json",
             "--log-dir",
             f"{directory}/logs",
             "--disable-builtin-mcps",
@@ -589,7 +682,10 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             "NO_COLOR": "1",
         }
         if self.config.context_window is not None:
-            env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"] = str(self.config.context_window)
+            # Copilot's limit covers the prompt only; the window also holds the reply.
+            env["COPILOT_PROVIDER_MAX_PROMPT_TOKENS"] = str(
+                self.config.context_window - (self.config.max_output_tokens or 0)
+            )
         if self.config.max_output_tokens is not None:
             env["COPILOT_PROVIDER_MAX_OUTPUT_TOKENS"] = str(self.config.max_output_tokens)
         return env
@@ -623,6 +719,13 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             )
         if usage is not None and usage.compaction_state_unavailable:
             gaps.append(ObservationGap(code="compaction_state_unavailable"))
+        if usage is not None and usage.telemetry_malformed:
+            gaps.append(
+                ObservationGap(
+                    code="model_usage_telemetry_malformed",
+                    detail="Copilot's OpenTelemetry file has unreadable lines; aggregate usage is unknown",
+                )
+            )
         cleanup = state.session.cleanup
         access = state.request.sandbox_access
         if cleanup is None:
@@ -679,17 +782,12 @@ class CopilotAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         invocation_id = state.invocation_id
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
-        payload = {
-            "directory": state.session.session_dir,
-            "command": self._command(state, prompt),
-            "cwd": state.session.workdir,
-            "env": self._env(state),
-        }
+        command, env = self._command(state, prompt), self._env(state)
         conversation = [NeMoGymEasyInputMessage(role="user", content=prompt)]
         try:
             async with self.sem:
                 artifacts = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    command=command, env=env, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
@@ -825,6 +923,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             and not known
             and not usage.compaction_usage_unavailable
             and not usage.compaction_state_unavailable
+            and not usage.telemetry_malformed
         ):
             gaps.append(
                 ObservationGap(code="partial_model_usage_unavailable", detail="a model call reported no usage")
@@ -875,6 +974,15 @@ class CopilotAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: CopilotAgentRunRequest) -> BaseVerifyResponse:
         raise HTTPException(422, "Copilot has no compatibility /run; submit the episode to an Environment Server /run")
+
+
+def _check_setup(result: SandboxExecResult, failure: str) -> None:
+    """Raise with the exit status, error type and output tail of a failed setup command."""
+    if result.return_code != 0 or result.error_type:
+        details = "\n".join(part for part in (result.stderr, result.stdout) if part)
+        raise RuntimeError(
+            f"{failure} (exit {result.return_code}, error_type={result.error_type}): {details[-16000:]}"
+        )
 
 
 def _events(raw: str) -> list[tuple[float, dict[str, Any]]]:

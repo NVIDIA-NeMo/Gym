@@ -8,9 +8,15 @@ import logging
 import shlex
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
-from nemo_gym.agents import RUNNER_FILE, AgentSessionState, SandboxCommand, SandboxSession
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -25,11 +31,10 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 class CopilotRuntime(BaseModel):
-    """The installed runtime that ``install_copilot_runtime.py`` reports."""
+    """The installed runtime that ``install_copilot_runtime.sh`` reports."""
 
     model_config = ConfigDict(extra="ignore")
     binary: str
@@ -43,9 +48,30 @@ class CopilotArtifacts(BaseModel):
 
     events: str
     otel: str | None = None
-    usage: str | None = None
     stderr: str | None = None
     compaction_state: bool | None = None
+
+
+def parse_compaction_state(logs: list[str]) -> bool | None:
+    """Whether Copilot's persisted session events record a compaction; ``None`` when they cannot tell.
+
+    They include background compaction that is absent from stdout and the chat spans.
+    """
+    observed = False
+    for log in logs:
+        for line in log.split("\n"):
+            if not line.strip():
+                continue
+            try:
+                event = json.loads(line)
+            except (ValueError, RecursionError):
+                return None
+            if not isinstance(event, dict) or not isinstance(event.get("type"), str):
+                return None
+            observed = True
+            if event["type"] in ("session.compaction_start", "session.compaction_complete"):
+                return True
+    return False if observed else None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -71,10 +97,6 @@ class CopilotSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
-
-    async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage adapter input using the shared text-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
 
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
@@ -103,44 +125,44 @@ class CopilotSandboxSession(AgentSessionState):
                 # The agent base replays the activation error independently of close.
 
     async def execute(
-        self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float
+        self, *, command: list[str], env: dict[str, str], timeout: float, close_timeout: float
     ) -> CopilotArtifacts:
         """Run through the common lifecycle; the adapter validates the terminal events."""
         return await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(command=command, env=env),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
         )
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the runner command."""
-        await self.upload_json("input.json", payload)
-        return SandboxCommand(
-            argv=[
-                "python3",
-                "-I",
-                f"{self.session.session_dir}/{RUNNER_FILE}",
-                f"{self.session.session_dir}/input.json",
-            ],
-            stdlib_runner=True,
-        )
+    async def stage_activation(self, *, command: list[str], env: dict[str, str]) -> SandboxCommand:
+        """Stage the invocation and return the shared runner command."""
+        directory = self.session.session_dir
+        params = {
+            "cwd": self.session.workdir,
+            "command": command,
+            "env": env,
+            "stdin": "/dev/null",
+            "stdout": f"{directory}/stdout.jsonl",
+            "stderr": f"{directory}/stderr.log",
+            "events": f"{directory}/events.jsonl",
+        }
+        await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
+        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def read_compaction_state(self) -> bool | None:
-        """Inspect the private native event store after termination, before session cleanup."""
-        directory = self.session.session_dir
+        """Read the private native event store after termination, before session cleanup."""
+        store = shlex.quote(f"{self.session.session_dir}/copilot-home/session-state")
         try:
-            result = await self.session.sandbox.exec(
-                shlex.join(["python3", "-I", f"{directory}/{RUNNER_FILE}", "--compaction-state", directory]),
-                timeout_s=30,
-            )
-            if result.return_code == 0 and not result.error_type:
-                value = json.loads(result.stdout)
-                if isinstance(value, bool):
-                    return value
+            listed = await self.session.sandbox.exec(f"ls -1 -- {store}/*/events.jsonl", timeout_s=30)
+            if listed.return_code != 0 or listed.error_type:
+                return None  # No event store, or it cannot be listed.
+            paths = [path for path in (listed.stdout or "").split("\n") if path]
+            logs = [await read_text(self.session.sandbox, path=path) for path in paths]
         except Exception:
             LOG.warning("Could not inspect Copilot native compaction state", exc_info=True)
-        return None
+            return None
+        return parse_compaction_state(logs)
 
     async def collect_artifacts(self) -> CopilotArtifacts:
         """Keep partial events even when runner metadata or Copilot's own files are missing."""
@@ -158,7 +180,6 @@ class CopilotSandboxSession(AgentSessionState):
         return CopilotArtifacts(
             events=events,
             otel=await self.read_optional("otel.jsonl"),
-            usage=await self.read_optional("usage.json"),
             stderr=await self.read_optional("stderr.log"),
             compaction_state=await self.read_compaction_state(),
         )

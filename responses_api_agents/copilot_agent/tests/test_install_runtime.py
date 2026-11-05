@@ -1,26 +1,24 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import base64
 import hashlib
-import importlib.util
 import io
 import json
 import os
+import shlex
+import shutil
+import subprocess
 import tarfile
 from pathlib import Path
 
 import pytest
 
-
-def load_installer():
-    path = Path(__file__).parents[1] / "install_copilot_runtime.py"
-    spec = importlib.util.spec_from_file_location("install_copilot_runtime", path)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+from responses_api_agents.copilot_agent.app import _sandbox_prepare_command
 
 
+INSTALLER = Path(__file__).parents[1] / "install_copilot_runtime.sh"
+PACKAGE = "copilot-linux-x64"
+URL = "https://registry.test/@github/copilot-linux-x64/-/copilot-linux-x64-1.0.103.tgz"
 # Stands in for the standalone binary: the first run unpacks into $HOME/.cache like Copilot 1.0.103.
 FAKE_BINARY = """#!/bin/sh
 if [ -n "${COPILOT_CLI_DIST_DIR:-}" ]; then
@@ -30,119 +28,207 @@ else
 fi
 echo "GitHub Copilot CLI 1.0.103."
 """
+# Records each download and serves the package the test staged.
+FAKE_CURL = """#!/bin/bash
+while (($#)); do case $1 in -o) out=$2; shift 2 ;; *) url=$1; shift ;; esac; done
+echo "$url" >> "$TEST_ROOT/downloads.log"
+cat "$TEST_ROOT/served.tgz" > "$out"
+"""
 
 
-def package(binary=FAKE_BINARY) -> bytes:
+def package(binary: str = FAKE_BINARY) -> bytes:
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as tar:
-        data = binary.encode()
-        info = tarfile.TarInfo("package/copilot")
-        info.size = len(data)
-        info.mode = 0o755
-        tar.addfile(info, io.BytesIO(data))
+        for name, text in (("package/package.json", "{}"), ("package/copilot", binary)):
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size, info.mode = len(data), 0o755
+            tar.addfile(info, io.BytesIO(data))
     return stream.getvalue()
 
 
+def executable(path: Path, text: str) -> None:
+    path.write_text(text)
+    path.chmod(0o755)
+
+
 @pytest.fixture
-def installer(monkeypatch):
-    module = load_installer()
-    tarball = package()
-    integrity = "sha512-" + base64.b64encode(hashlib.sha512(tarball).digest()).decode()
-    downloads = []
-
-    def fetch(url):
-        downloads.append(url)
-        if url.endswith("/@github/copilot-linux-x64/1.0.103"):
-            return json.dumps({"dist": {"tarball": "https://registry.test/pkg.tgz", "integrity": integrity}}).encode()
-        assert url == "https://registry.test/pkg.tgz"
-        return module_tarball[0]
-
-    module_tarball = [tarball]
-    monkeypatch.setattr(module, "package_name", lambda: "copilot-linux-x64")
-    monkeypatch.setattr(module, "fetch", fetch)
-    return module, downloads, module_tarball
-
-
-def test_install_verifies_unpacks_privately_and_reuses(installer, tmp_path):
-    module, downloads, _ = installer
-    runtime = str(tmp_path / "nemo-gym-copilot-1.0.103")
-    record = module.install(runtime, "1.0.103", "https://registry.test")
-    assert record["binary"] == f"{runtime}/copilot"
-    assert record["dist_dir"] == f"{runtime}/home/.cache/copilot/pkg/linux-x64/1.0.103"
-    assert os.path.isfile(f"{runtime}/ready") and os.access(record["binary"], os.X_OK)
-    assert not [path for path in os.listdir(tmp_path) if ".partial-" in path]
-    assert len(downloads) == 2
-    assert module.install(runtime, "1.0.103", "https://registry.test") == record
-    assert len(downloads) == 2
+def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """Run the real installer with an isolated PATH: no python3, no package manager, and a fake curl."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("bash", "env", "mkdir", "dirname", "rm", "mv", "chmod", "touch", "cat", "tar", "sha512sum"):
+        found = shutil.which(name)
+        if found is None:
+            pytest.skip(f"Installer test requires {name}")
+        (bindir / name).symlink_to(found)
+    # GNU tar runs gzip; flock serializes concurrent installers where the image has it.
+    for name in ("gzip", "flock"):
+        if found := shutil.which(name):
+            (bindir / name).symlink_to(found)
+    if not (bindir / "flock").exists():
+        executable(bindir / "flock", "#!/bin/sh\nexit 0\n")
+    executable(bindir / "id", '#!/bin/bash\necho "${TEST_UID:-0}"\n')
+    executable(bindir / "curl", FAKE_CURL)
+    (tmp_path / "served.tgz").write_bytes(package())
+    return tmp_path, os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)}
 
 
-def test_integrity_mismatch_is_refused_without_a_runtime(installer, tmp_path):
-    module, _, tarball = installer
-    tarball[0] = package(FAKE_BINARY.replace("1.0.103.", "1.0.103!"))
-    runtime = str(tmp_path / "runtime")
-    with pytest.raises(SystemExit, match="Integrity mismatch"):
-        module.install(runtime, "1.0.103", "https://registry.test")
-    assert not os.path.exists(runtime)
-    assert not [path for path in os.listdir(tmp_path) if ".partial-" in path]
+def install(root: Path, env: dict[str, str], *, sha512: str | None = None) -> subprocess.CompletedProcess[str]:
+    digest = sha512 or hashlib.sha512((root / "served.tgz").read_bytes()).hexdigest()
+    return subprocess.run(
+        [str(root / "bin/bash"), str(INSTALLER), str(root / "runtime"), "1.0.103", PACKAGE, URL, digest],
+        env=env,
+        cwd="/",
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
 
 
-def test_runtime_with_another_version_is_replaced(installer, tmp_path):
-    module, downloads, _ = installer
-    runtime = str(tmp_path / "runtime")
-    module.install(runtime, "1.0.103", "https://registry.test")
-    record_path = Path(runtime) / "runtime.json"
-    record = json.loads(record_path.read_text())
-    record_path.write_text(json.dumps(record | {"version": "1.0.0"}))
-    module.install(runtime, "1.0.103", "https://registry.test")
-    assert len(downloads) == 4
+def downloads(root: Path) -> list[str]:
+    log = root / "downloads.log"
+    return log.read_text().splitlines() if log.exists() else []
+
+
+def test_cold_install_verifies_and_unpacks_into_a_private_home(sandbox):
+    root, env = sandbox
+    assert shutil.which("python3", path=env["PATH"]) is None
+    installed = install(root, env)
+    assert installed.returncode == 0, installed.stderr
+    runtime = root / "runtime"
+    record = json.loads(installed.stdout.strip().splitlines()[-1])
+    assert record == {
+        "binary": f"{runtime}/copilot",
+        "dist_dir": f"{runtime}/home/.cache/copilot/pkg/linux-x64/1.0.103",
+        "package": PACKAGE,
+        "version": "1.0.103",
+        "sha512": hashlib.sha512((root / "served.tgz").read_bytes()).hexdigest(),
+    }
+    assert json.loads((runtime / "runtime.json").read_text()) == record
+    assert (runtime / "ready").is_file() and os.access(record["binary"], os.X_OK)
+    # Only the binary is kept from the package.
+    assert sorted(path.name for path in runtime.iterdir()) == ["copilot", "home", "ready", "runtime.json"]
+    assert not list(root.glob("runtime.partial-*"))
+    assert downloads(root) == [URL]
+
+
+def test_ready_runtime_is_reused_without_a_download(sandbox):
+    root, env = sandbox
+    first = install(root, env)
+    second = install(root, env)
+    assert second.returncode == 0, second.stderr
+    assert second.stdout.strip().splitlines()[-1] == first.stdout.strip().splitlines()[-1]
+    assert downloads(root) == [URL]
+
+
+def test_checksum_mismatch_leaves_no_runtime(sandbox):
+    root, env = sandbox
+    installed = install(root, env, sha512=hashlib.sha512(b"another package").hexdigest())
+    assert installed.returncode != 0
+    assert "does not match the registry's SHA-512" in installed.stderr
+    assert not (root / "runtime").exists()
+    assert not list(root.glob("runtime.partial-*"))
 
 
 @pytest.mark.parametrize(
-    "machine,glibc,musl,expected",
-    [
-        ("x86_64", "glibc 2.31", False, "copilot-linux-x64"),
-        ("aarch64", "glibc 2.35", False, "copilot-linux-arm64"),
-        ("x86_64", None, True, "copilot-linuxmusl-x64"),
-    ],
+    "binary",
+    [FAKE_BINARY.replace("1.0.103.", "1.0.99."), FAKE_BINARY.replace('echo "GitHub', 'exit 3\necho "GitHub')],
+    ids=["wrong-version", "exit-nonzero"],
 )
-def test_package_matches_the_sandbox_platform(monkeypatch, machine, glibc, musl, expected):
-    module = load_installer()
-    monkeypatch.setattr(module.sys, "platform", "linux")
-    monkeypatch.setattr(module.platform, "machine", lambda: machine)
-    monkeypatch.setattr(module.os, "confstr", lambda name: glibc)
-    monkeypatch.setattr(module.os, "listdir", lambda path: ["ld-musl-x86_64.so.1"] if musl else ["libc.so.6"])
-    assert module.package_name() == expected
+def test_failed_health_check_publishes_no_ready_runtime(sandbox, binary):
+    root, env = sandbox
+    (root / "served.tgz").write_bytes(package(binary))
+    installed = install(root, env)
+    assert installed.returncode != 0
+    assert "failed its health check" in installed.stderr
+    assert not (root / "runtime/ready").exists()
+    assert not list(root.glob("runtime.partial-*"))
 
 
-@pytest.mark.parametrize(
-    "platform_name,machine,glibc,reason",
-    [
-        ("darwin", "x86_64", "glibc 2.31", "Linux only"),
-        ("linux", "ppc64le", "glibc 2.31", "x86_64 and aarch64"),
-        ("linux", "x86_64", "glibc 2.17", "glibc 2.28 or newer"),
-    ],
-)
-def test_unsupported_platforms_are_refused(monkeypatch, platform_name, machine, glibc, reason):
-    module = load_installer()
-    monkeypatch.setattr(module.sys, "platform", platform_name)
-    monkeypatch.setattr(module.platform, "machine", lambda: machine)
-    monkeypatch.setattr(module.os, "confstr", lambda name: glibc)
-    with pytest.raises(SystemExit, match=reason):
-        module.package_name()
-
-
-@pytest.mark.parametrize("state", ["missing-ready", "missing-record", "broken-record"])
-def test_interrupted_install_is_replaced(installer, tmp_path, state):
-    module, downloads, _ = installer
-    runtime = str(tmp_path / "runtime")
-    module.install(runtime, "1.0.103", "https://registry.test")
-    if state == "missing-ready":
-        Path(runtime, "ready").unlink()
-    elif state == "missing-record":
-        Path(runtime, "runtime.json").unlink()
+@pytest.mark.parametrize("damage", ["no-ready-marker", "truncated-binary"])
+def test_interrupted_installation_is_replaced(sandbox, damage):
+    root, env = sandbox
+    assert install(root, env).returncode == 0
+    # Killed after publishing, before the ready marker; or a binary cut short. Another installer was staging.
+    if damage == "no-ready-marker":
+        (root / "runtime/ready").unlink()
     else:
-        Path(runtime, "runtime.json").write_text("{")
-    recovered = module.install(runtime, "1.0.103", "https://registry.test")
-    assert module.check(recovered, "1.0.103")
-    assert Path(runtime, "ready").is_file()
-    assert len(downloads) == 4
+        (root / "runtime/copilot").write_text("truncated")
+    (root / "runtime.partial-1").mkdir()
+    installed = install(root, env)
+    assert installed.returncode == 0, installed.stderr
+    assert (root / "runtime/ready").is_file()
+    assert "GitHub Copilot CLI 1.0.103." in (root / "runtime/copilot").read_text()
+    assert not list(root.glob("runtime.partial-*"))
+    assert downloads(root) == [URL, URL]
+
+
+@pytest.mark.parametrize("uid", [0, 1000])
+def test_missing_downloader_is_installed_only_as_root(sandbox, uid):
+    root, env = sandbox
+    (root / "bin/curl").rename(root / "curl")
+    executable(
+        root / "bin/apt-get",
+        '#!/bin/bash\necho "$*" >> "$TEST_ROOT/packages.log"\n'
+        'if [ "$1" = install ]; then cat "$TEST_ROOT/curl" > "$TEST_ROOT/bin/curl"; chmod 755 "$TEST_ROOT/bin/curl"; fi\n',
+    )
+    installed = install(root, env | {"TEST_UID": str(uid)})
+    if uid:
+        assert installed.returncode == 1
+        assert "Copilot requires curl ca-certificates: preinstall these packages" in installed.stderr
+        assert not (root / "packages.log").exists() and not downloads(root)
+        return
+    assert installed.returncode == 0, installed.stderr
+    assert (root / "packages.log").read_text().splitlines() == [
+        "update",
+        "install -y --no-install-recommends curl ca-certificates",
+    ]
+    assert json.loads(installed.stdout.strip().splitlines()[-1])["version"] == "1.0.103"
+
+
+@pytest.mark.parametrize("package_manager", ["apk", "apt-get"])
+@pytest.mark.parametrize("failure", [None, "nonroot", "unavailable"])
+def test_bootstrap_installs_bash_only_when_missing(tmp_path, package_manager, failure):
+    """The supervisor, the harness runner and the installer need bash; the bootstrap itself is POSIX sh."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for name in ("mkdir", "ln"):
+        (bindir / name).symlink_to(shutil.which(name))
+    executable(bindir / "id", f"#!/bin/sh\necho {1000 if failure == 'nonroot' else 0}\n")
+    if failure != "unavailable":
+        executable(
+            bindir / package_manager,
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$TEST_ROOT/packages.log"\n'
+            f'case " $* " in *" bash "*) ln -s {shlex.quote(shutil.which("bash"))} "$TEST_ROOT/bin/bash" ;; esac\n',
+        )
+    directory = tmp_path / "session with spaces"
+    prepared = subprocess.run(
+        ["/bin/sh", "-c", _sandbox_prepare_command(str(directory))],
+        env=os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=10,
+    )
+    if failure:
+        assert prepared.returncode == 1
+        assert "requires bash" in prepared.stderr and not directory.exists()
+        return
+    assert prepared.returncode == 0, prepared.stderr
+    assert directory.is_dir() and (bindir / "bash").exists()
+    assert (tmp_path / "packages.log").read_text().splitlines() == (
+        ["add --no-cache bash"] if package_manager == "apk" else ["update", "install -y --no-install-recommends bash"]
+    )
+    # An image that has bash installs nothing.
+    (tmp_path / "packages.log").unlink()
+    again = subprocess.run(
+        ["/bin/sh", "-c", _sandbox_prepare_command(str(directory))],
+        env=os.environ | {"PATH": str(bindir), "TEST_ROOT": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert again.returncode == 0, again.stderr
+    assert not (tmp_path / "packages.log").exists()
