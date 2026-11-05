@@ -28,12 +28,20 @@ class _SuiteModel(BaseModel):
 
 
 class SuiteComparisonConfig(BaseNeMoGymCLIConfig):
-    """Compare benchmark suites without changing single-run comparison settings."""
+    """Compare baseline and candidate runs across a suite of models and benchmarks.
 
-    suite_fpath: str
-    confidence_level: float = Field(default=0.90, gt=0, lt=1, allow_inf_nan=False)
-    output_dirpath: str | None = None
-    report_format: ReportFormat = "both"
+    Run paths in the suite YAML resolve relative to that file. Reports give
+    ``delta = candidate - baseline`` on a 0-100 normalized scale with unpaired Welch intervals.
+    """
+
+    suite_fpath: str = Field(description="Suite YAML naming baseline and candidate runs per model and benchmark.")
+    confidence_level: float = Field(
+        default=0.90, gt=0, lt=1, allow_inf_nan=False, description="Two-sided confidence level for delta intervals."
+    )
+    output_dirpath: str | None = Field(
+        default=None, description="Report directory; defaults to the suite YAML's directory."
+    )
+    report_format: ReportFormat = Field(default="both", description="Reports to write: md, json, or both.")
 
 
 class SuiteMetricDefinition(_SuiteModel):
