@@ -308,8 +308,18 @@ Resources-owned sandbox, since agent-owned sandboxes are gone before verificatio
 OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
 other than `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
-`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out,
-and setup checks the version its package declares instead of installing. A borrowed sandbox relies on its owner's network policy.
+`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `openclaw/` as the installer lays them out.
+Build it into the image with `bash install_openclaw_runtime.sh <dir> <openclaw_version>`; the image also needs `bash`,
+since the session prepare step would otherwise run `apk` or `apt-get`, which the policy blocks. Instead of installing,
+setup checks that the runtime's Node is 22.19.0 or newer, that the CLI runs, and that the package declares
+`openclaw_version` (an exact match), and refuses the seed with a 422 when any of these fails.
+
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
+`model_and_tools`, a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. Under
+`model_only` an optional grant is still written to OpenClaw's configuration and its probe can wait up to 120 seconds
+before it is dropped. The policy is only as strong as the OpenSandbox server's egress mode: in `dns` mode only name
+resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at the IP layer and is needed for
+full isolation. A borrowed sandbox relies on its owner's network policy.
 
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own

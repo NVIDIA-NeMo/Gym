@@ -501,6 +501,14 @@ def _mcp_probe_problem(name: str, result: SandboxExecResult, *, url: str | None 
     return None
 
 
+# OpenClaw needs Node 22.19.0 or newer; an older bundled Node passes the package check but fails at activation.
+_NODE_FLOOR_CHECK = (
+    "const [major, minor] = process.versions.node.split('.').map(Number);"
+    "if (major < 22 || (major === 22 && minor < 19)) {"
+    "process.stderr.write('Node ' + process.versions.node + ' is older than 22.19.0'); process.exit(3); }"
+)
+
+
 class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: Optional[ResourcesServerRef] = None
     model_server: Optional[ModelServerRef] = None
@@ -668,6 +676,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                         for access in self.effective_tool_accesses(body)
                         if isinstance(access, MCPToolAccess)
                     ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
                 )
             except BaseException:
                 await provider.aclose()
@@ -711,19 +725,31 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 )
             prepared_directory = True
             if self.config.sandbox_runtime_dir:
-                # The installer's own check: the version the package declares.
+                # The installer's ready checks: Node 22.19.0 or newer, the CLI runs, and the version the package
+                # declares. The CLI runs with a private home, so the check writes nothing into the task's home.
+                node = shlex.quote(runtime + "/node/bin/node")
+                version_home = f"{directory}/openclaw-version-home"
                 checked = await sandbox.exec(
-                    f"{shlex.quote(runtime + '/node/bin/node')} -e "
-                    f"{shlex.quote('process.stdout.write(require(process.argv[1]).version)')} "
+                    f"{node} -e {shlex.quote(_NODE_FLOOR_CHECK)} && mkdir -p {shlex.quote(version_home)} && "
+                    f"HOME={shlex.quote(version_home)} XDG_CACHE_HOME={shlex.quote(version_home + '/cache')} "
+                    f"XDG_CONFIG_HOME={shlex.quote(version_home + '/config')} "
+                    f"{node} {shlex.quote(runtime + '/openclaw/node_modules/openclaw/openclaw.mjs')} --version "
+                    f">/dev/null && {node} -e {shlex.quote('process.stdout.write(require(process.argv[1]).version)')} "
                     f"{shlex.quote(runtime + '/openclaw/node_modules/openclaw/package.json')}",
                     cwd=workdir,
                     timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
-                if checked.return_code != 0 or checked.error_type or checked.stdout != self.config.openclaw_version:
+                details = f"stderr={(checked.stderr or '')[-16000:]}; stdout={(checked.stdout or '')[-16000:]}"
+                if checked.error_type:
+                    # A transport failure or timeout may pass on another attempt.
                     raise RuntimeError(
-                        f"OpenClaw runtime in {runtime} does not hold openclaw_version {self.config.openclaw_version} "
-                        f"(exit {checked.return_code}, error={checked.error_type}): "
-                        f"stderr={(checked.stderr or '')[-16000:]}; stdout={(checked.stdout or '')[-16000:]}"
+                        f"OpenClaw could not check the runtime in {runtime} (error={checked.error_type}): {details}"
+                    )
+                if checked.return_code != 0 or checked.stdout != self.config.openclaw_version:
+                    # A missing or incomplete runtime, another version or an old Node fails the same way every time.
+                    raise AgentSeedRejectedError(
+                        f"OpenClaw runtime in {runtime} does not run openclaw_version {self.config.openclaw_version} "
+                        f"(exit {checked.return_code}): {details}"
                     )
             else:
                 # Install only the agent runtime in the existing task sandbox.
