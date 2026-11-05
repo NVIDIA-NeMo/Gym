@@ -3,13 +3,30 @@
 """Agent sessions for the Agentic-MME agent, as the single-agent-turn Environment Server drives them."""
 
 import asyncio
+import json
+from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientConnectionError
 from fastapi import HTTPException, Request, Response
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedRejectedError, AgentSeedSessionRequest
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionRequest,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    agent_outcome_policy,
+)
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.agentic_mme.tests.test_app import response
-from responses_api_agents.agentic_mme_agent.tests.test_app import FakeResponse, body, call, make_agent
+from responses_api_agents.agentic_mme_agent.tests.test_app import (
+    FakeResponse,
+    UnreadableResponse,
+    body,
+    call,
+    make_agent,
+)
 
 
 ROLLOUT = "amme-rollout"
@@ -158,3 +175,80 @@ async def test_seed_refuses_what_the_agent_cannot_serve(config, seed_kwargs, mes
     seed = seed_body(**seed_kwargs)
     with pytest.raises(AgentSeedRejectedError, match=message):
         await agent.seed_agent_session(session_request(), seed)
+
+
+async def run_session_with_failing_call(failure, failing_call: int):
+    """Run one session episode whose model call number ``failing_call`` (from 0) fails with ``failure``."""
+    agent, _ = make_agent([response(output=[call()]), response("<answer>red</answer>")])
+    post = agent.server_client.post.side_effect
+    model_calls = 0
+
+    async def post_or_fail(**kwargs):
+        nonlocal model_calls
+        if kwargs["url_path"].endswith("/v1/responses"):
+            model_calls += 1
+            if model_calls == failing_call + 1:
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+        return await post(**kwargs)
+
+    agent.server_client.post.side_effect = post_or_fail
+    request = session_request()
+    await agent.seed_agent_session(request, seed_body())
+    return await agent.responses(request, Response(), body().responses_create_params)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "action"),
+    [(400, OutcomeAction.VERIFY), (413, OutcomeAction.VERIFY), (503, OutcomeAction.RETRY), (401, OutcomeAction.FAIL)],
+)
+async def test_refused_model_call_reports_its_status(status, action) -> None:
+    # Under an agent session the Environment Server decides what a refused call means: by default a rejected
+    # request is the model's own result, a retryable status is retried, and a bad key or URL fails the rollout.
+    refused = FakeResponse(None)
+    refused.ok, refused.status = False, status
+    refused.read = AsyncMock(return_value=b'{"error": {"code": "request_too_large"}}')
+    result = await run_session_with_failing_call(refused, failing_call=1)
+
+    assert result.status == "failed" and result.incomplete_details is None
+    assert "request_too_large" in result.error.message
+    outcome = json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY])
+    assert outcome == {"failure_kind": "model_request_error", "status_code": status}
+    # The work before the refused call stays in the response: the tool call, its output and the tool image.
+    assert [item.type for item in result.output][:2] == ["function_call", "function_call_output"]
+    assert agent_outcome_policy(result) == action
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "failure_kind"),
+    [
+        (TimeoutError(), "model_transport_error"),
+        (ClientConnectionError("connection reset"), "model_transport_error"),
+        (UnreadableResponse(body=b'{"not": "a response"}'), "unknown"),
+    ],
+    ids=["timeout", "connection", "not_a_response"],
+)
+async def test_model_call_that_fails_without_a_status_is_retried(failure, failure_kind) -> None:
+    result = await run_session_with_failing_call(failure, failing_call=0)
+
+    assert result.status == "failed" and result.output == []
+    assert json.loads(result.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": failure_kind}
+    assert agent_outcome_policy(result) == OutcomeAction.RETRY
+
+
+@pytest.mark.asyncio
+async def test_unanswered_episode_without_a_failed_call_is_not_marked_failed() -> None:
+    # Only a failed model call becomes a failed response; a model that stops on its own keeps its status.
+    cut = NeMoGymResponse.model_validate(
+        response(output=[call()]).model_dump()
+        | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    )
+    agent, _ = make_agent([cut])
+    request = session_request()
+    await agent.seed_agent_session(request, seed_body())
+    result = await agent.responses(request, Response(), body().responses_create_params)
+
+    assert result.status == "incomplete" and AGENT_OUTCOME_METADATA_KEY not in (result.metadata or {})
