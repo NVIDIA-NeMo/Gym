@@ -685,6 +685,32 @@ async def test_first_user_stop_is_invalid_when_fallback_disabled(monkeypatch) ->
     assert verified.reward == 0.0
     assert verified.trajectory_invalid_reasons == ["invalid_user_message"]
     assert verified.failure_labels == [VerificationFailureLabel.USER_FAILURE]
+    # The local check rejected the message, so no judge ran and none is blamed.
+    assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:user_message_failed_check"
+    assert "failed the local check" in verified.failure_reason
+    assert "invalid_user_message" in verified.failure_reason
+
+
+async def test_trajectory_that_never_completes_is_masked_as_incomplete() -> None:
+    server = make_server()
+    request = RequestStub()
+    await server.seed_session(
+        request,
+        ConversationalToolUseSeedSessionRequest(
+            domain_name="subscription support",
+            profile="general",
+            policy="policy",
+            customer_scenario={"reason_for_contact": "I need help."},
+        ),
+    )
+
+    verified = await server.verify(request, make_verify_request())
+    assert verified.reward == 0.0
+    assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:trajectory_incomplete"
+    assert "without a complete terminal state" in verified.failure_reason
+    assert "simulator" not in verified.failure_reason
 
 
 async def test_tool_schema_failure_is_recorded() -> None:
@@ -722,6 +748,9 @@ async def test_tool_schema_failure_is_recorded() -> None:
     assert verified.num_tool_schema_failures == 1
     assert verified.trajectory_invalid_reasons
     assert verified.failure_labels == [VerificationFailureLabel.TOOL_FAILURE]
+    assert verified.mask_sample is True
+    assert verified.failure_kind == "conversational_tool_use:tool_result_failed_check"
+    assert "failed the local check" in verified.failure_reason
     assert verified.result.trajectory.messages[-1].source == "environment"
     assert verified.result.trajectory.messages[-1].schema_valid is False
 

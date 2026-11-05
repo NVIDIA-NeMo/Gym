@@ -49,6 +49,9 @@ from nemo_gym.server_runtime import (
 SIMULATOR_CALL_FAILED = "conversational_tool_use:simulator_call_failed"
 USER_VERDICT_FAILED = "conversational_tool_use:user_message_failed_verification"
 TOOL_VERDICT_FAILED = "conversational_tool_use:tool_result_failed_verification"
+USER_CHECK_FAILED = "conversational_tool_use:user_message_failed_check"
+TOOL_CHECK_FAILED = "conversational_tool_use:tool_result_failed_check"
+TRAJECTORY_INCOMPLETE = "conversational_tool_use:trajectory_incomplete"
 FAILURE_REASON_MAX_CHARS = 2000
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
@@ -2415,26 +2418,34 @@ Return type in JSON Schema format: {return_type}
         """Name why a masked sample was masked, from evidence already on the state.
 
         Mirrors ``_should_mask_sample`` and never changes its decision. A simulator call that
-        failed is told apart from a judge verdict that blamed the user or tool simulation.
+        failed is told apart from a local check failure, a judge failure, a judge verdict that blamed
+        the user or tool simulation, and a trajectory that never completed.
         """
         if not self._should_mask_sample(state):
             return None, None
         failure_labels = set(state.failure_labels)
-        if state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR:
-            simulator = "tool" if VerificationFailureLabel.TOOL_FAILURE in failure_labels else "user"
-            detail = f"{simulator} simulator call failed: {state.terminal_error or 'no error text recorded'}"
-            return SIMULATOR_CALL_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        tool_blamed = VerificationFailureLabel.TOOL_FAILURE in failure_labels
+        user_or_tool_blamed = tool_blamed or VerificationFailureLabel.USER_FAILURE in failure_labels
         if VerificationFailureLabel.VERIFICATION_GENERATION_ERROR in failure_labels:
             detail = f"Judge call failed: {state.judge_generation_error or 'no error text recorded'}"
             return JUDGE_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        if not user_or_tool_blamed:
+            # Only a trajectory that reached verification without a terminal state is masked on
+            # the trajectory label alone; no simulator or judge call failed.
+            detail = f"Trajectory incomplete: {state.terminal_error or 'no error text recorded'}"
+            return TRAJECTORY_INCOMPLETE, detail[:FAILURE_REASON_MAX_CHARS]
+        simulated = "tool result" if tool_blamed else "user message"
+        if state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR:
+            simulator = "tool" if tool_blamed else "user"
+            detail = f"{simulator} simulator call failed: {state.terminal_error or 'no error text recorded'}"
+            return SIMULATOR_CALL_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
         reasons = ", ".join(state.invalid_reasons) or "no invalid reason recorded"
-        if VerificationFailureLabel.USER_FAILURE in failure_labels:
-            return USER_VERDICT_FAILED, f"Judge marked the simulated user message invalid: {reasons}"[
-                :FAILURE_REASON_MAX_CHARS
-            ]
-        return TOOL_VERDICT_FAILED, f"Judge marked the simulated tool result invalid: {reasons}"[
-            :FAILURE_REASON_MAX_CHARS
-        ]
+        if state.generation_invalid_reason is not None:
+            # A generated message failed the local check; the judge did not run.
+            kind = TOOL_CHECK_FAILED if tool_blamed else USER_CHECK_FAILED
+            return kind, f"The simulated {simulated} failed the local check: {reasons}"[:FAILURE_REASON_MAX_CHARS]
+        kind = TOOL_VERDICT_FAILED if tool_blamed else USER_VERDICT_FAILED
+        return kind, f"Judge marked the simulated {simulated} invalid: {reasons}"[:FAILURE_REASON_MAX_CHARS]
 
     def _dedupe_strings(self, values: List[Any]) -> List[str]:
         deduped = []
