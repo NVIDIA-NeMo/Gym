@@ -533,7 +533,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
                 spec = restrict_sandbox_network(
                     SandboxSpec(**sandbox_config),
                     network_access=self.config.network_access,
-                    provider_name=provider.name,
+                    provider=provider,
                     model_base_url=model_base_url,
                     tool_urls=[
                         str(access.connection.url)

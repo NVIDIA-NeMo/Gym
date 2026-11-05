@@ -80,6 +80,8 @@ on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an uns
 harness on the Gym host. Hermes derives the sandbox's lifetime from its own timeouts. Supply the image in
 `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `hermes_agent.responses_api_agents.hermes_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`.
 
 The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
 APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
@@ -131,7 +133,7 @@ hermes_agent:
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
-| `network_access` | `inherit` | egress of an agent-owned sandbox: `inherit` (the provider's network), `model_only` (only the Model Server's host), or `model_and_tools` (also each MCP grant's host). OpenSandbox only; a session that borrows a sandbox rejects any other value than `inherit`. A restricted sandbox cannot install Hermes, so its image must bake the runtime in (see below) |
+| `network_access` | `inherit` | egress of an agent-owned sandbox: `inherit` (the provider's network), `model_only` (only the Model Server's host), or `model_and_tools` (also each MCP grant's host). OpenSandbox only; a session that borrows a sandbox rejects any other value than `inherit`. The Agent Server builds Hermes's runtime and uploads it, so a restricted sandbox needs no network for setup (see below). A borrowed sandbox relies on its owner's network policy. |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
