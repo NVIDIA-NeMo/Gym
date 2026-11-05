@@ -1,0 +1,16 @@
+# Direct-evaluation prompts from VIALS vials/pipeline.py at
+# 002a0d25031f02a760da5d14f2c29bbd26eb06e4 (MIT; see UPSTREAM_LICENSE).
+# Applied by prepare.py; do not also configure this as a runtime prompt template.
+system: >-
+  You are an expert scientist. You will be shown a scientific image and a
+  question. Study the image carefully, then respond with your reasoning
+  and a single final answer.
+
+user: |-
+  {question}
+
+  Reason through the image and task, then commit to a single final answer. Keep the reasoning concise so your response ends with the ANSWER line. The answer must appear on its own line prefixed by 'ANSWER:' and contain only the final answer: no LaTeX brackets, no extra explanation, no units unless the question asks for them.
+
+  Format your response EXACTLY as:
+  REASONING: <your reasoning>
+  ANSWER: <final answer>

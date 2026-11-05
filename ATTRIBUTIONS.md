@@ -214,12 +214,14 @@ upstream copyright header and adds an NVIDIA modifications block.
 
 | Component | License | Vendored at | Upstream |
 |-----------|---------|-------------|---------|
+| VIALS | MIT (original); Apache-2.0 (NVIDIA integration modifications) | `resources_servers/vials/upstream.py`; adapted preparation and direct prompts in `benchmarks/vials/` | https://github.com/Handshake-AI-Research/VIALS |
 | ToolSandbox | Apple MIT License (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/toolsandbox/tool_sandbox/` | https://github.com/apple/ToolSandbox |
 | tau2-bench | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/indian_banking/core/` (`action_compare.py`, `state_normalize.py`; adapted judge prompt shape in `judge.py`, edited user-simulator guidelines in `prompts/user-sim-guidelines.md`) | https://github.com/sierra-research/tau2-bench |
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
 | ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template copied into `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml` — the user template byte-identical, the system prompt content-preserving with trailing whitespace stripped) | https://github.com/HaCTang/ReactionMechanismReasoning |
 | ChemReason-Bench | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/chemreason_bench/` (primary metrics ported into `metrics.py` from upstream `eval/eval.py`; `canonicalize_slots`, the post-processors and the lm probability rules ported into `slot_canonicalization.py` and `response_parsing.py` from `predict/predict.py`) | https://github.com/Khadaz/ChemReason-Bench |
 
+- VIALS: pinned at upstream revision `002a0d25031f02a760da5d14f2c29bbd26eb06e4`. Judge prompts, verdict parsing, and answer extraction are preserved in `resources_servers/vials/upstream.py`; model transport uses Gym. The MIT license is reproduced in `resources_servers/vials/UPSTREAM_LICENSE` and `benchmarks/vials/UPSTREAM_LICENSE`. The five example tasks are from the separately licensed CC-BY-4.0 dataset revision `9657bf84c6f6e470e1c31123afe3f9152c3655bd`, with individual image sources listed in `benchmarks/vials/attributions.csv`.
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
 - Provenance & list of NVIDIA modifications: `resources_servers/toolsandbox/tool_sandbox/VENDORING.md`
