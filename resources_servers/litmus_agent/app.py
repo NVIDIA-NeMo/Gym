@@ -607,17 +607,17 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
-        if not self.config.sandbox_provider:
-            return app
-
-        app.post(f"/{self.config.code_exec_tool_name}")(self.execute_code)
-
         # Swap the base ``/verify`` route for a session-aware wrapper so a
-        # finished rollout's sandbox is reaped. verify() itself is untouched.
+        # finished rollout releases both its identity and any sandbox, including verifier-only configurations.
         app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
         # Re-apply judge_failsafe: replacing the base route would otherwise drop the
         # JudgeError -> failures-sidecar guarantee SimpleResourcesServer makes globally.
         app.post("/verify")(judge_failsafe(self._verify_and_cleanup))
+
+        if not self.config.sandbox_provider:
+            return app
+
+        app.post(f"/{self.config.code_exec_tool_name}")(self.execute_code)
 
         # Tear down any sessions still open when the server stops, so a normal
         # shutdown does not leak sandboxes.
@@ -698,7 +698,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         """
         # The session middleware always sets the session ID, which keys the session's sandbox.
         session_id = request.session[SESSION_ID_KEY]
-        if self._resources_session_fences.get(session_id) is not None:
+        if self.session_is_closed(session_id):
             raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
         try:
             body = await request.json()
@@ -708,8 +708,8 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
         # Publish ownership before close can acknowledge cleanup. A post-exec check alone misses cancellation,
         # execution failures, or a failed stop after a close that overtook sandbox startup.
-        async with self._resources_session_locks.locked(session_id):
-            if self._resources_session_fences.get(session_id) is not None or session_id in self._verified_sessions:
+        async with self.session_lock(session_id):
+            if self.session_is_closed(session_id) or self.session_is_verified(session_id):
                 raise ResourcesSessionLostError(f"litmus_agent session {session_id} is closed")
             session, lock = await self._acquire_session(session_id)
         async with lock:
@@ -768,8 +768,7 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         return session_id in self._sessions
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Release state from a prior agent-run seed; the sandbox still starts on the first tool call."""
-        await self.release_session_state(session_id)
+        """The sandbox starts on the first tool call; the base releases a prior cookie run."""
 
     async def release_session_state(self, session_id: str) -> None:
         """Release the sandbox, retaining its reference if cleanup fails."""
@@ -782,27 +781,20 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         request: Request,
         body: LitmusAgentVerifyRequest,
     ) -> LitmusAgentVerifyResponse:
-        """Score, then reap the rollout's sandbox. Active only when tool-serving.
+        """Score, then release the rollout's identity and any lazily created sandbox.
 
         End of a rollout is the natural point to drop the session's sandbox so
         it does not leak; scoring is delegated unchanged to ``verify``.
         """
         session_id = request.session[SESSION_ID_KEY]
-        if self._resources_session_fences.get(session_id) is not None:
-            # An Environment Server verifies before it closes, so this verify is out of order; mask it.
-            passthrough = {k: v for k, v in body.model_dump().items() if k not in _RESERVED_RESPONSE_FIELDS}
-            return LitmusAgentVerifyResponse(
-                **(passthrough | lost_session_verification(f"litmus_agent session {session_id} is closed"))
-            )
-        try:
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                # An Environment Server verifies before it closes, so this verify is out of order; mask it.
+                passthrough = {k: v for k, v in body.model_dump().items() if k not in _RESERVED_RESPONSE_FIELDS}
+                return LitmusAgentVerifyResponse(
+                    **(passthrough | lost_session_verification(f"litmus_agent session {session_id} is closed"))
+                )
             return await self.verify(body)
-        finally:
-            # A successful verify reply ends checkpoint ownership. Keep failures retriable, and serialize
-            # cleanup with a tool's first allocation so no worker can be published after we release it.
-            async with self._resources_session_locks.locked(session_id):
-                await self.release_session_state(session_id)
-                if session_id not in self._verified_sessions:
-                    self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), None))
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:
         answer_type = resolve_answer_type(body.answer_type)
