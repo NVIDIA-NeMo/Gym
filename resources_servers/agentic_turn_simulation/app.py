@@ -29,7 +29,8 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY, get_response_json
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming, failure_kinds
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming, failure_kinds
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -40,6 +41,8 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.verification import call_judge, is_judge_failure
+from nemo_gym.verification.judge import _is_retryable_judge_error
 from resources_servers.agentic_turn_simulation.foreign_script import foreign_script_letters
 from resources_servers.agentic_turn_simulation.harnesses import HARNESSES, Harness, select_harness
 from resources_servers.agentic_turn_simulation.harnesses.base import ToolCallProtocol
@@ -539,31 +542,55 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
         return params
 
     async def _call_judge(self, judge: JudgeSpec, system: str, conversation: str) -> dict[str, Any] | None:
-        """The judge's verdict: the first usable one, else the last one parsed (None when none was)."""
+        """The judge's verdict: the first usable one, else the last one parsed (None when none was).
+
+        The call goes through call_judge (one attempt each; this loop owns the retries). A judge that could not be
+        reached on any attempt, or that rejects the conversation as too long, raises a judge_failed event rather
+        than dropping out of the vote. An unusable verdict is retried, then left to the vote.
+        """
         params = self._judge_params(judge, system, conversation)
         name = judge.model_server.name
         verdict = None
+        failure: NgFailureEvent | None = None
         for attempt in range(self.config.judge_max_attempts):
             try:
-                status, reply = await self._post_chat(name, params, self._judge_semaphore)
-                if status >= 400:
-                    LOG.warning("judge %s HTTP %d: %s", name, status, reply[:300])
-                    error = reply.lower()
-                    if status == 400 and "context" in error and ("length" in error or "maximum" in error):
-                        return None  # the conversation does not fit this judge; retrying will not help
-                    if status == 400 and _without_rejected_param(params, error):
-                        continue  # retried at once
-                else:
-                    choice = (reply.get("choices") or [{}])[0]
-                    verdict = parse_verdict((choice.get("message") or {}).get("content"))
-                    if usable(verdict):
-                        return verdict
-                    if choice.get("finish_reason") == "length":
-                        _grow_max_tokens(params, JUDGE_DEFAULT_MAX_TOKENS, self.config.judge_max_tokens_cap)
-                    LOG.warning("judge %s gave no usable verdict (attempt %d)", name, attempt + 1)
-            except Exception as exc:  # noqa: BLE001 - a judge failure masks the rollout, it never crashes it
+                async with self._judge_semaphore:
+                    reply = await call_judge(
+                        self.server_client,
+                        server_name=name,
+                        url_path="/v1/chat/completions",
+                        json=params,
+                        response_model=NeMoGymChatCompletion,
+                        max_attempts=1,
+                    )
+            except NgFailureEvent as exc:
+                if not is_judge_failure(exc):
+                    raise
+                failure = exc
+                cause = exc.__cause__ or exc
                 LOG.warning("judge %s call failed (attempt %d): %s", name, attempt + 1, exc)
+                bad_request = getattr(cause, "status", None) == 400  # retried as before, once nothing can be relaxed
+                if bad_request:
+                    content = getattr(cause, "response_content", b"")
+                    error = (content.decode(errors="replace") if isinstance(content, bytes) else str(content)).lower()
+                    if "context" in error and ("length" in error or "maximum" in error):
+                        raise  # the conversation does not fit this judge; retrying will not help
+                    if _without_rejected_param(params, error):
+                        continue  # retried at once
+                if not bad_request and not _is_retryable_judge_error(cause):
+                    raise
+            else:
+                failure = None
+                choice = reply.choices[0] if reply.choices else None
+                verdict = parse_verdict(choice.message.content if choice is not None else None)
+                if usable(verdict):
+                    return verdict
+                if choice is not None and choice.finish_reason == "length":
+                    _grow_max_tokens(params, JUDGE_DEFAULT_MAX_TOKENS, self.config.judge_max_tokens_cap)
+                LOG.warning("judge %s gave no usable verdict (attempt %d)", name, attempt + 1)
             await self._backoff(attempt)
+        if failure is not None:
+            raise failure  # the last attempt could not reach the judge: it is lost, not unusable
         return verdict
 
     async def _judge(
@@ -592,7 +619,13 @@ class AgenticTurnSimulationResourcesServer(SimpleResourcesServer):
             environment=load_prompt(harness.judge_environment) if harness.judge_environment else "",
             system_prompt_note=load_prompt(self.config.judge_system_prompt_note_file) if shows_prompt else "",
         )
-        return list(await asyncio.gather(*(self._call_judge(j, system, conversation) for j in self.config.judges)))
+        results = await asyncio.gather(
+            *(self._call_judge(j, system, conversation) for j in self.config.judges), return_exceptions=True
+        )
+        for result in results:  # a judge lost to a failed call fails the row, whatever the others voted
+            if isinstance(result, BaseException):
+                raise result
+        return list(results)
 
     # --- verify ---------------------------------------------------------------------------------------------
 
