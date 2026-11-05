@@ -192,7 +192,7 @@ async def test_collect_copies_what_the_run_left_and_tolerates_what_it_did_not(st
             path = command.removeprefix("test -f ").strip("'")
             return result(return_code=0 if path in files else 1)
         if command.startswith("tail -c"):
-            return result(stdout="mcp started")
+            return result(stdout="mcp started" if "mcp.log" in command else "supervisor log")
         return result()
 
     async def read_text(sandbox, *, path):
@@ -200,7 +200,6 @@ async def test_collect_copies_what_the_run_left_and_tolerates_what_it_did_not(st
 
     state.session.sandbox.exec = AsyncMock(side_effect=exec_)
     monkeypatch.setattr(sandbox_module, "read_text", read_text)
-    state.session.read_output_log = AsyncMock(return_value="supervisor log")
 
     artifacts = await state.collect()
 
@@ -208,7 +207,7 @@ async def test_collect_copies_what_the_run_left_and_tolerates_what_it_did_not(st
     # The runner was killed before writing its account of the run.
     assert artifacts.output is None and state.runtime_info is None
     assert artifacts.mcp_calls == [{"server": "s", "tool": "t", "output": "{}"}]
-    assert artifacts.log == "supervisor log\n[mcp.log]\nmcp started"
+    assert artifacts.log == "[output.log]\nsupervisor log\n[mcp.log]\nmcp started"
 
 
 async def test_collect_fails_when_the_sandbox_cannot_say_whether_a_file_exists(state) -> None:
@@ -232,7 +231,6 @@ async def test_collect_reads_the_runners_process_identity(state, monkeypatch) ->
 
     state.session.sandbox.exec = AsyncMock(side_effect=exec_)
     monkeypatch.setattr(sandbox_module, "read_text", read_text)
-    state.session.read_output_log = AsyncMock(return_value="")
 
     artifacts = await state.collect()
 

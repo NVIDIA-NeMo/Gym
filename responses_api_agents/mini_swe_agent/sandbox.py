@@ -16,7 +16,13 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.agents import (
+    OUTPUT_LOG_FILE,
+    AgentSessionState,
+    SandboxCommand,
+    SandboxPythonRuntime,
+    SandboxSession,
+)
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -42,6 +48,8 @@ MINI_SWE_RUNTIME = SandboxPythonRuntime(
     harness="mini-swe",
     requirements=_requirement_lines(_RUNTIME_FILES / "requirements.in"),
     import_check=(
+        # LiteLLM would otherwise fetch its model cost map from GitHub at import; the check makes no network call.
+        "import os; os.environ.update(LITELLM_LOCAL_MODEL_COST_MAP='true', MSWEA_SILENT_STARTUP='true'); "
         f"import minisweagent; assert minisweagent.__version__ == {MINI_SWE_VERSION!r}, minisweagent.__version__; "
         "from minisweagent.models.litellm_response_model import LitellmResponseModel; "
         "from mcp.client.streamable_http import streamable_http_client"
@@ -183,13 +191,15 @@ class MiniSWESession(AgentSessionState):
             self.runtime_info = parse_runtime_info(output.get("runtime"))
         calls_text = await self._read_optional(f"{directory}/mcp_calls.jsonl")
         mcp_calls = [json.loads(line) for line in (calls_text or "").splitlines() if line.strip()]
-        log = await self.session.read_output_log()
-        tail = await self.session.sandbox.exec(
-            f"tail -c {LOG_TAIL_BYTES} {quote(f'{directory}/mcp.log')} 2>/dev/null || true", cwd="/", timeout_s=30
-        )
-        if tail.stdout:
-            log += "\n[mcp.log]\n" + tail.stdout
-        return MiniSWEArtifacts(trajectory=trajectory, output=output, mcp_calls=mcp_calls, log=log[-LOG_TAIL_BYTES:])
+        logs = []
+        # Trimmed in the sandbox: a long run's output need not cross the provider.
+        for name in (OUTPUT_LOG_FILE, "mcp.log"):
+            tail = await self.session.sandbox.exec(
+                f"tail -c {LOG_TAIL_BYTES} {quote(f'{directory}/{name}')} 2>/dev/null || true", cwd="/", timeout_s=30
+            )
+            if tail.stdout:
+                logs.append(f"[{name}]\n{tail.stdout}")
+        return MiniSWEArtifacts(trajectory=trajectory, output=output, mcp_calls=mcp_calls, log="\n".join(logs))
 
     async def _read_optional(self, path: str) -> str | None:
         exists = await self.session.sandbox.exec(f"test -f {quote(path)}", cwd="/", timeout_s=30)
