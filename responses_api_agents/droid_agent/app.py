@@ -189,9 +189,10 @@ class DroidAgent(SimpleResponsesAPIAgent):
                 # Provider TTLs outlive this server: cover setup, one activation and cleanup.
                 settings.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
                 spec = SandboxSpec(**settings)
+            # An unknown provider or invalid provider settings fail every retry the same way.
+            provider = create_provider(provider_config)
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
-        provider = create_provider(provider_config)
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
         else:
@@ -351,8 +352,9 @@ class DroidAgent(SimpleResponsesAPIAgent):
             input_tokens=input_tokens,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=counts["cache_read_input_tokens"]),
             output_tokens=counts["output_tokens"],
-            # Droid 1.1.0 reports thinking_tokens 0 for a Chat Completions model that reasons; see the gap below.
-            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
+            # Droid 1.1.0 reports thinking_tokens 0 for a Chat Completions model that reasons, so the count is
+            # unknown; see the gap below.
+            output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
             total_tokens=input_tokens + counts["output_tokens"],
         )
 

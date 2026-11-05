@@ -232,3 +232,20 @@ def test_unparseable_lines_are_counted_not_dropped_silently():
     assert run.unparseable_lines == 2
     assert run.gaps[-1].code == "agent_stdout_unparseable"
     assert run.items[0].content[0].text.startswith("I'll start")
+
+
+def test_unicode_line_separators_inside_events_do_not_split_records():
+    text = "a b c\u0085d"
+    events = [
+        {"type": "reasoning", "id": "r1", "text": text},
+        {"type": "tool_call", "id": "c1", "toolName": "Read", "parameters": {"file_path": "/app/x"}},
+        {"type": "tool_result", "id": "c1", "value": text},
+        {"type": "message", "role": "assistant", "id": "a1", "text": text},
+        {"type": "completion", "usage": {"input_tokens": 1, "output_tokens": 1}},
+    ]
+    # Droid writes raw UTF-8; CRLF delimiters and blank lines still separate records.
+    lines = [json.dumps(event, ensure_ascii=False) for event in events]
+    run = parse_events("\r\n".join(lines) + "\r\n\r\n", invocation_id="rollout")
+    assert run.unparseable_lines == 0 and run.completed
+    reasoning, _, output, message = run.items
+    assert reasoning.summary[0].text == output.output == message.content[0].text == text

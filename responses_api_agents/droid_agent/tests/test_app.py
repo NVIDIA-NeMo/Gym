@@ -24,7 +24,11 @@ from nemo_gym.agents import (
     shell_assignments,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseUsage,
+)
 from nemo_gym.sandbox import AsyncSandbox
 from responses_api_agents.droid_agent import app, runtime
 from responses_api_agents.droid_agent import sandbox as adapter
@@ -173,6 +177,39 @@ def test_loopback_model_server_is_refused_for_a_remote_sandbox(monkeypatch):
     assert "loopback" in check_agent_seed_rejected(instance.setup_webserver(), seed())
 
 
+@pytest.mark.parametrize("borrowed", [True, False])
+@pytest.mark.parametrize("constructor_fails", [False, True])
+def test_provider_configuration_errors_are_refused_as_final(monkeypatch, borrowed, constructor_fails):
+    constructor = MagicMock()
+    constructor.connect = AsyncMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    instance = agent(monkeypatch, sandbox_provider="sandbox")
+    if constructor_fails:
+
+        def create_provider(config):
+            raise ValueError("exec.concurrency must be at least 1")
+
+        monkeypatch.setattr(app, "create_provider", create_provider)
+        reason = "exec.concurrency"
+    else:
+        instance.server_client.global_config_dict = {"sandbox": {"unknown_provider": {}}}
+        reason = "unknown_provider"
+    assert reason in check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=borrowed))
+    constructor.assert_not_called()
+    constructor.connect.assert_not_awaited()
+    assert not instance._session_records
+
+
+@pytest.mark.asyncio
+async def test_connection_failure_stays_retryable_and_closes_the_provider(monkeypatch):
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(side_effect=ConnectionError("refused")))
+    provider = SimpleNamespace(aclose=AsyncMock())
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    with pytest.raises(ConnectionError):
+        await agent(monkeypatch)._seed_agent_session_state(seed())
+    provider.aclose.assert_awaited_once()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("workdir", ["relative", "/app/../tmp", "/tmp", "/tmp/nemo-gym-droid-sessions/x"])
 async def test_workdir_overlapping_adapter_storage_is_refused_before_connect(monkeypatch, workdir):
@@ -233,7 +270,12 @@ async def test_activation_routes_droid_through_the_rollout_model_route(monkeypat
     # Droid counts cache reads apart from input_tokens; the response's input total includes them.
     assert response.usage.input_tokens == 14 and response.usage.total_tokens == 16
     assert response.usage.input_tokens_details.cached_tokens == 4
-    assert response.usage.output_tokens_details.reasoning_tokens == 0
+    # Droid's thinking_tokens is not a measurement, so the count stays unknown, also once summed with a known one.
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    known = response.usage.model_copy(
+        update={"output_tokens_details": NeMoGymResponseOutputTokensDetails(reasoning_tokens=3)}
+    )
+    assert NeMoGymResponseUsage.sum_from_list([response.usage, known]).output_tokens_details.reasoning_tokens is None
     assert "reasoning_token_usage_unavailable" in {gap.code for gap in session.observations.gaps}
     assert response.metadata == {"harness_execution": "sandbox"}
 

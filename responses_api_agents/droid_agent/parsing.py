@@ -73,7 +73,8 @@ def parse_events(stdout: str, *, invocation_id: str) -> DroidRun:
         run.items.append(item)
         run.conversation.append(item)
 
-    for line in stdout.splitlines():
+    # Only newlines end a record; splitlines() would also split at U+2028, U+2029 and U+0085 inside JSON strings.
+    for line in stdout.split("\n"):
         line = line.strip()
         if not line:
             continue

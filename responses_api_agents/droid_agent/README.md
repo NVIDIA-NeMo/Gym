@@ -171,7 +171,7 @@ The response usage is Droid's run total from its `completion` event, which count
 compaction and subagents included. Droid counts cache reads and writes apart from `input_tokens`, as
 Anthropic's usage does, so the response's input total adds them back, and `cached_tokens` is the
 cache reads. Droid 1.1.0 reports zero thinking tokens for a Chat Completions model that reasons, so
-reasoning tokens are reported as 0 with a `reasoning_token_usage_unavailable` gap; the captured
+reasoning tokens are reported as unknown (`null`) with a `reasoning_token_usage_unavailable` gap; the captured
 model calls carry the provider's count. Without the `completion` event the usage is unknown and the
 bundle records `model_call_usage_unavailable`. Droid's stream-json output does not name the served
 response of each call, so the invocation lists no `ModelCallRef`s; model-call capture joins calls
