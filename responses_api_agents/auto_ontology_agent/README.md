@@ -46,6 +46,9 @@ Auto Ontology retrieves from its catalog and probes values in the source databas
 4. **Settings** in `env.yaml`:
 
    ```yaml
+   auto_ontology_fast_model_base_url: <fast model endpoint, OpenAI-compatible>
+   auto_ontology_fast_model_api_key: <its key>
+   auto_ontology_fast_model_name: <fast model>
    auto_ontology_embedding_base_url: <embedding endpoint, OpenAI-compatible>
    auto_ontology_embedding_api_key: <its key>
    auto_ontology_embedding_model: <the model the catalog was ingested with>
@@ -64,15 +67,24 @@ gym eval run --config benchmarks/bird_interact/auto_ontology.yaml --model-type v
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml --output results/bird_interact_lite_c_ao.jsonl
 ```
 
-Auto Ontology's reasoning and fast models go through the configured Gym Model Server (`policy_model` by default). The
-model name it sends selects its client: an `openai/`, `azure/` or `aws/` prefix selects its OpenAI-compatible client.
+Auto Ontology has two model roles, and each goes through its own Gym Model Server:
+
+- **Reasoning, the policy.** It decides what to ask the user and what SQL to submit, so it runs on `policy_model`, the
+  model under evaluation.
+- **Fast.** It makes helper calls: it merges the user's answers into the question, checks evidence and extracts
+  structured fields. It runs on `auto_ontology_fast_model`, a fixed model, as auto-ontology-eval runs
+  `aws/anthropic/bedrock-claude-sonnet-5-5` beside `aws/anthropic/bedrock-claude-opus-4-8` for reasoning. To run both
+  roles on the policy, set `fast_model_server` to `policy_model` and `fast_model` to its name.
+
+The model name Auto Ontology sends selects its client: an `openai/`, `azure/` or `aws/` prefix selects its
+OpenAI-compatible client.
 
 ## Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `reasoning_model_server`, `reasoning_model` | `policy_model`, `${policy_model_name}` | Auto Ontology's reasoning model |
-| `fast_model_server`, `fast_model` | the reasoning model | Auto Ontology's fast model |
+| `reasoning_model_server`, `reasoning_model` | `policy_model`, `${policy_model_name}` | Auto Ontology's reasoning model, the policy |
+| `fast_model_server`, `fast_model` | `auto_ontology_fast_model`, `${auto_ontology_fast_model_name}` | Auto Ontology's fast model, from `env.yaml` |
 | `embedding_*` | from `env.yaml` | Auto Ontology's embedding endpoint, which it calls directly |
 | `catalog` | `localhost:5432`, `postgres`, `auto_ontology` | The catalog database |
 | `source_database_url` | from `env.yaml` | The source databases, with a `{database}` field |

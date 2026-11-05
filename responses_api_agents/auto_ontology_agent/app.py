@@ -85,12 +85,15 @@ class AutoOntologyCatalogConfig(BaseModel):
 class AutoOntologyAgentConfig(BaseResponsesAPIAgentConfig):
     """Settings of the Auto Ontology agent. Auto Ontology reads them when the first episode starts; see README.md."""
 
-    # The Gym Model Servers that serve Auto Ontology's reasoning and fast models. Auto Ontology sends the model names
-    # below; a name with an ``openai/``, ``azure/`` or ``aws/`` prefix selects its OpenAI-compatible client.
+    # The Gym Model Servers that serve Auto Ontology's two model roles. The reasoning model decides what to ask and
+    # what SQL to submit, so it is the policy. The fast model makes helper calls (merging the user's answers into the
+    # question, evidence checks, structured extraction), usually on another Model Server. Auto Ontology sends the
+    # model names below; a name with an ``openai/``, ``azure/`` or ``aws/`` prefix selects its OpenAI-compatible
+    # client.
     reasoning_model_server: ModelServerRef
     reasoning_model: str
-    fast_model_server: Optional[ModelServerRef] = None
-    fast_model: Optional[str] = None
+    fast_model_server: ModelServerRef
+    fast_model: str
     # Auto Ontology's embedding endpoint. Ingest and retrieval must use the same model.
     embedding_base_url: str
     embedding_api_key: str
@@ -143,7 +146,6 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
         """The Auto Ontology of this process, set up with this agent's settings on first use."""
         if self._runtime is None:
             config = self.config
-            fast_server = config.fast_model_server or config.reasoning_model_server
             environment = {
                 **config.feature_flags,
                 "REASONING_ENDPOINT": self.resolve_model_base_url(
@@ -151,9 +153,11 @@ class AutoOntologyAgent(SimpleResponsesAPIAgent):
                 ),
                 "REASONING_API_KEY": _MODEL_SERVER_API_KEY,
                 "REASONING_MODEL": config.reasoning_model,
-                "NON_REASONING_ENDPOINT": self.resolve_model_base_url(fast_server.name, trace_context=False),
+                "NON_REASONING_ENDPOINT": self.resolve_model_base_url(
+                    config.fast_model_server.name, trace_context=False
+                ),
                 "NON_REASONING_API_KEY": _MODEL_SERVER_API_KEY,
-                "NON_REASONING_MODEL": config.fast_model or config.reasoning_model,
+                "NON_REASONING_MODEL": config.fast_model,
                 "EMBED_ENDPOINT": config.embedding_base_url,
                 "EMBED_API_KEY": config.embedding_api_key,
                 "EMBED_MODEL": config.embedding_model,
