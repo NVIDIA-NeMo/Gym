@@ -208,8 +208,12 @@ class Deployment:
         """Every live worker has finished startup: its private session socket accepts connections."""
         if len([worker for worker in self.resources_workers() if worker.pid != exclude]) < WORKERS:
             return False
+        return len(self.resources_sockets()) >= WORKERS
+
+    def resources_sockets(self) -> list[str]:
+        """Private session sockets that currently accept connections."""
         pattern = os.path.join(RUNTIME_ROOT, f"ng-{self.procs['resources'].pid}-*", "*.sock")
-        accepting = 0
+        accepting = []
         for path in glob.glob(pattern):
             # Only the workers' session sockets, which are named by routing ID.
             if not re.fullmatch(r"[0-9a-f]{32}\.sock", os.path.basename(path)):
@@ -220,8 +224,8 @@ class Deployment:
                     probe.connect(path)
                 except OSError:
                     continue  # A killed worker's socket file.
-            accepting += 1
-        return accepting >= WORKERS
+            accepting.append(path)
+        return sorted(accepting)
 
     def resources_workers(self) -> list[psutil.Process]:
         # uvicorn's workers, not the multiprocessing helper it may also start.
@@ -426,8 +430,19 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
     url = deployment.url("resources")
 
     async def seed_all() -> list[dict[str, str]]:
-        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
-            return await asyncio.gather(*(_seed(client, url, index) for index in range(EPISODES)))
+        sessions = []
+        sockets = deployment.resources_sockets()
+        assert len(sockets) == WORKERS, sockets
+        # Seed each worker directly instead of relying on TCP accept scheduling.
+        for path in sockets:
+            async with aiohttp.ClientSession(
+                connector=aiohttp.UnixConnector(path), cookie_jar=aiohttp.DummyCookieJar()
+            ) as client:
+                for _ in range(2):
+                    cookies = await _seed(client, url, len(sessions))
+                    assert deployment.claimant(_session_id(cookies)) == Path(path).stem
+                    sessions.append(cookies)
+        return sessions
 
     async def verify_all(sessions: list[dict[str, str]]) -> tuple[list[aiohttp.ClientResponse], list[float]]:
         # A new client, so no pooled connection to the killed worker is reused.
@@ -438,23 +453,24 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
             return responses, [(await r.json())["reward"] for r in responses if r.status == 200]
 
     sessions = asyncio.run(seed_all())
-    # The kernel spreads connections over the workers, but not necessarily over all of them,
-    # so kill a worker that holds sessions while another worker holds the rest.
+    # Kill one owner, leaving sessions on every other worker.
     owner_of = {_session_id(cookies): deployment.claimant(_session_id(cookies)) for cookies in sessions}
     owners = Counter(owner_of.values())
-    assert len(owners) > 1, owners
+    assert len(owners) == WORKERS, owners
     # uvicorn replaces the worker; the replacement does not hold the killed worker's sessions.
-    victim = deployment.resources_worker_of(owners.most_common(1)[0][0])
+    victim_owner = owners.most_common(1)[0][0]
+    victim = deployment.resources_worker_of(victim_owner)
     victim.send_signal(signal.SIGKILL)
     # Uvicorn may be in its 30-second health check when the worker dies; only its parent can reap it.
     victim.wait(timeout=60)
     deployment._wait_for_workers(exclude=victim.pid)
     responses, rewards = asyncio.run(verify_all(sessions))
     lost_owners = {owner_of[_session_id(cookies)] for cookies, r in zip(sessions, responses) if r.status == 410}
-    assert len(lost_owners) == 1, Counter(r.status for r in responses)
+    assert lost_owners == {victim_owner}, Counter(r.status for r in responses)
     assert {r.status for r in responses} == {200, 410}
     # Every session of a live worker still verifies correctly.
     assert rewards and set(rewards) == {1.0}
     assert all(
-        owner_of[_session_id(cookies)] in lost_owners for cookies, r in zip(sessions, responses) if r.status != 200
+        r.status == (410 if owner_of[_session_id(cookies)] == victim_owner else 200)
+        for cookies, r in zip(sessions, responses)
     )
