@@ -1150,12 +1150,15 @@ def compute_captured_call_summary(
                     run_totals[key] = run_totals.get(key, 0) + value
     calls = sum(totals.get("calls", 0) for totals in by_role.values())
     attributed = calls - by_role.get("unattributed", {}).get("calls", 0)
+    incomplete = sum(1 for record in captured_call_records if record.get("capture_complete") is False)
     return {
         "rollouts_with_capture": len(captured_call_records),
+        "rollouts_with_incomplete_capture": incomplete,
         "total_rollouts": total_rollouts,
         "calls": calls,
         "calls_without_usage": sum(totals.get("calls_without_usage", 0) for totals in by_role.values()),
         "attributed_call_coverage": attributed / calls if calls else None,
+        "capture_complete": not incomplete,
         "by_role": by_role,
     }
 

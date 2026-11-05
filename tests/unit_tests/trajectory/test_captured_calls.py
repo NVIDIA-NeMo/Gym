@@ -13,6 +13,7 @@ def test_captured_calls_outside_agent_turns_are_counted_without_changing_agent_t
         "calls": 3,
         "calls_without_usage": 0,
         "attributed_call_coverage": 1 / 3,
+        "capture_complete": True,
         "by_role": {
             "agent": {"calls": 1, "calls_without_usage": 0, "prompt_tokens": 100, "call_latency_ms": 40.0},
             "unattributed": {"calls": 2, "calls_without_usage": 0, "prompt_tokens": 500, "call_latency_ms": 50.0},
@@ -78,8 +79,22 @@ def test_captured_calls_distinguish_no_calls_from_no_capture() -> None:
         "calls": 0,
         "calls_without_usage": 0,
         "attributed_call_coverage": None,
+        "capture_complete": True,
         "by_role": {},
     }
+
+
+def test_an_unreadable_capture_has_no_summary_rather_than_zero_calls() -> None:
+    unreadable = _three_call_trajectory(model_calls=[], gaps=[{"code": "model_call_capture_unreadable"}])
+
+    assert build_captured_calls(unreadable) is None
+
+
+def test_a_pending_capture_is_summarized_as_incomplete() -> None:
+    pending = _three_call_trajectory(gaps=[{"code": "model_call_capture_pending"}])
+
+    captured = build_captured_calls(pending)
+    assert captured["calls"] == 3 and captured["capture_complete"] is False
 
 
 def _three_call_trajectory(**extra: object) -> dict:

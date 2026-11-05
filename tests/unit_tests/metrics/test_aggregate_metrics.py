@@ -1581,10 +1581,12 @@ class TestCapturedCallSummary:
 
         assert captured == {
             "rollouts_with_capture": 2,
+            "rollouts_with_incomplete_capture": 0,
             "total_rollouts": 3,
             "calls": 5,
             "calls_without_usage": 1,
             "attributed_call_coverage": 4 / 5,
+            "capture_complete": True,
             "by_role": {
                 "agent": {"calls": 3, "calls_without_usage": 0, "prompt_tokens": 400, "call_latency_ms": 100.0},
                 "unattributed": {"calls": 1, "calls_without_usage": 1},
