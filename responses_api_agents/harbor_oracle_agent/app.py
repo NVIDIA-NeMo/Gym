@@ -27,7 +27,6 @@ import logging
 import math
 from dataclasses import dataclass
 from time import time
-from typing import Any
 from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
@@ -62,6 +61,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -130,11 +130,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
         such tasks instead of refusing them before the solution starts.
         """
         return True
-
-    def model_post_init(self, context: Any, /) -> None:
-        super().model_post_init(context)
-        if self.config.num_workers not in (None, 1):
-            raise ValueError("Process-local oracle sessions require num_workers=1")
 
     # -- sessions --------------------------------------------------------------------------
 
@@ -366,3 +361,6 @@ class OracleAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     OracleAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = OracleAgent.run_webserver()  # noqa: F401

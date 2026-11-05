@@ -40,6 +40,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_turn_simulation.foreign_script import foreign_script_letters
 from resources_servers.agentic_turn_simulation.harnesses import HARNESSES, Harness, select_harness
 from resources_servers.agentic_turn_simulation.harnesses.base import ToolCallProtocol
@@ -801,3 +802,6 @@ def _breakdowns(rows: list[dict[str, Any]], keys: list[str]) -> dict[str, Any]:
 
 if __name__ == "__main__":
     AgenticTurnSimulationResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = AgenticTurnSimulationResourcesServer.run_webserver()  # noqa: F401

@@ -72,6 +72,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 
 
@@ -402,3 +403,6 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     GdpPdfResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = GdpPdfResourcesServer.run_webserver()  # noqa: F401

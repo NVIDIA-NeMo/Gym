@@ -70,12 +70,37 @@ def test_a_recorded_install_is_adopted_only_while_it_holds_the_executable(
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
 
-    assert not adopt_recorded_install(marker, "tool")
+    assert not adopt_recorded_install(marker, "tool", version="1.0.0")
 
-    record_install(marker, bin_dir)
-    assert not adopt_recorded_install(marker, "tool")
+    record_install(marker, bin_dir, version="1.0.0")
+    assert not adopt_recorded_install(marker, "tool", version="1.0.0")
     assert os.environ["PATH"] == "/usr/bin"
 
     (bin_dir / "tool").write_text("#!/bin/sh\n")
-    assert adopt_recorded_install(marker, "tool")
+    assert adopt_recorded_install(marker, "tool", version="1.0.0")
+    assert os.environ["PATH"] == f"{bin_dir}{os.pathsep}/usr/bin"
+
+
+def test_a_recorded_install_is_adopted_only_for_the_version_it_installed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("PATH", "/usr/bin")
+    marker = tmp_path / "tool.installed"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "tool").write_text("#!/bin/sh\n")
+
+    # A pin bump must reinstall rather than run the tool another version left behind.
+    record_install(marker, bin_dir, version="1.0.0")
+    assert not adopt_recorded_install(marker, "tool", version="2.0.0")
+    assert not adopt_recorded_install(marker, "tool", version=None)
+
+    # An unpinned install is reused only by an unpinned request.
+    record_install(marker, bin_dir, version=None)
+    assert not adopt_recorded_install(marker, "tool", version="1.0.0")
+    assert adopt_recorded_install(marker, "tool", version=None)
+
+    # A record that names only the directory, as records did before they named a version, is not adopted.
+    marker.write_text(str(bin_dir))
+    assert not adopt_recorded_install(marker, "tool", version=None)
     assert os.environ["PATH"] == f"{bin_dir}{os.pathsep}/usr/bin"
