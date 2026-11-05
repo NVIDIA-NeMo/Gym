@@ -85,7 +85,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
-from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims, SessionKind
+from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -97,9 +97,9 @@ LOG = logging.getLogger(__name__)
 
 # Session cookie key that binds later activation and close requests to their agent session.
 AGENT_SESSION_COOKIE_KEY = "agent_session_id"
-# With several workers, the worker running a rollout's open session also claims this prefix plus the rollout id,
+# With several workers, the worker running a rollout's open session also owns this prefix plus the rollout id,
 # the path its stop names, so a stop without the session cookie reaches that worker.
-ROLLOUT_CLAIM_PREFIX = "/rollouts/"
+ROLLOUT_KEY_PREFIX = "/rollouts/"
 # An agent session is named by agent_session_id, in its seed and close bodies and in the cookie after its seed
 # (see nemo_gym.server_runtime.request_handling.session_routing).
 AGENT_SESSIONS = SessionKind(
@@ -108,7 +108,7 @@ AGENT_SESSIONS = SessionKind(
     seed_path="/v1/agent_sessions",
     close_path="/v1/agent_sessions/close",
     cookie_session=False,
-    path_claim=re.compile(rf"(?P<claim>{re.escape(ROLLOUT_CLAIM_PREFIX)}[^/]+)/stop"),
+    path_key=re.compile(rf"(?P<key>{re.escape(ROLLOUT_KEY_PREFIX)}[^/]+)/stop"),
 )
 # Request header with an activation's index: its 1-based count within its agent session.
 # With checkpointing,
@@ -498,41 +498,44 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # Seeds whose setup failed, kept for the caller's close until session_close_retry_window_seconds passes.
     _failed_seed_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
     _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
-    # With several workers, which worker claimed each agent_session_id (see nemo_gym.server_runtime.request_handling.session_routing).
-    _agent_session_claims: Optional[SessionClaims] = PrivateAttr(default=None)
+    # With several workers, which worker owns each agent_session_id (see nemo_gym.server_runtime.request_handling.session_routing).
+    _agent_session_owners: Optional[SessionOwners] = PrivateAttr(default=None)
 
-    def claimed_session_routing(self) -> dict[str, Any]:
+    def owned_session_routing(self) -> dict[str, Any]:
         return {"kind": AGENT_SESSIONS, "agent_sessions": self}
 
     def holds_agent_session(self, agent_session_id: str) -> bool:
         """Whether this worker keeps any record of the session: open, failed and awaiting close, or closed.
 
-        For a rollout's claim key, ``/rollouts/<rollout id>``, whether this worker runs the rollout's open session.
+        For a rollout's key, ``/rollouts/<rollout id>``, whether this worker runs the rollout's open session.
         """
-        if agent_session_id.startswith(ROLLOUT_CLAIM_PREFIX):
-            return self._open_rollout_record(agent_session_id.removeprefix(ROLLOUT_CLAIM_PREFIX)) is not None
+        if agent_session_id.startswith(ROLLOUT_KEY_PREFIX):
+            return self._open_rollout_record(agent_session_id.removeprefix(ROLLOUT_KEY_PREFIX)) is not None
         return agent_session_id in self._session_records
 
-    def use_agent_session_claims(self, claims: SessionClaims) -> None:
-        """Release a session's claim when this worker drops its last record (see nemo_gym.server_runtime.request_handling.session_routing)."""
-        self._agent_session_claims = claims
+    def use_agent_session_owners(self, owners: SessionOwners) -> None:
+        """Release ownership of a session when this worker drops its last record.
 
-    def _release_agent_session_claim(self, agent_session_id: str) -> None:
-        if self._agent_session_claims is not None:
-            self._agent_session_claims.release(agent_session_id)
+        See nemo_gym.server_runtime.request_handling.session_routing.
+        """
+        self._agent_session_owners = owners
 
-    def _claim_rollout(self, episode_id: EpisodeId) -> None:
-        """Claim the rollout's key for this worker, so a stop that names only the rollout reaches its session."""
-        claims = self._agent_session_claims
-        if claims is not None and claims.claim(ROLLOUT_CLAIM_PREFIX + episode_id.capture_key) != claims.routing_id:
+    def _release_agent_session_ownership(self, agent_session_id: str) -> None:
+        if self._agent_session_owners is not None:
+            self._agent_session_owners.release(agent_session_id)
+
+    def _acquire_rollout_ownership(self, episode_id: EpisodeId) -> None:
+        """Own the rollout's key on this worker, so a stop that names only the rollout reaches its session."""
+        owners = self._agent_session_owners
+        if owners is not None and owners.acquire(ROLLOUT_KEY_PREFIX + episode_id.capture_key) != owners.routing_id:
             LOG.warning(
                 "Rollout %s has an open session on another worker, which gets its stops", episode_id.capture_key
             )
 
-    def _release_rollout_claim(self, record: _AgentSessionRecord) -> None:
-        """Release the rollout's key once its session is no longer open here; a no-op while it is."""
-        if self._agent_session_claims is not None and record.episode_id is not None:
-            self._agent_session_claims.release(ROLLOUT_CLAIM_PREFIX + record.episode_id.capture_key)
+    def _release_rollout_ownership(self, record: _AgentSessionRecord) -> None:
+        """Release ownership of the rollout's key once its session is no longer open here; a no-op while it is."""
+        if self._agent_session_owners is not None and record.episode_id is not None:
+            self._agent_session_owners.release(ROLLOUT_KEY_PREFIX + record.episode_id.capture_key)
 
     def _open_rollout_record(self, rollout_id: str) -> _AgentSessionRecord | None:
         """The record of the open session, seeded or still seeding, that runs the rollout."""
@@ -559,7 +562,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             # A retire may have released the session, and a new one may have taken its ID since.
             if self._session_records.get(key) is record:
                 del self._session_records[key]
-                self._release_agent_session_claim(key)
+                self._release_agent_session_ownership(key)
         while self._failed_seed_records:
             key, record = next(iter(self._failed_seed_records.items()))
             if record.expires_at > now:
@@ -591,8 +594,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                         and self._session_records.get(session_id) is record
                     ):
                         del self._session_records[session_id]
-                        self._release_agent_session_claim(session_id)
-                        self._release_rollout_claim(record)
+                        self._release_agent_session_ownership(session_id)
+                        self._release_rollout_ownership(record)
                 return
 
     def _keep_failed_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
@@ -601,7 +604,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
         self._failed_seed_records.pop(agent_session_id, None)
         self._failed_seed_records[agent_session_id] = record
-        self._release_rollout_claim(record)
+        self._release_rollout_ownership(record)
 
     async def _undo_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
         """Release a seeded session's state with the close hook, or keep it as a failed seed if the hook fails."""
@@ -870,7 +873,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise AgentSessionConflictError("Agent session cookie names a session that is no longer available")
                 record.episode_id = body.episode_id
                 # Before setup, so a stop that arrives during it reaches this worker's seeding record.
-                self._claim_rollout(body.episode_id)
+                self._acquire_rollout_ownership(body.episode_id)
                 try:
                     record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
                 except AgentSessionSetupError as error:
@@ -890,7 +893,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                         self._restart_only.open_session(body.agent_session_id, body.episode_id)
                 except Exception:
                     # Nothing tracks the session, so undo the seed: release its state now,
-                    # so the lock's exit drops the record and, with several workers, its claim.
+                    # so the lock's exit drops the record and, with several workers, this worker's ownership.
                     await self._undo_seed(body.agent_session_id, record)
                     raise
                 if record.stop_requested and (session := self._rollout_sandbox_session(record.state)) is not None:
@@ -953,7 +956,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
             self._failed_seed_records.pop(session_id, None)
             self._fenced_session_records[session_id] = record
-            self._release_rollout_claim(record)
+            self._release_rollout_ownership(record)
             return result, True
 
     async def _close_session_state(
@@ -1024,15 +1027,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     def _install_restored_session(self, agent_session_id: str, state: AgentSessionState) -> None:
         """Install a session restored from a checkpoint, as its replacement attempt's seed would have."""
         self._session_records[agent_session_id] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
-        self._claim_rollout(state.request.episode_id)
+        self._acquire_rollout_ownership(state.request.episode_id)
 
     def _release_retired_session(self, agent_session_id: str) -> None:
         """Release a retired session that has no fence: its episode's close then finds nothing to release."""
         record = self._session_records.get(agent_session_id)
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
-            self._release_agent_session_claim(agent_session_id)
-            self._release_rollout_claim(record)
+            self._release_agent_session_ownership(agent_session_id)
+            self._release_rollout_ownership(record)
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
         """Opt into multi-turn continuation; existing one-activation adapters stay unchanged."""
