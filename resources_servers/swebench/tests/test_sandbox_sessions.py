@@ -532,7 +532,7 @@ async def test_close_waits_for_failed_verification_stop_and_keeps_retry_ownershi
         with pytest.raises(RuntimeError, match="provider unavailable"):
             await close
     assert server._session_id_to_sandbox["resources-session"] is sandbox
-    assert server._task_session_fence.closed_episode("resources-session") is None
+    assert server._task_session_fences.get("resources-session") is None
     sandbox.stop.side_effect = None
     await server.close_resources_session(_request(), ResourcesCloseSessionRequest.model_validate(_close()))
     assert sandbox.stop.await_count == 3
@@ -553,7 +553,7 @@ async def test_expiry_failed_stop_retains_owner_until_explicit_close(monkeypatch
     assert record.expired
     assert server._session_id_to_sandbox["resources-session"] is sandbox
     assert server._session_id_to_prepared["resources-session"] == "repo__repo-1"
-    assert server._task_session_fence.closed_episode("resources-session") is None
+    assert server._task_session_fences.get("resources-session") is None
     result = await server.verify(_request(), _VerifyRequest.model_validate(_VERIFY))
     assert result.mask_sample and result.failure_kind == SESSION_EXPIRED
     server._grade.assert_not_awaited()
@@ -620,7 +620,7 @@ async def test_older_claim_release_consumer_keeps_ownership_during_concurrent_cl
         with pytest.raises(RuntimeError, match="provider unavailable"):
             await closing
     assert server._session_id_to_sandbox["resources-session"] is sandbox
-    assert server._task_session_fence.closed_episode("resources-session") is None
+    assert server._task_session_fences.get("resources-session") is None
     sandbox.stop.side_effect = None
     await server.close_resources_session(_request(), ResourcesCloseSessionRequest.model_validate(_close()))
     assert not server._session_id_to_sandbox
@@ -812,7 +812,7 @@ async def test_close_racing_the_expiry_sweep_stops_the_sandbox_once_and_fences_t
     sweeping = asyncio.create_task(server.seed_task_sandbox_session(_request("other"), _seed_request("other"), _Task))
     await asyncio.gather(closing, sweeping)
     assert server._sandboxes[0].stop.await_count == 1
-    assert server._task_session_fence.closed_episode("resources-session") is not None
+    assert server._task_session_fences.get("resources-session") is not None
     assert "resources-session" not in server._session_id_to_sandbox
 
 

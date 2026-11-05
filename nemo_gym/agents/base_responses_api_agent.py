@@ -923,9 +923,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         current = self._agent_session_id_from_request(request)
         if current is not None and current != body.agent_session_id:
             raise AgentSessionConflictError("agent_session_id does not match the session cookie")
-        result, fenced = await self._close_agent_session_id(
-            body.agent_session_id, body.episode_id, current=current
-        )
+        result, fenced = await self._close_agent_session_id(body.agent_session_id, body.episode_id, current=current)
         if fenced:
             # A stale /responses request must not fall back to the non-session path.
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id

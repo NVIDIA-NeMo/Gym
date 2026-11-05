@@ -87,7 +87,7 @@ without being relabeled as candidate or verifier calls or excluded from checking
 
 Interaction-scoring calls use the existing verifier ownership context. Each
 physical judge session has its own capture key; its captured exchanges are merged
-into the parent trajectory using the judge's close-receipt references. Raw captures
+into the parent trajectory using the references in the judge's close reply. Raw captures
 and ownership provenance are retained, and missing or ambiguous evidence remains
 an explicit gap. Recognized Claude session-title housekeeping is excluded from
 canonical judge calls with its reason recorded in provenance.

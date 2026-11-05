@@ -160,9 +160,9 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
         if self.config.num_workers not in (None, 1):
             raise ValueError("interactive_browser keeps browsers in-process and requires num_workers=1")
         self._session_id_to_state = {}
-        # Sessions an Environment Server seeded under its own resources_session_id.
+        # Episode sessions, which an Environment Server seeded under its own resources_session_id.
         self._episode_identity: Dict[str, Tuple[EpisodeId, TaskId]] = {}
-        # Closed ids stay known for a bounded time: a seed that lands after its close would
+        # Closed IDs stay fenced for the close retry window: a seed that lands after its close would
         # otherwise open a browser nobody will ever close.
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(

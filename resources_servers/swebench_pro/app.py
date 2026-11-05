@@ -335,7 +335,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
-        # Typed sessions, which an Environment Server seeds and closes by resources_session_id.
+        # Episode sessions, which an Environment Server seeds and closes by resources_session_id.
         self._session_id_to_identity: dict[str, tuple[EpisodeId, TaskId]] = {}
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
@@ -818,7 +818,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 "model_patch": model_patch,
                 "verification_attempts": attempt,
             }
-        # The adapter supplies typed verifier facts; collector-owned routing markers cannot cross a native episode.
+        # The adapter supplies typed verifier facts; collector-owned routing markers cannot cross an episode request.
         response_data.pop("_ng_failure_class", None)
         response_data.pop("_ng_failure_judge_error", None)
         return SWEBenchProVerifyResponse.model_validate(response_data)

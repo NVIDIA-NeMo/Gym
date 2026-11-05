@@ -441,7 +441,7 @@ class TestCheckpointing:
                 headers=AUTH,
             )
             stale = await client.post("/ng-rollout/r-a1/step", json=_step_body())
-        # The retire stopped and freed the episode;
+        # The retire stopped and released the episode;
         # a late step is refused until the controller forgets the rollout, and does not recreate it.
         assert stale.status_code == 409 and stale.json()["error"]["code"] == "checkpoint_stale_attempt"
         assert env.session_state == {}

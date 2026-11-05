@@ -131,7 +131,7 @@ tool. Tasks explored through `api_search` spend a search and a fetch on every en
 calling it, so long ones need more:
 `+officeenv_simple_agent.responses_api_agents.simple_agent.max_steps=150`.
 
-## Environment Server episodes and MCP
+## Episode sessions and MCP
 
 An Environment Server (for example `single_agent_turn`) seeds with a `ResourcesSeedSessionRequest`
 whose `task_data` holds the row's fields other than `responses_create_params`. The OfficeEnv

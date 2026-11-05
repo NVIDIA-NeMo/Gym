@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Environment Server sessions and the legacy seed, through the server's HTTP routes with a fake sandbox."""
+"""Episode sessions and the agent-run seed, through the server's HTTP routes with a fake sandbox."""
 
 from unittest.mock import AsyncMock, MagicMock
 

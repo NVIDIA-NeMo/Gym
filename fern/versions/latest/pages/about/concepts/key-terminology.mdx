@@ -60,6 +60,29 @@ The **model** (also called the **policy**) is what you call for generation — l
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
 
+### Sessions
+
+Resources servers and agent servers keep per-episode state in sessions. Use these names in code, docstrings, error messages, tests, and docs, and do not add synonyms. See [Resources Server APIs](/environment-tutorials/resources-server-apis) and [Add or Update a Harness](/agent-server/add-or-update-a-harness).
+
+| Term | Definition | Not |
+| --- | --- | --- |
+| **Resources session** / **agent session** | The per-episode state a resources server or an agent server holds, named by `resources_session_id` or `agent_session_id`. | Resources Server session |
+| **Episode session** / **episode seed** | A session an environment server seeds through `/seed_session` or `/v1/agent_sessions`, and that seed. | typed session, typed seed, Environment Server session |
+| **Agent-run seed** | The seed an agent's own `/run` sends to a resources server. | untyped seed |
+| **Lock** | Makes a session's seed and close run one at a time: `ResourcesSessionLocks.locked()`. | fence (for the lock) |
+| **Fence** | The record a close leaves, which refuses a seed that arrives after the close: `ResourcesSessionFences` with `fence()`, `get()` and `raise_if_fenced()`. | closed record, close receipt, tombstone, "remembers the close" |
+| **Close retry window** | How long a fence lasts: `session_close_retry_window_seconds`. | close window, retry window, retention window |
+| **Expire** | A timed lifetime runs out: a fence, a failed seed's record, or an open session (`session_expired`). | forgotten |
+| **Saved reply** | The first close's response, which an agent server returns to a retried close. | close receipt, retained close response |
+| **Release** | Give up what a session or an episode holds, such as its sandbox and in-memory state. | free |
+| **Lost** | The server no longer holds the session: a 404 on a tool call, or a masked verify with `session_lost`. | — |
+| **Owner** | With several workers, the worker that holds a session's state and serves its requests; its owner file names it. | claim, claimant |
+| **Claim** | Checkpoint restore only: a replacement attempt takes the restored record; one nobody took is **unclaimed**. | claim for routing ownership |
+| **Terminal** | A refusal the environment server does not retry. | final |
+| **Conflict** | A 409 refusal: `ResourcesSessionConflictError` or `AgentSessionConflictError`. | `HTTPException(409, ...)` in session code |
+
+Other features use some of these words in their own senses and keep them: the process supervisor's termination and cleanup receipts, export receipts, and the tombstones of `gdpval`'s journal and `genrm_compare`'s cohorts.
+
 ### Agent & model
 
 | Term | Definition |
