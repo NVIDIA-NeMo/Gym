@@ -193,10 +193,10 @@ class UserSimResourcesServer(SimpleResourcesServer):
     # The cookie session each resources session was seeded under, so a close that carries no cookie, as after a
     # lost seed reply, still finds and releases the seed.
     resources_session_id_to_session_id: dict[str, str] = {}
-    # Each closed resources session, with the episode that closed it and when the record expires.
-    closed_resources_session_ids: dict[str, tuple[EpisodeId, float]] = {}
+    # The fence of each closed resources session: the episode that closed it and when the fence expires.
+    fenced_resources_session_ids: dict[str, tuple[EpisodeId, float]] = {}
     # The cookie sessions whose seed outlived session_ttl_seconds, so their verify reports session_expired. Expires
-    # like the closed record.
+    # like a fence.
     expired_session_ids: dict[str, float] = {}
 
     async def seed_session(
@@ -217,7 +217,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         self._expire_sessions()
         resolved_row = task.resolved_row
-        if body.resources_session_id in self.closed_resources_session_ids:
+        if body.resources_session_id in self.fenced_resources_session_ids:
             raise HTTPException(status_code=409, detail="Resources session is already closed")
         existing_session_id = (
             session_id
@@ -466,8 +466,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
         body: ResourcesCloseSessionRequest,
     ) -> ResourcesCloseSessionResponse:
         self._expire_sessions()
-        closed = self.closed_resources_session_ids.get(body.resources_session_id)
-        if closed is not None and closed[0] != body.episode_id:
+        fenced = self.fenced_resources_session_ids.get(body.resources_session_id)
+        if fenced is not None and fenced[0] != body.episode_id:
             raise HTTPException(status_code=409, detail="Resources session was closed by another episode")
         # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
         session_id = self.resources_session_id_to_session_id.get(
@@ -479,7 +479,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
             del self.session_id_to_seed[session_id]
             self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
-        self.closed_resources_session_ids.setdefault(
+        self.fenced_resources_session_ids.setdefault(
             body.resources_session_id,
             (body.episode_id, monotonic() + self.config.session_ttl_seconds),
         )
@@ -500,9 +500,9 @@ class UserSimResourcesServer(SimpleResourcesServer):
         for session_id, expires_at in tuple(self.expired_session_ids.items()):
             if expires_at <= now:
                 del self.expired_session_ids[session_id]
-        for resources_session_id, (_, expires_at) in tuple(self.closed_resources_session_ids.items()):
+        for resources_session_id, (_, expires_at) in tuple(self.fenced_resources_session_ids.items()):
             if expires_at <= now:
-                del self.closed_resources_session_ids[resources_session_id]
+                del self.fenced_resources_session_ids[resources_session_id]
 
 
 def _validate_resolved_row(

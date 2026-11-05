@@ -488,7 +488,7 @@ def test_a_backend_lost_before_verify_masks_the_rollout(tmp_path, plugin, caplog
     assert "failed before verify" in caplog.text and "state lost" in caplog.text
 
 
-async def test_a_retired_session_frees_its_episode_and_stays_closed(server):
+async def test_a_retired_session_releases_its_episode_and_stays_fenced(server):
     resource, _, seed = server
     client = TestClient(resource.setup_webserver())
     client.post("/seed_session", json=seed)
@@ -523,7 +523,7 @@ async def test_retire_retains_a_known_episode_identity(server):
     assert client.post("/seed_session", json=seed).status_code == 409
 
 
-async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
+async def test_closed_ids_are_fenced_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
     clock = [0.0]
     monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
     resource = make_server(tmp_path, session_close_retry_window_seconds=10)
@@ -535,9 +535,10 @@ async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, pl
     await resource.retire_session_state("session-two")
     clock[0] = 9.5
     assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [409, 409]
-    # No record outlives the routing claim on its ID, so with several workers every worker then treats it as new.
+    # No fence outlives its worker's ownership of the ID,
+    # so with several workers every worker then treats it as new.
     clock[0] = 10.0
-    assert len(resource._closed) == 0
+    assert len(resource._fences) == 0
     assert [client.post("/seed_session", json=seed).status_code for seed in (closed, retired)] == [200, 200]
 
 
