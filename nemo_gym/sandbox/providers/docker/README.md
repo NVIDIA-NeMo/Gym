@@ -249,13 +249,13 @@ Source: [`provider.py`](./provider.py) and [`pty.py`](./pty.py). It implements t
 `docker` in [`../registry.py`](../registry.py).
 
 Unit tests live in
-[`tests/unit_tests/test_docker_provider.py`](../../../../tests/unit_tests/test_docker_provider.py) and
-[`tests/unit_tests/test_docker_pty.py`](../../../../tests/unit_tests/test_docker_pty.py)
+[`tests/unit_tests/sandbox/test_docker_provider.py`](../../../../tests/unit_tests/sandbox/test_docker_provider.py) and
+[`tests/unit_tests/sandbox/test_docker_pty.py`](../../../../tests/unit_tests/sandbox/test_docker_pty.py)
 and run as part of the core suite — **no Docker required**:
 
 ```bash
 uv venv && uv sync --extra dev
-pytest tests/unit_tests/test_docker_provider.py -q
+pytest tests/unit_tests/sandbox/test_docker_provider.py -q
 ```
 
 The suite mocks at the **subprocess boundary**: `_require_docker` is monkeypatched to a fake

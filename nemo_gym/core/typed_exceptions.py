@@ -19,14 +19,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from aiohttp import ClientResponseError
 
-from nemo_gym.core.episode_types import (
+from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
+from nemo_gym.core.failure_records import (
     FailureBoundary,
     FailureDetails,
     FailureEvent,
     FailureReport,
     SdkErrorDetails,
 )
-from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
 from nemo_gym.utils.exception_inspection import (
     bounded_text,
     error_to_http_status,

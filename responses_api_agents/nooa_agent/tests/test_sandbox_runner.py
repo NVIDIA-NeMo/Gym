@@ -51,6 +51,7 @@ def runner() -> tuple[SandboxNOOARunner, MemorySandbox]:
         model_base_url=str(p.model_base_url),
         model_server_name=p.model_server_name,
         max_policy_calls=3,
+        context_window=p.context_window,
     ), sandbox
 
 
@@ -99,6 +100,7 @@ async def test_launch_quotes_paths_runs_in_task_and_preserves_cookies(limit: int
     assert launch.max_policy_calls == limit
     assert launch.request.rollout_id == request.rollout_id
     assert launch.request.model_url_path == request.model_url_path
+    assert launch.context_window == 262144
     assert request.resource_cookies == result.resource_cookies == {"resource": "new"}
     assert request.model_cookies == {"model": "new"}
     assert r.session.cleanup == cleanup_receipt()
@@ -164,6 +166,7 @@ async def test_terminal_result_waits_for_cleanup_before_capture_and_return() -> 
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
     ],
 )
 async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATerminationReason) -> None:

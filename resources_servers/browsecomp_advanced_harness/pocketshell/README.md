@@ -108,7 +108,7 @@ Known, accepted divergences:
 
 ```bash
 uv venv --python 3.12
-uv pip install -e ".[dev]"
+uv sync --locked --extra dev
 .venv/bin/python -m pytest tests/ -q
 ```
 

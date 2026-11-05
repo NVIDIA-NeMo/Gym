@@ -26,5 +26,8 @@ aegis_v4_safety_benchmark_environment_server:
   _inherit_from: aegis_v4_safety_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: aegis_v4_safety_benchmark_resources_server
       agent_server:
         name: aegis_v4_safety_benchmark_simple_agent
