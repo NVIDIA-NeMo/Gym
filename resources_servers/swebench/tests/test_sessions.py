@@ -81,7 +81,7 @@ def session_server(monkeypatch: pytest.MonkeyPatch):
         return_value=SimpleNamespace(repo="repo", base_commit="base", instance_id="task")
     )
 
-    async def create(test_spec, *, task_session_id=None, verifier_session_id=None):
+    async def create(test_spec, *, test_assets=(), task_session_id=None, verifier_session_id=None):
         sandbox = verifier if verifier_session_id is not None else task
         if task_session_id is not None:
             server._session_id_to_sandbox[task_session_id] = sandbox
@@ -594,8 +594,23 @@ def test_task_data_matches_the_instance_request():
 
     wire = mod.SWEBenchInstanceRequest.model_fields
     assert set(TaskData.model_fields) == set(wire)
-    assert {n for n, f in TaskData.model_fields.items() if f.is_required()} == set(wire)
+    # image_assets is the one optional field: only SWE-bench Multimodal rows carry it.
+    assert {n for n, f in TaskData.model_fields.items() if f.is_required()} == set(wire) - {"image_assets"}
+    assert not TaskData.model_fields["image_assets"].is_required()
     assert {n: f.annotation for n, f in TaskData.model_fields.items()} == {n: f.annotation for n, f in wire.items()}
+
+
+async def test_typed_seed_withholds_the_test_assets_from_the_task_sandbox_and_verify_uploads_them(session_server):
+    from resources_servers.swebench.tests.test_app import CHART_ROW, PNG_A, PNG_B
+
+    server, _, _, _ = session_server
+    seed = _seed().model_copy(update={"task_data": mod.SWEBenchInstanceRequest.model_validate(CHART_ROW).model_dump()})
+    await server.seed_session(_request(), seed)
+    await server.verify(_request(), mod.SWEBenchVerifyRequest.model_validate(CHART_ROW))
+
+    seed_call, verify_call = server._create_sandbox.await_args_list
+    assert "test_assets" not in seed_call.kwargs
+    assert [asset.content for asset in verify_call.kwargs["test_assets"]] == [PNG_A, PNG_B]
 
 
 EXAMPLE_ROWS = [
