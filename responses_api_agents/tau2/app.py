@@ -47,7 +47,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
 )
-from nemo_gym.models import chat_completion_usage_to_response_usage
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.server_runtime import (
     BaseRunRequest,
@@ -56,7 +56,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.trajectory import AgentObservationBundle
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.tau2.observability import build_tool_observations
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_model.app import split_responses_input_output_items
 from tau2.data_model.simulation import SimulationRun, TextRunConfig
 from tau2.data_model.tasks import Task
 from tau2.evaluator.evaluator import EvaluationType
@@ -379,7 +379,7 @@ class Tau2Agent(SimpleResponsesAPIAgent):
 
         message_dicts = to_litellm_messages(messages_to_convert)
 
-        converter = VLLMConverter(return_token_id_information=True)
+        converter = ChatCompletionsConverter(return_token_id_information=True)
         all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
         input_items_1, output_items = split_responses_input_output_items(all_items)
         # Tau starts trajectories with an assistant message

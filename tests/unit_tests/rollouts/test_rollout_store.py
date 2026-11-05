@@ -32,7 +32,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.utils.path_utils import failures_path_for
+from nemo_gym.utils.path_utils import failures_path_for, rerun_masked_journal_path_for
 
 
 @pytest.fixture
@@ -66,6 +66,26 @@ def test_invalid_outcomes_are_rejected_before_appending_bytes(prepared_run):
                 store.record_outcome(invalid)
             assert snapshot(output) == before
     assert RolloutStore.read(output).selected("success") == [result]
+
+
+def test_a_fresh_run_does_not_inherit_an_earlier_runs_rerun_approvals(prepared_run):
+    from nemo_gym.rollouts.rollout_recovery import load_rerun_masked_approvals
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    # An earlier run at this path approved running its masked attempt 0 of rollout (0, 0) again.
+    rerun_masked_journal_path_for(output).write_text(
+        orjson.dumps({"reason": "r", "identities": [{"identity": [0, 0], "attempt": 0, "attempts": 1}]}).decode()
+        + "\n"
+    )
+    assert load_rerun_masked_approvals(output) == frozenset({(0, 0, 0)})
+
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    # The fresh run numbers attempts from 0 again, so the old approval would name its first attempt.
+    assert not rerun_masked_journal_path_for(output).exists()
+    assert load_rerun_masked_approvals(output) == frozenset()
 
 
 def test_partial_open_failure_closes_files_and_allows_retry(prepared_run, monkeypatch):

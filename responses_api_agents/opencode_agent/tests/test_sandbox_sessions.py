@@ -353,6 +353,87 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
     agent.server_client.post.assert_not_called()
 
 
+def test_http_splits_the_reasoning_block_a_gym_reply_starts_with(setup, tmp_path):
+    # The Gym Model Server returns a reply's reasoning ahead of its text as <think>...</think>, which OpenCode stores
+    # as a text part; graded output and observations carry it as reasoning, not as the answer.
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][1]
+    tool = assistant["parts"][1]
+    assistant["parts"] = [
+        {"type": "text", "text": "<think>run pwd</think>"},
+        tool,
+        {"type": "text", "text": "<think>it printed /app</think>\n\nAnswer: /app"},
+    ]
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        output = result.json()["output"]
+        assert [item["type"] for item in output] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "message",
+        ]
+        assert output[0]["summary"][0]["text"] == "run pwd"
+        assert output[3]["summary"][0]["text"] == "it printed /app"
+        assert output[4]["content"][0]["text"] == "Answer: /app"
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    persisted = [item for item in invocation["conversation"] if item.get("role") != "user"]
+    assert [item["type"] for item in persisted] == [item["type"] for item in output]
+    assert persisted[4]["content"][0]["text"] == "Answer: /app"
+
+
+async def test_http_keeps_an_empty_answer_when_the_final_gym_reply_is_only_reasoning(setup, tmp_path):
+    # Without the empty final message, the judge's backward search would grade the earlier answer "4".
+    from responses_api_agents.opencode_agent.tests.test_app import judge_final_answer
+
+    agent, sandbox = setup
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][1]
+    tool = assistant["parts"][1]
+    assistant["info"]["finish"] = "tool-calls"
+    assistant["parts"] = [{"type": "text", "text": "4"}, {"type": "text", "text": "<think>run pwd</think>"}, tool]
+    final = {"info": {**assistant["info"], "finish": "stop"}, "parts": [{"type": "text", "text": "<think>r</think>"}]}
+    export["messages"].append(final)
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        output = result.json()["output"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert [item["type"] for item in output] == [
+        "message",
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        "message",
+    ]
+    assert output[0]["content"][0]["text"] == "4"
+    assert output[-1]["content"][0]["text"] == ""
+    assert await judge_final_answer(output) == (0.0, "empty_final_answer", False)
+    invocation = next(
+        record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
+    )
+    # The observed conversation keeps the same empty answer for the final reply.
+    observed = [item for item in invocation["conversation"] if item.get("id") == "part-2-0"]
+    assert [(item["type"], item["content"][0]["text"]) for item in observed] == [("message", "")]
+
+
 @pytest.mark.parametrize("part_type", ["text", "reasoning"])
 @pytest.mark.parametrize("text", ["literal <think> opening", "literal </think> closing", " <think>x</think> \n"])
 def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path, part_type, text):
@@ -401,8 +482,8 @@ def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path,
     "override",
     [
         {"max_output_tokens": 123},
-        {"temperature": 0.2},
-        {"top_p": 0.9},
+        {"top_logprobs": 2},
+        {"reasoning": {"effort": "high"}},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -422,7 +503,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/opencode-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "max_output_tokens": 5}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text

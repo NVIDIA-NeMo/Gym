@@ -16,8 +16,9 @@ from copy import deepcopy
 
 import pytest
 
+from nemo_gym.models import ChatCompletionsConverter
 from responses_api_agents.swe_agents.app import SWEBenchWrapper
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_model.app import split_responses_input_output_items
 
 
 @pytest.mark.parametrize("content", [None, ""])
@@ -51,7 +52,7 @@ def test_empty_sampled_final_turn_preserves_training_metadata(content, generatio
     assert messages[-1]["content"] == content
     assert {key: messages[-1][key] for key in token_fields} == token_fields
     # Exercise the downstream converter used by the agent, not only the append.
-    converter = VLLMConverter(return_token_id_information=True)
+    converter = ChatCompletionsConverter(return_token_id_information=True)
     _, output = split_responses_input_output_items(converter.chat_completions_messages_to_responses_items(messages))
     generated = [item.model_dump() for item in output if getattr(item, "generation_token_ids", None)]
     assert [item["generation_token_ids"] for item in generated] == [[20], generation_ids]

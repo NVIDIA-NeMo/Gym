@@ -469,7 +469,7 @@ class TestAgentSandbox:
         """seed_session creates the sandbox with no `files`; only verify seeds eval files."""
         source = self._source()
         seed = source[source.index("async def seed_session") : source.index("def _response")]
-        assert "_create_sandbox(body)" in seed and "files=" not in seed
+        assert "_create_sandbox(body, session_id=session_id)" in seed and "files=" not in seed
 
     def test_the_testbed_env_is_first_on_path(self) -> None:
         from resources_servers.swe_gym.app import TESTBED_ENV
