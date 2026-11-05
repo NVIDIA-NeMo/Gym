@@ -315,3 +315,52 @@ def test_the_store_keeps_a_sandboxed_session_row_it_reads_without_its_trajectory
         output, import_legacy=False, skip_keys=frozenset({"ng_trajectory", "ng_agent_observations"})
     )
     assert store.pending() == []
+
+
+@pytest.mark.parametrize(
+    "stage,expected", [("seed", "retryable"), ("verification", "retryable"), ("agent", "masked"), (None, "masked")]
+)
+def test_masked_oom_recovery_uses_shared_origin_stage(tmp_path, stage, expected):
+    row = _masked("provider_oom_killed") | {
+        "_ng_failure_id": "oom",
+        "_ng_failure_events": {
+            "oom": {
+                "event_id": "oom",
+                "boundary": "sandbox",
+                "failure_kind": "provider_oom_killed",
+                "stage": stage,
+            }
+        },
+    }
+    output, _ = _run(tmp_path, [[row]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert len(store.pending()) == (1 if expected == "retryable" else 0)
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, expected: 1}
+    if expected == "retryable":
+        assert _evidence(decision, (1, 0)).attempts == 1
+
+
+@pytest.mark.parametrize(
+    "attribution,expected", [("evaluation", "retryable"), ("model", "masked"), ("unknown", "masked")]
+)
+def test_masked_oom_recovery_keeps_applied_class_after_reload(tmp_path, attribution, expected):
+    row = _masked("provider_oom_killed") | {
+        "failure_outcome_action": "retry",
+        "failure_outcome_attribution": attribution,
+    }
+    _run(tmp_path, [[row]])
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, expected: 1}
+
+
+def test_masked_seed_oom_saved_fail_never_becomes_a_retry(tmp_path):
+    row = _masked("provider_oom_killed") | {
+        "failure_outcome_action": "fail",
+        "failure_outcome_attribution": "evaluation",
+        "_ng_failure_stage": "seed",
+    }
+    output, _ = _run(tmp_path, [[row]])
+    assert RolloutStore.read(output, import_legacy=False).pending() == []
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "terminal": 1}

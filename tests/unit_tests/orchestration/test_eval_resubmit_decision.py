@@ -1890,6 +1890,7 @@ def test_review_gate_reports_its_effective_named_criteria(tmp_path):
             "max_failure_fraction": 0.02,
             "passes": "strictly below, before rounding",
             "policy_timeout_counts_as_model": True,
+            "classification": GateCriteria().classification.model_dump(mode="json"),
         },
         "response": {"max_failure_fraction": 0.02, "applied": False},
         "trial": {"max_failure_fraction": 0.02, "applied": False},

@@ -119,7 +119,7 @@ def model_call_facts(r):
         out.append({"status_code": count(meta.get("status_code")), "upstream_status_code": count(meta.get("upstream_status_code")),
                     "error_category": category[:64] if isinstance(category, str) else None,
                     "failure_events": [{"failure_kind": event.get("failure_kind") if isinstance(event.get("failure_kind"), str) else None,
-                                        "http_status": count(event.get("http_status"))}
+                                        "http_status": count(event.get("http_status")), "stage": event.get("stage")}
                                        for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
                     "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
     return out
@@ -141,7 +141,7 @@ def trial_metadata(value):
     result["failure_report"] = None
     if isinstance(report, dict) and isinstance(report.get("events"), dict):
         result["failure_report"] = {"failure_id": report.get("failure_id"), "omitted": report.get("omitted"),
-            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id", "cause_id", "failure_kind", "http_status")}
+            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id", "cause_id", "failure_kind", "http_status", "stage")}
                        if isinstance(event, dict) else None for event_id, event in report["events"].items()}}
     return result
 import hashlib

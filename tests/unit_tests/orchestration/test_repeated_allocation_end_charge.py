@@ -183,4 +183,4 @@ def test_the_guard_reports_the_final_identity_by_its_cause(run):
     # Reported by its cause, and an evaluation-side fault: not the model's.
     facts = failure_facts(decision, collected)
     assert facts["trial_failures"]["by_cause"]["allocation"]["count"] == 1
-    assert fault_class(ROLLOUT_ALLOCATION_ENDED) is None
+    assert fault_class(ROLLOUT_ALLOCATION_ENDED) == "evaluation"

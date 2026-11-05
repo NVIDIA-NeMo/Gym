@@ -33,17 +33,13 @@ from tests.unit_tests.orchestration.test_eval_resubmit_decision import (  # noqa
 from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
 
 
-def test_the_gate_uses_the_shared_class_lists():
-    assert recovery.MODEL_FAULT_KINDS is failure_kinds.MODEL_FAULT_KINDS
-    assert recovery.SERVER_FAULT_KINDS is failure_kinds.SERVER_FAULT_KINDS
-    # The shared default covers what a policy-failure list counts as the policy's own.
-    assert {
-        "agent_timeout",
-        "agent_command_not_allowed",
-        "agent_limit",
-        "agent_invalid_output",
-        "model_context_limit",
-    } <= failure_kinds.MODEL_FAULT_KINDS
+def test_the_gate_uses_the_shared_classifier():
+    from nemo_gym.core.failure_kinds import FailureClass, classify_failure
+
+    for kind in failure_kinds.FAILURE_KINDS | failure_kinds.GATE_DERIVED_KINDS:
+        assert fault_class(kind) == classify_failure(failure_kind=kind)
+    assert fault_class("provider_not_registered") == FailureClass.UNKNOWN
+    assert fault_class("rollout_allocation_ended") == FailureClass.EVALUATION
 
 
 def test_a_command_the_harness_refused_is_the_models_fault():
@@ -161,8 +157,12 @@ def test_policy_counted_zero_stays_measured_incomplete_without_reinspecting_evid
     assert row["evaluation_completed"] is False
     # Counting is the saved policy decision; it does not turn an infrastructure fact into model fault.
     assert report["model"]["count"] == 0
-    assert report["evaluation"]["kinds"] == {kind: 1}
-    assert passed is False and report["status"] == "FAIL", reason
+    if kind == "provider_oom_killed":
+        assert report["unknown"]["kinds"] == {kind: 1}
+        assert passed is None and report["status"] == "UNVERIFIED", reason
+    else:
+        assert report["evaluation"]["kinds"] == {kind: 1}
+        assert passed is False and report["status"] == "FAIL", reason
     assert recovery._scored_kind(row) == kind
     assert task["failures"]["metric_coverage"]["trials"] == 1
 
@@ -255,12 +255,10 @@ def test_trial_health_uses_saved_attribution_without_failure_evidence(kind, attr
     row["_ng_failure_events_omitted"] = True
     decision, (passed, reason, report), task = _gate(collected)
     assert decision.counts == {"scored": 1}
-    side = "model" if attribution == "model" else "evaluation"
-    other = "evaluation" if side == "model" else "model"
-    assert report[side]["kinds"] == {kind: 1}, reason
-    assert report[other]["count"] == 0
+    assert report[attribution]["kinds"] == {kind: 1}, reason
+    assert all(report[side]["count"] == 0 for side in ("model", "evaluation", "unknown") if side != attribution)
     assert task["failures"]["metric_coverage"]["trials"] == 1
-    assert passed is (attribution == "model"), reason
+    assert passed is {"model": True, "evaluation": False, "unknown": None}[attribution], reason
     assert row["evaluation_completed"] is False
 
 
@@ -278,8 +276,9 @@ def test_same_failure_kind_can_have_different_saved_attribution_per_trial():
     decision, (passed, reason, report), _ = _gate(collected)
     assert decision.counts == {"scored": 3}
     assert report["model"]["kinds"] == {"provider_oom_killed": 1}
-    assert report["evaluation"]["kinds"] == {"provider_oom_killed": 2}
-    assert report["evaluation"]["server"] == 2
+    assert report["evaluation"]["kinds"] == {"provider_oom_killed": 1}
+    assert report["unknown"]["kinds"] == {"provider_oom_killed": 1}
+    assert report["evaluation"]["server"] == 1
     assert passed is False, reason
 
 
@@ -288,7 +287,7 @@ def test_invalid_or_missing_saved_attribution_keeps_existing_health_classificati
     collected = _policy_zero()
     collected.results[0]["failure_outcome_attribution"] = attribution
     _, (_, _, report), _ = _gate(collected)
-    assert report["evaluation"]["kinds"] == {"provider_oom_killed": 1}
+    assert report["unknown"]["kinds"] == {"provider_oom_killed": 1}
     assert report["model"]["count"] == 0
 
 
@@ -297,7 +296,8 @@ def test_explicit_unknown_attribution_does_not_fall_back_to_model_kind():
     collected.results[0]["failure_outcome_attribution"] = "unknown"
     _, (_, _, report), _ = _gate(collected)
     assert report["model"]["count"] == 0
-    assert report["evaluation"]["kinds"] == {"agent_timeout": 1}
+    assert report["unknown"]["kinds"] == {"agent_timeout": 1}
+    assert report["evaluation"]["count"] == 0
 
 
 def test_bad_judge_verdict_preserves_other_trials_saved_attribution():
@@ -363,3 +363,151 @@ def test_unfinished_run_health_preserves_saved_policy_attribution(tmp_path, monk
     assert values["health/trial/expected"] == 2
     assert values["health/trial/failed_lower_bound"] == 0
     assert values["health/trial/failure_rate_lower_bound"] == 0
+
+
+def _stage_zero(stage):
+    collected = _policy_zero()
+    collected.results[0].update(
+        _ng_failure_id="final",
+        _ng_failure_events={
+            "final": {
+                "event_id": "final",
+                "boundary": "sandbox",
+                "failure_kind": "provider_oom_killed",
+                "stage": stage,
+            }
+        },
+    )
+    return collected
+
+
+@pytest.mark.parametrize("stage,expected", [("agent", "model"), ("verification", "evaluation"), (None, "unknown")])
+def test_trial_health_uses_the_final_event_stage(stage, expected):
+    collected = _stage_zero(stage)
+    _, (_, _, report), _ = _gate(collected)
+    assert report[expected]["kinds"] == {"provider_oom_killed": 1}
+    assert fault_class("provider_oom_killed", stage=stage) == expected
+
+
+def test_gate_configuration_roundtrip_changes_class_without_changing_saved_facts():
+    from nemo_gym.orchestration.recovery import decide_from_collected
+
+    collected = _stage_zero("agent")
+    criteria = GateCriteria.model_validate(
+        {
+            "classification": {
+                "by_stage": {"agent": {"by_failure_kind": {"provider_oom_killed": "evaluation"}}},
+            }
+        }
+    )
+    criteria = GateCriteria.model_validate_json(criteria.model_dump_json())
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    gate = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None, criteria=criteria)
+    assert gate["evaluation_health"]["evaluation"]["kinds"] == {"provider_oom_killed": 1}
+    assert gate["evaluation_health"]["status"] == "FAIL"
+    assert (
+        gate["criteria"]["evaluation"]["classification"]["by_stage"]["agent"]["by_failure_kind"]["provider_oom_killed"]
+        == "evaluation"
+    )
+    assert collected.results[0]["_ng_failure_events"]["final"]["stage"] == "agent"
+    assert decision.counts == {"scored": 1}
+
+
+def test_saved_unknown_class_wins_over_new_gate_override():
+    from nemo_gym.core.failure_kinds import FailureClassificationConfig
+    from nemo_gym.orchestration.recovery import decide_from_collected
+
+    collected = _stage_zero("agent")
+    collected.results[0]["failure_outcome_attribution"] = "unknown"
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    passed, _, report = trial_verdict(
+        decision,
+        collected,
+        classification=FailureClassificationConfig(by_failure_kind={"provider_oom_killed": "evaluation"}),
+    )
+    assert report["unknown"]["kinds"] == {"provider_oom_killed": 1}
+    assert report["model"]["count"] == report["evaluation"]["count"] == 0
+    assert passed is None
+
+
+def test_recovered_stage_failure_does_not_turn_success_into_a_final_fault():
+    collected = _run(1)
+    before = _gate(collected)[1]
+    row = collected.results[0]
+    row["_ng_failure_events"] = {
+        "recovered": {
+            "event_id": "recovered",
+            "boundary": "sandbox",
+            "failure_kind": "provider_oom_killed",
+            "stage": "verification",
+        }
+    }
+    from nemo_gym.orchestration.recovery import CollectedEvidence
+
+    collected = CollectedEvidence.model_validate_json(collected.model_dump_json())
+    decision, (passed, reason, report), _ = _gate(collected)
+    assert collected.results[0]["reward"] == 1.0
+    assert decision.counts == {"scored": 1}
+    assert decision.action.value == "noop"
+    assert passed is before[0], reason
+    assert reason == before[1]
+    assert all(report[side]["count"] == 0 for side in ("model", "evaluation", "unknown"))
+
+
+def test_collector_preserves_final_failure_stage_for_shared_health_classification(tmp_path):
+    import json
+
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect
+
+    source = _stage_zero("agent")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    for name, rows in (
+        ("rollouts_materialized_inputs.jsonl", source.materialized),
+        ("rollouts.jsonl", source.results),
+    ):
+        (artifacts / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
+    collected = collect(tmp_path)
+    _, (passed, reason, report), _ = _gate(collected)
+    assert report["model"]["kinds"] == {"provider_oom_killed": 1}
+    assert passed is not False, reason  # Collection has no source-bound quality artifact in this fixture.
+
+
+def test_recovery_uses_configured_class_after_policy_save_reload(tmp_path):
+    from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import INFRA, _decide, ident, write_job_dir
+
+    row = ident(0, **INFRA)
+    row.update(
+        _ng_failure_id="final",
+        _ng_failure_events={
+            "final": {
+                "event_id": "final",
+                "boundary": "sandbox",
+                "failure_kind": "provider_unavailable",
+                "stage": "seed",
+            }
+        },
+    )
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
+    policy = RecoveryOutcomePolicyConfig.model_validate(
+        {
+            "by_failure_class": {"model": "fail", "evaluation": "retry"},
+            "classification": {"by_stage": {"seed": {"by_failure_kind": {"provider_unavailable": "model"}}}},
+        }
+    )
+    policy = RecoveryOutcomePolicyConfig.model_validate_json(policy.model_dump_json())
+    default = _decide(job)
+    configured = _decide(job, policy)
+    assert default.identities["retryable"] == [(0, 0)]
+    assert configured.identities["terminal"] == [(0, 0)]
+    assert configured.evidence[0].attempts == default.evidence[0].attempts
+    assert configured.evidence[0].failure_kind == "provider_unavailable"
+    assert configured.evidence[0].stage == "seed"
+
+
+def test_recovery_rejects_zero_scoring_through_a_class_rule():
+    from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+
+    with pytest.raises(ValueError, match="does not support count_as_zero"):
+        RecoveryOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})

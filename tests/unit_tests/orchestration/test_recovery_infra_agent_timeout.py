@@ -171,7 +171,7 @@ def test_a_sandbox_or_tool_server_failure_event_in_the_row_is_infrastructure() -
 
 def test_the_kind_is_gate_derived_and_evaluation_side() -> None:
     assert is_gate_derived(AGENT_TIMEOUT_INFRASTRUCTURE)
-    assert fault_class(AGENT_TIMEOUT_INFRASTRUCTURE) == "server"
+    assert fault_class(AGENT_TIMEOUT_INFRASTRUCTURE) == "evaluation"
     assert fault_class("agent_timeout") == "model"
 
 
@@ -292,3 +292,18 @@ async def test_the_store_reopens_a_harbor_graded_zero_only_with_server_faults(
     else:
         assert store.pending() == [] and len(store.selected("success")) == 1
         assert decision.counts == {IdentityState.SCORED: 1} and decision.action == RecoveryAction.NOOP
+
+
+@pytest.mark.parametrize("stage,expected", [("agent", False), ("seed", True), ("verification", False), (None, False)])
+def test_timeout_materiality_uses_shared_stage_class_for_sandbox_evidence(stage, expected):
+    event = {"event_id": "oom", "boundary": "sandbox", "failure_kind": "provider_oom_killed", "stage": stage}
+    row = timeout_row(0, CLEAN, _ng_failure_events={"oom": event})
+    assert is_infrastructure_agent_timeout(row) is expected
+    assert event["failure_kind"] == "provider_oom_killed"
+    assert event["stage"] == stage
+
+
+def test_unregistered_provider_prefix_is_not_infrastructure_evidence():
+    event = {"event_id": "unknown", "boundary": "sandbox", "failure_kind": "provider_not_registered"}
+    row = timeout_row(0, CLEAN, _ng_failure_events={"unknown": event})
+    assert not is_infrastructure_agent_timeout(row)

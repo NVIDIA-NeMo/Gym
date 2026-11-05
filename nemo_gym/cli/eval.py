@@ -584,6 +584,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             metrics.update(
                 {
                     "health/trial/counts_known": int(exact),
+                    "health/trial/unclassified": evaluation["unknown"]["count"],
                     "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
                     "health/trial/expected": trials,
                     "health/trial/omitted": decision.counts.get(IdentityState.OMITTED, 0),
