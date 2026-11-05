@@ -109,14 +109,15 @@ gym eval run --no-serve --config run.yaml --agent crewai_agent \
 
 | Call | What the adapter does |
 | --- | --- |
-| Seed (`/v1/agent_sessions`) | Lists the tools of each MCP grant, then connects to the lent sandbox, or starts its own with `sandbox_config`, and uploads the shell's runner to `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory. |
+| Seed (`/v1/agent_sessions`) | Lists the tools of each MCP grant, then connects to the lent sandbox, or starts its own with `sandbox_config`, and creates the shell's session directory `/tmp/nemo-gym-crewai-sessions/<id>`, outside the task directory. |
 | Activation (`/ng-rollout/<capture key>/v1/responses`) | Builds one CrewAI agent and one task from the request and runs `Crew.akickoff()` once. Identical retries join the same run; a different request answers 409. |
 | Close (`/v1/agent_sessions/close`) | Cancels the crew's calls in flight and fails its later ones, cancels the activation, kills shell commands still running, removes the session directory, then disconnects from a lent sandbox or stops its own. Returns the observations. |
 
 CrewAI 1.15 runs its agent loop as a Flow whose steps call the model and the tools synchronously from worker threads
 of the event loop's default executor, even under `akickoff()`. Each of those calls is handed back to the event loop,
 so model requests use Gym's aiohttp client and commands use the session's sandbox connection, and close can cancel
-them.
+them. Those calls need the executor too, so the first seed sizes it to `concurrency` plus the default executor's
+size, min(32, CPUs + 4): crews waiting on their calls cannot take every thread.
 
 ### Model calls
 
@@ -135,10 +136,15 @@ the adapter imports CrewAI.
 
 | Tool | Source | Behavior |
 | --- | --- | --- |
-| `shell` | `SandboxAccess`, or the agent's own sandbox | Each call runs a fresh `bash` in the task directory with the owner's `SandboxAccess.env`, so `cd` and variables do not carry over. The command runs in a process group of its own and is killed with it after `shell_timeout_seconds`. Its combined stdout and stderr go to a file, so a background process it leaves cannot hold the exec open; background processes survive the command as task services. The model sees the output (head and tail beyond `shell_max_output_bytes`) and the exit code. |
-| Each tool of an `mcp` grant | `tool_accesses` | Listed at seed with the grant's URL and headers; each call opens a fresh MCP session over Gym's aiohttp client, as CrewAI's own MCP tools open a fresh client per call. Tools keep their own names, which verifiers compare, rather than CrewAI's server-prefixed names. A server error result reaches the model as a CrewAI `ToolFailure`. |
+| `shell` | `SandboxAccess`, or the agent's own sandbox | Each call runs a fresh `bash` in the task directory with the owner's `SandboxAccess.env`, so `cd` and variables do not carry over. The command runs in a process group of its own and is killed with it after `shell_timeout_seconds`. Its combined stdout and stderr go to a file, so a background process it leaves cannot hold the exec open; background processes survive the command as task services. The runner is sent with each command, so a command that deletes the session directory does not break the next one. The model sees the output (head and tail beyond `shell_max_output_bytes`) and the exit code. |
+| Each tool of an `mcp` grant | `tool_accesses` | Listed at seed with the grant's URL and headers; each call opens a fresh MCP session over Gym's aiohttp client, as CrewAI's own MCP tools open a fresh client per call. Tools keep their own names, which verifiers compare, rather than CrewAI's server-prefixed names. A server error result, or a JSON-RPC error such as invalid arguments, reaches the model as a CrewAI `ToolFailure`. |
 
-The task image needs `bash`, `head`, `tail`, `wc` and `sleep`; nothing is installed in the sandbox.
+The task image needs `bash`, `head`, `tail`, `wc`, `sleep`, `cat`, `rm` and `mkdir`; nothing is installed in the
+sandbox.
+
+Tool results reach the model whole, the shell's within `shell_max_output_bytes`: the adapter turns off CrewAI's
+`use_better_compaction`, which would move a large result to a file on the Agent Server host and give the model an
+extra tool to read it.
 
 Seeds the adapter cannot serve answer 422: a required grant other than `mcp`, a sandbox connection other than
 `direct`, a relative `workdir` (lent or in `sandbox_config`), a `SandboxAccess.user` override, and tool names that collide (with `shell` or with
@@ -167,16 +173,20 @@ CrewAI sent to the model. Usage is the sum over every model call, or unknown wit
 gap when one call reported none. A run that hits `timeout` answers `incomplete` with its partial work, which is graded.
 A final answer cut off at the output cap answers `incomplete` with `max_output_tokens`. A failed model request answers
 `failed` with `ng_agent_outcome` naming `model_request_error` and its status; a transport failure names
-`model_transport_error`; any other CrewAI error is `unknown`. When CrewAI reaches `max_iter` it asks the model for a
-final answer, and the run counts as completed, as CrewAI counts it.
+`model_transport_error`; an answer with neither text nor a tool call, which CrewAI asks for once more before it raises
+`EmptyLLMResponseError`, names `agent_invalid_output`; any other CrewAI error is `unknown`. CrewAI does not run a
+failed task again (`max_retry_limit=0`): the Environment Server's outcome policy decides whether the episode is
+verified or retried. When CrewAI reaches `max_iter` it asks the model for a final answer, and the run counts as
+completed, as CrewAI counts it.
 
-Close returns an `AgentObservationBundle` from `crewai_agent` with one `AgentInvocation` (its status, every model
-call's response ID and the conversation) and a `ToolCallObservation` per tool call with executor timing and status:
-a nonzero exit is `failed`, a deadline is `timeout`. CrewAI does not pass a call's ID to the tool, so executions are
-joined to the model's calls by name and arguments; an execution that cannot be joined is a
-`tool_call_identity_unavailable` gap. Cached and reasoning token counts that a call does not report are gaps. A close
-before any activation returns an `observation_capture_failed` gap; a close that interrupts a run adds
-`agent_activation_interrupted`.
+Close returns an `AgentObservationBundle` from `crewai_agent` with one `AgentInvocation` (the response's status,
+`stop_reason` `timeout` when the run hit `timeout`, every model call's response ID and the conversation) and a
+`ToolCallObservation` per tool call with executor timing and status: a nonzero exit is `failed`, a command's deadline
+is `timeout`, and a call still running when the run's own deadline ended it is `cancelled`. CrewAI does not pass a
+call's ID to the tool, so executions are joined to the model's calls by name and arguments, exact matches first; an
+execution that cannot be joined is a `tool_call_identity_unavailable` gap. Cached and reasoning token counts that a
+call does not report are gaps. A close before any activation returns an `observation_capture_failed` gap; a close that
+interrupts a run adds `agent_activation_interrupted`.
 
 The bundle also holds the agent's `SandboxObservation` of the sandbox it used. Its outcome is how the crew's run
 ended: `completed`, `failed` with the invocation's error type, `timeout` at the run's deadline, or `cancelled` when
@@ -193,12 +203,12 @@ header to the invocation, including failed attempts that have no response ID.
 | `timeout` | 1800 | Seconds a crew run may take; a task's `agent_timeout_sec` lowers it. |
 | `max_iter` | 50 | CrewAI `Agent.max_iter`. |
 | `max_model_retries` | 2 | Retries of transient model HTTP statuses. |
-| `context_window_size` | `null` | The model's context window; CrewAI summarizes near 85% of it. |
+| `context_window_size` | `null` (131072 in `configs/crewai_agent.yaml`) | The model's context window; CrewAI summarizes near 85% of it. Unset, CrewAI assumes 4,096 tokens. |
 | `role`, `goal`, `backstory`, `expected_output` | Generic engineer prompts | The CrewAI agent and task text around the instruction. |
 | `shell_timeout_seconds` | 600 | Deadline for one command. |
 | `shell_max_output_bytes` | 30000 | Command output shown to the model. |
 | `mcp_timeout_seconds` | 300 | Deadline for one MCP listing or call. |
-| `concurrency` | 16 | Crews running at once. Each model or tool call in flight holds a default-executor thread. |
+| `concurrency` | 16 | Crews running at once; it also sizes the event loop's default executor. Keep it at least the Environment Server's `max_concurrent_episodes`: a seeded session that waits for a slot holds its sandbox outside `timeout`, and the `ttl_s` of an agent-owned sandbox does not cover the wait. |
 | `sandbox_provider` | `null` | Provider block for the agent's own sandbox, used only when the Environment Server lends none. |
 | `sandbox_config` | `{}` | `SandboxSpec` fields for that sandbox; `workdir` defaults to `/app`, `ttl_s` to `timeout` plus 600. |
 | `session_close_timeout_seconds` | 60 | Budget for each close step. |
@@ -210,7 +220,7 @@ header to the invocation, including failed attempts that have no response ID.
 - `SandboxAccess.user` is refused: the shell's session files are written as the sandbox's default user.
 - Direct HTTP tool grants are not consumed; a required one is refused and an optional one is skipped.
 - Tool results that CrewAI never sent to the model (the run ended right after the call) are missing from the
-  transcript; their tool-call records keep the output.
+  transcript. Tool-call records carry timing and status but no output, so the observations do not hold them either.
 - A tool name that CrewAI's sanitizer changes (for example `getWeather` to `get_weather`) is offered to the model in
   the sanitized form; the transcript records the tool's own name.
 - CrewAI creates an encryption key for its credential store under the Agent Server user's data directory

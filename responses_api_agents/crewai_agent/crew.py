@@ -36,6 +36,7 @@ os.environ.update(
 
 from crewai import Agent, Crew, Process, Task  # noqa: E402
 from crewai.llms.base_llm import BaseLLM  # noqa: E402
+from crewai.llms.base_llm import EmptyLLMResponseError as EmptyLLMResponseError  # noqa: E402
 from crewai.mcp.content import content_blocks_to_text  # noqa: E402
 from crewai.tools import BaseTool  # noqa: E402
 from crewai.tools.tool_failure import ToolFailure, ToolFailureReason  # noqa: E402
@@ -275,6 +276,12 @@ def build_crew(
         cache=False,
         memory=False,
         verbose=False,
+        # CrewAI would run a failed task again from the start, in the sandbox the first attempt already changed. A
+        # failure ends the run instead, and the Environment Server's outcome policy decides what follows.
+        max_retry_limit=0,
+        # Oversized tool results would move to temporary files on the Agent Server host, which the model reads through
+        # an extra tool that runs outside the sandbox.
+        use_better_compaction=False,
     )
     # The instruction is the task's text as is. The crew is started without inputs, so CrewAI does not read the
     # braces in it as template variables.

@@ -14,7 +14,7 @@ from typing import Any
 
 import aiohttp
 import httpx
-from mcp import ClientSession
+from mcp import ClientSession, McpError
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, Tool
 
@@ -90,5 +90,11 @@ async def list_tools(access: MCPToolAccess, *, timeout_seconds: float) -> list[T
 async def call_tool(
     access: MCPToolAccess, name: str, arguments: dict[str, Any], *, timeout_seconds: float
 ) -> CallToolResult:
+    """Call one tool. A JSON-RPC error from the server, such as invalid arguments, raises ``McpError``."""
     async with mcp_session(access, timeout_seconds=timeout_seconds) as session:
-        return await session.call_tool(name, arguments)
+        try:
+            return await session.call_tool(name, arguments)
+        except McpError as error:
+            # Raised inside the session, it would leave the SDK's task groups wrapped in an ExceptionGroup.
+            rejected = error
+    raise rejected

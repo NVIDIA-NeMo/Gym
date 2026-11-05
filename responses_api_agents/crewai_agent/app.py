@@ -11,7 +11,9 @@ agent starts and stops itself. A lent sandbox is never stopped.
 import asyncio
 import json
 import logging
+import os
 from collections.abc import Awaitable, Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from time import monotonic, perf_counter, time
@@ -41,6 +43,7 @@ from nemo_gym.agents.utils import lifecycle_observation
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymFunctionCallOutput,
@@ -76,6 +79,7 @@ from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.crewai_agent import mcp_client
 from responses_api_agents.crewai_agent.crew import (
     CrewRun,
+    EmptyLLMResponseError,
     GrantTool,
     GymChatLLM,
     ShellTool,
@@ -123,7 +127,7 @@ class CrewAIAgentConfig(BaseResponsesAPIAgentConfig):
         ge=1,
         description=(
             "Crews that run at once. CrewAI holds a thread of the event loop's default executor for each model or "
-            "tool call in flight."
+            "tool call in flight, so the agent sizes that executor to this many threads plus headroom."
         ),
     )
     timeout: float = Field(
@@ -382,19 +386,36 @@ class _Episode:
     def tool_observations(self) -> list[TrajectoryToolCall]:
         """Join each executed tool run to the model's call: CrewAI runs a call without passing its ID to the tool."""
         unmatched = list(self.tool_runs)
-        records = []
-        for call in (item for item in self.output if isinstance(item, NeMoGymResponseFunctionToolCall)):
+        calls = [item for item in self.output if isinstance(item, NeMoGymResponseFunctionToolCall)]
+        joined: dict[str, _ToolRun] = {}
+        # Exact matches across all calls first, so a call CrewAI refused (invalid arguments) cannot take the run of a
+        # later call by its name alone.
+        for call in calls:
             try:
                 arguments = json.loads(call.arguments)
             except (json.JSONDecodeError, TypeError):
-                arguments = None
-            run = next(
-                (run for run in unmatched if run.name == call.name and run.arguments == arguments), None
-            ) or next((run for run in unmatched if run.name == call.name), None)
+                continue
+            run = next((run for run in unmatched if run.name == call.name and run.arguments == arguments), None)
+            if run is not None:
+                unmatched.remove(run)
+                joined[call.call_id] = run
+        for call in calls:
+            if call.call_id not in joined:
+                run = next((run for run in unmatched if run.name == call.name), None)
+                if run is not None:
+                    unmatched.remove(run)
+                    joined[call.call_id] = run
+        records = []
+        for call in calls:
+            run = joined.get(call.call_id)
             if run is None:
                 # CrewAI answered the call itself (an unknown tool or invalid arguments) without running a tool.
                 continue
-            unmatched.remove(run)
+            if not run.completed_at:
+                # Still in flight when the run ended; its cancellation reaches it on a later turn of the event loop.
+                run.status, run.error_type = "cancelled", "cancelled"
+                run.completed_at = max(run.started_at, time())
+                run.duration_ms = (run.completed_at - run.started_at) * 1000
             records.append(
                 TrajectoryToolCall(
                     invocation_id=self.invocation_id,
@@ -454,6 +475,7 @@ def _text(content: Any) -> str | None:
 class CrewAIAgent(SimpleResponsesAPIAgent):
     config: CrewAIAgentConfig
     _semaphore: asyncio.Semaphore = PrivateAttr()
+    _sized_loop: asyncio.AbstractEventLoop | None = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -462,7 +484,25 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             raise ValueError("CrewAI agent sessions are process-local and require num_workers=1")
         self._semaphore = asyncio.Semaphore(self.config.concurrency)
 
+    def _reserve_crew_threads(self) -> None:
+        """Size the event loop's default executor so that running crews cannot take every thread of it.
+
+        Each running crew holds a default-executor thread while its model or tool call runs on the loop, and those
+        calls need the executor too (file transfers, DNS lookups). With no thread left, every crew waits until its
+        deadline. The default size, min(32, CPUs + 4), is below ``concurrency`` on a small host.
+        """
+        loop = asyncio.get_running_loop()
+        if self._sized_loop is loop:
+            return
+        headroom = min(32, (os.process_cpu_count() or 1) + 4)
+        loop.set_default_executor(
+            ThreadPoolExecutor(max_workers=self.config.concurrency + headroom, thread_name_prefix="nemo-gym-crewai")
+        )
+        self._sized_loop = loop
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CrewAISessionState:
+        # Before the seed's own sandbox setup, which uses the executor.
+        self._reserve_crew_threads()
         accesses = self.effective_tool_accesses(body)
         unusable = sorted(
             access.name for access in accesses if access.required and not isinstance(access, MCPToolAccess)
@@ -764,7 +804,13 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             error_type = type(error).__name__ if error else None
             state.run_end = ("timeout" if status == "incomplete" else status, error_type)
             response = self._response(state, instruction, status=status, error=error)
-            self._record_observations(state, status=status, error_type=error_type)
+            # The response's status: a final answer cut off at the output cap makes it incomplete.
+            self._record_observations(
+                state,
+                status=response.status,
+                error_type=error_type,
+                stop_reason="timeout" if status == "incomplete" else None,
+            )
             return response
 
     def _crew_tools(self, state: CrewAISessionState, episode: _Episode, instruction: _Instruction) -> list[Any]:
@@ -931,15 +977,28 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             usage=episode.response_usage(),
         )
         if error is not None:
-            return self.report_outcome(response, {"outcome": episode.model_failure})
+            return self.report_outcome(response, {"outcome": episode.model_failure, "error": error})
         return response
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """A crew run that raised: the model request that failed, if one did; CrewAI's own errors are unknown."""
+        """A crew run that raised: the model request that failed, if one did; an empty answer is the model's invalid
+        output; CrewAI's other errors are unknown."""
         outcome = native_result.get("outcome")
-        return outcome if isinstance(outcome, AgentOutcome) else AgentOutcome(failure_kind="unknown")
+        if isinstance(outcome, AgentOutcome):
+            return outcome
+        if isinstance(native_result.get("error"), EmptyLLMResponseError):
+            # The model answered with neither text nor a tool call, also when CrewAI asked again.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
+        return AgentOutcome(failure_kind="unknown")
 
-    def _record_observations(self, state: CrewAISessionState, *, status: str, error_type: str | None = None) -> None:
+    def _record_observations(
+        self,
+        state: CrewAISessionState,
+        *,
+        status: str,
+        error_type: str | None = None,
+        stop_reason: str | None = None,
+    ) -> None:
         episode = state.episode
         if episode is None:
             # Close before any activation: there is nothing the crew did.
@@ -963,6 +1022,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         invocation = AgentInvocation(
             invocation_id=episode.invocation_id,
             status=status,
+            stop_reason=stop_reason,
             error_type=error_type,
             duration_ms=(monotonic() - episode.started) * 1000,
             model_calls=episode.model_calls,

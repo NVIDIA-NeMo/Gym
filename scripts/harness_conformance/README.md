@@ -212,9 +212,10 @@ tool's schema consumable by `provider.Probe._finish`. Keep expectations and witn
 of the task input and preserve the normal Gym collection path.
 
 Registration also means adding the harness name to hard-coded tuples. `episode._config`
-passes the probe's `--timeout` as the agent's `timeout` to the harnesses whose adapters
-have a `timeout` field (OpenCode, Pi, CrewAI and OpenClaw); add a new harness with that
-field, so that it uses the probe timeout instead of the adapter's default.
+passes the probe's `--timeout` as the agent's `timeout` to OpenCode, Pi, CrewAI and
+OpenClaw, and to Codex outside agent sessions; add a new harness whose adapter has a
+`timeout` field to that list, so that it uses the probe timeout instead of the adapter's
+default.
 `ci.install_runtime` syncs the adapter's locked project (`pyproject.toml` and `uv.lock`)
 and then returns early only for the harnesses in its
 `("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes and CrewAI come from

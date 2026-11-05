@@ -9,19 +9,21 @@ import os
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from http.cookies import SimpleCookie
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.crewai_agent import app, sandbox_shell
@@ -74,7 +76,8 @@ class _Model:
                 "path": url_path,
                 "json": copy.deepcopy(json),
                 "headers": headers,
-                "cookies": cookies,
+                # The agent passes one dict that it keeps updating: record what this call carried.
+                "cookies": dict(cookies or {}),
             }
         )
         reply = self.replies.pop(0)
@@ -84,6 +87,8 @@ class _Model:
 def _agent(model: _Model, **config: Any) -> CrewAIAgent:
     server_client = MagicMock(spec=ServerClient)
     server_client.post = model.post
+    # A crew that hangs fails its test in a minute, not at the default 30.
+    config.setdefault("timeout", 60)
     return CrewAIAgent(
         config=CrewAIAgentConfig(
             host="0.0.0.0",
@@ -190,7 +195,7 @@ def test_an_episode_runs_one_crew_turn_with_its_shell_in_the_borrowed_sandbox(ro
     closed = closed.json()
     assert closed["cleanup_confirmed"] is True
     invocation, tool, sandbox = closed["agent_observations"]["records"]
-    assert invocation["status"] == "completed"
+    assert (invocation["status"], invocation["stop_reason"]) == ("completed", None)
     assert [ref["response_id"] for ref in invocation["model_calls"]] == ["chatcmpl-1", "chatcmpl-2"]
     assert (tool["tool_call_id"], tool["tool_name"], tool["status"]) == ("chatcmpl-1-call-0", "shell", "completed")
     # The agent used a lent sandbox: it observed it, and left its teardown to the owner.
@@ -220,6 +225,80 @@ def test_a_failed_command_is_a_failed_tool_call_the_model_sees(root):
     assert (tool["status"], tool["error_type"]) == ("failed", "exit_code_2")
 
 
+def test_an_errexit_from_the_tasks_bash_env_does_not_cost_a_command_its_status(root, tmp_path):
+    bash_env = tmp_path / "bash_env.sh"
+    bash_env.write_text("set -e\n")
+    model = _Model(
+        _completion(None, ("shell", {"command": "false"}), id="chatcmpl-1"),
+        _completion("It failed.", id="chatcmpl-2"),
+    )
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root, env={"BASH_ENV": str(bash_env)}))
+        response = _respond(client)
+        closed = _close(client).json()
+
+    assert response.status_code == 200, response.text
+    assert model.requests[1]["json"]["messages"][-1]["content"] == "[exit code: 1]"
+    tool = closed["agent_observations"]["records"][1]
+    assert (tool["status"], tool["error_type"]) == ("failed", "exit_code_1")
+
+
+def test_a_large_tool_result_reaches_the_model_whole(root):
+    # Without a context window CrewAI assumes 4,096 tokens, where its compaction would move this result to a file.
+    model = _Model(
+        _completion(None, ("shell", {"command": "head -c 10000 /dev/zero | tr '\\0' x"}), id="chatcmpl-1"),
+        _completion("Done.", id="chatcmpl-2"),
+    )
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        assert _respond(client).status_code == 200
+
+    second = model.requests[1]["json"]
+    assert second["messages"][-1]["content"] == "x" * 10000 + "\n[exit code: 0]"
+    # No tool that would read a moved result is offered.
+    assert [tool["function"]["name"] for tool in second["tools"]] == ["shell"]
+
+
+def test_each_tool_result_is_recorded_once_in_call_order(root):
+    model = _Model(
+        _completion(None, ("shell", {"command": "echo one"}), id="chatcmpl-1"),
+        _completion(None, ("shell", {"command": "echo two"}), id="chatcmpl-2"),
+        _completion("Done.", id="chatcmpl-3"),
+    )
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        response = _respond(client)
+        closed = _close(client).json()
+
+    # Each later model call carries every earlier tool result again; the transcript holds each one once.
+    output = response.json()["output"]
+    assert [(item["type"], item.get("call_id"), item.get("output")) for item in output] == [
+        ("function_call", "chatcmpl-1-call-0", None),
+        ("function_call_output", "chatcmpl-1-call-0", "one\n\n[exit code: 0]"),
+        ("function_call", "chatcmpl-2-call-0", None),
+        ("function_call_output", "chatcmpl-2-call-0", "two\n\n[exit code: 0]"),
+        ("message", None, None),
+    ]
+    tools = [record for record in closed["agent_observations"]["records"] if record["kind"] == "tool_call"]
+    assert [tool["tool_call_id"] for tool in tools] == ["chatcmpl-1-call-0", "chatcmpl-2-call-0"]
+
+
+def test_a_call_crewai_refused_does_not_take_the_execution_of_a_later_call(root):
+    model = _Model(
+        # CrewAI answers a call with invalid arguments itself, without running the tool.
+        _completion(None, ("shell", {"cmd": "echo bad"}), id="chatcmpl-1"),
+        _completion(None, ("shell", {"command": "echo good"}), id="chatcmpl-2"),
+        _completion("Done.", id="chatcmpl-3"),
+    )
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        assert _respond(client).status_code == 200
+        closed = _close(client).json()
+
+    tools = [record for record in closed["agent_observations"]["records"] if record["kind"] == "tool_call"]
+    assert [(tool["tool_call_id"], tool["status"]) for tool in tools] == [("chatcmpl-2-call-0", "completed")]
+
+
 def test_an_activation_runs_once_and_a_retry_gets_the_same_response(root):
     model = _Model(_completion("Done.", id="chatcmpl-1"))
     with TestClient(_agent(model).setup_webserver()) as client:
@@ -232,6 +311,44 @@ def test_an_activation_runs_once_and_a_retry_gets_the_same_response(root):
     assert first.json()["id"] == again.json()["id"]
     assert len(model.requests) == 1
     assert different.status_code == 409
+
+
+async def test_a_waiter_that_goes_away_leaves_the_shared_run_to_finish(root):
+    release = asyncio.Event()
+
+    async def held() -> _Reply:
+        await release.wait()
+        return _completion("Done.", id="chatcmpl-1")
+
+    model = _Model(held)
+    agent = _agent(model)
+    session: dict[str, Any] = {}
+    await agent.seed_agent_session(
+        SimpleNamespace(session=session, cookies={}), _seed_body(sandbox_access=_sandbox_access(root))
+    )
+    request = SimpleNamespace(
+        session=session,
+        cookies={},
+        path_params={"rollout_id": _EPISODE.capture_key},
+        url=SimpleNamespace(path=f"/ng-rollout/{_EPISODE.capture_key}/v1/responses"),
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=_TASK)
+
+    first = asyncio.create_task(agent.responses(request, body))
+    async with asyncio.timeout(15):
+        while not model.requests:
+            await asyncio.sleep(0.05)
+    # The HTTP client went away: its handler is cancelled, the crew's run is not.
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    release.set()
+    again = await asyncio.wait_for(agent.responses(request, body), 15)
+
+    assert again.status == "completed" and len(model.requests) == 1
+    close = AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=_EPISODE)
+    closed = await asyncio.wait_for(agent.close_agent_session(request, close), 15)
+    assert closed.agent_observations.records[0].status == "completed"
 
 
 def test_activations_outside_the_seeded_session_are_refused(root):
@@ -290,6 +407,17 @@ def test_system_messages_and_instructions_join_the_agents_system_prompt(root):
     assert _TASK in user["content"] and "Be brief." not in user["content"]
     # Without a sandbox or grants the crew has no tools.
     assert "tools" not in model.requests[0]["json"]
+
+
+def test_parallel_tool_calls_and_top_p_reach_the_model_with_the_tools(root):
+    model = _Model(_completion("Done.", id="chatcmpl-1"))
+    body = {"input": [{"role": "user", "content": _TASK}], "parallel_tool_calls": False, "top_p": 0.5}
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        assert _respond(client, body).status_code == 200
+
+    sent = model.requests[0]["json"]
+    assert (sent["parallel_tool_calls"], sent["top_p"], len(sent["tools"])) == (False, 0.5, 1)
 
 
 @pytest.mark.parametrize(
@@ -377,7 +505,68 @@ def test_a_crew_that_runs_out_of_time_answers_incomplete(root):
     assert response.json()["metadata"]["crewai_stop_reason"] == "timeout"
     assert (root / "partial.txt").read_text() == "partial\n"
     assert "agent_run_timeout" in {gap["code"] for gap in closed["agent_observations"]["gaps"]}
+    invocation = closed["agent_observations"]["records"][0]
+    assert (invocation["status"], invocation["stop_reason"]) == ("incomplete", "timeout")
     assert closed["agent_observations"]["records"][-1]["outcome"] == "timeout"
+
+
+def test_a_deadline_during_a_command_answers_incomplete_with_the_call_cancelled(root):
+    model = _Model(_completion(None, ("shell", {"command": "echo partial > partial.txt; sleep 20"}), id="chatcmpl-1"))
+    with TestClient(_agent(model, timeout=3).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        response = _respond(client)
+        closed = _close(client).json()
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "incomplete"
+    assert (root / "partial.txt").read_text() == "partial\n"
+    invocation, tool, sandbox = closed["agent_observations"]["records"]
+    assert (invocation["status"], invocation["stop_reason"]) == ("incomplete", "timeout")
+    assert (tool["tool_call_id"], tool["status"], tool["error_type"]) == (
+        "chatcmpl-1-call-0",
+        "cancelled",
+        "cancelled",
+    )
+    assert tool["completed_at"] >= tool["started_at"]
+    assert sandbox["outcome"] == "timeout"
+
+
+@pytest.mark.parametrize(
+    "seed, body",
+    [
+        ({"agent_timeout_sec": 2}, {}),
+        ({}, {"metadata": {"agent_timeout_sec": "2"}}),
+    ],
+    ids=["seed", "request_metadata"],
+)
+def test_a_tasks_agent_timeout_lowers_the_crews_deadline(root, seed, body):
+    async def slow() -> _Reply:
+        await asyncio.sleep(30)
+        raise AssertionError("the task's agent_timeout_sec should have ended the run")
+
+    model = _Model(slow)
+    with TestClient(_agent(model, timeout=1800).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root), **seed)
+        started = time.monotonic()
+        response = _respond(client, {"input": [{"role": "user", "content": _TASK}], **body})
+
+    assert time.monotonic() - started < 15
+    assert response.json()["status"] == "incomplete"
+
+
+def test_a_final_answer_cut_off_at_the_output_cap_is_incomplete(root):
+    body = json.loads(_completion("Partial answ", id="chatcmpl-1")._body)
+    body["choices"][0]["finish_reason"] = "length"
+    with TestClient(_agent(_Model(_Reply(body))).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        response = _respond(client)
+        closed = _close(client).json()
+
+    assert response.json()["status"] == "incomplete"
+    assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
+    # The invocation agrees with the response; the crew's use of the sandbox ended normally.
+    invocation, sandbox = closed["agent_observations"]["records"]
+    assert (invocation["status"], invocation["stop_reason"], sandbox["outcome"]) == ("incomplete", None, "completed")
 
 
 def test_a_rejected_model_request_fails_the_activation_with_its_status(root):
@@ -389,6 +578,8 @@ def test_a_rejected_model_request_fails_the_activation_with_its_status(root):
 
     assert response.status_code == 200
     assert response.json()["status"] == "failed"
+    # CrewAI does not run the task again after the failed call.
+    assert len(model.requests) == 1
     assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {
         "failure_kind": "model_request_error",
         "status_code": 400,
@@ -396,6 +587,33 @@ def test_a_rejected_model_request_fails_the_activation_with_its_status(root):
     invocation, sandbox = closed["agent_observations"]["records"]
     assert invocation["status"] == "failed"
     assert (sandbox["outcome"], sandbox["error_type"]) == ("failed", invocation["error_type"])
+
+
+def test_a_rejected_model_request_after_a_command_does_not_run_the_task_again(root):
+    model = _Model(
+        _completion(None, ("shell", {"command": "echo run >> runs.txt"}), id="chatcmpl-1"),
+        _Reply(status=400),
+        # What a second attempt at the task would get.
+        _completion(None, ("shell", {"command": "echo run >> runs.txt"}), id="chatcmpl-2"),
+        _completion("Done.", id="chatcmpl-3"),
+    )
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        response = _respond(client)
+
+    assert response.json()["status"] == "failed"
+    assert len(model.requests) == 2
+    assert (root / "runs.txt").read_text() == "run\n"
+
+
+def test_an_empty_answer_is_the_models_invalid_output(root):
+    model = _Model(*(_completion("", id=f"chatcmpl-{i}") for i in range(6)))
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        response = _respond(client)
+
+    assert response.json()["status"] == "failed"
+    assert json.loads(response.json()["metadata"]["ng_agent_outcome"]) == {"failure_kind": "agent_invalid_output"}
 
 
 def test_a_model_request_that_times_out_fails_the_activation_instead_of_ending_it_early(root):
@@ -427,6 +645,17 @@ def test_a_transient_model_status_is_retried(root):
     assert "trajectory" not in closed
 
 
+def test_model_server_cookies_are_sent_back_on_later_calls(root):
+    first = _completion(None, ("shell", {"command": "true"}), id="chatcmpl-1")
+    first.cookies.load({"route": "backend-3"})
+    model = _Model(first, _completion("Done.", id="chatcmpl-2"))
+    with TestClient(_agent(model).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        assert _respond(client).status_code == 200
+
+    assert [request["cookies"] for request in model.requests] == [{}, {"route": "backend-3"}]
+
+
 def test_usage_is_unknown_when_a_model_call_reports_none(root):
     model = _Model(
         _completion(None, ("shell", {"command": "true"}), id="chatcmpl-1"),
@@ -439,6 +668,18 @@ def test_usage_is_unknown_when_a_model_call_reports_none(root):
 
     assert response.json()["usage"] is None
     assert "model_call_usage_unavailable" in {gap["code"] for gap in closed["agent_observations"]["gaps"]}
+
+
+def test_a_model_reply_without_an_id_is_a_reference_gap(root):
+    body = json.loads(_completion("Done.", id="chatcmpl-1")._body)
+    del body["id"]
+    with TestClient(_agent(_Model(_Reply(body))).setup_webserver()) as client:
+        _seed(client, sandbox_access=_sandbox_access(root))
+        assert _respond(client).status_code == 200
+        closed = _close(client).json()
+
+    assert closed["agent_observations"]["records"][0]["model_calls"] == []
+    assert "model_call_reference_unavailable" in {gap["code"] for gap in closed["agent_observations"]["gaps"]}
 
 
 def test_a_sandbox_that_fails_under_the_crew_fails_the_episode_instead_of_grading_it(root, monkeypatch):
@@ -463,6 +704,53 @@ def test_a_sandbox_that_fails_under_the_crew_fails_the_episode_instead_of_gradin
     assert (invocation["status"], invocation["error_type"]) == ("failed", "infrastructure_error")
     assert tool["error_type"] == "infrastructure_error"
     assert (sandbox["outcome"], sandbox["error_type"]) == ("failed", "infrastructure_error")
+
+
+async def test_crews_beyond_the_default_executors_size_all_finish(root, monkeypatch):
+    # On a host with one CPU the default executor has 5 threads, fewer than the 8 crews here.
+    monkeypatch.setattr(app.os, "process_cpu_count", lambda: 1)
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(ThreadPoolExecutor(5))
+    first_calls = 0
+    five_in_flight = asyncio.Event()
+
+    class ShellThenDone:
+        async def post(self, *, server_name, url_path, json, cookies=None, headers=None) -> _Reply:
+            nonlocal first_calls
+            if any(message.get("role") == "tool" for message in json["messages"]):
+                return _completion("Done.", id="chatcmpl-2")
+            # Five crews in a model call at once, as under load: each holds a thread of the executor.
+            first_calls += 1
+            if first_calls == 5:
+                five_in_flight.set()
+            await five_in_flight.wait()
+            # Then each call needs the executor itself, as aiohttp's default resolver does for the server's address.
+            await loop.getaddrinfo("localhost", 80)
+            return _completion(None, ("shell", {"command": "echo hi"}), id="chatcmpl-1")
+
+    # A crew that cannot get a thread answers incomplete at this deadline.
+    asgi = _agent(ShellThenDone(), concurrency=16, timeout=20).setup_webserver()
+
+    async def episode(i: int) -> list[Any]:
+        episode_id = EpisodeId(rollout_id=f"rollout-{i}", attempt=0)
+        seed = AgentSeedSessionRequest(
+            agent_session_id=f"agent-session-{i}",
+            episode_id=episode_id,
+            task_id=TaskId(taskset="tb", task_id="t"),
+            sandbox_access=_sandbox_access(root),
+        )
+        close = AgentCloseSessionRequest(agent_session_id=seed.agent_session_id, episode_id=episode_id)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=asgi), base_url="http://agent") as client:
+            seeded = await client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+            response = await client.post(
+                f"/ng-rollout/{episode_id.capture_key}/v1/responses", json={"input": "Say hi."}
+            )
+            closed = await client.post("/v1/agent_sessions/close", json=close.model_dump(mode="json"))
+            return [seeded.status_code, response.json().get("status"), closed.status_code]
+
+    outcomes = await asyncio.wait_for(asyncio.gather(*(episode(i) for i in range(8))), 60)
+
+    assert outcomes == [[200, "completed", 200]] * 8
 
 
 @pytest.fixture

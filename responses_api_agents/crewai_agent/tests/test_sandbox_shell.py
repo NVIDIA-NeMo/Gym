@@ -118,9 +118,32 @@ async def test_release_kills_a_running_command_and_removes_the_session_files(she
     assert not (Path(shell.workdir) / "late.txt").exists()
 
 
-async def test_a_runner_that_leaves_no_status_is_a_sandbox_failure(shell):
-    await asyncio.wait_for(shell.release(timeout_seconds=10), 10)
+async def test_a_runner_that_leaves_no_status_is_a_sandbox_failure(shell, monkeypatch):
+    exec_command = shell.sandbox.exec
 
-    # The session's runner is gone, so the sandbox exec ends without the runner's status line.
+    async def lost(command, **options):
+        result = await exec_command(command, **options)
+        # The provider lost the runner's status line, as a dropped stream or a stopped container does.
+        return replace(result, stdout="partial output\n")
+
+    monkeypatch.setattr(shell.sandbox, "exec", lost)
+
     with pytest.raises(ShellRunnerError, match="without a command status"):
         await asyncio.wait_for(shell.run("echo unreachable"), 10)
+
+
+async def test_a_command_that_deletes_the_session_directory_leaves_the_next_command_working(shell):
+    first = await asyncio.wait_for(shell.run(f"rm -rf {Path(shell.session_dir).parent}"), 10)
+    second = await asyncio.wait_for(shell.run("echo still here"), 10)
+
+    assert first.exit_code == 0
+    assert (second.output, second.exit_code, second.timed_out) == ("still here\n", 0, False)
+
+
+async def test_a_command_that_exits_on_its_own_is_never_a_timeout(shell):
+    # A watchdog that outlives the kill of its group (bash 3.2) can leave the timeout mark after a normal exit.
+    Path(shell.session_dir, f"command-{shell._commands + 1}.pid.timeout").touch()
+
+    result = await asyncio.wait_for(shell.run("echo done"), 10)
+
+    assert (result.output, result.exit_code, result.timed_out) == ("done\n", 0, False)

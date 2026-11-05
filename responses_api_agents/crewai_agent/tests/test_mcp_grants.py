@@ -10,7 +10,9 @@ from collections.abc import Iterator
 import pytest
 import uvicorn
 from fastapi.testclient import TestClient
+from mcp import ClientSession, McpError
 from mcp.server.fastmcp import FastMCP
+from mcp.types import INVALID_PARAMS, ErrorData
 
 from nemo_gym.agents import check_agent_seed_rejected
 from nemo_gym.server_runtime import MCPStreamableHTTPConnection, MCPToolAccess
@@ -110,6 +112,28 @@ def test_a_granted_tool_is_discovered_called_and_its_result_reaches_the_model(mc
     tools = {record["tool_call_id"]: record for record in closed["agent_observations"]["records"][1:]}
     assert (tools["c1-call-0"]["status"], tools["c1-call-1"]["status"]) == ("completed", "failed")
     assert tools["c1-call-1"]["error_type"] == "tool_error"
+
+
+def test_a_call_the_server_answers_with_a_json_rpc_error_reaches_the_model_as_a_failed_call(mcp_url, monkeypatch):
+    async def rejected(self, name, arguments=None, *args, **kwargs):
+        # The session raises the server's JSON-RPC error answer, as for invalid parameters.
+        raise McpError(ErrorData(code=INVALID_PARAMS, message="city must not be empty"))
+
+    monkeypatch.setattr(ClientSession, "call_tool", rejected)
+    model = _Model(
+        _completion(None, ("get_weather", {"city": ""}), id="c1"),
+        _completion("I could not get the weather.", id="c2"),
+    )
+    with TestClient(_agent(model).setup_webserver()) as client:
+        assert _seed(client, tool_accesses=[_grant(mcp_url)]).status_code == 200
+        response = _respond(client, {"input": "What is the weather?"})
+        closed = _close(client).json()
+
+    # Not an infrastructure failure (503): the model sees the error and carries on.
+    assert response.status_code == 200, response.text
+    assert "city must not be empty" in model.requests[1]["json"]["messages"][-1]["content"]
+    (tool,) = closed["agent_observations"]["records"][1:]
+    assert (tool["tool_call_id"], tool["status"], tool["error_type"]) == ("c1-call-0", "failed", "mcp_error")
 
 
 def test_a_required_grant_that_does_not_connect_fails_the_seed_before_any_model_call(mcp_url):

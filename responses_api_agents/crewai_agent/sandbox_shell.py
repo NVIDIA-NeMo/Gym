@@ -4,8 +4,9 @@
 
 Each command runs in a fresh bash in the task directory, in a process group of its own. A deadline kills that group,
 and so does agent close for a command still running. The command writes its output to a file in the session
-directory, so a background process it leaves (a task service) cannot hold the provider's exec open. Only bash and
-``head``, ``tail``, ``wc`` and ``sleep`` are needed in the task image.
+directory, so a background process it leaves (a task service) cannot hold the provider's exec open. The runner is
+sent with each command, so a command that deletes the session directory does not break the next one. Only bash and
+``head``, ``tail``, ``wc``, ``sleep``, ``cat``, ``rm`` and ``mkdir`` are needed in the task image.
 """
 
 import math
@@ -17,7 +18,6 @@ from nemo_gym.sandbox import AsyncSandbox, upload_text
 
 
 SESSION_ROOT = "/tmp/nemo-gym-crewai-sessions"
-RUNNER_FILE = "run_command.sh"
 _STATUS_MARKER = "__nemo_gym_crewai_command_status__"
 # Time the runner gets beyond the command's deadline to kill it and print its output.
 _EXEC_GRACE_SECONDS = 30
@@ -26,11 +26,13 @@ _EXEC_GRACE_SECONDS = 30
 # `set -m` gives the command, and the watchdog, a process group of its own. The watchdog marks a timeout before it
 # kills the command's group; after the command exits, the watchdog's group is killed instead and the command's
 # background processes keep running. Agent close kills the group named by a pid file that is still present.
-RUNNER_SCRIPT = r"""set -m
+# `set +e` keeps an errexit from the task's BASH_ENV from ending the runner when the command fails. A timeout counts
+# only for a command that died of a signal: a watchdog that outlives the kill of its group can still mark one.
+RUNNER_SCRIPT = r"""set +e -m
 bash "$1" </dev/null >"$3" 2>&1 &
 command_pid=$!
 echo "$command_pid" >"$4"
-(sleep "$2"; : >"$4.timeout"; kill -KILL -- "-$command_pid") </dev/null >/dev/null 2>&1 &
+(sleep "$2" && : >"$4.timeout" && kill -KILL -- "-$command_pid") </dev/null >/dev/null 2>&1 &
 watchdog_pid=$!
 # Job control reports each killed job on stderr, which some providers merge into the output the model sees.
 exec 2>/dev/null
@@ -47,7 +49,7 @@ else
   cat "$3"
 fi
 timed_out=0
-if [ -e "$4.timeout" ]; then timed_out=1; fi
+if [ -e "$4.timeout" ] && [ "$status" -gt 128 ]; then timed_out=1; fi
 printf '\n%s %s %s\n' "$6" "$status" "$timed_out"
 """
 
@@ -94,7 +96,13 @@ class SandboxShell:
         self._commands = 0
 
     async def setup(self) -> None:
-        await upload_text(self.sandbox, path=f"{self.session_dir}/{RUNNER_FILE}", text=RUNNER_SCRIPT)
+        """Create the session directory, which also checks that the sandbox runs commands."""
+        result = await self.sandbox.exec(f"mkdir -p {quote(self.session_dir)}", timeout_s=_EXEC_GRACE_SECONDS)
+        if result.error_type is not None or result.return_code != 0:
+            raise ShellRunnerError(
+                f"could not create the shell session directory (return code {result.return_code}, "
+                f"error {result.error_type}): {(result.stderr or '').strip()[-500:]}"
+            )
 
     async def run(self, command: str) -> ShellResult:
         self._commands += 1
@@ -104,7 +112,9 @@ class SandboxShell:
         deadline = max(1, math.ceil(self.timeout_seconds))
         argv = [
             "bash",
-            f"{self.session_dir}/{RUNNER_FILE}",
+            "-c",
+            RUNNER_SCRIPT,
+            "nemo-gym-crewai-runner",
             f"{stem}.sh",
             str(deadline),
             f"{stem}.out",

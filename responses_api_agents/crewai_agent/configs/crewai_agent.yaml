@@ -16,5 +16,7 @@ crewai_agent:
       model: ${policy_model_name}
       timeout: 1800
       max_iter: 50
+      # The policy model's context window. Unset, CrewAI assumes 4,096 tokens and summarizes the conversation early.
+      context_window_size: 131072
       shell_timeout_seconds: 600
       session_close_timeout_seconds: 60
