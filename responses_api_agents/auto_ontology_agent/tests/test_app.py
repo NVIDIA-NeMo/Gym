@@ -157,6 +157,8 @@ def _agent(**config: Any) -> AutoOntologyAgent:
         "name": "auto_ontology_agent",
         "reasoning_model_server": ModelServerRef(type="responses_api_models", name="policy_model"),
         "reasoning_model": "azure/openai/model",
+        "fast_model_server": ModelServerRef(type="responses_api_models", name="auto_ontology_fast_model"),
+        "fast_model": "azure/openai/fast",
         "embedding_base_url": "http://embed/v1",
         "embedding_api_key": "key",
         "embedding_model": "embed-model",
@@ -421,14 +423,17 @@ class TestCInteractSession:
 
 
 def test_auto_ontology_gets_the_gym_model_servers_and_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
-    agent = _agent(fast_model="azure/openai/fast", feature_flags={"INTERACTIVE": "true"})
+    agent = _agent(feature_flags={"INTERACTIVE": "true"})
     monkeypatch.setattr(
         AutoOntologyAgent, "resolve_model_base_url", lambda self, name, **kwargs: f"http://{name}:8000/v1"
     )
 
     environment = agent.runtime()._environment
 
-    assert environment["REASONING_ENDPOINT"] == environment["NON_REASONING_ENDPOINT"] == "http://policy_model:8000/v1"
+    assert (environment["REASONING_ENDPOINT"], environment["NON_REASONING_ENDPOINT"]) == (
+        "http://policy_model:8000/v1",
+        "http://auto_ontology_fast_model:8000/v1",
+    )
     assert (environment["REASONING_MODEL"], environment["NON_REASONING_MODEL"]) == (
         "azure/openai/model",
         "azure/openai/fast",
