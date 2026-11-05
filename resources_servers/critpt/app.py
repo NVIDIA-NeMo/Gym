@@ -35,7 +35,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification.judge import judge_call_failed, reraise_judge_errors
+from nemo_gym.verification import reraise_judge_errors
+from nemo_gym.verification.judge import judge_call_failed
 
 
 # Repo root: resources_servers/critpt/app.py -> nemo-gym/

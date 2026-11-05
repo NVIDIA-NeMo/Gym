@@ -27,9 +27,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.core.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure, judge_failsafe
+from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.critpt.app import (
     _REPO_ROOT,
     CritPtAccessDenied,
