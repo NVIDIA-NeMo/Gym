@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -34,8 +36,9 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.geobenchx.catalog import TOOL_DEFINITIONS
 from resources_servers.geobenchx.upstream_backend import UpstreamToolPool
-from resources_servers.geobenchx_synth.catalog import UNUSED_TOOLS
+from resources_servers.geobenchx_synth.catalog import UNUSED_TOOLS, offered_states
 from resources_servers.geobenchx_synth.scoring import score
+from resources_servers.geobenchx_synth.sql_tool import SQL_TOOL_NAME, SqlSandbox, StateDatabases
 
 
 WORKER_SCRIPT = Path(__file__).with_name("synth_worker.py")
@@ -51,6 +54,14 @@ class GeoBenchXSynthResourcesServerConfig(BaseResourcesServerConfig):
     num_tool_workers: int = 16
     tool_timeout_s: float = 300.0
     max_sessions_per_worker: int = 64
+    # run_sql: the output of prepare/build_sql.py. Unset, run_sql reports that no database is available.
+    sql_data_path: str | None = None
+    # Per-state DuckDB files are built here on first use (default: <scratch_path>/sql).
+    sql_db_path: str | None = None
+    # DuckDB extension directory holding the spatial extension (default: DuckDB's own).
+    sql_extension_dir: str | None = None
+    sql_timeout_s: float = 60.0
+    sql_max_rows: int = 50
 
 
 class GeoBenchXSynthVerifyRequest(BaseVerifyRequest):
@@ -83,6 +94,8 @@ class GeoBenchXSynthResourcesServer(SimpleResourcesServer):
     ray_enabled = False
     config: GeoBenchXSynthResourcesServerConfig
     _pool: UpstreamToolPool | None = PrivateAttr(default=None)
+    _sql: SqlSandbox | None = PrivateAttr(default=None)
+    _entries: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
     def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
@@ -104,14 +117,30 @@ class GeoBenchXSynthResourcesServer(SimpleResourcesServer):
             worker_script=WORKER_SCRIPT,
             worker_args=("--catalog", str(catalog)),
         )
+        self._entries = json.loads(catalog.read_text())
+        if c.sql_data_path:
+            databases = StateDatabases(
+                c.sql_data_path, c.sql_db_path or str(Path(c.scratch_path) / "sql"), c.sql_extension_dir
+            )
+            self._sql = SqlSandbox(databases, timeout_s=c.sql_timeout_s, max_rows=c.sql_max_rows)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         for name in TOOL_DEFINITIONS:
             if name not in UNUSED_TOOLS:
                 app.post(f"/{name}")(self._handler(name))
+        app.post(f"/{SQL_TOOL_NAME}")(self.run_sql)
         app.router.add_event_handler("shutdown", self._pool.close)
+        if self._sql:
+            app.router.add_event_handler("shutdown", self._sql.close)
         return app
+
+    async def run_sql(self, request: Request, body: ToolBody) -> dict[str, Any]:
+        if self._sql is None:
+            return {"result": "Error: no spatial database is available for this task"}
+        session_id = request.session.get(SESSION_ID_KEY, "")
+        query = (body.model_extra or {}).get("query", "")
+        return {"result": await asyncio.to_thread(self._sql.run, session_id, str(query))}
 
     def _handler(self, tool_name: str):
         async def handler(request: Request, body: ToolBody) -> dict[str, Any]:
@@ -126,6 +155,10 @@ class GeoBenchXSynthResourcesServer(SimpleResourcesServer):
         session_id = request.session.get(SESSION_ID_KEY)
         if session_id:
             await self._pool.reset(session_id)
+            if self._sql:
+                task = body.model_extra or {}
+                states = offered_states(task.get("state", ""), task.get("split", ""), self._entries)
+                await asyncio.to_thread(self._sql.reset, session_id, states)
         return BaseSeedSessionResponse()
 
     async def verify(self, body: GeoBenchXSynthVerifyRequest) -> GeoBenchXSynthVerifyResponse:

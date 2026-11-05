@@ -7,6 +7,8 @@
 #   geobenchx_synth_geodata: /path/to/GeoData             # from prepare/build_catalog.py
 #   geobenchx_synth_tasks: /path/to/tasks                 # from prepare/generate.py
 #   geobenchx_scratch: /path/to/scratch
+# For run_sql (rows rebuilt with --tools sql or both):
+#   geobenchx_synth_sqldata: /path/to/SqlData             # from prepare/build_sql.py
 geobenchx_synth_resources_server:
   resources_servers:
     geobenchx_synth:
@@ -18,6 +20,7 @@ geobenchx_synth_resources_server:
       upstream_src: ${geobenchx_upstream_src}
       geo_data_path: ${geobenchx_synth_geodata}
       scratch_path: ${geobenchx_scratch}
+      sql_data_path: ${oc.select:geobenchx_synth_sqldata,null}
       num_tool_workers: 16
       tool_timeout_s: 300
       datasets:

@@ -50,6 +50,41 @@ matches the county layer's `geoid` column.
   The model should call `reject_task`.
 - **control**: a unit conversion that needs no tools.
 
+## SQL tool
+
+`run_sql` runs one read-only `SELECT` over the task's offered vector layers and tables,
+one table per catalog entry. `prepare/build_sql.py` exports them as GeoParquet with the
+measurements the GIS tools make precomputed, so queries need no reprojection:
+
+| Column | On | Contents |
+|---|---|---|
+| `geom` | vector layers | WKB in EPSG:4326 |
+| `geom_3857` | vector layers | WKB in EPSG:3857, the CRS `create_buffer` measures distances in |
+| `length_km` | roads, railways, waterways | length in the county's UTM zone, as `calculate_line_lengths` measures it |
+| `cdl_2020` to `cdl_2023` | buildings | Cropland Data Layer class at the building's centroid, as `get_centroids` and `filter_points_by_raster_values` sample it |
+
+The dialect is the subset of PostGIS that DuckDB Spatial also runs: geometry is decoded
+with `ST_GeomFromWKB`, and there is no `ST_Transform`, `ST_Union` aggregate, `ILIKE`,
+`round` or `UNION`. Column names are lowercase. The same query runs on PostgreSQL/PostGIS
+with the Parquet files loaded as `bytea`. Raster tasks stay answerable through the
+`cdl_*` columns.
+
+Each state is loaded once into a DuckDB file under `sql_db_path` (default
+`<scratch_path>/sql`). Each session gets its own in-memory database with only the
+offered states attached read-only. External access and configuration are then locked,
+so a query cannot read other files, write, attach databases or load extensions. The
+spatial extension is installed on first use; on an offline host, set `sql_extension_dir`
+to a directory where it is already installed. Only single `SELECT` statements run, each
+under `sql_timeout_s`, and at most `sql_max_rows` rows come back, with geometry shown
+as WKT.
+
+The tool set is chosen per row. `prepare/rebuild_rows.py` rewrites the rows of an
+existing `tasks.jsonl` without replaying plans:
+
+- `gis`: the upstream tools only, as `generate.py` writes them.
+- `both`: the upstream tools plus `run_sql`.
+- `sql`: `run_sql` and `reject_task`.
+
 ## Reward
 
 The reward is binary, computed in `scoring.py`:
@@ -73,6 +108,14 @@ cd resources_servers/geobenchx_synth/prepare
 python download.py --out $RAW
 python build_catalog.py --raw $RAW --out $GEODATA
 python generate.py --geodata $GEODATA --upstream-src $GEOBENCHX_SRC --out $TASKS
+```
+
+To offer `run_sql`, export the SQL tables and rewrite the rows with another tool set.
+`build_sql.py` also needs `pyarrow`. Rasters are sampled with Rasterio.
+
+```bash
+python build_sql.py --geodata $GEODATA --out $SQLDATA
+python rebuild_rows.py --geodata $GEODATA --tasks $TASKS/tasks.jsonl --tools both --out $TASKS_BOTH
 ```
 
 `generate.py` keeps a task only if its first plan succeeds with a nonzero result

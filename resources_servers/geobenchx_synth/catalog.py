@@ -23,12 +23,17 @@ names stay inside their split.
 from __future__ import annotations
 
 import copy
-from typing import Any
+from typing import Any, Literal
 
 from resources_servers.geobenchx.catalog import TOOL_DEFINITIONS
+from resources_servers.geobenchx_synth.prepare.aois import STATES
+from resources_servers.geobenchx_synth.sql_tool import sql_tool_definition
 
 
 UNUSED_TOOLS = {"make_bivariate_map"}
+
+# gis: the upstream GeoBenchX tools. sql: run_sql and reject_task only. both: all of them.
+ToolSet = Literal["gis", "sql", "both"]
 
 SYSTEM_PROMPT = """You are a geographer who answers questions with the supplied GIS tools and data catalog.
 Do not provide Python code. Compute results with the tools; do not estimate.
@@ -78,15 +83,37 @@ def partner_state(state: str, split_states: list[str]) -> str | None:
     return others[split_states.index(state) % len(others)] if others else None
 
 
+def split_states(entries: list[dict[str, Any]]) -> dict[str, list[str]]:
+    built = {e["state"] for e in entries}
+    by_split: dict[str, list[str]] = {}
+    for state in STATES:
+        if state.name in built:
+            by_split.setdefault(state.split, []).append(state.name)
+    return by_split
+
+
+def offered_states(state: str, split: str, entries: list[dict[str, Any]]) -> list[str]:
+    peers = split_states(entries).get(split, [])
+    partner = partner_state(state, peers) if state in peers else None
+    return [s for s in (state, partner) if s]
+
+
 def offered_entries(entries: list[dict[str, Any]], state: str, split_states: list[str]) -> list[dict[str, Any]]:
     partner = partner_state(state, split_states)
     return [e for e in entries if e["state"] in (state, partner)]
 
 
-def dataset_row(task: dict[str, Any], offered: list[dict[str, Any]]) -> dict[str, Any]:
+def dataset_row(task: dict[str, Any], offered: list[dict[str, Any]], tools: ToolSet = "gis") -> dict[str, Any]:
     vectors = sorted(e["name"] for e in offered if e["kind"] not in ("cdl", "table"))
     rasters = sorted(e["name"] for e in offered if e["kind"] == "cdl")
     tables = sorted(e["name"] for e in offered if e["kind"] == "table")
+    gis_tools = response_tools(vectors, rasters, tables)
+    if tools == "gis":
+        row_tools = gis_tools
+    elif tools == "both":
+        row_tools = gis_tools + [sql_tool_definition(offered)]
+    else:
+        row_tools = [sql_tool_definition(offered)] + [t for t in gis_tools if t["name"] == "reject_task"]
     return {
         "task_id": task["task_id"],
         "activity": "geobenchx_synth",
@@ -103,7 +130,7 @@ def dataset_row(task: dict[str, Any], offered: list[dict[str, Any]]) -> dict[str
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": task["prompt"]},
             ],
-            "tools": response_tools(vectors, rasters, tables),
+            "tools": row_tools,
             "parallel_tool_calls": False,
             "temperature": 0,
         },
