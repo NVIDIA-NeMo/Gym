@@ -1024,6 +1024,9 @@ async def _call_aggregate_metrics(
             response_metadata = {
                 key: response[key] for key in ("usage", "incomplete_details") if response.get(key) is not None
             }
+            context_marker = (response.get("metadata") or {}).get("nemo_gym_context_window_exceeded")
+            if context_marker is not None:
+                response_metadata["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
             if response_metadata:
                 entry["response"] = response_metadata
             stripped.append(entry)
