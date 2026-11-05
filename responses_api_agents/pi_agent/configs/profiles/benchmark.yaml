@@ -24,7 +24,8 @@ pi_agent:
       sandbox_provider: sandbox
       # Grade what the model knows: the sandbox reaches only the model server, as with pi_sandboxed_agent.
       # A search preset overrides this with model_and_tools. A restricted sandbox cannot download Pi, so the
-      # image carries the runtime install_pi_runtime.sh produces (null: one prebaked at the default path).
+      # image carries the runtime install_pi_runtime.sh produces. With null, the image must hold one at the default
+      # path with its ready marker; otherwise every seed fails trying to download it.
       network_access: model_only
       sandbox_runtime_dir: ???
       # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
