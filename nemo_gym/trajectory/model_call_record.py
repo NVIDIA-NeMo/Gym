@@ -9,6 +9,8 @@ from typing import Any, Literal, Mapping, Optional
 from pydantic import BaseModel, Field
 
 from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.failure_records import FailureReport
+from nemo_gym.core.failure_transport import ModelOperationObservation
 
 
 def _token_count(value: Any) -> Optional[int]:
@@ -53,6 +55,11 @@ def extract_token_stats(usage: Any) -> dict[str, Optional[int]]:
     if tokens_out is None:
         tokens_out = _token_count(usage.get("completion_tokens"))
     cache_creation = _token_count(usage.get("cache_creation_input_tokens"))
+    if cache_creation is None:
+        # OpenAI reports cache writes as a subset of its prompt count, so they never change tokens_in.
+        cache_creation = _usage_detail_token(
+            usage, ("input_tokens_details", "prompt_tokens_details"), ("cache_write_tokens",)
+        )
     tokens_total = _token_count(usage.get("total_tokens"))
     if tokens_total is None and tokens_in is not None and tokens_out is not None:
         tokens_total = tokens_in + tokens_out
@@ -198,6 +205,8 @@ class ModelCallRecord(BaseModel):
     response_source: Optional[Literal["upstream", "local"]] = None
     upstream_status_code: Optional[int] = None
     local_response_reason: Optional[str] = None
+    failure_report: FailureReport | None = None
+    model_operations: list[ModelOperationObservation] | None = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -223,7 +232,7 @@ class ModelCallRecord(BaseModel):
     reasoning_content: Optional[str] = None
 
     # Cache visibility. cached_tokens is the cache-read count; cache_creation_tokens is the
-    # Anthropic cache-write count (also folded into tokens_in for the true prompt size).
+    # cache-write count. Both are part of tokens_in.
     cache_hit: Optional[bool] = None
     cached_tokens: Optional[int] = None
     cache_creation_tokens: Optional[int] = None
@@ -285,6 +294,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         response_source=exchange.get("response_source"),
         upstream_status_code=exchange.get("upstream_status_code"),
         local_response_reason=exchange.get("local_response_reason"),
+        failure_report=exchange.get("failure_report"),
+        model_operations=exchange.get("model_operations"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=raw_request if isinstance(raw_request, dict) else None,
@@ -330,6 +341,8 @@ def _prompt_size(usage: Mapping[str, Any]) -> Optional[int]:
     - ``input_tokens`` with top-level ``cache_read_input_tokens`` or ``cache_creation_input_tokens``
       (Anthropic Messages) excludes it, so the cache counts are added.
     - ``input_tokens`` alone (Responses) includes it.
+
+    The OpenAI ``*_tokens_details`` cache read and write counts are subsets of the prompt count and are never added.
     """
     prompt_tokens = _token_count(usage.get("prompt_tokens"))
     if prompt_tokens is not None:

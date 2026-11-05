@@ -37,6 +37,7 @@ from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, Browsecom
 
 def _make_agent() -> BrowsecompAgent:
     config = BrowsecompAgentConfig(
+        allow_host_execution=True,
         host="0.0.0.0",
         port=8080,
         entrypoint="",

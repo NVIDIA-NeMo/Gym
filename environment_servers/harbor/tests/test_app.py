@@ -72,7 +72,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import failure_kinds
+from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -397,6 +397,42 @@ class TestEpisode:
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "pull failed" in response.failure.failure_reason
         assert server.server_client.calls == []
+
+    @pytest.mark.parametrize("status", [401, 403, 500, None])
+    async def test_sandbox_credentials_refused_at_seed_are_named(self, tmp_path, monkeypatch, status):
+        """Provider credentials are classified on the cause, without reclassifying the environment outcome."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+
+        class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
+            status_code = status
+            request_payload = {"secret": "must not be serialized"}
+
+        async def refused(task, workdir, *, episode_key):
+            raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
+
+        monkeypatch.setattr(server, "_create_sandbox", refused)
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert "Could not set up sandbox for 'hello'" in failure.failure_reason
+        assert response.failure_report is not None
+        events = list(response.failure_report.events.values())
+        outer = response.failure_report.events[response.failure_report.failure_id]
+        assert outer.boundary == "environment"
+        assert outer.failure_kind == "environment_episode_failed" and failure.failure_kind is None
+        assert outer.foreign_error.http_status == 503
+        setup = response.failure_report.events[outer.cause_id]
+        assert len(events) == 2
+        assert setup.operation == "sandbox.setup"
+        assert setup.boundary == ("sandbox" if status in (401, 403) else "environment")
+        assert setup.foreign_error.exception_type.endswith("SandboxApiException")
+        assert setup.foreign_error.message == "Create sandbox failed: Authentication credentials are invalid."
+        assert setup.foreign_error.http_status == status
+        assert "must not be serialized" not in response.failure_report.model_dump_json()
+        assert setup.cause_id is None
+        assert setup.failure_kind == (
+            "provider_credentials_rejected" if status in (401, 403) else "environment_episode_failed"
+        )
 
     async def test_shutdown_refuses_new_episodes(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
@@ -4543,7 +4579,8 @@ class TestGeneralization:
             async def start(self, spec):
                 starts.append(spec.image)
                 if len(starts) <= len(failures):
-                    raise SandboxCreateError(failures[len(starts) - 1])
+                    failure = failures[len(starts) - 1]
+                    raise failure if isinstance(failure, BaseException) else SandboxCreateError(failure)
 
             def __getattr__(self, name):
                 return getattr(sandbox, name)
@@ -4564,6 +4601,30 @@ class TestGeneralization:
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
+        assert not server._sandboxes
+
+    @pytest.mark.parametrize("message, failures", [("ErrImagePull", 1), ("ErrImagePull", 3), ("quota exceeded", 1)])
+    async def test_shared_sandbox_failure_preserves_pull_retry_policy(self, tmp_path, monkeypatch, message, failures):
+        cause = RuntimeError(message)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_request_failed",
+            operation="create",
+            failure_reason="Sandbox create failed",
+        )
+        error.__cause__ = cause
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, [error] * failures)
+        with RequestFailureLog.capture() as log:
+            response = await run_episode(server, task)
+        if message == "ErrImagePull" and failures == 1:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0
+            assert starts == ["ubuntu:24.04"] * 2
+            assert log.report.events[error.event_id].foreign_error.exception_type == "RuntimeError"
+        else:
+            assert response.failure is not None
+            assert len(starts) == failures
+        assert error.__cause__ is cause
         assert not server._sandboxes
 
     async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):

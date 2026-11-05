@@ -33,10 +33,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.telemetry import ResourcesOperation
-from nemo_gym.verification import JudgeError
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -454,6 +455,7 @@ class TestApp:
         not_equal_verify_response = await resources_server.verify(not_equal_verify_request)
         assert not_equal_verify_response.responses_create_params == model_create_params
         assert not_equal_verify_response.response == first_model_response
+        assert not_equal_verify_response.model_dump()["question"] == question
         assert not_equal_verify_response.reward == approx(0.0)
         assert not_equal_verify_response.expected_answer == expected_answer
         assert not_equal_verify_response.extracted_answer is None
@@ -468,6 +470,7 @@ class TestApp:
             "judge_evaluations",
             "library_reward",
             "mask_sample",
+            "question",
             "response",
             "responses_create_params",
             "reward",
@@ -496,6 +499,7 @@ class TestApp:
         equal_verify_response = await resources_server.verify(equal_verify_request)
         assert equal_verify_response.responses_create_params == model_create_params
         assert equal_verify_response.response == second_model_response
+        assert equal_verify_response.model_dump()["question"] == question
         assert equal_verify_response.reward == approx(1.0)
         assert equal_verify_response.expected_answer == expected_answer
         assert equal_verify_response.extracted_answer == "x + 1"
@@ -509,6 +513,7 @@ class TestApp:
             "judge_evaluations",
             "library_reward",
             "mask_sample",
+            "question",
             "response",
             "responses_create_params",
             "reward",
@@ -937,6 +942,34 @@ class TestApp:
             expected_output_item,
         )
 
+    @mark.parametrize(
+        "text, expected_label",
+        [
+            ("I cannot determine whether these answers are equivalent.", "judge_parsing_error"),
+            ("My final verdict is [[A=B]]", "[[A=B]]"),
+            ("My final verdict is different [[A!=B]]", "[[A!=B]]"),
+            ("First [[A=B]], then [[A!=B]]", "[[A!=B]]"),
+        ],
+        ids=["no verdict", "equal", "not equal", "last verdict wins"],
+    )
+    async def test_the_judge_evaluation_saves_the_verdict_it_found(
+        self, config: LibraryJudgeMathResourcesServerConfig, text: str, expected_label: str
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        resources_server = LibraryJudgeMathResourcesServer(config=config, server_client=server_mock)
+        post_mock = MagicMock()
+        post_mock.read = AsyncMock(
+            return_value=json.dumps(self._create_response("judge_id", self._create_response_output_message(text)))
+        )
+        server_mock.post = AsyncMock(return_value=post_mock)
+
+        equal, evaluation = await resources_server._generate_judge_evaluation("question", "first", "second")
+
+        # A completed reply without a verdict still scores as unequal, but is saved as no verdict, so it is re-judged.
+        assert evaluation.verdict_label == expected_label
+        assert equal is (expected_label == "[[A=B]]")
+        assert evaluation.model_dump(exclude_none=True)["verdict_label"] == expected_label
+
     async def test_generate_judge_evaluation(self, config: LibraryJudgeMathResourcesServerConfig) -> None:
         judge_config = config.model_copy(deep=True)
         judge_config.judge_responses_create_params.max_output_tokens = 1024
@@ -949,8 +982,9 @@ class TestApp:
 
         response_mock.return_value = json.dumps({})
         # A body that isn't a valid Response is a broken judge call, not a wrong answer.
-        with raises(JudgeError, match="Field required"):
+        with raises(NgFailureEvent, match="Field required") as failure:
             await resources_server._generate_judge_evaluation("invalid_response", "invalid_1", "invalid_2")
+        assert is_judge_failure(failure.value)
 
         reasoning_item = NeMoGymResponseReasoningItem(id="reasoning_item", summary=[], type="reasoning")
         response_mock.return_value = json.dumps(self._create_response("reasoning_id", reasoning_item))
