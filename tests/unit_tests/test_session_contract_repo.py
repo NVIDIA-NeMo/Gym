@@ -79,6 +79,21 @@ def test_resources_servers_close_through_the_base_route() -> None:
         for cls in _classes(path):
             methods = _methods(cls)
             seed = methods.get("seed_session")
+            if seed is not None and "release_session_state" in methods and "close_resources_session" not in methods:
+                # An inherited close can check ownership only if the seed records it through the base.
+                calls_base_seed = any(
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "seed_session"
+                    and isinstance(node.func.value, ast.Call)
+                    and isinstance(node.func.value.func, ast.Name)
+                    and node.func.value.func.id == "super"
+                    for node in ast.walk(seed)
+                )
+                if not calls_base_seed:
+                    violations.append(
+                        f"{_location(path, cls)} inherits close but its seed override never calls super().seed_session"
+                    )
             if (
                 seed is not None
                 and "ResourcesSeedSessionRequest" in ast.unparse(seed)

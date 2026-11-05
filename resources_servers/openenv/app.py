@@ -22,7 +22,6 @@ to add a new environment.
 """
 
 import importlib
-import logging
 from typing import Any, Dict, Optional
 
 from fastapi import FastAPI, Request
@@ -38,9 +37,6 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-
-
-logger = logging.getLogger(__name__)
 
 
 def _import_class(dotted_path: str) -> type:
@@ -70,6 +66,7 @@ class SessionState(BaseModel):
     model_config = {"arbitrary_types_allowed": True}
 
     env: Any  # The OpenEnv Environment instance
+    initialized: bool = True
     accumulated_reward: float = 0.0
     step_count: int = 0
     done: bool = False
@@ -80,10 +77,8 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
 
     config: OpenEnvResourcesServerConfig
-    # Keyed by the session cookie's SESSION_ID_KEY, which an episode seed binds to its resources_session_id.
+    # Keyed by the session cookie's SESSION_ID_KEY, which a typed seed binds to its resources_session_id.
     _sessions: Dict[str, SessionState] = {}
-    # Failed resets whose cleanup also failed still belong to the session's eventual close.
-    _pending_envs: Dict[str, Any] = {}
     _env_class: Any = None
     _action_class: Any = None
     _is_mcp: bool = False
@@ -92,7 +87,6 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         """Initialize private attributes: session stores and dynamically imported classes."""
         super().model_post_init(context)
         self._sessions = {}
-        self._pending_envs = {}
         self._env_class = _import_class(self.config.env_class)
         self._action_class = _import_class(self.config.action_class)
 
@@ -207,54 +201,27 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     def _open_session(self, request: Request) -> SessionState:
         """The session a tool call names, or a 404 if it was never seeded or has already ended."""
         session = self._sessions.get(request.session[SESSION_ID_KEY])
-        if session is None:
+        if session is None or not session.initialized:
             raise ResourcesSessionLostError("No active OpenEnv session for this request. Call /seed_session first.")
         return session
 
-    def _new_session(self, session_id: str) -> SessionState:
-        """Create an environment instance, call reset(), and wrap it in session state.
-
-        Calls env.reset() directly with only the configured reset_kwargs, because
-        some OpenEnv environments don't accept the extra seed/episode_id kwargs
-        that reset_async() injects.
-        """
-        self._close_pending_env(session_id)
-        env = self._env_class()
-        self._pending_envs[session_id] = env
-        try:
-            initial_obs = env.reset(**self.config.reset_kwargs)
-            initial_reward = float(initial_obs.reward) if initial_obs.reward is not None else 0.0
-            session = SessionState(env=env, accumulated_reward=initial_reward, done=initial_obs.done)
-        except BaseException:
-            try:
-                self._close_pending_env(session_id)
-            except Exception:
-                # Preserve the reset error and ownership so the caller's close or seed retry can release it.
-                logger.exception("Failed to close OpenEnv instance after reset failed for session %s", session_id)
-            raise
-        self._pending_envs.pop(session_id)
-        return session
-
-    def _close_pending_env(self, session_id: str) -> None:
-        env = self._pending_envs.get(session_id)
-        if env is not None and hasattr(env, "close"):
-            env.close()
-        self._pending_envs.pop(session_id, None)
-
     def has_session_state(self, session_id: str) -> bool:
-        return session_id in self._sessions
+        session = self._sessions.get(session_id)
+        return session is not None and session.initialized
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Reset an environment, closing a previous legacy run before replacing it."""
-        previous = self._sessions.get(session_id)
-        if previous is not None and hasattr(previous.env, "close"):
-            previous.env.close()
-        self._sessions.pop(session_id, None)
-        self._sessions[session_id] = self._new_session(session_id)
+        """Reset an environment while keeping its handle reachable if construction fails."""
+        # Publish before reset: the base releases partial state on failure and retains ownership if close fails.
+        # reset_async adds seed/episode_id kwargs that not every OpenEnv environment accepts.
+        session = SessionState(env=self._env_class(), initialized=False)
+        self._sessions[session_id] = session
+        initial_obs = session.env.reset(**self.config.reset_kwargs)
+        session.accumulated_reward = float(initial_obs.reward) if initial_obs.reward is not None else 0.0
+        session.done = initial_obs.done
+        session.initialized = True
 
     async def release_session_state(self, session_id: str) -> None:
-        """Close pending and live environments, retaining them if cleanup fails."""
-        self._close_pending_env(session_id)
+        """Close live or partly reset environments, retaining the handle if cleanup fails."""
         session = self._sessions.get(session_id)
         if session is not None and hasattr(session.env, "close"):
             session.env.close()
@@ -274,22 +241,17 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
         """Release the environment and retain only its reward for a bounded verification retry window."""
         session_id = request.session[SESSION_ID_KEY]
-        verified = self._verified_sessions.get(session_id)
-        if session_id not in self._resources_session_fences:
-            if verified is not None:
-                return BaseVerifyResponse(**body.model_dump(), reward=verified[1])
-            session = self._sessions.get(session_id)
-            if session is not None:
-                reward = session.accumulated_reward
-                if hasattr(session.env, "close"):
-                    session.env.close()
-                self._sessions.pop(session_id)
-                identity = self._session_episodes.pop(session_id, None)
-                self._verified_sessions.remember(session_id, (identity, reward))
-                return BaseVerifyResponse(**body.model_dump(), reward=reward)
-        return BaseVerifyResponse(
-            **(body.model_dump() | lost_session_verification("No active OpenEnv session to verify"))
-        )
+        async with self.verifying(session_id) as verification:
+            if verification.is_lost:
+                return BaseVerifyResponse(
+                    **(body.model_dump() | lost_session_verification("No active OpenEnv session to verify"))
+                )
+            if verification.is_live:
+                reward = self._sessions[session_id].accumulated_reward
+                verification.retain(reward)
+            else:
+                reward = verification.retained
+            return BaseVerifyResponse(**body.model_dump(), reward=reward)
 
 
 if __name__ == "__main__":
