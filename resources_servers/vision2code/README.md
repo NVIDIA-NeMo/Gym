@@ -83,10 +83,8 @@ python -m resources_servers.vision2code.prepare /data/manifest.jsonl /data/tasks
 
 Image paths resolve relative to the manifest. Preparation embeds the image in the model
 input and records its path, dimensions, and hash for verification. Keep the source images
-accessible to the resource server. Five synthetic [example tasks](../../environments/vision2code/data/example.jsonl) and
-[real rollouts](../../environments/vision2code/data/example_rollouts.jsonl) are included.
-The example images, rollouts, and metrics live in `environments/vision2code/data/`.
-The resource server's `data` symlink preserves compatibility with Gym's resource-server data checks.
+accessible to the resource server. Five synthetic [example tasks](data/example.jsonl) and
+[real rollouts](data/example_rollouts.jsonl) are included.
 
 ## Run evaluation
 

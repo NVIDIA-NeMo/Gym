@@ -28,7 +28,7 @@ vision2code:
       datasets:
         - name: example
           type: example
-          jsonl_fpath: environments/vision2code/data/example.jsonl
+          jsonl_fpath: resources_servers/vision2code/data/example.jsonl
 
 vision2code_simple_agent:
   responses_api_agents:
