@@ -20,6 +20,14 @@ from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
 pytestmark = pytest.mark.sandbox
 
 
+@pytest.mark.parametrize("placement_group", ["", "bad group", "a" * 64, "-invalid", "invalid-"])
+def test_invalid_placement_group_is_rejected_before_creation(placement_group):
+    provider = Provider()
+    with pytest.raises(ValueError, match="placement_group"):
+        AsyncSandboxCompose(provider, "compose.yaml", placement_group=placement_group)
+    assert not provider.created
+
+
 def make_compose(provider, document, *, default_command=None, **kwargs):
     """Supply normalized YAML and optional commands for focused lifecycle tests."""
     from unittest.mock import Mock
@@ -674,7 +682,8 @@ async def test_health_probe_timeout_retries_then_starts_dependent(tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("declaration", [{}, None], ids=["mapping", "null"])
-async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration):
+@pytest.mark.parametrize("placement_group", [None, "episode-shared-placement"])
+async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_path, declaration, placement_group):
     # ``volumes:\n  data:`` (a null declaration, the canonical Compose spelling) provisions like ``data: {}``.
     shared = tmp_path / "shared"
     external = shared / "operator-data"
@@ -723,6 +732,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         },
         default_command=["sleep", "1"],
         volume_sources={"/operator/source": "operator-data"},
+        placement_group=placement_group,
         poll_interval_s=0.01,
     )
     async with group:
@@ -735,7 +745,10 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         second_spec = provider.created[-1]
         assert second_spec.metadata["placement"] == "shared-disk"
         # Helper, seeds and members all share pod IPs and storage: one placement group.
-        assert {spec.metadata.get(PLACEMENT_GROUP_KEY) for spec in provider.created} == {group.project}
+        assert {spec.metadata.get(PLACEMENT_GROUP_KEY) for spec in provider.created} == {
+            placement_group or group.project
+        }
+        assert group.project != placement_group
         assert second_spec.provider_options["volumes"][-1]["read_only"] is True
         assert group._seeds and all(seed._stopped for seed in group._seeds)
         descriptor = json.loads(json.dumps(await group.serialize()))
@@ -2542,8 +2555,10 @@ async def test_two_groups_with_a_narrowed_mapping_keep_an_ordinary_volume_apart(
             default_command=["sleep", "1"],
             poll_interval_s=0.01,
             volume_sources=document_volume_sources(document, deployment),
+            placement_group="shared-episode",
         ) as group:
             helper, seed, db = provider.created
+            assert {s.metadata[PLACEMENT_GROUP_KEY] for s in provider.created} == {"shared-episode"}
             (mount,) = db.provider_options["volumes"]
             assert mount["source"] == f"{group.project}/pgdata"
             assert any(

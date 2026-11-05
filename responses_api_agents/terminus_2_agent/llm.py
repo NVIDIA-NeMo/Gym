@@ -52,18 +52,18 @@ _THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 def chat_completion_params(
     responses_create_params: dict[str, Any], *, collect_rollout_details: bool = False
 ) -> dict[str, Any]:
-    """The Chat Completions fields, other than messages, that Gym's vLLM converter derives from Responses fields."""
+    """The Chat Completions fields, other than messages, that Gym's Chat Completions converter derives."""
     if not responses_create_params:
         return {}
 
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.models import VLLMConverter
+    from nemo_gym.models import ChatCompletionsConverter
 
     params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
     params_for_conversion["input"] = []
     responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
 
-    converter = VLLMConverter(
+    converter = ChatCompletionsConverter(
         return_token_id_information=collect_rollout_details,
     )
     chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(exclude_unset=True)
