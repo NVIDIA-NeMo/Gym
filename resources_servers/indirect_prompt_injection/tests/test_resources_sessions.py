@@ -12,9 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The IPI server serves the resources sessions API through its real routes, next to an Agent's /run seed."""
+"""The IPI server serves the typed resources sessions API through its real routes, next to an Agent's /run seed."""
 
 import asyncio
+import base64
 import copy
 import json
 import time
@@ -77,6 +78,12 @@ def make_client(server: IPIResourcesServer) -> TestClient:
     return TestClient(app)
 
 
+def cookie_session_id(client: TestClient, server: IPIResourcesServer) -> str:
+    # TimestampSigner can refresh the signature while the session identity remains unchanged.
+    payload = client.cookies[server.get_session_middleware_key()].split(".", 1)[0]
+    return json.loads(base64.b64decode(payload))[SESSION_ID_KEY]
+
+
 def seed_json(resources_session_id: str = "resources-session", **update: Any) -> dict[str, Any]:
     seed = ResourcesSeedSessionRequest(
         resources_session_id=resources_session_id, episode_id=EPISODE, task_id=TASK, task_data=TASK_DATA
@@ -129,7 +136,7 @@ def test_follows_the_session_contract() -> None:
     )
 
 
-def test_an_episode_verify_releases_the_environment_and_preserves_its_retry() -> None:
+def test_a_typed_verify_releases_the_environment_and_preserves_its_retry() -> None:
     server = make_server()
     client = make_client(server)
 
@@ -217,7 +224,7 @@ def test_an_agents_run_verify_without_a_seed_is_masked() -> None:
 
 
 @pytest.mark.parametrize("state", ["active", "verified", "closed"])
-def test_a_run_seed_cannot_overwrite_an_episode_session(state: str) -> None:
+def test_a_run_seed_cannot_overwrite_a_typed_session(state: str) -> None:
     server = make_server()
     client = make_client(server)
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -230,7 +237,7 @@ def test_a_run_seed_cannot_overwrite_an_episode_session(state: str) -> None:
     assert server.session_id_to_env.get("resources-session") is original
 
 
-def test_an_episode_seed_cannot_take_over_a_run_session() -> None:
+def test_a_typed_seed_cannot_take_over_a_run_session() -> None:
     server = make_server()
     client = make_client(server)
     assert client.post("/seed_session", json=ROW).status_code == 200
@@ -251,7 +258,7 @@ def test_a_failed_environment_copy_leaves_no_binding_and_can_be_retried() -> Non
     assert client.post("/send_message", json=MESSAGE).status_code == 200
 
 
-async def test_episode_sessions_seeded_from_one_task_data_object_share_no_environment() -> None:
+async def test_typed_sessions_seeded_from_one_task_data_object_share_no_environment() -> None:
     # Over HTTP every seed parses its own task_data. In process, seeds copied from one request share one task_data.
     server = make_server()
     seed_a = ResourcesSeedSessionRequest(
@@ -295,11 +302,11 @@ def test_checkpoint_wait_verify_leaves_no_untracked_environment() -> None:
     assert client.post("/ng-rollout/rollout/verify", json=verify_json()).json()["mask_sample"] is False
 
 
-@pytest.mark.parametrize("episode", [False, True])
-def test_checkpoint_retirement_releases_an_unverified_environment(episode: bool) -> None:
+@pytest.mark.parametrize("typed", [False, True])
+def test_checkpoint_retirement_releases_an_unverified_environment(typed: bool) -> None:
     server = make_server(checkpoint=True)
     client = make_client(server)
-    assert client.post("/ng-rollout/rollout/seed_session", json=seed_json() if episode else ROW).status_code == 200
+    assert client.post("/ng-rollout/rollout/seed_session", json=seed_json() if typed else ROW).status_code == 200
     retired = client.post(
         "/ng-control/v1/checkpoint/retire",
         json={"checkpoint_id": "retire", "deadline_ts": time.time() + 5, "episode_ids": [EPISODE.model_dump()]},
@@ -327,12 +334,12 @@ def test_verified_identity_expires_and_close_still_checks_the_episode() -> None:
 
 @pytest.mark.parametrize("field", ["resources_session_id", "episode_id", "task_id", "task_data"])
 @pytest.mark.parametrize("mcp", [False, True])
-def test_a_malformed_episode_seed_cannot_fall_back_to_a_run_seed(field: str, mcp: bool) -> None:
+def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str, mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     body = seed_json()
     body.pop(field)
-    # An extra top-level environment also must not let a malformed episode seed use the /run arm.
+    # An extra top-level environment also must not let a malformed typed seed use the /run arm.
     body["environment"] = {}
     assert client.post("/seed_session", json=body).status_code == 422
     assert server._session_episodes == {}
@@ -340,7 +347,7 @@ def test_a_malformed_episode_seed_cannot_fall_back_to_a_run_seed(field: str, mcp
 
 @pytest.mark.parametrize("mcp", [False, True])
 def test_a_run_seed_keeps_a_row_with_its_own_task_id(mcp: bool) -> None:
-    # Dataset task_id/task_data fields do not make a row an episode seed.
+    # Dataset task_id/task_data fields do not make a row a typed seed.
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     assert (
@@ -356,13 +363,12 @@ def test_next_run_keeps_its_cookie_and_replaces_the_finished_environment() -> No
     client = make_client(server)
     assert client.post("/seed_session", json=ROW).status_code == 200
     [session_id] = server.session_id_to_env
-    cookies = dict(client.cookies)
     assert client.post("/send_message", json=MESSAGE).status_code == 200
     first = client.post("/verify", json=verify_json()).json()
     # The next /run on the same cookie keeps the ID and replaces the finished run, retry record included.
     assert client.post("/seed_session", json=ROW).status_code == 200
-    assert list(server.session_id_to_env) == [session_id] and dict(client.cookies) == cookies
-    assert session_id not in server._verified_sessions
+    assert list(server.session_id_to_env) == [session_id] and cookie_session_id(client, server) == session_id
+    assert not server.session_is_verified(session_id)
     assert server.session_id_to_env[session_id] == ROW["environment"]
     second = client.post("/verify", json=verify_json()).json()
     assert (first["reward"], second["reward"]) == (1.0, 1.0)
@@ -394,14 +400,14 @@ async def test_a_run_seed_racing_a_verify_waits_for_the_release_and_the_retry_re
     # The verify released the finished run through the hook, and the next run's seed replaced it only afterwards.
     assert released == ["run-session"]
     assert server.session_id_to_env["run-session"] == ROW["environment"]
-    assert "run-session" not in server._verified_sessions
+    assert not server.session_is_verified("run-session")
     # The next run's environment then goes away without a verify: its verify is masked, not answered from the record.
     await server.retire_session_state("run-session")
     assert (await server.verify(request, IPIVerifyRequest.model_validate(verify_json()))).mask_sample is True
 
 
 @pytest.mark.parametrize("mcp", [False, True])
-def test_minimal_legacy_seed_remains_valid_but_episode_seed_requires_the_injection(mcp: bool) -> None:
+def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_injection(mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     legacy = {"environment": ROW["environment"]}
@@ -421,13 +427,12 @@ def test_failed_legacy_reseed_keeps_retry_evidence_until_initialization_succeeds
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     assert client.post("/seed_session", json=ROW).status_code == 200
     [session_id] = server.session_id_to_env
-    cookies = dict(client.cookies)
     assert client.post("/verify", json=verify_json()).json()["reward"] == 1.0
     with patch("resources_servers.indirect_prompt_injection.app.copy.deepcopy", side_effect=MemoryError):
         assert client.post("/seed_session", json=ROW).status_code == 500
-    assert dict(client.cookies) == cookies
-    assert session_id in server._verified_sessions and not server.session_id_to_env
+    assert cookie_session_id(client, server) == session_id
+    assert server.session_is_verified(session_id) and not server.session_id_to_env
     assert client.post("/verify", json=verify_json()).json()["mask_sample"] is False
     assert client.post("/seed_session", json=ROW).status_code == 200
     assert list(server.session_id_to_env) == [session_id]
-    assert session_id not in server._verified_sessions
+    assert not server.session_is_verified(session_id)
