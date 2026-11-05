@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Grade one ACMG answer with the pinned upstream scorer and aggregate the dataset's published metrics."""
+"""Grade one ACMG answer with the pinned upstream scorer and aggregate the per-arm metrics."""
 
 import re
 from typing import Any
@@ -55,7 +55,7 @@ def composite_reward(components: dict[str, Any], closeness: float | None) -> flo
 
 
 def score(text: str, reference: dict[str, Any], arm: str) -> dict[str, Any]:
-    """The composite reward, the upstream components and scalar, and the pooled counts behind the published metrics."""
+    """The reward, the upstream scorer's components, and the pooled counts behind the per-arm metrics."""
     components = official_reward.reward(text, reference, arm)
     label, criteria = official_reward.parse_answer(text)
     returned = (criteria or {}) if label is not None else {}
@@ -72,7 +72,6 @@ def score(text: str, reference: dict[str, Any], arm: str) -> dict[str, Any]:
     closeness = label_closeness(label, reference)
     return {
         "reward": composite_reward(components, closeness),
-        "official_reward": official_reward.scalar(components),
         "gate": float(bool(components["answered"] and components["self_consistent"])),
         "label_closeness": closeness,
         "components": components,
@@ -92,7 +91,6 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     Label accuracy and label closeness are over the cases whose label is scored. Criterion precision, recall and
     F1 pool the (code, strength) counts over responses rather than averaging per-response values. Self-consistency
     is over the responses whose criteria could be combined at all. A missing classification is an output failure.
-    `reward` is the composite and `official_reward` the dataset's default scalar.
     """
     n = len(rows)
     if not n:
@@ -110,7 +108,6 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "responses": n,
         "reward": sum(row["reward"] for row in rows) / n,
-        "official_reward": sum(row["official_reward"] for row in rows) / n,
         "gate": sum(row["gate"] for row in rows) / n,
         "label_scorable": len(scorable),
         "label_accuracy": sum(scorable) / len(scorable) if scorable else None,

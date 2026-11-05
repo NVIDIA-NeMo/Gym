@@ -27,13 +27,11 @@ metadata live in `verifier_metadata` and never reach the model. The model reason
 
 **Scoring.** The resources server runs the dataset's own standalone scorer (`training/reward.py`, vendored byte for
 byte with its SHA-256 pinned and tested) on the final assistant text only; inline `<think>` blocks are removed first.
-Gym's per-rollout `reward` is the team's composite from the grading recipe (sdg-pipelines
-`recipes/acmg-grading/composite.py`): `gate x (0.5 x label_closeness + 0.5 x evidence_score)`, where the gate is 1
-only when a classification was given and follows from the response's own criteria, label closeness gives half
-credit one step away on B-LB-VUS-LP-P, and the evidence score is the scorer's evidence-point closeness
-`max(0, 1 - distance / 8)`. For the 141 cases whose label is `excluded` the reward is `gate x evidence_score`. The
-dataset's default scalar, `0.5 x label + 0.3 x criterion F1 + 0.2 x self-consistency`, is kept as `official_reward`.
-Headline metrics are per arm, as the dataset's baseline report defines them:
+Gym's per-rollout `reward` is `gate x (0.5 x label_closeness + 0.5 x evidence_score)`, as defined in the team's
+grading recipe (sdg-pipelines `recipes/acmg-grading/composite.py`): the gate is 1 only when a classification was
+given and follows from the response's own criteria, label closeness gives half credit one step away on
+B-LB-VUS-LP-P, and the evidence score is the scorer's evidence-point closeness `max(0, 1 - distance / 8)`. For the
+141 cases whose label is `excluded` the reward is `gate x evidence_score`. Metrics are reported per arm:
 
 | Metric | Definition |
 |---|---|
@@ -42,25 +40,16 @@ Headline metrics are per arm, as the dataset's baseline report defines them:
 | `exact_criteria` | Share of responses returning every required criterion and nothing unacceptable |
 | `self_consistency` | Share of responses whose label follows from their own criteria (rule document's combining rules with rules, any standard system without) |
 | `output_failure_rate` | Share of responses with no classification |
-| `reward`, `gate`, `label_closeness` | Means of the composite reward, its self-consistency gate and the label closeness over scorable cases |
-| `official_reward`, `evidence_score` | Means of the dataset's scalar and of its evidence-point closeness score |
+| `reward`, `gate`, `label_closeness` | Means of the reward, its self-consistency gate and the label closeness over scorable cases |
+| `evidence_score` | Mean evidence-point closeness |
 
 **Run conditions.** The team's held-out protocol: temperature 1.0, top-p 0.95, thinking on, no output-token cap
 beyond the context limit, 4 repeats (`num_repeats: 4`; report each repeat and their mean, not pass@k). The dataset's
 published baselines used one response per prompt at temperature 0, medium reasoning effort and a 32,768-token cap.
 
-## Reference scores
-
-Dataset baselines (`results/baseline_summary.json`), label accuracy on the 254 scorable cases:
-
-| Model | With rules | Without rules | Criterion F1 with / without | Official reward with / without |
-|---|---:|---:|---|---|
-| nemotron-3-ultra | 92.9% | 59.8% | 91.3% / 53.2% | 0.936 / 0.632 |
-| gpt-5.6-sol | 92.5% | 74.0% | 93.3% / 68.0% | 0.942 / 0.769 |
-
-Replaying the 1,580 published responses of those two models through this verifier reproduces every per-response
-prediction, label verdict, criteria count, exactness, self-consistency and output-failure flag, and every published
-aggregate. The official-reward column is computed from that replay.
+Replaying the dataset's 1,580 published baseline responses through this verifier reproduces every per-response
+prediction, label verdict, criteria count, exactness, self-consistency and output-failure flag of the dataset's own
+scorer, and every per-arm aggregate it reports.
 
 ## Prepare and validate
 
@@ -89,8 +78,8 @@ gym eval run --no-serve --benchmark acmg --model-type vllm_model \
     --output results/acmg/rollouts.jsonl
 ```
 
-Read `acmg/with_rules/*` and `acmg/without_rules/*` from the agent metrics. Label accuracy, criterion F1,
-self-consistency, the composite reward and the official reward are the key metrics; `label_scorable` and `self_consistency_assessable` are
+Read `acmg/with_rules/*` and `acmg/without_rules/*` from the agent metrics. The reward, label accuracy, criterion
+F1 and self-consistency are the key metrics; `label_scorable` and `self_consistency_assessable` are
 their denominators.
 
 ## Limitations

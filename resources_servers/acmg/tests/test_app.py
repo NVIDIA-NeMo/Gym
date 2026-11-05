@@ -85,7 +85,6 @@ def test_examples_validate_and_keep_the_answer_key_out_of_the_prompt() -> None:
 def test_exact_answer_earns_full_reward_and_reports_components() -> None:
     result = _verify("CRITERIA: PVS1 VeryStrong; PM2 Supporting\nCLASSIFICATION: LP", "example_lp", "with_rules")
     assert result.reward == 1.0
-    assert result.official_reward == 1.0
     assert (result.gate, result.label_closeness) == (1.0, 1.0)
     assert result.predicted_label == "LP"
     assert result.predicted_criteria == {"PVS1": "VeryStrong", "PM2": "Supporting"}
@@ -98,8 +97,8 @@ def test_exact_answer_earns_full_reward_and_reports_components() -> None:
 
 
 def test_label_that_does_not_follow_from_the_criteria_is_gated_to_zero() -> None:
-    # PVS1 + PM2_Supporting cannot reach Pathogenic, so the label is wrong and not self-consistent: the composite
-    # reward is 0 even though the criteria are perfect; the dataset's scalar still pays for them.
+    # PVS1 + PM2_Supporting cannot reach Pathogenic, so the label is wrong and not self-consistent: the reward is 0
+    # even though the criteria are perfect.
     result = _verify("CRITERIA: PVS1 VeryStrong; PM2 Supporting\nCLASSIFICATION: P", "example_lp", "without_rules")
     assert result.predicted_label == "P"
     assert result.components["label"] == 0.0
@@ -107,7 +106,6 @@ def test_label_that_does_not_follow_from_the_criteria_is_gated_to_zero() -> None
     assert result.components["self_consistent"] == 0.0
     assert (result.gate, result.label_closeness) == (0.0, 0.5)
     assert result.reward == 0.0
-    assert result.official_reward == pytest.approx(0.3)
 
 
 def test_adjacent_label_earns_half_credit_and_wrong_evidence_none() -> None:
@@ -138,7 +136,6 @@ def test_missing_required_criterion_costs_its_points() -> None:
     result = _verify("CRITERIA: PVS1 VeryStrong\nCLASSIFICATION: LP", "example_lp", "without_rules")
     assert result.components["evidence_distance"] == 1.0
     assert result.reward == pytest.approx(0.5 + 0.5 * (1 - 1 / 8))
-    assert result.official_reward == pytest.approx(0.5 + 0.3 * 2 / 3 + 0.2)
 
 
 def test_excluded_label_scores_only_the_evidence() -> None:
@@ -148,12 +145,10 @@ def test_excluded_label_scores_only_the_evidence() -> None:
     assert result.components["label"] is None
     assert result.label_closeness is None
     assert result.reward == 1.0
-    # PM2_Supporting alone combines to VUS, so LP is not self-consistent: gated to 0 while the scalar keeps the
-    # criteria share, 0.3 x F1 renormalised over 0.5.
+    # PM2_Supporting alone combines to VUS, so LP is not self-consistent and the reward is gated to 0.
     result = _verify("CRITERIA: PM2 Supporting\nCLASSIFICATION: LP", "example_excluded", "without_rules")
     assert result.components["self_consistent"] == 0.0
     assert result.reward == 0.0
-    assert result.official_reward == pytest.approx(0.6)
 
 
 def test_reasoning_blocks_are_not_graded() -> None:
@@ -167,7 +162,6 @@ def test_reasoning_blocks_are_not_graded() -> None:
 def test_missing_classification_is_an_output_failure() -> None:
     result = _verify("The packet is insufficient to classify this variant.", "example_b", "without_rules")
     assert result.reward == 0.0
-    assert result.official_reward == 0.0
     assert result.predicted_label is None
     assert result.components["answered"] == 0.0
     assert not result.self_consistency_assessable
@@ -184,7 +178,6 @@ def test_metrics_are_reported_per_arm() -> None:
     metrics = server.compute_metrics([[row.model_dump()] for row in rows])
     assert metrics["acmg/with_rules/responses"] == 2
     assert metrics["acmg/with_rules/reward"] == 1.0
-    assert metrics["acmg/with_rules/official_reward"] == 1.0
     assert metrics["acmg/with_rules/label_accuracy"] == 1.0
     assert metrics["acmg/with_rules/label_closeness"] == 1.0
     assert metrics["acmg/with_rules/criterion_f1"] == 1.0
@@ -204,6 +197,6 @@ def test_metrics_are_reported_per_arm() -> None:
     assert set(key) == {
         f"acmg/{arm}/{name}"
         for arm in ("with_rules", "without_rules")
-        for name in ("label_accuracy", "criterion_f1", "self_consistency", "reward", "official_reward")
+        for name in ("reward", "label_accuracy", "criterion_f1", "self_consistency")
     }
     assert "acmg/all/label_accuracy" not in metrics

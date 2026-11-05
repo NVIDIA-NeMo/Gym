@@ -18,7 +18,7 @@ from resources_servers.acmg.scoring import final_answer_text, metrics, score
 from resources_servers.acmg.task_data import TaskData
 
 
-HEADLINE_METRICS = ("label_accuracy", "criterion_f1", "self_consistency", "reward", "official_reward")
+HEADLINE_METRICS = ("reward", "label_accuracy", "criterion_f1", "self_consistency")
 
 
 class AcmgResourcesServerConfig(BaseResourcesServerConfig):
@@ -30,7 +30,6 @@ class AcmgVerifyRequest(BaseVerifyRequest):
 
 
 class AcmgVerifyResponse(BaseVerifyResponse, AcmgVerifyRequest):
-    official_reward: float
     gate: float
     label_closeness: float | None
     components: dict[str, float | None]

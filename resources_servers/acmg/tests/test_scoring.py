@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from .. import official_reward
 from ..scoring import composite_reward, final_answer_text, label_closeness, metrics, score, summarize
 
 
@@ -27,15 +26,6 @@ def test_vendored_scorer_matches_the_pinned_upstream_file() -> None:
     header, body = text.split(MARKER, 1)
     assert UPSTREAM_SHA256 in header.decode()
     assert hashlib.sha256(body).hexdigest() == UPSTREAM_SHA256
-
-
-def test_default_scalar_is_the_published_weighting() -> None:
-    parts = official_reward.reward("CRITERIA: PVS1 VeryStrong\nCLASSIFICATION: LP", REFERENCE, "without_rules")
-    # Label right, PM2 missing (recall 1/2, precision 1, F1 2/3); PVS1 alone is LP on the 2020 point scale (8 points).
-    assert parts["label"] == 1.0
-    assert parts["criterion_f1"] == pytest.approx(2 / 3)
-    assert parts["self_consistent"] == 1.0
-    assert official_reward.scalar(parts) == pytest.approx(0.5 + 0.3 * 2 / 3 + 0.2)
 
 
 @pytest.mark.parametrize(
@@ -111,11 +101,9 @@ def test_summarize_pools_criterion_counts_rather_than_averaging() -> None:
     assert summary["exact_criteria"] == 0.5
     assert summary["label_accuracy"] == 1.0
     assert summary["label_closeness"] == 1.0
-    # Noisy: 12 points combine to P, not the stated LP, so the composite is gated to 0 while the scalar keeps the
-    # label and a 1/3 F1 (precision 1/4, recall 1/2).
+    # Noisy: 12 points combine to P, not the stated LP, so its reward is gated to 0.
     assert summary["gate"] == 0.5
     assert summary["reward"] == pytest.approx(0.5)
-    assert summary["official_reward"] == pytest.approx((1.0 + (0.5 + 0.3 / 3)) / 2)
     assert summary["responses"] == 2
     assert summarize([]) == {}
 
