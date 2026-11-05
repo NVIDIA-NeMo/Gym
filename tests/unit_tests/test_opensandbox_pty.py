@@ -24,7 +24,8 @@ import aiohttp
 import pytest
 
 import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
-from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_PTY_BUSY, PROVIDER_UNAVAILABLE
+from nemo_gym.core.outcome_policy import OutcomeAction, OutcomePolicyConfig, failure_outcome_policy
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtySpec
@@ -811,7 +812,9 @@ def _always_refused_provider(monkeypatch: pytest.MonkeyPatch) -> Any:
     """Provider whose every takeover attach is refused as 'already attached'."""
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
-    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    provider = OpenSandboxProvider(
+        connection={"domain": "server", "api_key": "k", "protocol": "https"}, diagnostics={"timeout_s": 0.01}
+    )
 
     def _client() -> FakeHttpClient:
         rejected = FakeWs([], close_code=1008)
@@ -823,12 +826,11 @@ def _always_refused_provider(monkeypatch: pytest.MonkeyPatch) -> Any:
     return provider
 
 
+@pytest.mark.parametrize("reason", ["FAILED", "OOMKilled"])
 async def test_provider_attach_pty_reports_dead_sandbox_on_exhausted_takeover(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, reason: str
 ) -> None:
-    """A takeover refused across every retry usually means the sandbox is gone
-    (its stale attachment can never acknowledge the eviction); the error must
-    say that, not 'already has an attached client'."""
+    """Confirmed sandbox death replaces the busy refusal and retains it as the cause."""
     pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
 
@@ -838,18 +840,24 @@ async def test_provider_attach_pty_reports_dead_sandbox_on_exhausted_takeover(
 
         async def get_info(self) -> SimpleNamespace:
             return SimpleNamespace(
-                status=SimpleNamespace(state="Failed", reason="FAILED", message="1/1 observed pods failed; node lost")
+                status=SimpleNamespace(state="Failed", reason=reason, message="1/1 observed pods failed")
             )
 
     provider = _always_refused_provider(monkeypatch)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=DeadRaw())
-    with pytest.raises(NgFailureEvent, match="Sandbox is unavailable") as exc_info:
+    with pytest.raises(NgFailureEvent) as exc_info:
         await provider.attach_pty(handle, "s-7", takeover=True)
-    assert "already has an attached client" in str(exc_info.value.__cause__)
+    failure = exc_info.value
+    assert failure.failure_kind == (PROVIDER_OOM_KILLED if reason == "OOMKilled" else PROVIDER_UNAVAILABLE)
+    assert failure.details.provider_status_reason == reason
+    assert isinstance(failure.__cause__, NgFailureEvent)
+    assert failure.__cause__.failure_kind == PROVIDER_PTY_BUSY
+    assert "already has an attached client" in str(failure.__cause__)
 
 
-async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("status_available", [True, False])
+async def test_provider_attach_pty_keeps_refusal_without_death_evidence(
+    monkeypatch: pytest.MonkeyPatch, status_available: bool
 ) -> None:
     pytest.importorskip("tenacity", reason="tenacity optional sandbox dependency is not installed")
     pytest.importorskip("opensandbox", reason="opensandbox SDK is not installed")
@@ -859,12 +867,30 @@ async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
             return SimpleNamespace(endpoint="server/v1/sandboxes/sb-1/proxy/44772", headers={})
 
         async def get_info(self) -> SimpleNamespace:
-            raise RuntimeError("control plane unavailable")
+            if not status_available:
+                raise RuntimeError("control plane unavailable")
+            return SimpleNamespace(status=SimpleNamespace(state="Running", reason="Running"))
 
+    refusals: list[NgFailureEvent] = []
+    attach = pty_module.attach_pty_session
+
+    async def record_refusal(**kwargs: Any) -> OpenSandboxPtySession:
+        try:
+            return await attach(**kwargs)
+        except NgFailureEvent as error:
+            refusals.append(error)
+            raise
+
+    monkeypatch.setattr(pty_module, "attach_pty_session", record_refusal)
     provider = _always_refused_provider(monkeypatch)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueRaw())
-    with pytest.raises(NgFailureEvent, match="unknown"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client") as exc_info:
         await provider.attach_pty(handle, "s-7", takeover=True)
+    assert len(refusals) == len(pty_module._PTY_TAKEOVER_RETRY_DELAYS) + 1
+    assert exc_info.value is refusals[-1]
+    assert exc_info.value.__cause__ is None
+    policy = OutcomePolicyConfig(default_action="fail", by_failure_kind={PROVIDER_PTY_BUSY: "retry"})
+    assert failure_outcome_policy(exc_info.value, config=policy) == OutcomeAction.RETRY
 
 
 class _RefusingRaw:
@@ -932,7 +958,7 @@ async def test_provider_attach_pty_keeps_retrying_when_absence_is_unproven(
     provider, handed_out = _refused_with_existence(monkeypatch, get_response)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueStatusRaw())
 
-    with pytest.raises(NgFailureEvent, match="unknown"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client"):
         await provider.attach_pty(handle, "s-7", takeover=True)
 
     attaches = [client for client in handed_out if client.ws_calls]

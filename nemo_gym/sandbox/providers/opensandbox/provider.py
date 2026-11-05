@@ -2902,8 +2902,20 @@ class OpenSandboxProvider:
                     # sandbox itself is gone (node loss, OOM kill) the stale
                     # attachment can never acknowledge its eviction, so the
                     # takeover is refused forever — report the sandbox's death
-                    # instead of the refusal.
-                    raise await self._pty_failure(handle, e) from e
+                    # instead of the refusal. Keep bounded polling because the
+                    # terminal lifecycle status can lag the final refusal.
+                    deadline = asyncio.get_running_loop().time() + self._diagnostics.timeout_s
+                    evidence = await self._sandbox_death_evidence(handle, deadline=deadline)
+                    if evidence is None:
+                        raise
+                    raise opensandbox_failure(
+                        operation="pty",
+                        sandbox_id=handle.sandbox_id,
+                        cause=e,
+                        failure_kind=evidence.failure_kind,
+                        reason=evidence.message,
+                        provider_status_reason=evidence.provider_status_reason,
+                    ) from e
             await asyncio.sleep(delay)
         session._sandbox_id = handle.sandbox_id
         await self._retire_closed_pty_sessions()
