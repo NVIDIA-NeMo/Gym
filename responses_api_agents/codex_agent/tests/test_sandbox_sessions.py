@@ -2845,6 +2845,25 @@ def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, ne
         assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
 
 
+def test_tool_egress_leaves_out_the_mcp_grants_codex_skips(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.expected_workdir = "/workspace"
+    body = owned_seed_with_search_grant()
+    # Codex leaves out an optional grant whose name config.toml cannot hold; its host must stay closed too.
+    body["tool_accesses"].append(mcp_grant("bad.name", required=False, url="http://skipped.example:7000/mcp"))
+
+    spec, created = seed_owned(agent, sandbox, body)
+
+    assert created.status_code == 200, created.text
+    assert spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
+
+
 def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setup):
     agent, sandbox = setup
     agent.config.network_access = "model_only"

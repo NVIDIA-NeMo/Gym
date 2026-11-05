@@ -79,6 +79,9 @@ on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an uns
 harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
 instance name, `codex_agent.responses_api_agents.codex_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`. A restricted sandbox cannot download Codex, so supply
+`sandbox_runtime_dir`.
 
 The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
 APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
@@ -415,4 +418,4 @@ OpenSandbox policy is set when the sandbox is created, so a session that borrows
 other than `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
 `sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `codex/` as the installer lays them out,
-and setup checks that it reports `codex-cli <codex_version>` instead of installing.
+and setup checks that it reports `codex-cli <codex_version>` instead of installing. A borrowed sandbox relies on its owner's network policy.
