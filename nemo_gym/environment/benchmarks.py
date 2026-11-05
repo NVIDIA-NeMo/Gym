@@ -220,7 +220,7 @@ __getattr__ = moved_attr_getter(
     __name__,
     {
         "list_benchmarks": "nemo_gym.cli.eval",
-        "PrepareBenchmarkConfig": "nemo_gym.cli.eval",
+        "PrepareBenchmarkConfig": "nemo_gym.environment.benchmark_preparation",
         "prepare_benchmark": "nemo_gym.cli.eval",
     },
 )
