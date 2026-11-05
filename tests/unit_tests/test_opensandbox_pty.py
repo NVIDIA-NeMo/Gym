@@ -889,6 +889,7 @@ async def test_provider_attach_pty_keeps_refusal_without_death_evidence(
     assert len(refusals) == len(pty_module._PTY_TAKEOVER_RETRY_DELAYS) + 1
     assert exc_info.value is refusals[-1]
     assert exc_info.value.__cause__ is None
+    assert exc_info.value.failure_kind == PROVIDER_PTY_BUSY
     policy = OutcomePolicyConfig(default_action="fail", by_failure_kind={PROVIDER_PTY_BUSY: "retry"})
     assert failure_outcome_policy(exc_info.value, config=policy) == OutcomeAction.RETRY
 
@@ -907,7 +908,9 @@ def _refused_with_existence(monkeypatch: pytest.MonkeyPatch, get_response: Any) 
     """Provider whose takeover attaches are refused and whose GET /pty/{id} answers ``get_response``."""
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
-    provider = OpenSandboxProvider(connection={"domain": "server", "api_key": "k", "protocol": "https"})
+    provider = OpenSandboxProvider(
+        connection={"domain": "server", "api_key": "k", "protocol": "https"}, diagnostics={"timeout_s": 0.01}
+    )
     handed_out: list[FakeHttpClient] = []
 
     def _client() -> FakeHttpClient:
@@ -958,9 +961,10 @@ async def test_provider_attach_pty_keeps_retrying_when_absence_is_unproven(
     provider, handed_out = _refused_with_existence(monkeypatch, get_response)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueStatusRaw())
 
-    with pytest.raises(NgFailureEvent, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="already has an attached client") as exc_info:
         await provider.attach_pty(handle, "s-7", takeover=True)
 
+    assert exc_info.value.failure_kind == PROVIDER_PTY_BUSY
     attaches = [client for client in handed_out if client.ws_calls]
     assert len(attaches) == 2, "the takeover must still be re-dialed"
 
