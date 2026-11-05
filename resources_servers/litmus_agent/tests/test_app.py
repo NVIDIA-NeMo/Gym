@@ -1136,6 +1136,69 @@ class TestResourcesSessions:
         assert server._session_locks == {}
         assert server._sessions == {}
 
+    async def test_cancelled_startup_and_close_keep_allocation_owned_until_stop(self, monkeypatch):
+        server = _make_sandbox_server()
+        allocated, finish_start = asyncio.Event(), asyncio.Event()
+        startup_cancelled = False
+        real_create = _LocalFakeProvider.create
+
+        async def delayed_create(provider, spec):
+            nonlocal startup_cancelled
+            handle = await real_create(provider, spec)
+            allocated.set()
+            try:
+                await finish_start.wait()
+            except asyncio.CancelledError:
+                startup_cancelled = True
+                raise
+            return handle
+
+        monkeypatch.setattr(_LocalFakeProvider, "create", delayed_create)
+        await server.seed_session(
+            ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=_FakeRequest("rs-1")
+        )
+        tool_call = asyncio.create_task(_run_code(server, "rs-1", "print(1)"))
+        close_body = ResourcesCloseSessionRequest.model_validate(_close("rs-1"))
+        try:
+            await asyncio.wait_for(allocated.wait(), timeout=5)
+            tool_call.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await tool_call
+            assert not startup_cancelled
+            assert server.has_session_state("rs-1")
+            provider = _LocalFakeProvider.instances[-1]
+
+            close = asyncio.create_task(server.close_resources_session(close_body))
+            await asyncio.sleep(0)
+            assert not close.done()
+            assert provider.closed == provider.aclosed == 0
+            close.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await close
+            assert not startup_cancelled
+            assert server.has_session_state("rs-1")
+            assert not server.session_is_closed("rs-1")
+
+            provider.close_error = RuntimeError("sandbox API unavailable")
+            finish_start.set()
+            with pytest.raises(RuntimeError, match="sandbox API unavailable"):
+                await server.close_resources_session(close_body)
+            assert server.has_session_state("rs-1")
+            assert not server.session_is_closed("rs-1")
+            assert provider.created == 1
+
+            provider.close_error = None
+            await server.close_resources_session(close_body)
+            assert provider.closed == provider.aclosed == 1
+            assert server.session_is_closed("rs-1")
+            assert server._sessions == server._session_locks == {}
+        finally:
+            finish_start.set()
+            await asyncio.gather(tool_call, return_exceptions=True)
+            for provider in _LocalFakeProvider.instances:
+                provider.close_error = None
+            await server._shutdown_all_sessions()
+
     async def test_failed_startup_keeps_sandbox_until_stop_succeeds(self, monkeypatch):
         server = _make_sandbox_server()
         real_upload = _LocalFakeProvider.upload_file

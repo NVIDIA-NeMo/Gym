@@ -246,6 +246,7 @@ class _SandboxSession:
     sandbox: AsyncSandbox
     cells: List[str] = field(default_factory=list)
     ready: bool = False
+    startup: asyncio.Task[AsyncSandbox] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +676,8 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
 
         async with lock:
             session = self._sessions.get(session_id)
+            if session is not None and session.startup is not None:
+                await self._finish_startup(session)
             if session is not None and not session.ready:
                 # Startup may have created a container before driver upload and its cleanup failed.
                 # Do not execute in that incomplete container or replace its last ownership record.
@@ -685,9 +688,23 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                 sandbox = AsyncSandbox(self.config.sandbox_provider, self._build_sandbox_spec())
                 session = _SandboxSession(sandbox=sandbox)
                 self._sessions[session_id] = session
-                await sandbox.start()
-                session.ready = True
+                # A cancelled request must not cancel provider.create before AsyncSandbox receives its handle.
+                session.startup = asyncio.create_task(sandbox.start())
+                await self._finish_startup(session)
         return session, lock
+
+    async def _finish_startup(self, session: _SandboxSession) -> None:
+        startup = session.startup
+        if startup is None:
+            return
+        try:
+            await asyncio.shield(startup)
+        except Exception:
+            session.startup = None
+            raise
+        else:
+            session.startup = None
+            session.ready = True
 
     async def execute_code(self, request: Request) -> PlainTextResponse:
         """Run a code cell in the session's sandbox and return its output.
@@ -746,6 +763,11 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         async with lock:
             session = self._sessions.get(session_id)
             if session is not None:
+                try:
+                    await self._finish_startup(session)
+                except Exception:
+                    # A failed upload can leave a published handle whose stop still needs to be retried.
+                    logger.warning("Sandbox startup failed before cleanup of session %s", session_id, exc_info=True)
                 await session.sandbox.stop()
             async with self._registry_lock:
                 self._sessions.pop(session_id, None)
