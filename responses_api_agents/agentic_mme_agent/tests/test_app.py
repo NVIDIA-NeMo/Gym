@@ -9,7 +9,7 @@ from aiohttp import ClientConnectionError, ClientPayloadError
 from fastapi import Request, Response
 from PIL import Image
 
-from nemo_gym.server_runtime.base_server import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
 from resources_servers.agentic_mme.tests.test_app import response
 from responses_api_agents.agentic_mme_agent.app import AgenticMMEAgent, AgenticMMEAgentConfig, AgenticMMERunRequest

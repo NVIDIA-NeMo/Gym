@@ -40,7 +40,7 @@ from aiohttp import FormData
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, model_validator
 
-from nemo_gym.client.http_client import request
+from nemo_gym.client import request
 from responses_api_agents.agentic_mme_agent.search_cache import shared_cache
 from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace, image_data_url
 

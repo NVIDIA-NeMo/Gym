@@ -30,9 +30,13 @@ agentic_mme_agent:
         jsonl_fpath: resources_servers/agentic_mme/data/example.jsonl
         num_repeats: 1
 
-agentic_mme_agent_environment_server:
+# Each episode runs through the single-agent-turn Environment Server: it seeds the resources and agent sessions,
+# runs one agent turn, verifies, and closes both sessions. The agent runs its image tools itself, so it receives no
+# resources tools. Under an agent session, retrieval.mode=replay is refused, because the replay list is a field of
+# the task row that the session does not receive.
+agentic_mme_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents

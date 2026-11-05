@@ -6,24 +6,33 @@
 import asyncio
 import itertools
 import json
+from dataclasses import dataclass
 from typing import Any
 
 import cv2
 from aiohttp import ClientError
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.agents import (
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
 from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema
@@ -46,6 +55,18 @@ class AgenticMMERunRequest(BaseRunRequest):
     model_config = ConfigDict(extra="allow")
     verifier_metadata: dict[str, Any] = Field(default_factory=dict)
     retrieval_replay: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@dataclass
+class AgenticMMESessionState(AgentSessionState):
+    """One agent session runs one episode.
+
+    An identical retry of the activation joins the running episode, a different request is refused, and close
+    cancels it. The image tools run in this agent, so the session holds no tool grant and no sandbox.
+    """
+
+    activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
+    execution: asyncio.Task[tuple[NeMoGymResponse, dict[str, str]]] | None = None
 
 
 class AgenticMMEAgent(SimpleResponsesAPIAgent):
@@ -232,16 +253,77 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             )
         return result, trace, cookies, policy_error
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgenticMMESessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Agentic-MME runs its image tools in the agent and does not use a sandbox")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("Agentic-MME does not use granted tools")
+        if self.config.retrieval.mode == "replay":
+            # The replay list is a field of the task row. An agent session receives only the model request.
+            raise AgentSeedRejectedError(
+                "retrieval.mode=replay reads retrieval_replay from the task row, which agent sessions do not "
+                "receive; use retrieval.mode=disabled or live under an environment server"
+            )
+        return AgenticMMESessionState(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, AgenticMMESessionState):
+            raise TypeError("Expected Agentic-MME session state")
+        execution = state.execution
+        if execution is not None:
+            if not execution.done():
+                execution.cancel()
+                done, _ = await asyncio.wait({execution}, timeout=self.config.session_close_timeout_seconds)
+                if not done:
+                    raise TimeoutError(
+                        "Agentic-MME episode did not stop within the session close timeout; close must retry"
+                    )
+            await asyncio.gather(execution, return_exceptions=True)
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
+    async def _session_episode(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict[str, str], model_url_path: str
+    ) -> tuple[NeMoGymResponse, dict[str, str]]:
+        result, _, model_cookies, _ = await self._episode(body, cookies, model_url_path=model_url_path)
+        return result, {name: getattr(value, "value", value) for name, value in (model_cookies or {}).items()}
+
     async def responses(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        result, _, cookies, _ = await self._episode(
-            body, request.cookies, model_url_path=self.url_path_for_request("/v1/responses", request)
-        )
-        for name, value in (cookies or {}).items():
+        """Run one episode: the image-tool loop, with every model call through the rollout's model route.
+
+        Under an agent session, the session runs one activation. An identical retry joins it, and a different
+        request, or one routed under another rollout, is refused with 409.
+        """
+        route = self.url_path_for_request("/v1/responses", request)
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            result, _, model_cookies, _ = await self._episode(body, request.cookies, model_url_path=route)
+            for name, value in (model_cookies or {}).items():
+                response.set_cookie(name, value)
+            return result
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, AgenticMMESessionState):
+            raise TypeError("Expected Agentic-MME session state")
+        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+            raise HTTPException(409, "Agent session does not match the rollout route")
+        key = (body.model_copy(deep=True), route)
+        if state.activation_key is not None and state.activation_key != key:
+            raise HTTPException(409, "Session already has another activation")
+        if state.execution is None:
+            state.activation_key = key
+            state.execution = asyncio.create_task(self._session_episode(body, dict(request.cookies), route))
+        try:
+            result, model_cookies = await asyncio.shield(state.execution)
+        except asyncio.CancelledError:
+            request_task = asyncio.current_task()
+            if state.execution.cancelled() and request_task is not None and not request_task.cancelling():
+                raise HTTPException(409, "Agent session is closing") from None
+            raise
+        for name, value in model_cookies.items():
             response.set_cookie(name, value)
         return result
 
