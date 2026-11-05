@@ -32,7 +32,7 @@ See `data/example.jsonl` for concrete examples.
 
 ## IFBench Library Setup
 
-The server clones the AllenAI IFBench repo at a pinned commit on first startup and adds it to `sys.path`. Python dependencies (spaCy, nltk, syllapy, etc.) are installed via `requirements.txt`.
+The server clones the AllenAI IFBench repo at a pinned commit on first startup and adds it to `sys.path`. Python dependencies (spaCy, nltk, syllapy, etc.) are installed via `pyproject.toml`.
 
 If the server runs inside a container that restricts outbound network access, the clone will fail. In that case, run `setup_ifbench.py` outside the container first:
 
