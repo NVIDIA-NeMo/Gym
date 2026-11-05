@@ -413,7 +413,7 @@ class TestSanity:
             ({}, "Hermes requires sandbox_access or a configured sandbox_provider for an episode session"),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         seed = AgentSeedSessionRequest(
             agent_session_id="session",

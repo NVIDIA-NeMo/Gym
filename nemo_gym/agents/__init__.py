@@ -36,6 +36,7 @@ if TYPE_CHECKING:
         restricted_network_policy,
         sandbox_server_url,
         seed_mcp_servers,
+        verification_failure_fields,
         verify_agent_response,
     )
     from nemo_gym.agents.base_responses_api_agent import (
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
         AgentSeedSessionRequest,
         AgentSeedSessionResponse,
         AgentSessionCapabilitiesResponse,
+        AgentSessionConflictError,
         AgentSessionSetupError,
         AgentSessionState,
         BaseResponsesAPIAgentConfig,
@@ -107,6 +109,7 @@ _PUBLIC_API = {
     "AgentSeedSessionRequest": "base_responses_api_agent",
     "AgentSeedSessionResponse": "base_responses_api_agent",
     "AgentSessionCapabilitiesResponse": "base_responses_api_agent",
+    "AgentSessionConflictError": "base_responses_api_agent",
     "AgentSessionSetupError": "base_responses_api_agent",
     "AgentSessionState": "base_responses_api_agent",
     "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
@@ -151,6 +154,7 @@ _PUBLIC_API = {
     "seed_mcp_servers": "agent_tools",
     "shell_assignments": "utils.sandbox_session",
     "stage_skills": "skills",
+    "verification_failure_fields": "agent_tools",
     "verify_agent_response": "agent_tools",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)

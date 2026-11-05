@@ -455,6 +455,7 @@ class TestApp:
         not_equal_verify_response = await resources_server.verify(not_equal_verify_request)
         assert not_equal_verify_response.responses_create_params == model_create_params
         assert not_equal_verify_response.response == first_model_response
+        assert not_equal_verify_response.model_dump()["question"] == question
         assert not_equal_verify_response.reward == approx(0.0)
         assert not_equal_verify_response.expected_answer == expected_answer
         assert not_equal_verify_response.extracted_answer is None
@@ -469,6 +470,7 @@ class TestApp:
             "judge_evaluations",
             "library_reward",
             "mask_sample",
+            "question",
             "response",
             "responses_create_params",
             "reward",
@@ -497,6 +499,7 @@ class TestApp:
         equal_verify_response = await resources_server.verify(equal_verify_request)
         assert equal_verify_response.responses_create_params == model_create_params
         assert equal_verify_response.response == second_model_response
+        assert equal_verify_response.model_dump()["question"] == question
         assert equal_verify_response.reward == approx(1.0)
         assert equal_verify_response.expected_answer == expected_answer
         assert equal_verify_response.extracted_answer == "x + 1"
@@ -510,6 +513,7 @@ class TestApp:
             "judge_evaluations",
             "library_reward",
             "mask_sample",
+            "question",
             "response",
             "responses_create_params",
             "reward",
