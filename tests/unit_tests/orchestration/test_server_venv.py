@@ -57,6 +57,8 @@ class TestCLISetupCommandSetupEnvCommand:
         server.mkdir(parents=True)
         (server / "pyproject.toml").write_text('[project]\nname="sample"\nversion="0"\n')
         (server / "uv.lock").write_text("version=1\nrevision=3\n")
+        # Gym's own locked server: the root is a Gym checkout.
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "nemo-gym"\n')
         config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
             UV_VENV_DIR_KEY_NAME: str(tmp_path / "custom venvs")
         }
@@ -190,7 +192,8 @@ class TestCLISetupCommandSetupEnvCommand:
 def setup_component(tmp_path: Path) -> tuple[Path, dict, Path]:
     server_dir = tmp_path / "source with spaces" / "models" / "example"
     server_dir.mkdir(parents=True)
-    (server_dir.parent.parent / "pyproject.toml").touch()
+    # Gym's own locked server: the root is a Gym checkout.
+    (server_dir.parent.parent / "pyproject.toml").write_text('[project]\nname = "nemo-gym"\n')
     (server_dir / "pyproject.toml").touch()
     (server_dir / "uv.lock").touch()
     config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
@@ -1096,6 +1099,45 @@ class TestIsGymCheckout:
         assert f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command
         assert "--no-sources-package nemo-gym '-e .'" in command
         assert "nemo-gym==" not in command
+
+    @pytest.mark.parametrize("editable", [True, False])
+    def test_an_external_server_with_a_lock_still_gets_the_parents_gym(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, editable: bool
+    ) -> None:
+        """Its uv.lock pins its own Gym source; the locked installer would install that instead of the parent's Gym."""
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "pyproject.toml").write_text('[project]\nname = "my-server"\n')
+        (server_dir / "uv.lock").write_text('version = 1\n[[package]]\nname = "nemo-gym"\nversion = "0.1.0"\n')
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", editable)
+
+        with patch("importlib.metadata.version", return_value="0.9.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert "_locked_env.py" not in command
+        assert (f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command) is editable
+        assert ("nemo-gym==0.9.0" in command) is not editable
+        assert "--no-sources-package nemo-gym '-e .'" in command
+
+    @pytest.mark.parametrize("editable", [True, False])
+    def test_an_external_server_that_is_not_a_package_installs_its_requirements_with_the_parents_gym(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch, editable: bool
+    ) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "pyproject.toml").write_text(
+            '[project]\nname = "my-server"\n[tool.uv]\npackage = false\n[tool.uv.sources]\nhelper = { path = "../helper" }\n'
+        )
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", editable)
+
+        with patch("importlib.metadata.version", return_value="0.9.0"):
+            command = self._install_command(server_dir, tmp_path)
+        # Only Gym's own source is replaced, so the server's helper source still applies.
+        assert "--no-sources-package nemo-gym --requirements pyproject.toml" in command
+        assert "--no-sources " not in command
+        assert (f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command) is editable
+        assert ("nemo-gym==0.9.0" in command) is not editable
 
     @staticmethod
     def _piped_requirements(command: str, server_dir: Path) -> list[str]:
