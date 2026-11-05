@@ -641,11 +641,11 @@ def test_reported_error_retains_continuation_evidence(
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
-    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
     from nemo_gym.trajectory import (
         AgentObservationBundle,
+        ModelCallRecord,
         TrajectoryRecord,
         join_agent_model_calls,
         join_assistant_message_calls,

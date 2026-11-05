@@ -24,8 +24,8 @@ import pytest
 from nemo_gym.sandbox import api as sandbox_api
 from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
 from nemo_gym.telemetry import gym_metrics
+from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
 from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics, sandbox_group_on  # noqa: F401 - fixtures
-from tests.unit_tests.test_sandbox import FakeSandboxProvider
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")

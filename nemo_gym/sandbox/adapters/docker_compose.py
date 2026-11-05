@@ -79,7 +79,7 @@ def _merge_provider_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
-# Every sandbox of one Compose project carries this label with the project name. Members
+# Every sandbox of one Compose project carries this label with a shared placement group. Members
 # reach each other by pod IP and share storage, so a multi-cell front end (cell-router)
 # must place them together; it routes every create with the same value to one cell.
 PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
@@ -124,6 +124,9 @@ class AsyncSandboxCompose:
     when the sandbox is created, so setup (including Harbor's overlay Dockerfile ``RUN`` lines) can write to
     shared storage. For a service with setup, its working directory is applied afterwards:
     setup may create that directory under a different user. An exception fails the start and stops the group.
+
+    ``placement_group`` keeps related collections and external helpers on the same router cell. It defaults
+    to this collection's unique project; sharing placement does not share managed volumes or cleanup ownership.
     """
 
     def __init__(
@@ -141,6 +144,7 @@ class AsyncSandboxCompose:
         upload_root: str | Path | None = None,
         service_volume_sources: Mapping[str, Mapping[str, str]] | None = None,
         service_setup: Mapping[str, Callable[[AsyncSandbox], Awaitable[None]]] | None = None,
+        placement_group: str | None = None,
     ):
         self.provider = create_provider(provider) if isinstance(provider, Mapping) else provider
         self.service_providers = {
@@ -164,6 +168,10 @@ class AsyncSandboxCompose:
         self.service_setup = dict(service_setup or {})
         self.upload_root = Path(upload_root).resolve() if upload_root is not None else None
         self.project = "compose-" + uuid.uuid4().hex
+        # Placement can span collections, while storage and cleanup stay project-owned.
+        self.placement_group = self.project if placement_group is None else placement_group
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9_.-]{0,61}[A-Za-z0-9])?", self.placement_group):
+            raise ValueError("placement_group must be a valid Kubernetes label value of 1-63 characters")
         self.services: dict[str, AsyncSandbox] = {}
         self._plans: dict[str, dict[str, Any]] = {}
         self._runtime_metadata: dict[str, dict[str, str]] = {}
@@ -526,7 +534,7 @@ class AsyncSandboxCompose:
                         **spec.metadata,
                         **(service.get("labels") or {}),
                         **self._runtime_metadata.get(name, {}),
-                        PLACEMENT_GROUP_KEY: self.project,
+                        PLACEMENT_GROUP_KEY: self.placement_group,
                     },
                     provider_options=_merge_provider_options(
                         spec.provider_options, self._service_options.get(name, {})
@@ -565,7 +573,7 @@ class AsyncSandboxCompose:
                     image=self.volume_init_image,
                     ttl_s=self.timeout_s + 3600,
                     entrypoint=["sh", "-c", "while :; do sleep 3600; done"],
-                    metadata={**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.project},
+                    metadata={**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.placement_group},
                     provider_options=provider.shared_volume_options(None, root),
                 ),
                 owns_provider=False,
@@ -583,7 +591,7 @@ class AsyncSandboxCompose:
             # shared storage, the copy-up seed (a sandbox of the service's own spec) and the mount options.
             provider = self._provider_for(name)
             volume_sources = self._volume_sources_for(name)
-            metadata = {**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.project}
+            metadata = {**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.placement_group}
             helper = await self._volume_helper_for(provider, root)
             mounts = []
             for volume in service["volumes"]:

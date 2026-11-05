@@ -49,7 +49,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
-    TaskId,
 )
 from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
@@ -175,17 +174,6 @@ class Terminus2SessionState(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task | None = None
     metrics: Dict[str, Any] | None = None
-
-
-def _collector_task_identity(task_id: TaskId) -> str:
-    """The task identity rollout collection expects on a session run's trajectory.
-
-    A materialized row carries ``task_id`` as the ``TaskId`` mapping, and the collector's canonical
-    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``rollout_collection``).
-    The environment server posts only the task's ``responses_create_params`` on the turn, so the
-    seeded session request is the harness's only copy of that identity.
-    """
-    return str(task_id.model_dump(mode="json"))
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -925,7 +913,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                             request,
                             body,
                             state.sandbox,
-                            task_id=_collector_task_identity(state.request.task_id),
+                            task_id=state.request.task_id.task_id,
                         )
                     except Terminus2InfrastructureError as exc:
                         state.metrics = exc.metrics

@@ -50,8 +50,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from responses_api_models.vllm_model.app import VLLMConverter
 
 
 def _qid(text: str) -> str:
@@ -938,7 +938,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
-            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollouts/rollout_collection.py)
             # and every remaining sample dies with it — that cost two full multi-node
             # allocations, each dying part-way through a run on one bad sample.
             #
@@ -1095,7 +1095,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Hit the policy model's vLLM /tokenize endpoint and return the prompt
         token count (used to decide context reset without a full generation).
         (ported from gym-gitlab b66e37c6)"""
-        converter = VLLMConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
         chat_completion_create_params = chat_completion_create_params.model_dump()
         # Same projection as vllm_model/app.py's tokenize path.

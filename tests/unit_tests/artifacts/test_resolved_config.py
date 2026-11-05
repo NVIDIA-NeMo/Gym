@@ -116,7 +116,7 @@ def test_write_resolved_config_never_writes_header_credentials(tmp_path: Path) -
 
 def test_no_serve_collection_saves_the_config_before_collecting(tmp_path: Path, monkeypatch) -> None:
     import nemo_gym.cli.eval as cli_eval
-    import nemo_gym.rollout_collection as rollout_collection
+    import nemo_gym.rollouts.rollout_collection as rollout_collection
     import nemo_gym.telemetry.setup as telemetry_setup
 
     monkeypatch.setenv("NO_SERVE_BASE_FOR_TEST", "base")

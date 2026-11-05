@@ -62,7 +62,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
-from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
 class TestGlobalConfig:
@@ -3498,6 +3498,30 @@ class TestComposeUnboundAgent:
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
+
+    def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
+        config = self._session_environment_config("langgraph_agent")
+        config.langgraph_agent.responses_api_agents.langgraph_agent.resources_server = None
+        config["independent_agent"] = {
+            "responses_api_agents": {"hermes_agent": {"entrypoint": "app.py", "resources_server": None}}
+        }
+        config["independent_environment"] = {
+            "environment_servers": {
+                "single_agent_turn_legacy": {
+                    "agent_server": {"type": "responses_api_agents", "name": "independent_agent"},
+                    "resources_tool_transports": ["mcp"],
+                }
+            }
+        }
+        independent_before = OmegaConf.to_container(config.independent_environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config, selected_agent="langgraph_agent")
+
+        environment = config.gpqa_mcqa_environment_server.environment_servers.single_agent_turn_legacy
+        assert environment.agent_server.name == "gpqa_mcqa_langgraph_agent"
+        assert environment.resources_tool_transports == []
+        assert OmegaConf.to_container(config.independent_environment) == independent_before
+        assert config.independent_agent.responses_api_agents.hermes_agent.resources_server is None
 
     def _cli_dict(self, config: dict) -> DictConfig:
         """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""
