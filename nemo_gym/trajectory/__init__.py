@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from nemo_gym.trajectory.model_call_record import ModelCallRecord, build_model_call_record
     from nemo_gym.trajectory.trajectory_record import (
         NG_AGENT_OBSERVATIONS_KEY,
+        NG_AGENT_SANDBOX_OBSERVATION_KEY,
         NG_TRAJECTORY_KEY,
         NG_VERIFIER_INVOCATIONS_KEY,
         AgentEpisode,
@@ -60,6 +61,7 @@ _PUBLIC_API = {
     "ModelCallRecord": "model_call_record",
     "ModelCallRef": "trajectory_record",
     "NG_AGENT_OBSERVATIONS_KEY": "trajectory_record",
+    "NG_AGENT_SANDBOX_OBSERVATION_KEY": "trajectory_record",
     "NG_TRAJECTORY_KEY": "trajectory_record",
     "NG_VERIFIER_INVOCATIONS_KEY": "trajectory_record",
     "ObservationGap": "trajectory_record",

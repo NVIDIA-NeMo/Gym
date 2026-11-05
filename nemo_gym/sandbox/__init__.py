@@ -119,7 +119,7 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
-    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider, SandboxBackendUnreachableError
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
     from nemo_gym.sandbox.transfer import (
         TRANSFER_USER,
         SandboxProbeError,
@@ -149,7 +149,6 @@ _PUBLIC_API = {
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
     "SandboxAccess": "access",
-    "SandboxBackendUnreachableError": "providers.opensandbox.provider",
     "SandboxConfig": "config",
     "SandboxProbeError": "transfer",
     "SandboxTransferError": "transfer",
