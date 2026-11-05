@@ -478,6 +478,7 @@ class TestServerUtils:
     async def test_cancellation_middleware_samples_all_routes(
         self, monkeypatch: MonkeyPatch, capsys: CaptureFixture, path: str
     ) -> None:
+        """Bound deadlocks while allowing worker scheduling delay under shared CI CPU load."""
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
         handler_waiting = asyncio.Event()
 
@@ -497,9 +498,9 @@ class TestServerUtils:
             incoming = asyncio.Queue()
             await incoming.put({"type": "http.request", "body": b"", "more_body": False})
             app_task = asyncio.create_task(middleware(scope, incoming.get, send))
-            await asyncio.wait_for(handler_waiting.wait(), timeout=1)
+            await asyncio.wait_for(handler_waiting.wait(), timeout=5)
             await incoming.put({"type": "http.disconnect"})
-            await asyncio.wait_for(app_task, timeout=1)
+            await asyncio.wait_for(app_task, timeout=5)
 
         assert middleware.num_cancelled == 101
         assert capsys.readouterr().out == (

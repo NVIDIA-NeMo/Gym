@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -19,10 +20,19 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
+from nemo_gym.agents import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
+from nemo_gym.core import (
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    VERIFIER_ERROR,
+    EpisodeId,
+    FailureReportRow,
+    NeMoGymResponse,
+    rollout_context,
+)
 from nemo_gym.rollouts import NG_TERMINAL_KEY
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, sandbox_credentials_rejected
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
@@ -32,6 +42,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
+    observe_verifier_sandbox,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
@@ -48,6 +59,9 @@ from resources_servers.terminal_bench_4.models import (
     VerifierTestCounts,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
+
+
+logger = logging.getLogger(__name__)
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -85,6 +99,67 @@ def atomic_json(path, value):
     temporary = path.with_name(path.name + ".tmp")
     temporary.write_text(json.dumps(value, indent=2, allow_nan=False))
     temporary.replace(path)
+
+
+# Where each episode with a Gym identity is indexed by it: <artifacts_dir>/<dir>/<run id>/<task>-<rollout>-<attempt>
+# holds the episode's identity, so a resumed run finds its graded attempts without reading the whole shared directory.
+_GYM_ROLLOUTS_DIR = "gym-rollouts"
+_GYM_RUN_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def gym_identity(request) -> dict | None:
+    """The Gym rollout this request is an attempt of: the run id and indices Gym sends with every row, or None."""
+    extra = getattr(request, "model_extra", None) or {}
+    run_id = extra.get("_ng_run_id")
+    task, rollout, attempt = (extra.get(key) for key in ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index"))
+    attempt = 0 if attempt is None else attempt
+    if not (isinstance(run_id, str) and _GYM_RUN_ID.fullmatch(run_id)):
+        return None
+    if not all(type(value) is int and value >= 0 for value in (task, rollout, attempt)):
+        return None
+    return {"run_id": run_id, "task_index": task, "rollout_index": rollout, "attempt_index": attempt}
+
+
+def _timestamp(timings: dict, phase: str, key: str) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(timings[phase][key])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if value.tzinfo is not None else None
+
+
+def graded_record(state, body, gym: dict) -> SandboxedVerifyResponse | None:
+    """The verified response of a recorded episode that a resumed Gym rollout may take as its graded attempt, or None.
+
+    Only an episode of the same Gym run, task and rollout whose agent finished normally and whose verifier ran after
+    that: a completed termination, the verifier started after the agent's execution finished, no exception and no
+    interrupted mark (a killed agent, a resources shutdown), and a completed, unmasked evaluation.
+    """
+    if not isinstance(state, dict) or state.get("record_version") != 3 or state.get("phase") != "closed":
+        return None
+    recorded = state.get("gym_identity") or {}
+    if any(recorded.get(key) != gym[key] for key in ("run_id", "task_index", "rollout_index")):
+        return None
+    request = state.get("request") or {}
+    if any(request.get(key) != getattr(body, key) for key in ("task_name", "task_ref", "dataset_ref")):
+        return None
+    if (state.get("termination") or {}).get("reason") != "completed":
+        return None
+    result = state.get("result") or {}
+    if "interrupted" in result or "exception_info" in result:
+        return None
+    agent_finished = _timestamp(result, "agent_execution", "finished_at")
+    verifier_started = _timestamp(result, "verifier", "started_at")
+    if agent_finished is None or verifier_started is None or verifier_started < agent_finished:
+        return None
+    try:
+        response = SandboxedVerifyResponse.model_validate(state["verified_response"])
+    except (KeyError, ValidationError):
+        return None
+    fields = response.model_dump()
+    if not response.evaluation_completed or fields.get("mask_sample") or fields.get("_ng_failure_class"):
+        return None
+    return response
 
 
 # Verifier outcomes that Terminal-Bench never retries and counts as a 0: Harbor excludes them from retries and counts a
@@ -172,6 +247,54 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def _state_path(self, identity):
         return self.config.artifacts_dir / f"{identity}.json"
 
+    def _gym_index(self, gym: dict) -> Path:
+        return self.config.artifacts_dir / _GYM_ROLLOUTS_DIR / gym["run_id"]
+
+    def _graded_replay(self, body: TerminalBench4RunRequest) -> SeedSessionResponse | None:
+        """A graded attempt this server recorded for the same Gym rollout, answered instead of running it again.
+
+        A resumed run sends a rollout whose earlier attempt was graded here but never reached the run's saved rows
+        (the segment ended between the verdict and the save). Each request has a new client session, so the episode
+        identity differs; the Gym identity in the request finds the recorded attempt. The earliest attempt that
+        qualifies (see ``graded_record``) is answered, marked with where it came from; a record that is partial,
+        unreadable, of another run or task, or not graded normally is ignored, and the rollout runs as usual.
+        """
+        gym = gym_identity(body)
+        if gym is None:
+            return None
+        prefix = f"{gym['task_index']}-{gym['rollout_index']}-"
+        try:
+            names = [path.name for path in self._gym_index(gym).iterdir() if path.name.startswith(prefix)]
+        except OSError:
+            return None
+        attempts = sorted(int(name[len(prefix) :]) for name in names if name[len(prefix) :].isdecimal())
+        for attempt in attempts:
+            try:
+                identity = (self._gym_index(gym) / f"{prefix}{attempt}").read_text().strip()
+                if not re.fullmatch(r"[a-f0-9]{64}", identity):
+                    continue
+                state = json.loads(self._state_path(identity).read_text())
+            except (OSError, ValueError):
+                continue
+            response = graded_record(state, body, gym)
+            if response is None:
+                continue
+            logger.info(
+                "Answering Gym run %s task %s rollout %s with attempt %s, graded in episode %s",
+                gym["run_id"],
+                gym["task_index"],
+                gym["rollout_index"],
+                attempt,
+                state["session_id"],
+            )
+            replayed = response.model_dump(mode="json") | {
+                "replayed_from": {"session_id": state["session_id"], "attempt_index": attempt}
+            }
+            return SeedSessionResponse(
+                session_id=state["session_id"], verified_response=SandboxedVerifyResponse.model_validate(replayed)
+            )
+        return None
+
     def _persist(self, session):
         resources = []
         for env in (session.environment, session.verifier_environment, session.shared_logs):
@@ -208,12 +331,21 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 "resources_session_id": session.resources_request.resources_session_id
                 if session.resources_request is not None
                 else None,
+                "gym_identity": gym_identity(session.request),
             },
         )
         lookup = self.config.artifacts_dir / f"{session.session_id}.state"
         temporary = lookup.with_suffix(".tmp")
         temporary.write_text(session.identity)
         temporary.replace(lookup)
+        gym = gym_identity(session.request)
+        if gym is not None:
+            index = self._gym_index(gym) / f"{gym['task_index']}-{gym['rollout_index']}-{gym['attempt_index']}"
+            if not index.exists():
+                index.parent.mkdir(parents=True, exist_ok=True)
+                temporary = index.with_name(index.name + ".tmp")
+                temporary.write_text(session.identity)
+                temporary.replace(index)
         if session.directory.exists():
             atomic_json(session.directory / "result.json", session.result)
 
@@ -247,6 +379,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             if self._state_path(identity).exists():
                 state = json.loads(self._state_path(identity).read_text())
                 session = self._session(request, state["session_id"])
+            elif (replay := self._graded_replay(body)) is not None:
+                return replay
             else:
                 session_id = "tb4-" + uuid4().hex
                 session = self._new_session(identity, owner, body.model_copy(deep=True), session_id)
@@ -292,11 +426,20 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 session.persist()
                 session.expiry_task = asyncio.create_task(self._watch_agent_deadline(session))
             except (Exception, asyncio.CancelledError) as exc:
+                # A provider that refused the credentials refuses every attempt: the kind ends the run.
+                rejected = (
+                    sandbox_credentials_rejected(exc, operation="sandbox.setup", stage="seed")
+                    if isinstance(exc, Exception)
+                    else None
+                )
                 session.termination = AgentTermination(
                     reason="cancelled" if isinstance(exc, asyncio.CancelledError) else "infrastructure_error",
                     detail=f"{type(exc).__name__}: {exc}",
+                    failure_kind=rejected.failure_kind if rejected is not None else None,
                 )
                 lifecycle.exception(session, exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    lifecycle.interrupted(session, "resources_shutdown")
                 await lifecycle.cleanup(session)
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id, termination=session.termination
@@ -367,8 +510,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         key = session.resources_request.resources_session_id
         await self._prepare_session(session)
         if session.seed_response.termination is not None:
-            # Provisioning failed and was cleaned up; the episode may be retried.
-            session.resources_error = (503, f"Task sandbox setup failed: {session.termination.detail}")
+            # Invalid execution limits are deterministic; preserve other setup retry behavior.
+            invalid_limits = (session.result.get("exception_info") or {}).get(
+                "exception_type"
+            ) == ExecLimitConfigurationError.__name__
+            session.resources_error = (
+                422 if invalid_limits else 503,
+                f"Task sandbox setup failed: {session.termination.detail}",
+            )
             self._remember_close(key, session)
             return
         with rollout_context(session.request.capture_rollout_id):
@@ -499,6 +648,28 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             await lifecycle.finalize_session(
                 session, grade=body.agent_started and session.seed_response.termination is None
             )
+            # The resource owner retains the actual handles after cleanup. Bind these
+            # facts to the verify invocation, independently of the agent's bundle.
+            for environment, role in ((session.environment, "agent"), (session.verifier_environment, "verifier")):
+                if environment is None:
+                    continue
+                try:
+                    sandboxes = (
+                        tuple(environment.compose.services.values())
+                        if environment.uses_compose
+                        else (environment.main,)
+                    )
+                except Exception:
+                    logger.warning("Sandbox owner handles unavailable for verification observation")
+                    continue
+                for sandbox in sandboxes:
+                    try:
+                        observation = lifecycle_observation(sandbox, role=role)
+                        if observation is not None:
+                            observe_verifier_sandbox(observation)
+                    except Exception:
+                        # Observability must not replace a calculated grade or its original failure.
+                        logger.warning("Sandbox lifecycle observation unavailable")
             session.verified_response = self._verified_response(session, body.harness_metadata)
             session.persist()
         if session.resources_request is not None:
@@ -532,6 +703,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+        legacy = getattr(session, "resources_request", None) is None
+        ungraded_verifier = bool(failure) and not completed and session.termination.reason != "infrastructure_error"
+        legacy_failure = {}
+        if legacy and failure and not ungraded_verifier:
+            legacy_failure["_ng_failure_class"] = "infrastructure_error"
+            if failure_type:
+                legacy_failure["_ng_failure_type"] = failure_type
+            if failure_type == ExecLimitConfigurationError.__name__:
+                legacy_failure[NG_TERMINAL_KEY] = True
         return SandboxedVerifyResponse(
             **(
                 session.verify_body.model_dump(
@@ -548,15 +728,20 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             termination=session.termination,
             infrastructure_error=failure,
             failure_reason=failure or verifier_failure,
-            failure_kind=VERIFIER_ERROR if verifier_failure else None,
+            failure_kind=(
+                VERIFIER_ERROR
+                if verifier_failure or ungraded_verifier
+                else (session.termination.failure_kind or _selected_failure_kind(extra))
+                if failure
+                else None
+            ),
+            mask_sample=bool(failure) and (not legacy or ungraded_verifier),
             artifacts={"trial": str(session.directory)},
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
-            **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
-            **({"_ng_failure_type": failure_type} if failure_type else {}),
-            # A retry would fail the same way: only a configuration change can fix it.
-            **({NG_TERMINAL_KEY: True} if failure_type == ExecLimitConfigurationError.__name__ else {}),
+            verifier_diagnostics=list(session.diagnostics),
+            **legacy_failure,
         )
 
     def _session(self, request, session_id):
@@ -742,6 +927,13 @@ def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
             return AgentTermination(reason="nonzero_exit", detail="The final model call hit max_output_tokens")
         return AgentTermination(reason="timeout", detail="The agent stopped at its time limit")
     return AgentTermination(reason="nonzero_exit", detail=f"Agent response status: {response.status}")
+
+
+def _selected_failure_kind(harness_metadata: dict) -> str | None:
+    """The kind of the failure the agent's harness selected for its result, if it reported one."""
+    report = FailureReportRow.report(harness_metadata)
+    selected = report.events.get(report.failure_id) if report.failure_id is not None else None
+    return selected.failure_kind if selected is not None else None
 
 
 if __name__ == "__main__":
