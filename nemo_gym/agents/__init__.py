@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_rejected
     from nemo_gym.agents.testing.failure_assertions import raises_agent_failure
     from nemo_gym.agents.utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
+    from nemo_gym.agents.utils.sandbox_network import SandboxNetworkAccess, restrict_sandbox_network
     from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
     from nemo_gym.agents.utils.sandbox_python import SandboxPythonRuntime
     from nemo_gym.agents.utils.sandbox_session import (
@@ -128,6 +129,7 @@ _PUBLIC_API = {
     "SUPERVISOR_FILE": "utils.supervisor_client",
     "SUPERVISOR_SCRIPT": "utils.supervisor_client",
     "SandboxCommand": "utils.sandbox_session",
+    "SandboxNetworkAccess": "utils.sandbox_network",
     "SandboxPythonRuntime": "utils.sandbox_python",
     "SandboxSession": "utils.sandbox_session",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
@@ -143,6 +145,7 @@ _PUBLIC_API = {
     "parse_cleanup_receipt": "utils.supervisor_client",
     "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_timeout": "utils.task_timeout",
+    "restrict_sandbox_network": "utils.sandbox_network",
     "restricted_network_policy": "agent_tools",
     "sandbox_server_url": "agent_tools",
     "seed_mcp_servers": "agent_tools",
