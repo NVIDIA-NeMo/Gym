@@ -18,7 +18,7 @@ import orjson
 import pytest
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.verification.judge import (
     JudgeError,
@@ -162,7 +162,7 @@ class TestJudgeFailsafe:
 
 
 async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
-    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
     original = NgFailureEvent(
@@ -197,7 +197,7 @@ async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
 
 
 async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary():
-    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 
     original = NgFailureEvent(
@@ -226,7 +226,7 @@ async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary(
 
 
 def test_judge_selector_does_not_swallow_other_canonical_failures():
-    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.verification.judge import is_judge_failure
 
     for boundary, kind in [
@@ -239,7 +239,7 @@ def test_judge_selector_does_not_swallow_other_canonical_failures():
 
 @pytest.mark.asyncio
 async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
-    from nemo_gym.core.episode import verifier_invocation_context
+    from nemo_gym.core.episode_context import verifier_invocation_context
     from nemo_gym.verification.judge import is_judge_failure
 
     client = _client(status=200, body=b'{"verdict":"CORRECT"}')
@@ -289,7 +289,7 @@ async def test_a_judge_failure_a_caller_retries_past_stays_an_observation():
 
 async def test_a_recovered_judge_failure_keeps_its_model_cause_in_the_success_report():
     """MODEL -> JUDGE: the observation a successful retry leaves names the model failure as the judge's cause."""
-    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_records import FailureBoundary
     from nemo_gym.core.failure_transport import RequestFailureLog
     from nemo_gym.verification.judge import reraise_judge_errors
 
