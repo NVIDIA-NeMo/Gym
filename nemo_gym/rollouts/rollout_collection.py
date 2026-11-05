@@ -144,7 +144,13 @@ from nemo_gym.rollouts.model_calls import (
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
-from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf
+from nemo_gym.rollouts.rollout_perf import (
+    NG_CAPTURED_CALLS_KEY,
+    NG_PERF_KEY,
+    DispatchLatencyTracker,
+    _attach_captured_calls,
+    _attach_ng_perf,
+)
 from nemo_gym.rollouts.rollout_records import (
     RUN_ID_KEY,
     RolloutRecord,
@@ -198,7 +204,13 @@ from nemo_gym.telemetry.gym_metrics import (
     record_rollout_reward,
     record_run_summary,
 )
-from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
+from nemo_gym.telemetry.observer import (
+    MODEL_CALL_ROLE_ATTRIBUTE,
+    MeteredAdmission,
+    count_resident,
+    driver_metrics,
+    observe_event_loop,
+)
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_format import project_result_v1
@@ -665,7 +677,7 @@ def _is_collector_key(key: str) -> bool:
     the harness's own turns from its session close (as an agent's ``/run`` result does), and the collector
     replaces it with the canonical projection built from those turns.
     """
-    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY)
+    return key.startswith("_ng_") or key in ("ng_model_call_capture", NG_PERF_KEY, NG_CAPTURED_CALLS_KEY)
 
 
 # Legacy harnesses intentionally return these failure and observation fields.
@@ -1096,13 +1108,14 @@ async def enrich_run_result(
 
     # Assembles ng_perf from ng_trajectory when observability is enabled.
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
+    _attach_captured_calls(result, observability_enabled=observability_enabled)
 
     if delete_capture and safe_to_delete:
         clear_model_call_captures_for_rollouts([result], capture_dirs)
     return result
 
 
-_ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
+_ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY, NG_CAPTURED_CALLS_KEY)
 
 
 def _returned_observation_envelopes(result: Any) -> list[tuple[dict[str, Any], str, str]]:
@@ -2236,6 +2249,7 @@ def _record_rollout_shape(row: Mapping[str, Any], result: Mapping[str, Any]) -> 
 
     Turns and tool calls come from the rollout's ``ng_perf`` when rollout observability produced it.
     Without it, tool calls are counted from the final response's ``function_call`` items, and turns are not recorded.
+    Model calls are recorded once per role from ``ng_captured_calls``, and not at all without capture.
     """
     observer = driver_metrics()
     if observer is None:
@@ -2255,6 +2269,9 @@ def _record_rollout_shape(row: Mapping[str, Any], result: Mapping[str, Any]) -> 
                 1 for item in output_items if isinstance(item, dict) and item.get("type") == "function_call"
             )
         observer.tool_calls.record(tool_calls)
+        captured_calls = result.get(NG_CAPTURED_CALLS_KEY) or {}
+        for role, totals in (captured_calls.get("by_role") or {}).items():
+            observer.model_calls.record(totals["calls"], attributes={MODEL_CALL_ROLE_ATTRIBUTE: role})
     except Exception:
         logger.debug("Could not record rollout shape metrics", exc_info=True)
 

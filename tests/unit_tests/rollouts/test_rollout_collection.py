@@ -136,6 +136,7 @@ from nemo_gym.rollouts.rollout_collection import (
     _failures_path_for,
     _final_zero_failure_rows,
     _get_max_rollout_attempts,
+    _is_collector_key,
     _masking_step_metrics,
     _missing_rollout_rows_counted_as_zero,
     _rollout_order_key,
@@ -148,7 +149,14 @@ from nemo_gym.rollouts.rollout_collection import (
     refresh_agent_complete_files,
 )
 from nemo_gym.rollouts.rollout_health import health_check_run_dir
-from nemo_gym.rollouts.rollout_perf import NG_PERF_KEY, DispatchLatencyTracker, _attach_ng_perf, _build_ng_perf
+from nemo_gym.rollouts.rollout_perf import (
+    NG_CAPTURED_CALLS_KEY,
+    NG_PERF_KEY,
+    DispatchLatencyTracker,
+    _attach_captured_calls,
+    _attach_ng_perf,
+    _build_ng_perf,
+)
 from nemo_gym.rollouts.rollout_records import prepare_append as _drop_truncated_tail
 from nemo_gym.rollouts.rollout_recovery import manifest_path_for, matches_failure_class
 from nemo_gym.rollouts.trajectory_builder import (
@@ -2634,6 +2642,32 @@ class TestRolloutCollection:
             "reasoning_tokens": 3,
             "total_latency_ms": 1234.5,
         }
+
+    @staticmethod
+    def _three_call_trajectory(**extra: object) -> dict:
+        """NVIDIA-NeMo/Gym#4722: three captured calls, only the first in the single agent turn."""
+        return {
+            NG_TRAJECTORY_KEY: {
+                "task_id": "t",
+                "rollout_id": "t-0",
+                "invocations": [{"invocation_id": "root", "model_calls": [{"model_call_id": "call-1"}]}],
+                "model_calls": [
+                    {"model_call_id": "call-1", "duration_ms": 40.0, "token_stats": {"prompt_tokens": 100}},
+                    {"model_call_id": "call-2", "duration_ms": 30.0, "token_stats": {"prompt_tokens": 200}},
+                    {"model_call_id": "call-3", "duration_ms": 20.0, "token_stats": {"prompt_tokens": 300}},
+                ],
+                **extra,
+            }
+        }
+
+    def test_captured_calls_are_attached_only_with_observability_on(self) -> None:
+        off = self._three_call_trajectory()
+        _attach_captured_calls(off, observability_enabled=False)
+        assert NG_CAPTURED_CALLS_KEY not in off
+        on = self._three_call_trajectory()
+        _attach_captured_calls(on, observability_enabled=True)
+        assert on[NG_CAPTURED_CALLS_KEY]["calls"] == 3
+        assert _is_collector_key(NG_CAPTURED_CALLS_KEY)
 
     def test_build_ng_perf_omits_absent_token_fields_and_latency(self) -> None:
         # No model_calls/tool_calls at all on the trajectory, and no independent latency

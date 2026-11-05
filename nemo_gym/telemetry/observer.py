@@ -35,6 +35,7 @@ These metrics make that pressure visible without inspecting private asyncio inte
 * ``gym.driver.rollouts.offered_total``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission_duration_ms``, ``gym.driver.output_write_duration_ms``, ``gym.driver.output_write_bytes``, and ``gym.driver.materialize_duration_ms`` histograms, from the rollout driver.
 * ``gym.driver.rollout.input_items``, ``gym.driver.rollout.output_items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
 * ``gym.concurrency.*``: the limit, slots in use, and waiters of every :class:`~nemo_gym.telemetry.concurrency.MeteredSemaphore` in the process.
+* ``gym.driver.rollout.model_calls`` by ``nemo.gym.model_call.role``: captured model calls in each completed rollout, once per role present, while model-call capture is on.
 
 Each kind of work runs where it costs the least:
 
@@ -92,6 +93,8 @@ ROLLOUT_INPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.input_items"
 ROLLOUT_OUTPUT_ITEMS_INSTRUMENT = "gym.driver.rollout.output_items"
 ROLLOUT_TURNS_INSTRUMENT = "gym.driver.rollout.turns"
 ROLLOUT_TOOL_CALLS_INSTRUMENT = "gym.driver.rollout.tool_calls"
+ROLLOUT_MODEL_CALLS_INSTRUMENT = "gym.driver.rollout.model_calls"
+MODEL_CALL_ROLE_ATTRIBUTE = "nemo.gym.model_call.role"
 
 EVENT_LOOP_ATTRIBUTE = "nemo.gym.event_loop"
 GC_GENERATION_ATTRIBUTE = "nemo.gym.gc.generation"
@@ -373,6 +376,11 @@ class _Instruments:
             ),
             ("turns", ROLLOUT_TURNS_INSTRUMENT, "Agent turns in one completed rollout, from its ng_perf."),
             ("tool_calls", ROLLOUT_TOOL_CALLS_INSTRUMENT, "Tool calls in one completed rollout."),
+            (
+                "model_calls",
+                ROLLOUT_MODEL_CALLS_INSTRUMENT,
+                "Captured model calls of one role in one completed rollout, from its ng_captured_calls.",
+            ),
         ):
             setattr(
                 self,
@@ -493,6 +501,7 @@ class _ProcessObserver:
         self.output_items = instruments.output_items
         self.turns = instruments.turns
         self.tool_calls = instruments.tool_calls
+        self.model_calls = instruments.model_calls
         self.lag = instruments.lag
         self.tasks = instruments.tasks
         self.gc_pause = instruments.gc_pause

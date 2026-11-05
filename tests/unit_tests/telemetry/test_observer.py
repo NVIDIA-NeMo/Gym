@@ -716,6 +716,19 @@ class TestRolloutShape:
         assert observer.ROLLOUT_TURNS_INSTRUMENT not in exported
         assert observer.ROLLOUT_INPUT_ITEMS_INSTRUMENT not in exported  # a string prompt has no item list
 
+    def test_model_calls_are_recorded_per_role_from_captured_calls(self, collected):
+        captured = {"by_role": {"agent": {"calls": 1}, "unattributed": {"calls": 2}}}
+        exported = self._record(collected, {}, {"response": {}, "ng_captured_calls": captured})
+        by_role = {
+            point.attributes[observer.MODEL_CALL_ROLE_ATTRIBUTE]: point.sum
+            for point in exported[observer.ROLLOUT_MODEL_CALLS_INSTRUMENT]
+        }
+        assert by_role == {"agent": 1, "unattributed": 2}
+
+    def test_no_model_calls_are_recorded_without_capture(self, collected):
+        exported = self._record(collected, {}, {"response": {}})
+        assert observer.ROLLOUT_MODEL_CALLS_INSTRUMENT not in exported
+
 
 def test_the_last_observer_to_stop_exports_the_final_totals(monkeypatch):
     """A short run ends before any periodic export, so stopping must export the counts while they still exist."""
