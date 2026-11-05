@@ -11,8 +11,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from nemo_gym import server_utils
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+import nemo_gym.client.http_client
+from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     EpisodeId,
@@ -25,9 +26,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
-from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig, ServerClient
-from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from nemo_gym.trajectory import TrajectoryRecord, TrajectoryTurn
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
@@ -784,8 +784,8 @@ class TestNativeSessions:
         trajectory = close.json()["trajectory"]
         assert trajectory["rollout_id"] == "r1"
         # The turn body carries no task identity; the trajectory names the seeded task the way the collector
-        # names a materialized row (``str(row["task_id"])``), not the rollout id.
-        assert trajectory["task_id"] == str(_seed_body()["task_id"]) == "{'taskset': 'tb', 'task_id': 'path-tracing'}"
+        # names the seeded task's scalar ID.
+        assert trajectory["task_id"] == _seed_body()["task_id"]["task_id"] == "path-tracing"
         [turn] = trajectory["turns"]
         assert turn["task_id"] == trajectory["task_id"]
         assert turn["invocation_id"] == observations["records"][0]["invocation_id"]
@@ -828,7 +828,7 @@ class TestNativeSessions:
         assert close.json()["agent_observations"]["records"][0]["invocation_id"] == "terminus2_x"
         assert close.json()["trajectory"] == trajectory.model_dump(mode="json")
         # The one run was handed the seeded task's collector identity.
-        assert identities == [str(_seed_body()["task_id"])]
+        assert identities == [_seed_body()["task_id"]["task_id"]]
 
     def test_seed_requires_sandbox_access(self, monkeypatch):
         _, client, _, _ = self._client(monkeypatch)
@@ -1064,10 +1064,10 @@ class TestHarnessOutcomes:
             probe.bind(("127.0.0.1", 0))
             closed_port = probe.getsockname()[1]
         monkeypatch.setattr(app_module, "MODEL_CONNECTION_RETRIES", 2)
-        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-        monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 1)
-        monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-        http_client = server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_nemo_gym_fastapi_num_workers", lambda: 1)
+        monkeypatch.setattr(nemo_gym.client.http_client, "is_nemo_gym_fastapi_worker", lambda: True)
+        http_client = nemo_gym.client.http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
 
         async def run(agent, instruction, environment, context):
             llm = agent.kwargs["llm"]
@@ -1081,7 +1081,7 @@ class TestHarnessOutcomes:
                 await _execute_with_harness(monkeypatch, run, config=_harness_config(sandbox_timeout=30))
         finally:
             await http_client.close()
-            monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
+            monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
         elapsed = perf_counter() - started
 
         # Two connection retries half a second apart, then ModelUnreachableError: a 502, not a verified timeout.

@@ -12,25 +12,32 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    AgentSessionState,
     SandboxCommand,
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.kilocode_agent.observability import read_kilo_snapshot
+from responses_api_agents.kilocode_agent.runtime import (
+    ASSISTANT_MESSAGE_PLUGIN_FILE,
+    ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+    RUNTIME_INSTALLER_FILE,
+    RUNTIME_INSTALLER_SOURCE,
+    TASK_ENVIRONMENT_PLUGIN_FILE,
+    TASK_ENVIRONMENT_PLUGIN_SOURCE,
+)
 
 
 LOG = logging.getLogger(__name__)
 LOG_TAIL_BYTES = 4096
-TASK_ENVIRONMENT_PLUGIN = "task_environment.mjs"
 # Per-run files the runner and plugin write next to the runtime; a rearmed activation must not read the preflight's.
 RUN_OUTPUTS = ("stdout.jsonl", "stderr.log", "runtime.json", "task-environment.ready", "required-mcp.ready")
 
@@ -160,7 +167,7 @@ class KiloSandboxSession(AgentSessionState):
     @property
     def task_environment_plugin(self) -> str:
         """The plugin, as a kilo.json entry, that restores the task's HOME and XDG directories for tools."""
-        return PurePosixPath(self.directory, TASK_ENVIRONMENT_PLUGIN).as_uri()
+        return PurePosixPath(self.directory, TASK_ENVIRONMENT_PLUGIN_FILE).as_uri()
 
     async def install_runtime(self, *, version: str, timeout: float) -> None:
         """Install pinned Node and Kilo into the session directory with the bundled installer."""
@@ -172,8 +179,8 @@ class KiloSandboxSession(AgentSessionState):
         if prepared.return_code != 0 or prepared.error_type:
             details = "\n".join(part for part in (prepared.stderr, prepared.stdout) if part)
             raise RuntimeError(f"Cannot prepare the Kilo session (exit {prepared.return_code}): {details[-16000:]}")
-        installer = f"{directory}/install_kilo_runtime.sh"
-        await sandbox.upload(Path(__file__).with_name("install_kilo_runtime.sh"), installer)
+        installer = f"{directory}/{RUNTIME_INSTALLER_FILE}"
+        await sandbox.upload(RUNTIME_INSTALLER_SOURCE, installer)
         installed = await sandbox.exec(
             f"bash {quote(installer)} {quote(directory + '/runtime')} {quote(version)}",
             cwd=self.session.workdir,
@@ -188,11 +195,13 @@ class KiloSandboxSession(AgentSessionState):
             )
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(
-            Path(__file__).with_name(TASK_ENVIRONMENT_PLUGIN), f"{directory}/{TASK_ENVIRONMENT_PLUGIN}"
+            ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+            f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}",
         )
+        await sandbox.upload(TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{directory}/{TASK_ENVIRONMENT_PLUGIN_FILE}")
 
     async def stage_activation(
-        self, *, command: list[str], config: str, mcp_preflight: bool = False
+        self, *, command: list[str], config: str, output_token_max: int | None = None, mcp_preflight: bool = False
     ) -> SandboxCommand:
         """Stage the isolated provider config and CLI argv without altering task files."""
         directory = self.directory
@@ -218,6 +227,11 @@ class KiloSandboxSession(AgentSessionState):
                 "XDG_DATA_HOME": f"{directory}/data",
                 "XDG_CONFIG_HOME": f"{directory}/config",
                 "XDG_CACHE_HOME": f"{directory}/cache",
+                **(
+                    {"KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_token_max)}
+                    if output_token_max is not None
+                    else {}
+                ),
                 "KILO_NO_DAEMON": "1",
                 "KILO_DB": f"{directory}/kilo.db",
                 "KILO_CONFIG": f"{directory}/kilo.json",

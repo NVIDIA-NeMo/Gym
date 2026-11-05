@@ -21,11 +21,14 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.mcp_auto_exposure import harvest_tools
+from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint, SandboxExecResult, SandboxHandle, SandboxStatus
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+    harvest_tools,
+)
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if import tool_sandbox
 from resources_servers.partner_if.task_data import TaskData, ToolBackendBundle
@@ -578,7 +581,7 @@ def test_the_sandboxed_example_runs_the_example_backend_on_the_example_tasks():
 
 
 def test_the_sandboxed_example_config_starts_and_gym_validates_its_rows(monkeypatch):
-    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema
 
     monkeypatch.setattr(tool_sandbox, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
     config = api.MockToolsServerConfig.model_validate(

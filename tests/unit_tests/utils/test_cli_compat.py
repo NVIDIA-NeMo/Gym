@@ -56,7 +56,7 @@ MOVED_SYMBOLS = [
     ("nemo_gym.rollout_collection", "collect_rollouts", "nemo_gym.cli.eval", "collect_rollouts"),
     ("nemo_gym.rollout_collection", "aggregate_rollouts", "nemo_gym.cli.eval", "aggregate_rollouts"),
     ("nemo_gym.train_data_utils", "prepare_data", "nemo_gym.cli.dataset", "prepare_data"),
-    ("nemo_gym.cli", "RunHelper", "nemo_gym.cli.env", "RunHelper"),
+    ("nemo_gym.cli", "RunHelper", "nemo_gym.orchestration.server_supervisor", "RunHelper"),
     ("nemo_gym.cli", "RunConfig", "nemo_gym.cli.env", "RunConfig"),
     ("nemo_gym.cli", "TestConfig", "nemo_gym.cli.env", "TestConfig"),
     ("nemo_gym.cli", "TestAllConfig", "nemo_gym.cli.env", "TestAllConfig"),
@@ -73,14 +73,12 @@ MOVED_SYMBOLS = [
     ("nemo_gym.cli", "VersionConfig", "nemo_gym.cli.general", "VersionConfig"),
     ("nemo_gym.cli", "version", "nemo_gym.cli.general", "version"),
     ("nemo_gym.cli", "GlobalConfigDictParserConfig", "nemo_gym.config.global_config", "GlobalConfigDictParserConfig"),
-    ("nemo_gym.cli_setup_command", "run_command", "nemo_gym.cli.setup_command", "run_command"),
-    ("nemo_gym.cli_setup_command", "setup_env_command", "nemo_gym.cli.setup_command", "setup_env_command"),
 ]
 
 
 @pytest.mark.parametrize("old_module, old_name, new_module, new_name", MOVED_SYMBOLS)
 def test_deprecated_import_still_resolves_and_warns(old_module, old_name, new_module, new_name) -> None:
-    old_mod = importlib.import_module(old_module)
+    # Importing an old module path that moved warns too, so it happens inside the block.
     with pytest.warns(DeprecationWarning):
-        resolved = getattr(old_mod, old_name)
+        resolved = getattr(importlib.import_module(old_module), old_name)
     assert resolved is getattr(importlib.import_module(new_module), new_name)

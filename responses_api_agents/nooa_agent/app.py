@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Body, FastAPI, HTTPException, Request
 
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -28,9 +28,9 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
-from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.trajectory import AgentInvocation
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
@@ -90,6 +90,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 server_client=self.server_client,
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
+                context_window=self.config.context_window,
             )
         else:
             if body.sandbox_access is None:
@@ -114,10 +115,14 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 timeout=self.config.sandbox_runner_timeout_seconds,
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
+                context_window=self.config.context_window,
             )
             state.runner = runner
             try:
-                runner.python = await prepare_nooa_runtime(sandbox)
+                runner.python = await prepare_nooa_runtime(
+                    sandbox,
+                    wheelhouse_path=self.config.runtime_wheelhouse,
+                )
                 await runner.prepare()
             except BaseException as error:
                 # Main retains this state for close while rejecting activation

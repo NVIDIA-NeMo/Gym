@@ -17,13 +17,13 @@ from unittest.mock import MagicMock
 
 from pytest import approx
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.ragtruth.app import (
     RagtruthResourcesServer,
     RagtruthResourcesServerConfig,

@@ -50,7 +50,14 @@ from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Set,
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY
+from nemo_gym.client import SESSION_ID_KEY, get_server_url
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
+from nemo_gym.core import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
+from nemo_gym.environment import is_deliverable
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -66,12 +73,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
-from nemo_gym.core import AGENT_TIMEOUT, JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, EpisodeId, TaskId
-from nemo_gym.deliverables import is_deliverable
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY
-from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, get_server_url
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.judge_panel import (
     ResolvedJudge,
@@ -557,7 +558,8 @@ def _permanent_judge_failure(
     )
 
 
-# The agent ran out of wall time. The row is retried like any other timeout and left out of the fit if it is waived.
+# The agent ran out of wall time. With the agent's answer kept, this is the model's result: never run again and left
+# out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
 
 
@@ -609,6 +611,9 @@ class _TaskSession:
 
 
 class GDPValResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: GDPValResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:
@@ -1949,6 +1954,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if staged:
             extra["comparison/num_stages"] = len(staged)
             stage_fits: Dict[int, tuple[Optional[float], Optional[float], int]] = {}
+            # Per stage, the rows its fit used: judged ones and losses imputed for a missing evaluation.
+            stage_fit_rows: Dict[int, int] = {}
             for stage_index in sorted(staged):
                 stage_responses = staged[stage_index]
                 _, _, _, stage_ref_totals = _accumulate(stage_responses)
@@ -1974,6 +1981,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
                 extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
                 extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
+                stage_fit_rows[stage_index] = len(
+                    {
+                        (vr.get("_ng_task_index", vr.get("task_id")), vr.get("_ng_rollout_index", 0))
+                        for vr in judged_rows + imputed
+                    }
+                )
 
             headline_stage_index: Optional[int] = None
             headline: Optional[tuple[Optional[float], Optional[float], int]] = None
@@ -2024,6 +2037,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 if final_stage_accepted and final_stage_fit:
                     headline_stage_index = expected_final_stage_index
                     headline = candidate
+                    if expected_final_stage_count is not None:
+                        # The headline ELO covers the final stage's fit rows of the rows that stage planned.
+                        extra["metric_coverage/trials"] = stage_fit_rows[expected_final_stage_index]
+                        extra["metric_coverage/expected"] = int(expected_final_stage_count)
                 extra["comparison/final_stage_present"] = int(final_stage_present)
                 extra["comparison/final_stage_complete"] = int(final_stage_complete)
                 extra["comparison/final_stage_partial_accepted"] = int(final_stage_partial_accepted)

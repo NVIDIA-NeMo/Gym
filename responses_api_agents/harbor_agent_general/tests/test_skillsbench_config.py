@@ -10,8 +10,8 @@ from unittest.mock import Mock, patch
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
-from nemo_gym.server_utils import entrypoint_ray_enabled
+from nemo_gym.models import CaptureStore, ModelCallCaptureConfig, install_model_call_capture
+from nemo_gym.server_runtime import entrypoint_ray_enabled
 from responses_api_agents.harbor_agent_general import app, skillsbench_app
 from responses_api_agents.harbor_agent_general.app import HarborRunRequest, temporary_worker_env
 from responses_api_agents.harbor_agent_general.skillsbench_app import (
@@ -189,3 +189,12 @@ async def test_concurrent_dispatch_uses_per_row_model_capture_urls(tmp_path, mon
             assert response.status_code == 200
             records = CaptureStore(tmp_path).read(capture_key)
             assert len(records) == (1 if enabled else 0)
+
+
+def test_the_leaf_sets_the_llm_request_timeout_and_keeps_the_task_agent_budgets():
+    config = OmegaConf.load(ROOT / "benchmarks/skillsbench/harbor.yaml")
+    job = config.skillsbench_harbor_agent.responses_api_agents.harbor_agent_general.job
+    kwargs = job.agents[0].kwargs
+    assert (kwargs.llm_timeout_s, kwargs.llm_num_retries) == (3600, 5)
+    # Each task's own [agent] timeout_sec is the benchmark's budget; Harbor scales it by this unchanged multiplier.
+    assert job.agent_timeout_multiplier == 1.0 and "override_timeout_sec" not in job.agents[0]

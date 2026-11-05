@@ -23,6 +23,7 @@ import shlex
 import shutil
 import signal
 from asyncio import Semaphore
+from collections.abc import Mapping
 from pathlib import Path
 from time import perf_counter, time
 from typing import Any, Optional
@@ -32,20 +33,24 @@ from fastapi import HTTPException, Request
 from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_COMMAND_NOT_STARTED, HARNESS_RUNNER_FAILED, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
+    SandboxSession,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -58,7 +63,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -67,8 +71,14 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+)
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
@@ -326,11 +336,11 @@ class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # keeps whatever it declares. They are config fields rather than `kilo_config` keys because the
     # config merge is struct-mode, so a config using `_inherit_from` cannot add keys under `models`.
     #
-    # `context_window` is what kilo measures a session against. It only drives auto-compaction when
-    # `kilo_config` also sets `compaction.threshold_percent`; 0 disables that accounting entirely.
+    # `context_window` drives usage-based compaction. Setting `kilo_config.compaction.threshold_percent`
+    # also enables Kilo's outgoing-request preflight check, before contacting the model server.
     context_window: int = 32768
-    # `max_output_tokens` is the per-request output budget; kilo asks the model server for
-    # min(this, its own OUTPUT_TOKEN_MAX of 32000), so values above 32000 have no effect.
+    # Set Kilo's output ceiling as well as its model metadata so its default 32000 cap does not
+    # silently truncate a larger configured per-request output budget.
     #
     # Setting it too high fails silently, which is why the default is conservative. Kilo's system
     # prompt and tool definitions run to ~10k tokens, and vLLM rejects prompt + max_tokens >
@@ -378,6 +388,14 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
     resources server to verify. Kilo's model calls go through ``model_server`` when one is set — see
     that field. Eval-only either way: token IDs and logprobs are not wired up.
     """
+
+    def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
+        """Preserve the HTTP status carried by the pinned CLI's APIError event."""
+        data = native_result.get("data")
+        status = data.get("statusCode") if isinstance(data, dict) else None
+        if native_result.get("name") == "APIError" and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     config: KiloCodeAgentConfig
     sem: Semaphore = None
@@ -553,6 +571,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         else:
             observations = artifacts.observations.model_copy(deep=True)
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if outcome == "failed" or record.status == "failed":
                     record.status = "failed"
@@ -671,6 +691,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         if api_key:
             env["OPENAI_API_KEY"] = api_key
         env.update({k: v for k, v in self.config.env.items() if v})
+        if self.config.model_server:
+            env["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(self.config.max_output_tokens)
         return env
 
     def _build_command(self, project_dir: Path, prompt: str) -> list[str]:
@@ -841,6 +863,10 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         response = self._build_response(
             body, output_items, usage, self.config.model, incomplete=timed_out or length_stop
         )
+        if isinstance(error, dict) and self.classify_outcome(error).failure_kind == MODEL_REQUEST_ERROR:
+            response.status = "failed"
+            response.error = ResponseError(code="server_error", message=problem[:2000])
+            response = self.report_outcome(response, error)
         return response, problem
 
     async def _sandbox_response(
@@ -869,6 +895,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 stage_activation=lambda: state.stage_activation(
                     command=command,
                     config=json.dumps(config),
+                    output_token_max=self.config.max_output_tokens if self.config.model_server else None,
                 ),
                 collect=state.collect_artifacts,
                 timeout=self.config.timeout,
@@ -882,9 +909,24 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
             diagnostics=artifacts.log_tail or artifacts.stderr[-4096:],
         )
         if problem is not None:
-            # Agent sessions must not hand a failed run to the verifier, where it would score as a zero.
-            raise RuntimeError(state.redact_diagnostics(problem))
+            cleanup = state.session.cleanup
+            if not (
+                "ng_agent_outcome" in (response.metadata or {})
+                and cleanup
+                and cleanup["cleanup_confirmed"]
+                and not cleanup["timed_out"]
+                and not cleanup["error"]
+                and cleanup["return_code"] in (0, 1)
+                and artifacts.exit_code in (0, 1)
+                and artifacts.task_environment_ready
+                and artifacts.required_mcp_ready
+            ):
+                raise RuntimeError(state.redact_diagnostics(problem))
+            # Kilo exits 1 for a terminal APIError. Preserve that model response so
+            # the Environment Server can apply its failure/retry policy.
+            response.error = ResponseError(code="server_error", message=state.redact_diagnostics(problem)[:2000])
         response.metadata = {
+            **(response.metadata or {}),
             "harness_execution": "sandbox",
             **(
                 {"harness_hostname": artifacts.runner_hostname, "harness_pid": str(artifacts.runner_pid)}
@@ -964,6 +1006,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_artifact_unavailable")],
             )
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if problem is not None:
                     record.status = "failed"

@@ -22,6 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -29,7 +30,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.cvdp_agent.app import (
     CVDPAgent,
     CVDPAgentConfig,
@@ -236,20 +236,16 @@ class TestAgenticSandboxSpec:
         assert spec.env["NV_AGENT_HOME"] == "/code/.home"
 
     def test_sandbox_model_url_carries_the_current_span(self, monkeypatch) -> None:
-        from nemo_gym import server_utils
-
         segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: segment)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: segment)
         agent = self._agent(deps_provision="archive")
         agent._model_url = MagicMock(return_value="http://model.example")
         spec = agent._build_spec(self._run_request(), "build rtl", {}, agent._resolve_image())
         assert spec.env["NV_MODEL_URL"] == f"http://model.example{segment}"
 
     def test_sandbox_model_url_carries_the_rollout_prefix_when_capture_is_on(self, monkeypatch) -> None:
-        from nemo_gym import server_utils
-
         segment = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: segment)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: segment)
         agent = self._agent(deps_provision="archive")
         agent.server_client.global_config_dict = {"observability_enabled": True}
         agent._model_url = MagicMock(return_value="http://model.example")

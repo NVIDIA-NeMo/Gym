@@ -1,0 +1,190 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Agent-reported causes, independent of environment grading and retry policy."""
+
+from enum import StrEnum
+from typing import TYPE_CHECKING, Annotated
+
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
+
+from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.core.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    FAILURE_KINDS,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+)
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
+from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
+
+
+if TYPE_CHECKING:
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+
+AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
+
+
+class AgentOutcome(BaseModel):
+    """Additional evidence distinguishing causes of a failed agent response.
+
+    Ordinary completion and limits already use response.status. HTTP status here
+    belongs to the upstream model request, not the agent endpoint's HTTP 200.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    failure_kind: str
+    status_code: int | None = Field(default=None, ge=400, le=599, strict=True)
+
+    @field_validator("failure_kind")
+    @classmethod
+    def require_registered_kind(cls, value: str) -> str:
+        """Accept the shared vocabulary plus an explicitly undetermined cause."""
+        if value != "unknown" and value not in FAILURE_KINDS:
+            raise ValueError(f"Unregistered failure kind: {value}")
+        return value
+
+    @model_validator(mode="after")
+    def require_request_status(self) -> "AgentOutcome":
+        if (self.failure_kind == MODEL_REQUEST_ERROR) != (self.status_code is not None):
+            raise ValueError("Only model_request_error requires an upstream HTTP status")
+        return self
+
+
+class OutcomeAction(StrEnum):
+    """Mutually exclusive grading or episode-failure action."""
+
+    VERIFY = "verify"
+    RETRY = "retry"
+    FAIL = "fail"
+    COUNT_AS_ZERO = "count_as_zero"
+
+
+class OutcomePolicyConfig(BaseModel):
+    """Select an action from explicit failure evidence; partial overrides retain boundary defaults."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(default_factory=dict)
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(default_factory=dict)
+    default_action: OutcomeAction
+
+    @field_validator("by_failure_kind", "by_status_code")
+    @classmethod
+    def merge_default_rules(
+        cls, value: dict[str | int, OutcomeAction], info: ValidationInfo
+    ) -> dict[str | int, OutcomeAction]:
+        """Merge validated overrides so JSON status keys are normalized before replacing defaults."""
+        return cls.model_fields[info.field_name].get_default(call_default_factory=True) | value
+
+    @field_validator("by_failure_kind")
+    @classmethod
+    def require_registered_kinds(cls, value: dict[str, OutcomeAction]) -> dict[str, OutcomeAction]:
+        """Reject misspelled failure names at configuration load, before starting an evaluation."""
+        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+        if invalid:
+            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
+        return value
+
+
+class AgentOutcomePolicyConfig(OutcomePolicyConfig):
+    """Existing Environment Server defaults for classified failed agent responses."""
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(
+        default_factory=lambda: {
+            AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
+            AGENT_LIMIT: OutcomeAction.VERIFY,
+            MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            "unknown": OutcomeAction.RETRY,
+        }
+    )
+    by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(
+        default_factory=lambda: {
+            **dict.fromkeys((400, 413, 422), OutcomeAction.VERIFY),
+            **dict.fromkeys(filter(is_retryable_dependency_status, range(400, 600)), OutcomeAction.RETRY),
+        }
+    )
+    default_action: OutcomeAction = OutcomeAction.FAIL
+
+    @model_validator(mode="after")
+    def require_environment_actions(self) -> "AgentOutcomePolicyConfig":
+        """These boundaries can verify or fail an episode, but cannot execute an explicit-zero action."""
+        if OutcomeAction.COUNT_AS_ZERO in [
+            self.default_action,
+            *self.by_failure_kind.values(),
+            *self.by_status_code.values(),
+        ]:
+            raise ValueError("Environment Server policy does not support count_as_zero")
+        return self
+
+
+def choose_action(*, failure_kind: str, http_status: int | None, config: OutcomePolicyConfig) -> OutcomeAction:
+    """Select by status, then kind, then default; parsing and execution belong to the boundary."""
+    return config.by_status_code.get(http_status, config.by_failure_kind.get(failure_kind, config.default_action))
+
+
+def failure_outcome_policy(failure: "NgFailureEvent", *, config: OutcomePolicyConfig) -> OutcomeAction:
+    """Adapt only this event's selected kind and status, without searching its causal chain."""
+    return choose_action(failure_kind=failure.failure_kind, http_status=failure.http_status, config=config)
+
+
+def agent_outcome_policy(
+    response: "NeMoGymResponse", *, config: AgentOutcomePolicyConfig | None = None
+) -> OutcomeAction:
+    """Apply configured grading/retry rules to a classified failed response.
+
+    Unclassified legacy responses retain their existing grading behavior; malformed
+    metadata is an ungraded, nonretryable failure regardless of configuration.
+    """
+    raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    if response.status != "failed" or raw is None:
+        return OutcomeAction.VERIFY
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        # Keep malformed classification in the partial response for diagnosis, not scoring.
+        return OutcomeAction.FAIL
+    config = config or AgentOutcomePolicyConfig()
+    return choose_action(failure_kind=outcome.failure_kind, http_status=outcome.status_code, config=config)
+
+
+def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether the selected model operation timed out after upload on every observed attempt.
+
+    Unidentified, mixed, omitted or connecting attempts do not establish a final response timeout.
+    """
+    if report is None or report.omitted or report.failure_id is None:
+        return False
+    final = report.events.get(report.failure_id)
+    if (
+        final is None
+        or final.boundary != FailureBoundary.MODEL
+        or final.operation != "model_request"
+        or not final.operation_id
+        or not final.attempt_id
+    ):
+        return False
+    observed = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
+    ]
+    # An unidentified attempt cannot be proven to belong to an earlier operation instead of the final one.
+    if any(not event.operation_id or not event.attempt_id for event in observed):
+        return False
+    attempts = [event for event in observed if event.operation_id == final.operation_id]
+    return (
+        bool(attempts)
+        and len({event.attempt_id for event in attempts}) == len(attempts)
+        and all(
+            event.attempt_id
+            and isinstance(event.details, ModelFailureDetails)
+            and event.details.request_upload_complete is True
+            and event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+            for event in attempts
+        )
+    )

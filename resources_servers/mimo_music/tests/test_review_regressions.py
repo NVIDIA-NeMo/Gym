@@ -10,7 +10,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.server_utils import entrypoint_ray_enabled
+from nemo_gym.server_runtime import entrypoint_ray_enabled
 from resources_servers.mimo_music.app import MimoMusicResourcesServer
 from resources_servers.mimo_music.tests.test_app import ABC, request, server
 
@@ -34,10 +34,10 @@ def test_config_resolves_with_environment_server() -> None:
             offline=True,
         )
     )
-    relay = config.mimo_music_environment_server.environment_servers.legacy_agent
-    assert relay.entrypoint == "app.py"
-    assert relay.agent_server.type == "responses_api_agents"
-    assert relay.agent_server.name == "mimo_music_simple_agent"
+    environment = config.mimo_music_environment_server.environment_servers.single_agent_turn_legacy
+    assert environment.entrypoint == "app.py"
+    assert environment.agent_server.type == "responses_api_agents"
+    assert environment.agent_server.name == "mimo_music_simple_agent"
     agent = config.mimo_music_simple_agent.responses_api_agents.simple_agent
     assert agent.resources_server.name == "mimo_music"
     assert agent.max_steps == 1

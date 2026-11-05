@@ -22,13 +22,13 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -51,7 +51,7 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
         name="",
         reward_mode=reward_mode,
         judge_model_server={"type": "responses_api_models", "name": "judge"},
-        tavily_api_key="test-key",
+        tavily_api_key="test-key",  # pragma: allowlist secret
         sandbox_provider="test",
         sandbox_config={},
         persist_deliverables_dir="unused",
@@ -1777,6 +1777,8 @@ class TestMultiReference:
         assert metrics["comparison/stage_1/imputed_loss_votes"] == 4
         assert metrics["comparison/final_stage_complete"] == 1
         assert metrics["comparison/eval_elo"] == pytest.approx(calculate_mle_elo([(1000.0, 3, 5, 0)])[0])
+        # The headline fit used both final-stage rows, the judged one and the imputed loss, of the two planned.
+        assert (metrics["metric_coverage/trials"], metrics["metric_coverage/expected"]) == (2, 2)
 
     def test_aggregate_metrics_stage_aware_headline_is_expected_final_stage(self) -> None:
         """The declared final stage supplies the headline when its fit is usable."""
@@ -1895,6 +1897,7 @@ class TestMultiReference:
         assert "comparison/stage_0/eval_elo" in metrics
         assert "comparison/eval_elo" not in metrics
         assert "comparison/headline_stage_index" not in metrics
+        assert "metric_coverage/trials" not in metrics and "metric_coverage/expected" not in metrics
         assert metrics["comparison/expected_final_stage_index"] == 1
         assert metrics["comparison/final_stage_present"] == 0
         assert metrics["comparison/final_stage_complete"] == 0
@@ -1909,8 +1912,8 @@ class TestMultiReference:
         """
         import asyncio as _asyncio
 
-        from nemo_gym.base_resources_server import lost_session_verification
         from nemo_gym.config import AggregateMetricsRequest
+        from nemo_gym.server_runtime import lost_session_verification
 
         server = _server(
             reward_mode="comparison",
@@ -2113,6 +2116,9 @@ class TestMultiReference:
         assert metrics["comparison/final_stage_partial_accepted"] == int(accepted)
         assert metrics["comparison/final_stage_degraded"] == int(not accepted)
         assert ("comparison/eval_elo" in metrics) is accepted
+        # An accepted partial final stage: the headline covers its one fit row of the two it planned.
+        coverage = (metrics.get("metric_coverage/trials"), metrics.get("metric_coverage/expected"))
+        assert coverage == ((1, 2) if accepted else (None, None))
 
     def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
         """The same ``(task_index, rollout_index)`` may recur across stages (one

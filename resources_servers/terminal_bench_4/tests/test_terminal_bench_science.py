@@ -3,6 +3,7 @@
 """Terminal-Bench-Science on the pinned Harbor-package runtime shared with TB4."""
 
 import json
+import shlex
 from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,12 +15,17 @@ from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, global_config
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandboxCompose, SandboxExecResult, create_provider, resolve_provider_config
-from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.data import TaskDataValidator, load_task_data_schema
+from nemo_gym.sandbox import (
+    AsyncSandboxCompose,
+    OpenSandboxProvider,
+    SandboxExecResult,
+    create_provider,
+    resolve_provider_config,
+)
 from resources_servers.terminal_bench_4 import environment as environment_module
 from resources_servers.terminal_bench_4 import shared_logs as shared_logs_module
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
@@ -478,6 +484,7 @@ async def test_every_trial_sandbox_asks_for_single_process_oom_kills(tmp_path, m
         await provider.create(spec)
         assert sent[-1]["nemo.nvidia.com/oom-kill"] == "process", role
         assert sent[-1]["nemo.nvidia.com/resources"] == "custom", role
+        assert sent[-1]["nemo.nvidia.com/s3-hostpath"] == "false", role
     await provider.aclose()
 
 
@@ -823,7 +830,7 @@ def test_codex_rows_embed_the_official_instruction(tmp_path, monkeypatch, timeou
 def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_missing(tmp_path, monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
     from nemo_gym import PARENT_DIR
-    from nemo_gym.cli import setup_command
+    from nemo_gym.orchestration import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.chdir(tmp_path)
@@ -846,14 +853,21 @@ def test_codex_rows_are_prepared_in_the_server_environment_when_pathspec_is_miss
         f" && {python} -m benchmarks.terminal_bench_science.prepare_codex --task-names {' '.join(in_manifest_order)} "
         f"--task-download-dir {tmp_path / 'packages'}"
     )
-    assert "uv pip install" in command  # sets up the server's environment as `gym env start` does
+    _, setup_command, _ = command.split(" && ", 2)
+    setup_args = shlex.split(setup_command)
+    assert Path(setup_args[1]).name == "venv_setup.py"
+    assert setup_args[setup_args.index("--venv") + 1] == str(python.parent.parent)
+    install_args = shlex.split(setup_args[setup_args.index("--command") + 1])
+    assert Path(install_args[1]).name == "_locked_env.py"
+    assert install_args[install_args.index("--project") + 1] == str(prepare_codex.SERVER_DIR)
+    assert install_args[install_args.index("--venv") + 1] == str(python.parent.parent)
     assert (working_dir, kwargs["project_root"]) == (prepare_codex.SERVER_DIR, PARENT_DIR)
     assert kwargs["extra_env"] == {prepare_codex.IN_SERVER_ENVIRONMENT_ENV_VAR: "1"}
 
 
 def test_codex_rows_fail_when_the_server_environment_run_fails(monkeypatch):
     from benchmarks.terminal_bench_science import prepare_codex
-    from nemo_gym.cli import setup_command
+    from nemo_gym.orchestration import server_venv as setup_command
 
     monkeypatch.setattr(prepare_codex, "_needs_server_environment", lambda: True)
     monkeypatch.setattr(setup_command, "run_command", lambda *args, **kwargs: SimpleNamespace(wait=lambda: 3))

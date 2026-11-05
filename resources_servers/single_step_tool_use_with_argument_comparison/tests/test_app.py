@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 from openai.types.responses import FunctionToolParam
 from pytest import approx, fixture
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -29,7 +30,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.single_step_tool_use_with_argument_comparison.app import (
     SingleStepToolUseArgumentComparisonResourcesServer,
     SingleStepToolUseArgumentComparisonResourcesServerConfig,
