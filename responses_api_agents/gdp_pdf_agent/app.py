@@ -39,7 +39,7 @@ raise, so the row still gets verified (and scores 0, since an empty answer earns
 rather than being dropped from the run entirely.
 
 An agent session gets the manifest from the task's ``agent_context`` (``artifacts.document_manifest``) and runs
-the same delivery and backoff inside its one activation. The delivery record goes into the response's
+the same delivery and backoff in the episode of its one activation; the agent loop stays Simple Agent's. The delivery record goes into the response's
 ``document_delivery`` metadata, and the Environment Server verifies the answer.
 """
 
@@ -48,7 +48,6 @@ import io
 import json
 import math
 import re
-from contextvars import ContextVar
 from dataclasses import dataclass, fields
 from http import HTTPStatus
 from pathlib import Path
@@ -56,7 +55,7 @@ from time import time
 from typing import Any, Awaitable, Callable, Literal, Optional
 
 from aiohttp import ClientResponseError
-from fastapi import Request, Response
+from fastapi import Request
 from PIL import Image, ImageDraw
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -66,7 +65,6 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
-    Body,
     resolve_agent_context_artifact,
 )
 from nemo_gym.agents.utils.verify_call import verify_with_transport_retry
@@ -538,8 +536,6 @@ def _strip_trajectory_images(trajectory: TrajectoryRecord) -> TrajectoryRecord:
 
 # The response metadata key a session's delivery record goes in, the one a /run result carries as a field.
 DOCUMENT_DELIVERY_METADATA_KEY = "document_delivery"
-# The manifest of the session whose activation is running, for the episode the activation creates.
-_SESSION_MANIFEST: ContextVar[Optional[Path]] = ContextVar("gdp_pdf_session_manifest", default=None)
 
 
 class GdpPdfAgentContext(BaseModel):
@@ -581,30 +577,16 @@ class GdpPdfAgent(SimpleAgent):
             **{field.name: getattr(state, field.name) for field in fields(state)}, manifest_path=manifest_path
         )
 
-    async def responses(
-        self,
-        request: Request,
-        response: Response,
-        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
-    ) -> NeMoGymResponse:
-        agent_session_id = self._agent_session_id_from_request(request)
-        state = self._session_state(agent_session_id) if agent_session_id is not None else None
-        token = _SESSION_MANIFEST.set(state.manifest_path if isinstance(state, GdpPdfSessionState) else None)
-        try:
-            return await super().responses(request, response, body)
-        finally:
-            _SESSION_MANIFEST.reset(token)
-
-    async def _create_episode(self, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any) -> tuple:
-        manifest_path = _SESSION_MANIFEST.get()
-        if (
-            manifest_path is None
-            or not kwargs.get("in_session")
-            or not (self.config.include_text or self.config.include_images)
-        ):
-            return await super()._create_episode(body, **kwargs)
-        create_episode = super()._create_episode
-        return await self._answer_with_document(body, manifest_path, lambda params: create_episode(params, **kwargs))
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        create_episode = super()._create_session_episode
+        manifest_path = state.manifest_path if isinstance(state, GdpPdfSessionState) else None
+        if manifest_path is None or not (self.config.include_text or self.config.include_images):
+            return await create_episode(state, body, **kwargs)
+        return await self._answer_with_document(
+            body, manifest_path, lambda params: create_episode(state, params, **kwargs)
+        )
 
     def _document_request(
         self,
