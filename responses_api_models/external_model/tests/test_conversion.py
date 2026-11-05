@@ -22,6 +22,10 @@ import re
 from types import SimpleNamespace
 
 import pytest
+from tokenizers import Tokenizer as FastTokenizer
+from tokenizers.models import WordLevel
+from tokenizers.pre_tokenizers import Whitespace
+from transformers import PreTrainedTokenizerFast
 
 from responses_api_models.external_model.conversion import (
     chat_response,
@@ -52,6 +56,21 @@ def test_sends_exact_prompt_ids_and_sampling_parameters():
     assert request["return_tokens_as_token_ids"] and request["logprobs"] == 0
     assert calls[0][0] == [{"role": "user", "content": "hello"}]
     assert calls[0][1]["enable_thinking"] is False
+
+
+def test_renders_chat_template_with_local_tokenizer() -> None:
+    backend = FastTokenizer(WordLevel({"[UNK]": 0, "user": 1, ":": 2, "hello": 3, "assistant": 4}, unk_token="[UNK]"))
+    backend.pre_tokenizer = Whitespace()
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="[UNK]")
+    tokenizer.chat_template = (
+        "{% for message in messages %}{{ message['role'] }}: {{ message['content'] }} {% endfor %}"
+        "{% if add_generation_prompt %}assistant: {% endif %}"
+    )
+    request = completion_request(
+        {"model": "model", "messages": [{"role": "user", "content": "hello"}], "max_tokens": 5},
+        tokenizer,
+    )
+    assert request["prompt"] == [1, 2, 3, 4, 2]
 
 
 def test_a_cache_salt_goes_out_in_nvext() -> None:
