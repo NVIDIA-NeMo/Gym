@@ -753,11 +753,14 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                     del self._session_locks[session_id]
 
     async def _shutdown_all_sessions(self) -> None:
-        for session_id in list(self._sessions):
-            try:
-                await self._cleanup_session(session_id)
-            except Exception:
-                logger.exception("Could not stop the sandbox of litmus_agent session %s at shutdown", session_id)
+        # Stop concurrently: the server supervisor kills the process about a second after asking it to stop.
+        session_ids = list(self._sessions)
+        results = await asyncio.gather(*map(self._cleanup_session, session_ids), return_exceptions=True)
+        for session_id, result in zip(session_ids, results):
+            if isinstance(result, BaseException):
+                logger.error(
+                    "Could not stop the sandbox of litmus_agent session %s at shutdown", session_id, exc_info=result
+                )
 
     # -- sessions -----------------------------------------------------------
 

@@ -36,10 +36,11 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
+    ResourcesParticipant,
     ResourcesSeedSessionRequest,
     ResourcesSessionLostError,
+    check_resources_session_contract,
 )
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 from resources_servers.litmus_agent.app import (
     _ANSWER_FORMAT_REGEXES,
     _CODE_EXEC_DRIVER_PATH,
@@ -910,8 +911,6 @@ class TestResourcesSessions:
         assert server._verified_sessions.get("rs-1") is None
 
     async def test_checkpoint_retire_releases_owned_sandbox_and_retries_failure(self) -> None:
-        from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
-
         server = _make_sandbox_server()
         await server.seed_session(
             ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=_FakeRequest("rs-1")
@@ -1214,7 +1213,7 @@ class TestResourcesSessions:
         finally:
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
 
-    async def test_shutdown_stops_the_rest_after_a_failed_stop(self):
+    async def test_shutdown_stops_the_rest_after_a_failed_stop(self, caplog):
         server = _make_sandbox_server()
         await _run_code(server, "s1", "print(1)")
         failing = _LocalFakeProvider.instances[-1]
@@ -1226,3 +1225,55 @@ class TestResourcesSessions:
 
         assert healthy.closed == 1
         assert list(server._sessions) == ["s1"]
+        assert "litmus_agent session s1 at shutdown" in caplog.text
+        assert "session s2" not in caplog.text
+
+    async def test_shutdown_stops_sandboxes_concurrently(self, monkeypatch):
+        # The server supervisor kills the process about a second after asking it to stop, so stops cannot queue.
+        server = _make_sandbox_server()
+        await _run_code(server, "s1", "print(1)")
+        await _run_code(server, "s2", "print(2)")
+        stopping = 0
+        both_stopping = asyncio.Event()
+        real_close = _LocalFakeProvider.close
+
+        async def close_once_both_are_stopping(provider, handle):
+            nonlocal stopping
+            stopping += 1
+            if stopping == 2:
+                both_stopping.set()
+            await asyncio.wait_for(both_stopping.wait(), timeout=1)
+            await real_close(provider, handle)
+
+        monkeypatch.setattr(_LocalFakeProvider, "close", close_once_both_are_stopping)
+        await server._shutdown_all_sessions()
+
+        assert server._sessions == {}
+        assert sum(provider.closed for provider in _LocalFakeProvider.instances[-2:]) == 2
+
+    async def test_shutdown_during_startup_waits_then_stops_the_sandbox(self, monkeypatch):
+        server = _make_sandbox_server()
+        creating = asyncio.Event()
+        finish_create = asyncio.Event()
+        real_create = _LocalFakeProvider.create
+
+        async def delayed_create(provider, spec):
+            creating.set()
+            await finish_create.wait()
+            return await real_create(provider, spec)
+
+        monkeypatch.setattr(_LocalFakeProvider, "create", delayed_create)
+        tool_call = asyncio.create_task(_run_code(server, "s1", "print(1)"))
+        await creating.wait()
+        shutdown = asyncio.create_task(server._shutdown_all_sessions())
+        await asyncio.sleep(0.05)
+        # Stopping now would only release the client, and the container the start then creates would leak.
+        assert not shutdown.done()
+        finish_create.set()
+
+        await shutdown
+        provider = _LocalFakeProvider.instances[-1]
+        assert provider.created == 1 and provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
+        with pytest.raises(ResourcesSessionLostError):
+            await tool_call

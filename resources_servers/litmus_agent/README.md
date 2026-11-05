@@ -176,9 +176,11 @@ the same name the dataset rows advertise in `responses_create_params.tools`. Whe
 `sandbox_provider` is unset the server is a pure verifier and serves no tool.
 
 **Lifecycle.** A sandbox is created **lazily** on a session's first tool call and
-reaped when that rollout's `/verify` runs (and any stragglers on server
-shutdown). Direct (no-tool) rows never create a sandbox, so a run with no
-tool-using rows works even without provider credentials.
+reaped when that rollout's `/verify` runs. At server shutdown the server stops the
+remaining sandboxes concurrently, but only those it can stop within the shutdown
+grace; a sandbox it does not stop is left to the provider's `ttl_s` expiry, where
+the provider supports one. Direct (no-tool) rows never create a sandbox, so a run
+with no tool-using rows works even without provider credentials.
 
 Under an Environment Server, such as `litmus_agent_environment_server`
 (`single_agent_turn_legacy`), `/seed_session` binds the session cookie to the
@@ -196,7 +198,9 @@ sample with reward 0.
 
 The deprecated cookie seed used by an Agent's own `/run` keeps the session ID and stops any previous sandbox before
 resetting the run. A failed stop preserves the sandbox for retry; the first tool call after a successful reseed
-starts a fresh sandbox.
+starts a fresh sandbox. After a cookie session's `/verify`, a tool call on that cookie gets 404 with
+`failure_kind: session_lost` until the cookie is seeded again. A cookie seed for a session that has closed is
+refused with 409 for `session_close_retry_window_seconds`.
 
 **Statefulness (replay model).** The sandbox runs one-shot commands, not a live
 Python kernel. Statefulness across calls within a session is emulated by
