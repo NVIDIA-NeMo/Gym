@@ -127,6 +127,8 @@ def test_real_cli_writes_numeric_reports_without_overwriting_run_reports(
     assert result.overall.statistics.baseline_mean == pytest.approx(50)
     assert result.overall.statistics.candidate_mean == pytest.approx(65)
     payload = json.loads(report_bytes)
+    assert payload["schema_version"] == "1"
+    assert "level" not in payload
     for comparison in [*payload["per_model"], payload["overall"], *payload["cells"]]:
         statistics = comparison["statistics"]
         assert statistics["delta"] == pytest.approx(statistics["candidate_mean"] - statistics["baseline_mean"])

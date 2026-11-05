@@ -226,6 +226,7 @@ def _run_summary(run: LoadedSuiteRun, coverage: SuiteCoverage, scores: tuple[flo
         aggregate_metrics=run.aggregate_metrics,
         materialized_inputs=run.materialized_inputs,
         agent=run.agent,
+        environment_server=run.environment_server,
         repeat_count=run.repeat_count,
         repeat_indices=[int(row[ROLLOUT_INDEX_KEY_NAME]) for row in run.repeat_rows],
         repeat_scores=list(scores),

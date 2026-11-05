@@ -25,6 +25,7 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
 from nemo_gym.eval.comparison.suite.loading import load_suite_run
 from nemo_gym.eval.comparison.suite.processing import compare_suite_cell
+from nemo_gym.eval.comparison.suite.report import write_suite_reports
 from nemo_gym.eval.comparison.suite.runner import build_suite_comparison
 from nemo_gym.eval.comparison.suite.schema import (
     SuiteComparisonConfig,
@@ -116,6 +117,49 @@ def _edit_entry(rollouts: str, update) -> None:
     entries = orjson.loads(path.read_bytes())
     update(entries[0])
     path.write_bytes(orjson.dumps(entries))
+
+
+def _write_routed_run(
+    directory: Path,
+    sources: list[tuple[str, str, tuple[int, ...], list[dict[str, float]]]],
+) -> str:
+    """Write stored summaries and taskset-routed plans for several scoring servers."""
+    directory.mkdir(parents=True, exist_ok=True)
+    rollouts = directory / "rollouts.jsonl"
+    rollouts.write_text("trajectory contents are deliberately unavailable\n")
+    entries = []
+    rows = []
+    for server, agent, tasks, values in sources:
+        entries.append(
+            {
+                "agent_ref": {"name": agent},
+                "_ng_environment_server": server,
+                "agent_metrics": {"num_repeats": len(values)},
+                "repeat_level_metrics": [
+                    {"_ng_rollout_index": repeat, "sample_count": len(tasks), "missing_count": 0, **metrics}
+                    for repeat, metrics in enumerate(values)
+                ],
+                "group_level_metrics": [
+                    {
+                        "_ng_task_index": task,
+                        "expected_num_rollouts": len(values),
+                        "missing_num_rollouts": 0,
+                        "rollout_infos": [
+                            {"_ng_task_index": task, "_ng_rollout_index": repeat} for repeat in range(len(values))
+                        ],
+                    }
+                    for task in tasks
+                ],
+            }
+        )
+        rows.extend(
+            {"_ng_environment_server": server, "_ng_task_index": task, "_ng_rollout_index": repeat}
+            for task in tasks
+            for repeat in range(len(values))
+        )
+    aggregate_metrics_path_for(rollouts).write_bytes(orjson.dumps(entries))
+    materialized_path_for(rollouts).write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    return str(rollouts)
 
 
 def test_multiple_metrics_preserve_equal_benchmark_and_equal_cell_weights(tmp_path: Path) -> None:
@@ -270,11 +314,252 @@ def test_multiple_agents_require_explicit_selection(tmp_path: Path) -> None:
     other = dict(entries[0]) | {"agent_ref": {"name": "other_agent"}}
     metrics.write_bytes(orjson.dumps([*entries, other]))
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
-    with pytest.raises(ConfigError, match="multiple agents.*set 'agent'"):
+    with pytest.raises(ConfigError, match="multiple aggregate entries.*set 'agent'.*'environment_server'"):
         _compare(path)
     pair["baseline"]["agent"] = AGENT
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
     assert _compare(path).cells[0].baseline.agent == AGENT
+
+
+@pytest.mark.parametrize(
+    ("selectors", "expected_agent", "expected_server"),
+    [
+        ({"agent": "bird_agent"}, "bird_agent", "bird_env"),
+        ({"environment_server": "mmlu_env"}, "mcqa_agent", "mmlu_env"),
+        ({"agent": "bird_agent", "environment_server": "bird_env"}, "bird_agent", "bird_env"),
+    ],
+)
+def test_agent_and_environment_selectors_retain_both_identities(
+    tmp_path: Path, selectors: dict[str, str], expected_agent: str, expected_server: str
+) -> None:
+    rollouts = _write_routed_run(
+        tmp_path,
+        [
+            ("bird_env", "bird_agent", (0, 1), _values(0.2, 0.4)),
+            ("mmlu_env", "mcqa_agent", (2, 3), _values(0.6, 0.8)),
+        ],
+    )
+    run = load_suite_run(SuiteRunSource(rollouts=Path(rollouts), **selectors), directory=tmp_path)
+    assert run.agent == expected_agent
+    assert run.environment_server == expected_server
+    expected_tasks = frozenset((0, 1) if expected_server == "bird_env" else (2, 3))
+    assert run.planned_tasks_by_repeat == {0: expected_tasks, 1: expected_tasks}
+    assert [row["mean/reward"] for row in run.repeat_rows] == pytest.approx(
+        [0.2, 0.4] if expected_server == "bird_env" else [0.6, 0.8]
+    )
+
+
+def test_single_server_is_inferred_without_selectors(tmp_path: Path) -> None:
+    rollouts = _write_routed_run(tmp_path, [("bird_env", "bird_agent", (0, 1), _values(0.2, 0.4))])
+    run = load_suite_run(SuiteRunSource(rollouts=Path(rollouts)), directory=tmp_path)
+    assert run.agent == "bird_agent"
+    assert run.environment_server == "bird_env"
+    assert run.planned_tasks_by_repeat == {0: frozenset((0, 1)), 1: frozenset((0, 1))}
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        {},
+        {"agent": "absent_agent"},
+        {"environment_server": "absent_env"},
+        {"agent": "bird_agent", "environment_server": "mmlu_env"},
+    ],
+)
+def test_ambiguous_unknown_or_conflicting_selectors_list_available_entries(
+    tmp_path: Path, selectors: dict[str, str]
+) -> None:
+    rollouts = _write_routed_run(
+        tmp_path,
+        [
+            ("bird_env", "bird_agent", (0, 1), _values(0.2, 0.4)),
+            ("mmlu_env", "mcqa_agent", (2, 3), _values(0.6, 0.8)),
+        ],
+    )
+    with pytest.raises(ConfigError, match="Available entries:") as error:
+        load_suite_run(SuiteRunSource(rollouts=Path(rollouts), **selectors), directory=tmp_path)
+    message = str(error.value)
+    for identity in ("bird_agent", "bird_env", "mcqa_agent", "mmlu_env"):
+        assert identity in message
+    if not selectors:
+        assert "set 'agent' or 'environment_server'" in message
+    else:
+        assert "No aggregate entry" in message
+
+
+def test_shared_harness_server_derived_labels_are_retained(tmp_path: Path) -> None:
+    # When servers share a harness, aggregation uses server-derived agent labels.
+    rollouts = _write_routed_run(
+        tmp_path,
+        [
+            ("bird_env", "bird_env", (0, 1), _values(0.2, 0.4)),
+            ("mmlu_env", "mmlu_env", (2, 3), _values(0.6, 0.8)),
+        ],
+    )
+    selected = load_suite_run(
+        SuiteRunSource(rollouts=Path(rollouts), environment_server="mmlu_env"), directory=tmp_path
+    )
+    assert selected.agent == "mmlu_env"
+    assert selected.environment_server == "mmlu_env"
+    assert [row["mean/reward"] for row in selected.repeat_rows] == pytest.approx([0.6, 0.8])
+    assert selected.planned_tasks_by_repeat == {0: frozenset((2, 3)), 1: frozenset((2, 3))}
+
+
+@pytest.mark.parametrize("overlapping_indices", [False, True])
+def test_taskset_servers_share_a_file_without_contaminating_coverage_or_statistics(
+    tmp_path: Path, overlapping_indices: bool
+) -> None:
+    second_tasks = (0, 1) if overlapping_indices else (2, 3)
+    baseline = _write_routed_run(
+        tmp_path / "baseline",
+        [
+            ("bird_simple_env", "bird_simple_agent", (0, 1), _values(0.2, 0.4)),
+            ("mmlu_simple_env", "mcqa_simple_agent", second_tasks, _values(0.6, 0.8)),
+        ],
+    )
+    candidate = _write_routed_run(
+        tmp_path / "candidate",
+        [
+            ("bird_hermes_env", "bird_hermes_agent", (0, 1), _values(0.4, 0.6)),
+            ("mmlu_hermes_env", "mcqa_hermes_agent", second_tasks, _values(0.7, 0.9)),
+        ],
+    )
+    path = _manifest(
+        tmp_path,
+        benchmarks={name: {"metrics": [_scale()]} for name in ("bird", "mmlu")},
+        models={
+            "model": {
+                name: {
+                    "baseline": {"rollouts": baseline, "environment_server": f"{name}_simple_env"},
+                    "candidate": {"rollouts": candidate, "environment_server": f"{name}_hermes_env"},
+                }
+                for name in ("bird", "mmlu")
+            }
+        },
+    )
+    result = _compare(path)
+    assert result.warnings == []
+    assert {cell.benchmark: cell.statistics.delta for cell in result.cells} == pytest.approx({"bird": 20, "mmlu": 10})
+    for cell in result.cells:
+        assert cell.baseline.coverage.status == cell.candidate.coverage.status == "verified"
+        assert cell.baseline.coverage.planned_task_count == cell.candidate.coverage.planned_task_count == 2
+        assert cell.baseline.environment_server == f"{cell.benchmark}_simple_env"
+        assert cell.candidate.environment_server == f"{cell.benchmark}_hermes_env"
+        assert cell.model_weight == cell.overall_weight == 0.5
+        assert cell.statistics.ci_low is not None
+        assert cell.statistics.ci_high is not None
+    assert result.overall.statistics.baseline_mean == pytest.approx(50)
+    assert result.overall.statistics.candidate_mean == pytest.approx(65)
+    assert result.overall.statistics.delta == pytest.approx(15)
+    assert result.overall.weights == [0.5, 0.5]
+    assert result.overall.statistics.ci_low is not None
+    assert result.per_model[0].statistics.ci_high is not None
+    report_dir = tmp_path / "reports"
+    write_suite_reports(result, report_dir, "both")
+    markdown = (report_dir / "suite_compare_report.md").read_text()
+    for name in ("bird", "mmlu"):
+        for role in ("simple", "hermes"):
+            assert f"Environment server: `{name}_{role}_env`." in markdown
+    restored = SuiteComparisonResult.model_validate_json((report_dir / "suite_compare_report.json").read_bytes())
+    assert restored == result
+
+
+@pytest.mark.parametrize("missing_server", ["selected", "other"])
+def test_server_filtering_reports_missing_tasks_only_for_selected_server(tmp_path: Path, missing_server: str) -> None:
+    baseline = _write_routed_run(
+        tmp_path / "baseline",
+        [
+            ("bird_env", "bird_agent", (0, 1), _values(0.2, 0.4)),
+            ("mmlu_env", "mcqa_agent", (2, 3), _values(0.6, 0.8)),
+        ],
+    )
+    candidate = _write_routed_run(
+        tmp_path / "candidate",
+        [
+            ("bird_env", "bird_agent", (0, 1), _values(0.4, 0.6)),
+            ("mmlu_env", "mcqa_agent", (2, 3), _values(0.7, 0.9)),
+        ],
+    )
+    aggregate_path = aggregate_metrics_path_for(Path(candidate))
+    entries = orjson.loads(aggregate_path.read_bytes())
+    entries[0 if missing_server == "selected" else 1]["group_level_metrics"].pop()
+    aggregate_path.write_bytes(orjson.dumps(entries))
+    path = _manifest(
+        tmp_path,
+        benchmarks={"bird": {"metrics": [_scale()]}},
+        models={
+            "model": {
+                "bird": {
+                    "baseline": {"rollouts": baseline, "environment_server": "bird_env"},
+                    "candidate": {"rollouts": candidate, "environment_server": "bird_env"},
+                }
+            }
+        },
+    )
+    result = _compare(path)
+    cell = result.cells[0]
+    assert cell.statistics.delta == pytest.approx(20)
+    if missing_server == "other":
+        assert cell.baseline.coverage.status == "verified"
+        assert cell.candidate.coverage.status == "verified"
+        assert result.warnings == []
+        assert cell.statistics.ci_low is not None
+        assert result.per_model[0].statistics.ci_high is not None
+        assert result.overall.statistics.ci_low is not None
+        return
+    assert cell.baseline.coverage.status == "incomplete"
+    assert cell.candidate.coverage.status == "incomplete"
+    assert cell.candidate.coverage.planned_task_count == 2
+    assert "Results are missing 1 of 2 planned tasks (task indices: 1)." in cell.candidate.coverage.notes
+    assert "Results are missing 2 of 4 planned rollouts." in cell.candidate.coverage.notes
+    assert cell.statistics.ci_low is None
+    assert result.per_model[0].statistics.ci_high is None
+    assert result.overall.statistics.ci_low is None
+
+
+def test_stamped_rows_use_server_while_unstamped_rows_keep_agent_fallback(tmp_path: Path) -> None:
+    rollouts = _write_routed_run(tmp_path, [("bird_env", "bird_agent", (0, 1), _values(0.2, 0.4))])
+    rows = [
+        # Server ownership takes precedence even when the agent label differs.
+        {"_ng_environment_server": "bird_env", "agent_ref": {"name": "different_label"}, "_ng_task_index": 0},
+        {"agent_ref": {"name": "bird_agent"}, "_ng_task_index": 1},
+        {"_ng_task_index": 2},
+        # Neither another server nor another unstamped agent belongs to this entry.
+        {"_ng_environment_server": "mmlu_env", "agent_ref": {"name": "bird_agent"}, "_ng_task_index": 3},
+        {"agent_ref": {"name": "mcqa_agent"}, "_ng_task_index": 4},
+    ]
+    materialized_path_for(Path(rollouts)).write_bytes(
+        b"".join(orjson.dumps(row | {"_ng_rollout_index": repeat}) + b"\n" for row in rows for repeat in (0, 1))
+    )
+    run = load_suite_run(SuiteRunSource(rollouts=Path(rollouts)), directory=tmp_path)
+    assert run.planned_tasks_by_repeat == {0: frozenset((0, 1, 2)), 1: frozenset((0, 1, 2))}
+
+
+def test_unstamped_aggregate_cannot_claim_server_stamped_inputs(tmp_path: Path) -> None:
+    rollouts = _write_run(tmp_path, _values(0.2, 0.4))
+    inputs = materialized_path_for(Path(rollouts))
+    rows = [orjson.loads(line) | {"_ng_environment_server": "bird_env"} for line in inputs.read_bytes().splitlines()]
+    inputs.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    with pytest.raises(ConfigError, match="Cannot match stamped materialized inputs.*has no _ng_environment_server"):
+        load_suite_run(SuiteRunSource(rollouts=Path(rollouts)), directory=tmp_path)
+
+
+def test_different_selector_fields_cannot_reuse_the_same_source_samples(tmp_path: Path) -> None:
+    rollouts = _write_routed_run(tmp_path / "source", [("bird_env", "bird_agent", (0, 1), _values(0.2, 0.4))])
+    path = _manifest(
+        tmp_path,
+        benchmarks={"bird": {"metrics": [_scale()]}},
+        models={
+            "model": {
+                "bird": {
+                    "baseline": {"rollouts": rollouts, "environment_server": "bird_env"},
+                    "candidate": {"rollouts": rollouts, "agent": "bird_agent"},
+                }
+            }
+        },
+    )
+    with pytest.raises(ConfigError, match="reuses the same aggregate file and agent.*independent source"):
+        _compare(path)
 
 
 def test_missing_repeat_metrics_errors_without_reconstructing(tmp_path: Path) -> None:
@@ -461,6 +746,151 @@ def test_source_aggregate_override_is_resolved_relative_to_manifest(tmp_path: Pa
     result = _compare(path)
     assert result.cells[0].baseline.aggregate_metrics == custom
     assert result.overall.statistics.delta == pytest.approx(20)
+
+
+def test_explicit_inventory_is_relative_to_manifest_and_ignores_other_agents(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pair = {
+        "baseline": {
+            "rollouts": _write_run(tmp_path / "baseline", _values(0.2, 0.4), planned_tasks=(99,)),
+            "materialized_inputs": "inventories/baseline.jsonl",
+        },
+        "candidate": {"rollouts": _write_run(tmp_path / "candidate", _values(0.4, 0.6))},
+    }
+    inventory = tmp_path / "inventories" / "baseline.jsonl"
+    inventory.parent.mkdir()
+    # The foreign agent reuses the same indices and has extra tasks: all of its rows
+    # must be filtered before duplicate detection and coverage verification.
+    rows = [
+        {"agent_ref": {"name": agent}, "_ng_task_index": task, "_ng_rollout_index": repeat}
+        for agent, tasks in ((AGENT, (0, 1)), ("other_agent", (0, 1, 50)))
+        for task in tasks
+        for repeat in (0, 1)
+    ]
+    inventory.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
+    unrelated_directory = tmp_path / "unrelated"
+    unrelated_directory.mkdir()
+    monkeypatch.chdir(unrelated_directory)
+    result = _compare(path)
+    cell = result.cells[0]
+    assert cell.baseline.materialized_inputs == inventory.resolve()
+    assert cell.baseline.coverage.status == cell.candidate.coverage.status == "verified"
+    assert cell.baseline.coverage.recorded_task_count == cell.baseline.coverage.planned_task_count == 2
+    assert cell.baseline.repeat_scores == pytest.approx([20, 40])
+    assert cell.candidate.repeat_scores == pytest.approx([40, 60])
+    assert cell.statistics.delta == pytest.approx(20)
+    assert cell.statistics.ci_low is not None
+    assert result.per_model[0].statistics.ci_high is not None
+    assert result.overall.statistics.ci_low is not None
+    assert result.warnings == []
+
+
+def test_missing_explicit_inventory_does_not_fall_back_to_valid_sibling(tmp_path: Path) -> None:
+    pair = _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))
+    pair["baseline"]["materialized_inputs"] = "missing_inventory.jsonl"
+    path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
+    with pytest.raises(ConfigError, match="Cannot read materialized inputs.*missing_inventory.jsonl"):
+        _compare(path)
+
+
+def test_different_plans_suppress_intervals_when_recorded_task_groups_are_unavailable(tmp_path: Path) -> None:
+    pair = _pair(tmp_path, "different_plan", _values(0.2, 0.4), _values(0.4, 0.6))
+    for source in pair.values():
+        _edit_entry(source["rollouts"], lambda entry: entry.update({"group_level_metrics": []}))
+    path = _manifest(
+        tmp_path,
+        benchmarks={name: {"metrics": [_scale()]} for name in ("different_plan", "complete")},
+        models={
+            "model": {
+                "different_plan": pair,
+                "complete": _pair(tmp_path, "complete", _values(0.1, 0.3), _values(0.2, 0.4)),
+            }
+        },
+    )
+    control = _compare(path)
+    control_cell = next(cell for cell in control.cells if cell.benchmark == "different_plan")
+    assert control_cell.baseline.coverage.status == control_cell.candidate.coverage.status == "unverified"
+    assert control_cell.statistics.ci_low is not None
+    inventory = materialized_path_for(Path(pair["candidate"]["rollouts"]))
+    rows = [
+        {"agent_ref": {"name": AGENT}, "_ng_task_index": task, "_ng_rollout_index": repeat}
+        for task in (2, 3)
+        for repeat in (0, 1)
+    ]
+    inventory.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    result = _compare(path)
+    cell = next(cell for cell in result.cells if cell.benchmark == "different_plan")
+    complete = next(cell for cell in result.cells if cell.benchmark == "complete")
+    note = "Baseline and candidate planned task sets differ."
+    assert cell.baseline.coverage.status == cell.candidate.coverage.status == "incomplete"
+    assert cell.baseline.coverage.recorded_task_count == cell.candidate.coverage.recorded_task_count == 0
+    assert cell.baseline.coverage.planned_task_count == cell.candidate.coverage.planned_task_count == 2
+    assert set(cell.baseline.coverage.notes) == set(control_cell.baseline.coverage.notes) | {note}
+    assert set(cell.candidate.coverage.notes) == set(control_cell.candidate.coverage.notes) | {note}
+    for role in ("baseline", "candidate"):
+        assert f"model/different_plan {role}: {note}" in result.warnings
+    assert not any("Candidate and baseline have results for different tasks" in warning for warning in result.warnings)
+    assert cell.statistics.baseline_mean == pytest.approx(30)
+    assert cell.statistics.candidate_mean == pytest.approx(50)
+    assert cell.statistics.delta == pytest.approx(20)
+    assert cell.model_weight == cell.overall_weight == 0.5
+    assert complete.baseline.coverage.status == complete.candidate.coverage.status == "verified"
+    assert complete.statistics.ci_low is not None
+    for statistics in (cell.statistics, result.per_model[0].statistics, result.overall.statistics):
+        assert statistics.ci_low is None
+        assert statistics.ci_high is None
+    assert result.overall.statistics.delta == control.overall.statistics.delta == pytest.approx(15)
+    assert result.overall.statistics.variance == control.overall.statistics.variance
+    assert result.overall.weights == control.overall.weights == [0.5, 0.5]
+
+
+def test_differing_repeat_plans_suppress_intervals_with_partial_recorded_identities(tmp_path: Path) -> None:
+    pair = _pair(tmp_path, "different_repeats", _values(0.2, 0.4), _values(0.4, 0.6))
+
+    def without_rollout_identities(entry):
+        for group in entry["group_level_metrics"]:
+            group.pop("rollout_infos")
+
+    for source in pair.values():
+        _edit_entry(source["rollouts"], without_rollout_identities)
+    path = _manifest(
+        tmp_path,
+        benchmarks={"test": {"metrics": [_scale()]}},
+        models={"model": {"test": pair}},
+    )
+    control = _compare(path)
+    assert control.cells[0].baseline.coverage.status == control.cells[0].candidate.coverage.status == "unverified"
+    assert control.overall.statistics.ci_low is not None
+    for source in pair.values():
+        inventory = materialized_path_for(Path(source["rollouts"]))
+        rows = [
+            row
+            for line in inventory.read_bytes().splitlines()
+            if (row := orjson.loads(line))["_ng_task_index"] != 1 or row["_ng_rollout_index"] != 0
+        ]
+        inventory.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    result = _compare(path)
+    cell = result.cells[0]
+    note = "Planned task sets differ between repeats."
+    assert cell.baseline.coverage.status == cell.candidate.coverage.status == "incomplete"
+    assert cell.baseline.coverage.recorded_task_count == cell.baseline.coverage.planned_task_count == 2
+    for role in ("baseline", "candidate"):
+        run = getattr(cell, role)
+        assert set(run.coverage.notes) == set(getattr(control.cells[0], role).coverage.notes) | {note}
+        assert f"model/test {role}: {note}" in result.warnings
+    assert not any("Recorded task sets differ between repeats." in warning for warning in result.warnings)
+    assert not any("Baseline and candidate planned task sets differ." in warning for warning in result.warnings)
+    assert cell.baseline.repeat_scores == control.cells[0].baseline.repeat_scores == pytest.approx([20, 40])
+    assert cell.candidate.repeat_scores == control.cells[0].candidate.repeat_scores == pytest.approx([40, 60])
+    assert cell.statistics.delta == pytest.approx(20)
+    assert cell.model_weight == cell.overall_weight == 1
+    for statistics in (cell.statistics, result.per_model[0].statistics, result.overall.statistics):
+        assert statistics.ci_low is None
+        assert statistics.ci_high is None
+    assert result.overall.statistics.variance == control.overall.statistics.variance
+    assert result.overall.weights == control.overall.weights == [1]
 
 
 @pytest.mark.parametrize(

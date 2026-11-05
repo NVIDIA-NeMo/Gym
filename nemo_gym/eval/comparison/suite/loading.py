@@ -24,7 +24,12 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import (
+    AGENT_REF_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.eval.comparison.loading import _read_agent_entries
 from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import MetricScale, normalize_score
 from nemo_gym.eval.comparison.suite.schema import (
@@ -38,12 +43,13 @@ from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_p
 
 @dataclass(frozen=True)
 class LoadedSuiteRun:
-    """One selected agent's stored summaries and optional planned task identities."""
+    """One selected aggregate entry and its optional planned task identities."""
 
     rollouts: Path
     aggregate_metrics: Path
     materialized_inputs: Path | None
     agent: str
+    environment_server: str | None
     repeat_rows: tuple[Mapping[str, object], ...]
     groups: tuple[Mapping[str, object], ...]
     agent_metrics: Mapping[str, object]
@@ -122,7 +128,45 @@ def _index(value: object, *, context: str) -> int:
     return value
 
 
-def _read_planned_tasks(path: Path, agent: str) -> dict[int, frozenset[int]]:
+def _select_entry(
+    entries: Mapping[str, dict[str, object]], source: SuiteRunSource, *, path: Path
+) -> tuple[str, dict[str, object]]:
+    """Resolve optional selectors independently for one source's aggregate file."""
+    matches = [
+        (agent, entry)
+        for agent, entry in entries.items()
+        if (source.agent is None or agent == source.agent)
+        and (
+            source.environment_server is None
+            or entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME) == source.environment_server
+        )
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    available = "; ".join(
+        f"agent={agent!r}, environment_server={entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)!r}"
+        for agent, entry in sorted(entries.items())
+    )
+    selectors = " and ".join(
+        f"{name}={value!r}"
+        for name, value in (("agent", source.agent), ("environment_server", source.environment_server))
+        if value is not None
+    )
+    if not matches:
+        raise ConfigError(f"No aggregate entry in '{path}' matches {selectors}. Available entries: {available}.")
+    if not selectors:
+        raise ConfigError(
+            f"'{path}' contains multiple aggregate entries; set 'agent' or 'environment_server' "
+            f"on this source in the suite manifest. Available entries: {available}."
+        )
+    raise ConfigError(
+        f"'{path}' matches multiple aggregate entries for {selectors}; set both 'agent' and "
+        f"'environment_server' to select one entry. Available entries: {available}."
+    )
+
+
+def _read_planned_tasks(path: Path, agent: str, *, environment_server: str | None) -> dict[int, frozenset[int]]:
+    """Select the plan using the same server identity as aggregation, with unstamped-row fallback."""
     tasks: dict[int, set[int]] = {}
     try:
         with path.open("rb") as stream:
@@ -132,27 +176,45 @@ def _read_planned_tasks(path: Path, agent: str) -> dict[int, frozenset[int]]:
                 row = orjson.loads(line)
                 if not isinstance(row, dict):
                     raise ConfigError(f"'{path}' line {line_number} is not an input object.")
-                reference = row.get(AGENT_REF_KEY_NAME) or {}
-                if not isinstance(reference, dict):
-                    raise ConfigError(f"'{path}' line {line_number} has invalid agent_ref.")
-                if reference.get("name") not in (None, agent):
-                    continue
+                server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+                if server is not None:
+                    if not isinstance(server, str) or not server:
+                        raise ConfigError(f"'{path}' line {line_number} has invalid _ng_environment_server.")
+                    if environment_server is None:
+                        raise ConfigError(
+                            f"Cannot match stamped materialized inputs '{path}' line {line_number}: selected "
+                            f"aggregate entry '{agent}' has no _ng_environment_server. "
+                            "Regenerate aggregate metrics with `gym eval aggregate`."
+                        )
+                    if server != environment_server:
+                        continue
+                else:
+                    reference = row.get(AGENT_REF_KEY_NAME) or {}
+                    if not isinstance(reference, dict):
+                        raise ConfigError(f"'{path}' line {line_number} has invalid agent_ref.")
+                    if reference.get("name") not in (None, agent):
+                        continue
                 context = f"'{path}' line {line_number}"
                 task = _index(row.get(TASK_INDEX_KEY_NAME), context=f"{context} task index")
                 repeat = _index(row.get(ROLLOUT_INDEX_KEY_NAME), context=f"{context} repeat index")
                 target = tasks.setdefault(repeat, set())
                 if task in target:
-                    raise ConfigError(f"'{path}' duplicates task {task}, repeat {repeat} for agent '{agent}'.")
+                    raise ConfigError(
+                        f"'{path}' duplicates task {task}, repeat {repeat} for aggregate entry '{agent}'."
+                    )
                 target.add(task)
     except (OSError, orjson.JSONDecodeError) as error:
         raise ConfigError(f"Cannot read materialized inputs '{path}': {error}") from error
     if not tasks:
-        raise ConfigError(f"Materialized inputs '{path}' contain no tasks for agent '{agent}'.")
+        raise ConfigError(
+            f"Materialized inputs '{path}' contain no tasks for aggregate entry '{agent}' "
+            f"(environment_server={environment_server!r}). Check the source selectors and materialized_inputs path."
+        )
     return {repeat: frozenset(indices) for repeat, indices in tasks.items()}
 
 
 def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun:
-    """Load one aggregate file, select its agent, and retain recorded repeat rows."""
+    """Select one aggregate entry by agent and/or server, retaining its recorded repeat rows."""
     rollouts = _resolve_path(source.rollouts, directory)
     metrics = (
         _resolve_path(source.aggregate_metrics, directory)
@@ -160,17 +222,10 @@ def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun
         else aggregate_metrics_path_for(rollouts)
     )
     entries = _read_agent_entries(metrics)
-    agent = source.agent
-    if agent is None:
-        if len(entries) != 1:
-            raise ConfigError(
-                f"'{metrics}' contains multiple agents ({', '.join(sorted(entries))}); "
-                "set 'agent' on this source in the suite manifest."
-            )
-        agent = next(iter(entries))
-    if agent not in entries:
-        raise ConfigError(f"Agent '{agent}' is not in '{metrics}'. Available agents: {', '.join(sorted(entries))}.")
-    entry = entries[agent]
+    agent, entry = _select_entry(entries, source, path=metrics)
+    environment_server = entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+    if environment_server is not None and (not isinstance(environment_server, str) or not environment_server):
+        raise ConfigError(f"'{metrics}' aggregate entry '{agent}' has invalid _ng_environment_server.")
     if "repeat_level_metrics" not in entry:
         raise ConfigError(
             f"'{metrics}' agent '{agent}' lacks repeat_level_metrics. "
@@ -201,12 +256,17 @@ def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun
         if source.materialized_inputs is not None
         else materialized_path_for(rollouts)
     )
-    planned = _read_planned_tasks(inputs, agent) if source.materialized_inputs is not None or inputs.exists() else None
+    planned = (
+        _read_planned_tasks(inputs, agent, environment_server=environment_server)
+        if source.materialized_inputs is not None or inputs.exists()
+        else None
+    )
     return LoadedSuiteRun(
         rollouts=rollouts,
         aggregate_metrics=metrics,
         materialized_inputs=inputs if planned is not None else None,
         agent=agent,
+        environment_server=environment_server,
         repeat_rows=rows,
         groups=groups,
         agent_metrics=agent_metrics,
