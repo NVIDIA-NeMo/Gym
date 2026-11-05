@@ -25,15 +25,16 @@ run. [Task Folder Format](/main/data/task-folders/task-folder-format) lists ever
 
 ## Coming from Harbor
 
-Task folders written for [Harbor](https://github.com/harbor-framework/harbor), and hub datasets by their `harbor:`
-reference, run in Gym without changes, within the subset Gym supports. What differs is who runs them. Gym starts the
-sandboxes through its own sandbox providers, the agent is a Gym harness chosen with `--agent`, not a Harbor agent, and
-the results are Gym rollouts, the same output as every other Gym environment. Gym records a digest of every task folder
-and refuses a task edited after it was prepared, until you prepare it again. In a pulled hub dataset, an edited task
-stops every prepare, so copy its folder into your own dataset to change it. Gym's dataset settings live in a `[gym]`
-table in `dataset.toml`, which `harbor add`, `harbor remove` and `harbor sync` drop when they rewrite the file, so keep
-the dataset in git. See [Compatibility with
-Harbor](/main/data/task-folders/task-folder-format#compatibility-with-harbor) for that subset.
+Task folders written for [Harbor](https://github.com/harbor-framework/harbor) run in NeMo Gym as they are:
+
+- Run a local task folder with `gym eval run <folder>`, or pull a hub dataset by its `harbor:` reference. See
+  [Bring in existing tasks](#bring-in-existing-tasks).
+- Choose the agent with `--agent` and the sandbox with `--sandbox`.
+- Results are NeMo Gym rollouts, the same output as every other NeMo Gym environment.
+
+Keep the dataset in git: `harbor add`, `harbor remove` and `harbor sync` rewrite `dataset.toml` without NeMo Gym's
+`[gym]` table. [Compatibility with Harbor](/main/data/task-folders/task-folder-format#compatibility-with-harbor)
+lists the task settings NeMo Gym supports.
 
 ## Before you start
 
@@ -249,7 +250,8 @@ For sandbox setup, see
 The pull fetches into the entry's own folder (the task folders are gitignored), or into
 `$NEMO_GYM_DATASETS_DIR/<entry>/` when that variable is set. Pulling the reference an entry declares lands there
 too, so the first pull above fills the `terminal_bench_4` entry. `gym dataset validate <entry>` and
-`gym eval run <entry>` then resolve the name to that folder without fetching.
+`gym eval run <entry>` then resolve the name to that folder without fetching. To change a task in a pulled dataset,
+copy its folder into your own dataset.
 [Evaluate Terminal-Bench 2.1 on the Harbor Path](/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor)
 runs this entry end to end.
 
