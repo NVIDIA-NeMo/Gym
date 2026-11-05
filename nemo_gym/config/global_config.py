@@ -111,6 +111,7 @@ USE_ABSOLUTE_IP = "use_absolute_ip"
 ABSOLUTE_IP_SERVER_TYPES_KEY_NAME = "absolute_ip_server_types"
 UV_PIP_SET_PYTHON_KEY_NAME = "uv_pip_set_python"
 SKIP_VENV_IF_PRESENT_KEY_NAME = "skip_venv_if_present"
+COMPONENT_EXTRAS_KEY_NAME = "component_extras"
 HF_TOKEN_KEY_NAME = "hf_token"
 RAY_HEAD_NODE_ADDRESS_KEY_NAME = "ray_head_node_address"
 PORT_RANGE_LOW_KEY_NAME = "port_range_low"
@@ -170,6 +171,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ABSOLUTE_IP_SERVER_TYPES_KEY_NAME,
     UV_PIP_SET_PYTHON_KEY_NAME,
     SKIP_VENV_IF_PRESENT_KEY_NAME,
+    COMPONENT_EXTRAS_KEY_NAME,
     HF_TOKEN_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
     PORT_RANGE_LOW_KEY_NAME,
@@ -218,6 +220,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "codex_agent",
         "harbor_oracle_agent",
         "hermes_agent",
+        "langgraph_agent",
         "kilocode_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
@@ -893,15 +896,30 @@ Duplicate config paths:
         reference = self._resources_server_reference(server_config)
         return reference is not None and OmegaConf.is_missing(reference, "name")
 
+    def _agent_composition_sources(
+        self, instances: List[_AgentInstance], *, selected_agent: Optional[str] = None
+    ) -> List[_AgentInstance]:
+        """Include an explicitly selected model-only flavor without treating every null binding as unbound."""
+        return [
+            instance
+            for instance in instances
+            if self._is_unbound_agent(instance.server_config)
+            or (instance.name == selected_agent and instance.agent_type == "langgraph_agent")
+        ]
+
     def compose_unbound_agent(
-        self, global_config_dict: DictConfig, held_agent_overrides: Optional[DictConfig] = None
+        self,
+        global_config_dict: DictConfig,
+        held_agent_overrides: Optional[DictConfig] = None,
+        *,
+        selected_agent: Optional[str] = None,
     ) -> None:
         """Rehost every other agent instance on the config's unbound agent, then drop that agent.
 
         `held_agent_overrides` are command line overrides keyed by the name each instance is renamed to.
         """
         instances = self._agent_instances(global_config_dict)
-        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        sources = self._agent_composition_sources(instances, selected_agent=selected_agent)
         if not sources:
             return
 
@@ -949,7 +967,7 @@ Duplicate config paths:
                 agents[source.agent_type] = composed
                 global_config_dict[renames[target.name]] = instance
 
-            self._retarget_environment_servers(global_config_dict, renames)
+            self._retarget_environment_servers(global_config_dict, renames, agent_type=source.agent_type)
             if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
                 self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
@@ -958,7 +976,9 @@ Duplicate config paths:
         self._raise_on_unapplied_agent_overrides(held_agent_overrides, set(renames.values()))
 
     @staticmethod
-    def _retarget_environment_servers(global_config_dict: DictConfig, renames: dict[str, str]) -> None:
+    def _retarget_environment_servers(
+        global_config_dict: DictConfig, renames: dict[str, str], *, agent_type: Optional[str] = None
+    ) -> None:
         """Point each environment server at the agent composition put in place of the one it named.
 
         The server is named after the environment, not the agent, so a swap leaves its own name
@@ -970,12 +990,16 @@ Duplicate config paths:
             servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
             if not isinstance(servers, DictConfig):
                 continue
-            for server in servers.values():
+            for server_type, server in servers.items():
                 if not isinstance(server, DictConfig):
                     continue
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
+                        if agent_type == "langgraph_agent" and server_type == SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE:
+                            # These graphs only call models; the environment still owns verification,
+                            # but must not grant resource tools the selected agent cannot consume.
+                            server["resources_tool_transports"] = []
 
     @staticmethod
     def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
@@ -1118,10 +1142,10 @@ Use the name the composed config reports."""
 the check."""
         )
 
-    def _composed_instance_names(self, config_dict: DictConfig) -> set:
+    def _composed_instance_names(self, config_dict: DictConfig, *, selected_agent: Optional[str] = None) -> set:
         """The instance names composition will produce, worked out before it runs."""
         instances = self._agent_instances(config_dict)
-        sources = [instance for instance in instances if self._is_unbound_agent(instance.server_config)]
+        sources = self._agent_composition_sources(instances, selected_agent=selected_agent)
         if len(sources) != 1:
             return set()
         return {
@@ -1131,14 +1155,14 @@ the check."""
         }
 
     def _hold_back_composed_agent_overrides(
-        self, cli_global_config_dict: DictConfig, config_dict: DictConfig
+        self, cli_global_config_dict: DictConfig, config_dict: DictConfig, *, selected_agent: Optional[str] = None
     ) -> DictConfig:
         """Take command line overrides naming an instance composition is about to create out of the dict.
 
         That instance does not exist yet, so merging them now would build a partial server beside it.
         Returned to be applied to the composed agent instead.
         """
-        composed_names = self._composed_instance_names(config_dict)
+        composed_names = self._composed_instance_names(config_dict, selected_agent=selected_agent)
         held = OmegaConf.create({})
         for name in list(cli_global_config_dict.keys()):
             if name not in composed_names:
@@ -1517,6 +1541,14 @@ For example, on the command line:
         # @bxyu-nvidia: Hydra returns `cli_global_config_dict` as a struct, but this causes problems in downstream swapping/merging.
         OmegaConf.set_struct(cli_global_config_dict, False)
 
+        selected_agent = None
+        selected_config_path = cli_global_config_dict.pop("_selected_langgraph_config", None)
+        if selected_config_path:
+            selected_instances = self._agent_instances(_load_config_yaml(selected_config_path))
+            if len(selected_instances) != 1 or selected_instances[0].agent_type != "langgraph_agent":
+                raise AgentCompositionError("The selected LangGraph config must declare exactly one LangGraph agent.")
+            selected_agent = selected_instances[0].name
+
         # Command line overrides function input.
         initial_global_config_dict = OmegaConf.create(parse_config.initial_global_config_dict or dict())
         global_config_dict: DictConfig = OmegaConf.merge(initial_global_config_dict, cli_global_config_dict)
@@ -1556,7 +1588,9 @@ Pass each config with --config (it builds the list for you), e.g.:
         # An agent override naming an instance no config defines is addressed to one composition is about to
         # create, so it is held back from this merge, which has nowhere to put it, and applied there instead.
         held_agent_overrides = self._hold_back_composed_agent_overrides(
-            cli_global_config_dict, OmegaConf.merge(*extra_configs, initial_global_config_dict)
+            cli_global_config_dict,
+            OmegaConf.merge(*extra_configs, initial_global_config_dict),
+            selected_agent=selected_agent,
         )
         # Rebuilt rather than reused: the command line dict was trimmed after the early merge above.
         global_config_dict = OmegaConf.merge(
@@ -1574,7 +1608,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         # missing-value check below (it removes the unbound agent instance that still carries '???').
         # NOTE(martas): this is the logic for legacy config structure. after migration
         # to environment servers, this should be updated.
-        self.compose_unbound_agent(global_config_dict, held_agent_overrides)
+        self.compose_unbound_agent(global_config_dict, held_agent_overrides, selected_agent=selected_agent)
         global_config_dict = OmegaConf.merge(global_config_dict, held_agent_overrides)
 
         # Fail fast with one actionable error if any required value is still '???'. Runs *after*

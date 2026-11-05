@@ -123,7 +123,7 @@ with a clear error — silent fallback to raw mode would mask a config bug.
 ### Common to both render modes
 
 `<think>...</think>` blocks come back inline in the completion text and are
-extracted by `VLLMConverter._extract_reasoning_from_content` when results are
+extracted by `ChatCompletionsConverter._extract_reasoning_from_content` when results are
 converted back to a Response.
 
 When `return_token_id_information: true`, generation token IDs are read from

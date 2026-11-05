@@ -14,7 +14,7 @@ Install the agent's requirements from its directory:
 
 ```bash
 cd responses_api_agents/nooa_agent
-uv pip install -r requirements.txt
+uv sync --locked
 ```
 
 The requirements pin all three NOOA packages: `nooa`, `nooa-cli`, and `nooa-bench`. The CLI supplies executor
