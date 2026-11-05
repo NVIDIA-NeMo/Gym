@@ -4,33 +4,44 @@
 
 import asyncio
 import json
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from nemo_gym.agents import (
-    AgentSeedRejectedError,
+    AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    RolloutStopRequest,
     SandboxPythonRuntime,
     SandboxSession,
     check_agent_seed_rejected,
 )
 from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
 from nemo_gym.client import ServerClient
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from responses_api_agents.terminus_2_agent import sandbox as terminus_sandbox
-from responses_api_agents.terminus_2_agent.app import Terminus2Agent, Terminus2AgentConfig
+from responses_api_agents.terminus_2_agent.app import Terminus2Agent, Terminus2AgentConfig, Terminus2AgentRunRequest
 from responses_api_agents.terminus_2_agent.sandbox import Terminus2SandboxSession, terminus_runtime
 
 
 APP = "responses_api_agents.terminus_2_agent.app"
+
+
+def _model_url(agent: Terminus2Agent, name: str, rollout_id: str | None) -> str:
+    """The Model Server URL for one rollout, as the agent base builds it."""
+    return f"http://model:8000/ng-rollout/{rollout_id}/v1"
 
 
 def _config(**kwargs) -> Terminus2AgentConfig:
@@ -89,14 +100,16 @@ def providers(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         provider=AsyncMock(),
         connect=AsyncMock(return_value=sandbox),
         resolve=MagicMock(return_value={"docker": {}}),
+        metadata=MagicMock(return_value={}),
         is_installed=AsyncMock(return_value=False),
         install=AsyncMock(),
     )
     monkeypatch.setattr(f"{APP}.get_global_config_dict", lambda: {"runtime": {}})
     monkeypatch.setattr(f"{APP}.resolve_provider_config", patched.resolve)
+    monkeypatch.setattr(f"{APP}.resolve_provider_metadata", patched.metadata)
     monkeypatch.setattr(f"{APP}.create_provider", lambda config: patched.provider)
     monkeypatch.setattr(f"{APP}.AsyncSandbox.connect", patched.connect)
-    monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", lambda *args: "http://model:8000/ng-rollout/r/v1")
+    monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", _model_url)
     monkeypatch.setattr(SandboxPythonRuntime, "is_installed", patched.is_installed)
     monkeypatch.setattr(SandboxPythonRuntime, "install", patched.install)
     return patched
@@ -178,14 +191,37 @@ class TestSeed:
         sandbox.disconnect.assert_awaited_once()
         sandbox.stop.assert_not_awaited()
 
-    async def test_an_image_without_script_is_refused(self, providers: SimpleNamespace) -> None:
-        sandbox = _sandbox(_ok(), SandboxExecResult(stdout="missing script (util-linux)\n", stderr="", return_code=3))
+    @pytest.mark.parametrize("missing", ["missing bash", "missing script (util-linux)"])
+    def test_an_image_without_bash_or_script_is_refused_with_a_final_422(
+        self, providers: SimpleNamespace, missing: str
+    ) -> None:
+        sandbox = _sandbox(_ok(), SandboxExecResult(stdout=f"{missing}\n", stderr="", return_code=3))
         providers.connect.return_value = sandbox
+        agent = _agent()
 
-        with pytest.raises(AgentSeedRejectedError, match="missing script"):
-            await _agent()._seed_agent_session_state(_seed())
-
+        assert check_agent_seed_rejected(agent.setup_webserver(), _seed()).endswith(missing)
+        assert not agent._session_records
         sandbox.disconnect.assert_awaited_once()
+
+    @pytest.mark.skipif(shutil.which("script") is None, reason="needs script")
+    @pytest.mark.parametrize(
+        ("present", "reported"), [(("script",), "missing bash"), (("bash",), "missing script (util-linux)")]
+    )
+    def test_the_terminal_probe_names_the_first_missing_tool(
+        self, tmp_path: Path, present: tuple[str, ...], reported: str
+    ) -> None:
+        for tool in present:
+            (tmp_path / tool).symlink_to(shutil.which(tool))
+
+        probe = subprocess.run(
+            ["/bin/sh", "-c", terminus_sandbox._TERMINAL_PROBE],
+            env={**os.environ, "PATH": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+        assert (probe.returncode, probe.stdout.strip()) == (3, reported)
 
     async def test_a_failed_install_releases_the_borrowed_sandbox(self, providers: SimpleNamespace) -> None:
         providers.install.side_effect = RuntimeError("no wheel for this platform")
@@ -211,24 +247,107 @@ class TestSeed:
     ) -> None:
         factory = MagicMock(return_value=providers.sandbox)
         monkeypatch.setattr(f"{APP}.AsyncSandbox", factory)
+        providers.metadata.return_value = {"sandbox-api": "opensandbox-sdk", "team": "provider-default"}
+        sandbox_config = {"image": "python:3.13-slim", "workdir": "/work", "metadata": {"team": "configured"}}
         agent = _agent(
             sandbox_provider="sandbox",
-            sandbox_config={"image": "python:3.13-slim", "workdir": "/work"},
+            sandbox_config=sandbox_config,
             sandbox_install_timeout_seconds=100,
             timeout=200,
         )
+        seed = _seed(borrowed=False)
 
-        state = await agent._seed_agent_session_state(_seed(borrowed=False))
+        state = await agent._seed_agent_session_state(seed)
 
         factory.assert_called_once_with(providers.provider)
+        providers.metadata.assert_called_once_with("sandbox", {"runtime": {}})
         providers.sandbox.start.assert_awaited_once_with(
-            SandboxSpec(image="python:3.13-slim", workdir="/work", ttl_s=900)
+            SandboxSpec(
+                image="python:3.13-slim",
+                workdir="/work",
+                # Both setup steps (runtime and tmux install), the run, and ten minutes for cleanup.
+                ttl_s=1000,
+                # The provider's defaults, then the configured metadata, then this session's labels.
+                metadata={
+                    "sandbox-api": "opensandbox-sdk",
+                    "team": "configured",
+                    "gym-agent": "terminus_2",
+                    "gym-session": "session",
+                    "gym-rollout": seed.episode_id.capture_key,
+                },
+            )
         )
-        assert agent.config.sandbox_config == {"image": "python:3.13-slim", "workdir": "/work"}
+        assert agent.config.sandbox_config == sandbox_config
         assert state.session.owns_sandbox is True and state.provider == "sandbox"
-        await agent._close_agent_session_state(state)
+        await asyncio.wait_for(agent._close_agent_session_state(state), 10)
         providers.sandbox.stop.assert_awaited_once()
         providers.sandbox.disconnect.assert_not_awaited()
+
+    @pytest.mark.parametrize("borrowed", [True, False], ids=["borrowed", "owned"])
+    async def test_setup_creates_the_workdir_only_in_its_own_sandbox(
+        self, providers: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, borrowed: bool
+    ) -> None:
+        factory = MagicMock(return_value=providers.sandbox)
+        factory.connect = providers.connect
+        monkeypatch.setattr(f"{APP}.AsyncSandbox", factory)
+        agent = _agent(sandbox_provider="sandbox", sandbox_config={"image": "i", "workdir": "/work"})
+
+        state = await agent._seed_agent_session_state(_seed(borrowed=borrowed, workdir="/work"))
+
+        prepare = providers.sandbox.exec.await_args_list[0]
+        directory = state.session.session_dir
+        # A borrowed sandbox's task directory belongs to the Resources server that lent it.
+        expected = [f"{directory}/harness", f"{directory}/logs", *([] if borrowed else ["/work"])]
+        assert prepare.args[0].split() == ["mkdir", "-p", *expected]
+        assert prepare.kwargs["cwd"] == "/"
+
+    async def test_a_failed_install_stops_an_owned_sandbox(
+        self, providers: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(f"{APP}.AsyncSandbox", MagicMock(return_value=providers.sandbox))
+        providers.install.side_effect = RuntimeError("no wheel")
+        agent = _agent(sandbox_provider="sandbox", sandbox_config={"image": "python:3.13-slim", "workdir": "/work"})
+
+        with pytest.raises(RuntimeError, match="no wheel"):
+            await agent._seed_agent_session_state(_seed(borrowed=False))
+
+        providers.sandbox.start.assert_awaited_once()
+        providers.sandbox.stop.assert_awaited_once()
+        providers.sandbox.disconnect.assert_not_awaited()
+
+    async def test_an_owned_sandbox_that_fails_to_start_closes_the_provider(
+        self, providers: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        providers.sandbox.start.side_effect = RuntimeError("image pull failed")
+        monkeypatch.setattr(f"{APP}.AsyncSandbox", MagicMock(return_value=providers.sandbox))
+        agent = _agent(sandbox_provider="sandbox", sandbox_config={"image": "python:3.13-slim", "workdir": "/work"})
+
+        with pytest.raises(RuntimeError, match="image pull failed"):
+            await agent._seed_agent_session_state(_seed(borrowed=False))
+
+        providers.provider.aclose.assert_awaited_once()
+
+    async def test_a_configured_ttl_is_kept(self, providers: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(f"{APP}.AsyncSandbox", MagicMock(return_value=providers.sandbox))
+        agent = _agent(sandbox_provider="sandbox", sandbox_config={"image": "i", "workdir": "/work", "ttl_s": 42})
+
+        await agent._seed_agent_session_state(_seed(borrowed=False))
+
+        assert providers.sandbox.start.await_args.args[0].ttl_s == 42
+
+    async def test_a_loopback_model_url_is_refused_before_any_sandbox_work(
+        self, providers: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            Terminus2Agent, "resolve_model_base_url", lambda self, name, rollout_id: "http://127.0.0.1:8000/v1"
+        )
+        providers.resolve.return_value = {"opensandbox": {}}
+
+        with pytest.raises(ValueError, match="loopback"):
+            await _agent()._seed_agent_session_state(_seed())
+
+        providers.connect.assert_not_awaited()
+        providers.sandbox.exec.assert_not_awaited()
 
 
 def _output(**kwargs) -> dict:
@@ -269,12 +388,15 @@ def _output(**kwargs) -> dict:
     }
 
 
+_BODY = NeMoGymResponseCreateParamsNonStreaming(input="solve it", metadata={"agent_timeout_sec": "60"})
+
+
 class _Activation:
     """A seeded session whose sandbox execution returns ``output`` without a sandbox."""
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, output: dict | None = None, **config) -> None:
         self.agent = _agent(**config)
-        monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", lambda *args: "http://model:1/ng-rollout/r/v1")
+        monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", _model_url)
         self.seed = _seed()
         sandbox = _sandbox()
         self.state = Terminus2SandboxSession(
@@ -299,8 +421,7 @@ class _Activation:
         )
 
     async def respond(self, body: NeMoGymResponseCreateParamsNonStreaming | None = None, request=None):
-        body = body or NeMoGymResponseCreateParamsNonStreaming(input="solve it", metadata={"agent_timeout_sec": "60"})
-        return await self.agent.responses(request or self.request, body)
+        return await asyncio.wait_for(self.agent.responses(request or self.request, body or _BODY), 30)
 
 
 class TestActivation:
@@ -316,7 +437,7 @@ class TestActivation:
             await activation.respond(NeMoGymResponseCreateParamsNonStreaming(input="another task"))
         activation.release.set()
 
-        assert (await first).id == (await retry).id == "chatcmpl-2"
+        assert (await asyncio.wait_for(first, 10)).id == (await asyncio.wait_for(retry, 10)).id == "chatcmpl-2"
         assert different.value.status_code == 409
         assert len(activation.payloads) == 1
 
@@ -351,7 +472,8 @@ class TestActivation:
 
         [payload] = activation.payloads
         assert payload["model"] == "test-model"
-        assert payload["model_base_url"] == "http://model:1/ng-rollout/r/v1"
+        # The runner calls the Model Server through the seeded rollout's route, so its calls join this rollout.
+        assert payload["model_base_url"] == f"http://model:8000/ng-rollout/{activation.seed.episode_id.capture_key}/v1"
         assert payload["instruction"] == "solve it"
         # The task's agent timeout lowers the configured ceiling.
         assert payload["timeout"] == 60
@@ -365,7 +487,7 @@ class TestActivation:
         activation = _Activation(monkeypatch)
 
         response = await activation.respond()
-        closed = await activation.agent._close_agent_session_state(activation.state)
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         assert response.status == "completed"
         assert response.metadata["harness_execution"] == "sandbox"
@@ -383,31 +505,57 @@ class TestActivation:
         assert (sandbox.outcome, sandbox.sandbox_id, sandbox.provider) == ("completed", "sandbox-1", "runtime")
 
     @pytest.mark.parametrize(
-        ("result", "status", "outcome"),
+        ("result", "status", "outcome", "sandbox_outcome"),
         [
             (
                 {"stop_reason": "error", "error_kind": "model_request_error", "error_status": 429},
                 "failed",
                 {"failure_kind": "model_request_error", "status_code": 429},
+                "failed",
             ),
             (
                 {"stop_reason": "error", "error_kind": "model_transport_error"},
                 "failed",
                 {"failure_kind": "model_transport_error"},
+                "failed",
             ),
-            ({"stop_reason": "error", "error_kind": "harness_error"}, "failed", {"failure_kind": "unknown"}),
-            ({"stop_reason": "error", "error_kind": "context_limit"}, "incomplete", None),
-            ({"stop_reason": "wall_time", "finished_naturally": False}, "incomplete", None),
-            ({"stop_reason": "max_turns", "finished_naturally": False}, "incomplete", None),
+            # A model error without an HTTP status is not a request the model refused.
+            (
+                {"stop_reason": "error", "error_kind": "model_request_error"},
+                "failed",
+                {"failure_kind": "unknown"},
+                "failed",
+            ),
+            (
+                {"stop_reason": "error", "error_kind": "output_limit"},
+                "failed",
+                {"failure_kind": "agent_invalid_output"},
+                "failed",
+            ),
+            ({"stop_reason": "error", "error_kind": "harness_error"}, "failed", {"failure_kind": "unknown"}, "failed"),
+            ({"stop_reason": "error", "error_kind": "context_limit"}, "incomplete", None, "completed"),
+            ({"stop_reason": "wall_time", "finished_naturally": False}, "incomplete", None, "timeout"),
+            ({"stop_reason": "max_turns", "finished_naturally": False}, "incomplete", None, "completed"),
+            ({"stop_reason": "cancelled", "finished_naturally": False}, "incomplete", None, "cancelled"),
+            ({"stop_reason": "terminal_exited", "finished_naturally": False}, "incomplete", None, "completed"),
+            # A stop reason this adapter does not know is a failure, never a graded ending.
+            ({"stop_reason": "something_new"}, "failed", {"failure_kind": "unknown"}, "failed"),
         ],
     )
     async def test_how_a_run_ended_reaches_the_environment(
-        self, monkeypatch: pytest.MonkeyPatch, result: dict, status: str, outcome: dict | None
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        result: dict,
+        status: str,
+        outcome: dict | None,
+        sandbox_outcome: str,
     ) -> None:
-        error = {"error": "Boom", "error_type": "HTTPStatusError"} if result["stop_reason"] == "error" else {}
+        failed = result["stop_reason"] == "error" or status == "failed"
+        error = {"error": "Boom", "error_type": "HTTPStatusError"} if failed else {}
         activation = _Activation(monkeypatch, _output(**result, **error))
 
         response = await activation.respond()
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         assert response.status == status
         expected_stop = "context_limit" if result.get("error_kind") == "context_limit" else result["stop_reason"]
@@ -415,6 +563,92 @@ class TestActivation:
         reported = response.metadata.get("ng_agent_outcome")
         assert (json.loads(reported) if reported else None) == outcome
         assert (response.error is not None) == (status == "failed")
+        [sandbox] = [record for record in closed.agent_observations.records if isinstance(record, SandboxObservation)]
+        assert sandbox.outcome == sandbox_outcome
+
+    async def test_an_unfinished_turn_of_a_failed_run_is_recorded_as_failed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        output = _output(stop_reason="error", error_kind="harness_error", error="Boom", finished_naturally=False)
+        output["trajectory"]["steps"][1]["observation"] = {}
+        activation = _Activation(monkeypatch, output)
+
+        await activation.respond()
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
+
+        [tool] = [record for record in closed.agent_observations.records if isinstance(record, ToolCallObservation)]
+        assert tool.status == "failed"
+
+    async def test_the_request_instructions_join_the_instruction(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        activation = _Activation(monkeypatch, system_prompt="You are Terminus.")
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            instructions="Answer in the file answer.txt.",
+            input=[
+                {"role": "system", "content": "Work in /app."},
+                {"role": "user", "content": "solve it"},
+            ],
+        )
+
+        await activation.respond(body)
+
+        [payload] = activation.payloads
+        assert payload["instruction"] == (
+            "You are Terminus.\n\nAnswer in the file answer.txt.\n\nWork in /app.\n\nsolve it"
+        )
+        # Terminus builds its own messages from the instruction; none reach the model through the chat params.
+        assert "messages" not in payload["chat_params"]
+
+    async def test_the_request_tools_stay_out_of_the_model_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        activation = _Activation(monkeypatch)
+        # A Terminal-Bench row: tool fields Terminus never uses, task metadata and an output limit.
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="solve it",
+            tools=[
+                {"type": "function", "name": "f", "parameters": {"type": "object", "properties": {}}, "strict": True}
+            ],
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            metadata={"agent_timeout_sec": "60", "instance_id": "task-1", "docker_image": "registry/task:1"},
+            max_output_tokens=50,
+        )
+
+        response = await activation.respond(body)
+
+        [payload] = activation.payloads
+        assert not {"tools", "tool_choice", "parallel_tool_calls"} & payload["chat_params"].keys()
+        assert payload["chat_params"]["max_tokens"] == 50
+        assert response.status == "completed"
+
+    @pytest.mark.parametrize("field", [{"previous_response_id": "resp_1"}, {"truncation": "auto"}])
+    async def test_a_request_the_converter_cannot_represent_is_refused_before_any_sandbox_work(
+        self, monkeypatch: pytest.MonkeyPatch, field: dict
+    ) -> None:
+        activation = _Activation(monkeypatch)
+
+        with pytest.raises(HTTPException) as refused:
+            await activation.respond(NeMoGymResponseCreateParamsNonStreaming(input="solve it", **field))
+
+        assert refused.value.status_code == 422
+        assert refused.value.detail.startswith("Terminus 2 cannot run this request:")
+        assert activation.state.task is None and activation.state.activation_request is None
+        assert not activation.payloads
+        activation.state.session.sandbox.exec.assert_not_awaited()
+
+    async def test_a_result_that_does_not_validate_is_an_evidence_gap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # The runner's result file is writable by task commands; a malformed one must not fail the activation.
+        activation = _Activation(monkeypatch, _output(compactions=[1]))
+
+        response = await activation.respond()
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
+
+        assert response.status == "completed"
+        [gap] = closed.agent_observations.gaps
+        assert (gap.code, gap.invocation_id, gap.detail) == (
+            "observation_capture_failed",
+            activation.state.invocation_id,
+            "AttributeError",
+        )
+        assert not closed.agent_observations.records
 
     async def test_a_timed_out_command_batch_is_recorded_as_timed_out(self, monkeypatch: pytest.MonkeyPatch) -> None:
         output = _output(stop_reason="wall_time", finished_naturally=False)
@@ -422,7 +656,7 @@ class TestActivation:
         activation = _Activation(monkeypatch, output)
 
         await activation.respond()
-        closed = await activation.agent._close_agent_session_state(activation.state)
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         [tool] = [record for record in closed.agent_observations.records if isinstance(record, ToolCallObservation)]
         [sandbox] = [record for record in closed.agent_observations.records if isinstance(record, SandboxObservation)]
@@ -441,7 +675,7 @@ class TestActivation:
         activation = _Activation(monkeypatch, output)
 
         await activation.respond()
-        closed = await activation.agent._close_agent_session_state(activation.state)
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         tools = [record for record in closed.agent_observations.records if isinstance(record, ToolCallObservation)]
         assert [(tool.tool_call_id, tool.status) for tool in tools] == [
@@ -453,7 +687,7 @@ class TestActivation:
         activation = _Activation(monkeypatch, _output(calls_without_usage=1))
 
         response = await activation.respond()
-        closed = await activation.agent._close_agent_session_state(activation.state)
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         assert response.usage is None
         assert "model_usage_unavailable" in {gap.code for gap in closed.agent_observations.gaps}
@@ -488,16 +722,63 @@ class TestActivation:
         with pytest.raises(TimeoutError, match="transport"):
             await activation.respond()
 
+    async def test_waiting_for_a_run_slot_does_not_count_toward_the_budget(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        activation = _Activation(monkeypatch)
+        now = [0.0]
+        monkeypatch.setattr(f"{APP}.monotonic", lambda: now[0])
+
+        async def transport_timeout(payload: dict, *, timeout: float, close_timeout: float) -> dict:
+            # Close stopped the runner after the provider's transport timed out, and the runner saved its turns.
+            activation.state.session.artifacts = _output(stop_reason="cancelled", finished_naturally=False)
+            raise TimeoutError("provider transport timed out")
+
+        activation.state.execute = transport_timeout
+        # Another session's run holds the only slot for longer than this task's 60-second budget.
+        await activation.agent.sem.acquire()
+        running = asyncio.create_task(activation.respond())
+        for _ in range(5):
+            await asyncio.sleep(0)
+        now[0] = 100.0
+        activation.agent.sem.release()
+
+        # The run itself took no time, so its transport timeout is a failure, not the end of its budget.
+        with pytest.raises(TimeoutError, match="transport"):
+            await asyncio.wait_for(running, 10)
+
 
 class TestClose:
     async def test_close_before_activation_reports_a_gap(self, monkeypatch: pytest.MonkeyPatch) -> None:
         activation = _Activation(monkeypatch)
 
-        closed = await activation.agent._close_agent_session_state(activation.state)
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         assert [gap.code for gap in closed.agent_observations.gaps] == ["observation_capture_failed"]
         activation.state.session.sandbox.disconnect.assert_awaited_once()
         activation.state.session.sandbox.stop.assert_not_awaited()
+
+    async def test_close_converts_a_result_captured_before_the_activation_was_cancelled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        activation = _Activation(monkeypatch)
+        activation.release.clear()
+
+        async def captured(payload: dict, *, timeout: float, close_timeout: float) -> dict:
+            activation.state.session.artifacts = _output(stop_reason="cancelled", finished_naturally=False)
+            await activation.release.wait()
+            return _output()
+
+        activation.state.execute = captured
+        running = asyncio.create_task(activation.respond())
+        await asyncio.sleep(0)
+
+        closed = await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
+
+        assert running.cancelled()
+        [invocation] = [record for record in closed.agent_observations.records if isinstance(record, AgentInvocation)]
+        assert (invocation.status, invocation.stop_reason) == ("incomplete", "cancelled")
+        assert [call.response_id for call in invocation.model_calls] == ["chatcmpl-1", "chatcmpl-2"]
 
     async def test_close_releases_the_sandbox_before_cancelling_a_running_activation(
         self, monkeypatch: pytest.MonkeyPatch
@@ -515,7 +796,7 @@ class TestClose:
         running = asyncio.create_task(activation.respond())
         await asyncio.sleep(0)
 
-        await activation.agent._close_agent_session_state(activation.state)
+        await asyncio.wait_for(activation.agent._close_agent_session_state(activation.state), 10)
 
         assert order == ["session closed, activation done=False"]
         assert running.cancelled()
@@ -534,7 +815,7 @@ class TestClose:
         activation.state.session.sandbox.disconnect.assert_not_awaited()
 
         installed.set()
-        await closing
+        await asyncio.wait_for(closing, 10)
 
         activation.state.session.sandbox.disconnect.assert_awaited_once()
 
@@ -542,6 +823,274 @@ class TestClose:
         activation = _Activation(monkeypatch)
 
         assert activation.agent._rollout_sandbox_session(activation.state) is activation.state.session
+
+    async def test_an_activation_after_close_is_refused(self, wired: SimpleNamespace) -> None:
+        agent = _agent()
+        seed = _seed()
+        request = _request(seed)
+        await asyncio.wait_for(agent.seed_agent_session(request, seed), 10)
+        await asyncio.wait_for(
+            agent.close_agent_session(
+                request, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed.episode_id)
+            ),
+            10,
+        )
+
+        with pytest.raises(HTTPException) as refused:
+            await asyncio.wait_for(agent.responses(request, _BODY), 10)
+
+        assert refused.value.status_code == 409
+        assert wired.sandbox.launches == 0
+
+
+class FakeSandbox:
+    """Files in memory below the real SandboxSession; the supervised launch plays the runner.
+
+    ``runner`` decides what the launched runner does: "complete" saves a result and exits; "dies_early" is ended
+    by a rollout stop before it installs its SIGTERM handler, so it saves nothing; "blocks" runs until a stop or
+    expiry marker arrives, then saves its turns as the real runner's handler does.
+    """
+
+    sandbox_id = "sandbox-1"
+    uploads_independent_of_execs = True
+
+    def __init__(self, runner: str = "complete") -> None:
+        self.files: dict[str, str] = {}
+        self.runner = runner
+        self.launched = asyncio.Event()
+        self.ended = asyncio.Event()
+        self.launches = 0
+        self.stop_requests: set[str] = set()
+        # Set to make the check for a missing output.json fail, as an unreachable sandbox would.
+        self.absence_check_error: Exception | None = None
+        self.disconnect = AsyncMock()
+        self.stop = AsyncMock()
+
+    async def upload(self, source, destination) -> None:
+        self.files[str(destination)] = Path(source).read_text()
+        if str(destination).endswith("/expire.request"):
+            self.ended.set()
+
+    async def download(self, source, destination) -> None:
+        if source not in self.files:
+            raise FileNotFoundError(source)
+        Path(destination).write_text(self.files[source])
+
+    async def exec(self, command: str, **kwargs) -> SandboxExecResult:
+        if "process_supervisor.sh" in command and "--receipt" in command:
+            return await self._launch(command)
+        if "echo absent" in command:
+            if self.absence_check_error is not None:
+                raise self.absence_check_error
+            target = command.split("[ -e ", 1)[1].split(" ]", 1)[0].strip("'")
+            return SandboxExecResult(stdout="" if target in self.files else "absent\n", stderr="", return_code=0)
+        if "touch " in command and "stop.request" in command:
+            # Close writes the supervisor's stop file and, like the real script, waits a bounded time for the receipt.
+            receipt = command.split("[ -f ", 1)[1].split(" ]", 1)[0].strip("'")
+            self.stop_requests.add(receipt.removesuffix("cleanup.json") + "stop.request")
+            self.ended.set()
+            for _ in range(100):
+                if receipt in self.files:
+                    break
+                await asyncio.sleep(0.01)
+            else:
+                # Nothing launched: the stop wins the claim and writes the no-launch receipt.
+                self.files[receipt] = json.dumps(
+                    {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+                )
+        return SandboxExecResult(stdout="tmux 3.4", stderr="", return_code=0)
+
+    async def _launch(self, command: str) -> SandboxExecResult:
+        directory = command.split("--receipt ", 1)[1].split(" ", 1)[0].strip("'").removesuffix("/cleanup.json")
+        self.launches += 1
+        self.launched.set()
+
+        def receipt(**fields) -> None:
+            base = {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": False}
+            self.files[f"{directory}/cleanup.json"] = json.dumps({**base, **fields})
+
+        if f"{directory}/expire.request" in self.files:
+            # The supervisor never starts a harness whose expiry was requested before launch.
+            receipt(return_code=None, timed_out=True)
+        elif self.runner == "complete":
+            self.files[f"{directory}/output.json"] = json.dumps(_output())
+            receipt()
+        else:
+            await self.ended.wait()
+            if self.runner == "blocks":
+                # The runner's handler: close writes stop.request first (cancelled); an expiry does not (wall_time).
+                reason = "cancelled" if f"{directory}/stop.request" in self.stop_requests else "wall_time"
+                self.files[f"{directory}/output.json"] = json.dumps(
+                    _output(stop_reason=reason, finished_naturally=False)
+                )
+                receipt(timed_out=True)
+            else:  # dies_early: SIGTERM's default action, before the runner's handler exists, saves nothing.
+                receipt(return_code=143, timed_out=True)
+        return SandboxExecResult(stdout="", stderr="", return_code=0)
+
+
+@pytest.fixture
+def wired(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    """Seeds connect to the FakeSandbox in ``sandbox``, which a test may replace; the runtime counts as installed."""
+    holder = SimpleNamespace(sandbox=FakeSandbox(), provider=AsyncMock())
+
+    async def connect(descriptor, *, provider):
+        return holder.sandbox
+
+    monkeypatch.setattr(f"{APP}.get_global_config_dict", lambda: {"runtime": {}})
+    monkeypatch.setattr(f"{APP}.resolve_provider_config", lambda ref, config: {"docker": {}})
+    monkeypatch.setattr(f"{APP}.create_provider", lambda config: holder.provider)
+    monkeypatch.setattr(f"{APP}.AsyncSandbox.connect", connect)
+    monkeypatch.setattr(Terminus2Agent, "resolve_model_base_url", _model_url)
+    monkeypatch.setattr(SandboxPythonRuntime, "is_installed", AsyncMock(return_value=True))
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock())
+    return holder
+
+
+def _request(seed: AgentSeedSessionRequest) -> Request:
+    return Request(
+        {"type": "http", "headers": [], "session": {}, "path_params": {"rollout_id": seed.episode_id.capture_key}}
+    )
+
+
+class TestSandboxLifecycle:
+    """The real stage, supervised launch, receipt, collection and close, over an in-memory sandbox."""
+
+    @staticmethod
+    async def _seeded(wired: SimpleNamespace) -> tuple[Terminus2Agent, AgentSeedSessionRequest, Request]:
+        agent = _agent(session_close_timeout_seconds=3)
+        seed = _seed()
+        request = _request(seed)
+        await asyncio.wait_for(agent.seed_agent_session(request, seed), 10)
+        return agent, seed, request
+
+    @staticmethod
+    async def _close(agent: Terminus2Agent, seed: AgentSeedSessionRequest, request: Request):
+        return await asyncio.wait_for(
+            agent.close_agent_session(
+                request, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed.episode_id)
+            ),
+            10,
+        )
+
+    async def test_a_run_goes_through_the_supervised_lifecycle(self, wired: SimpleNamespace) -> None:
+        agent, seed, request = await self._seeded(wired)
+
+        response = await asyncio.wait_for(agent.responses(request, _BODY), 30)
+        closed = await self._close(agent, seed, request)
+
+        assert (response.status, response.metadata["stop_reason"]) == ("completed", "completed")
+        staged = json.loads(next(text for path, text in wired.sandbox.files.items() if path.endswith("/input.json")))
+        assert staged["workdir"] == "/app"
+        assert staged["model_base_url"] == f"http://model:8000/ng-rollout/{seed.episode_id.capture_key}/v1"
+        [invocation] = [record for record in closed.agent_observations.records if isinstance(record, AgentInvocation)]
+        assert invocation.status == "completed"
+        # Terminus uses no Resources tools, so close hands no Resources cookies back.
+        assert closed.resources_cookies is None
+        wired.sandbox.disconnect.assert_awaited_once()
+        wired.sandbox.stop.assert_not_awaited()
+
+    async def test_a_rollout_stop_during_seed_ends_the_activation_as_a_timeout(self, wired: SimpleNamespace) -> None:
+        agent, seed, request = await self._seeded(wired)
+        # The supervisor's receipt alone shows that Terminus never started; nothing else is asked of the sandbox.
+        wired.sandbox.absence_check_error = ConnectionError("sandbox unreachable")
+        assert (await agent.stop_rollout(seed.episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+
+        response = await asyncio.wait_for(agent.responses(request, _BODY), 30)
+
+        # Terminus never ran: an empty run graded like a timeout, never an activation error that is retried.
+        assert (response.status, response.metadata["stop_reason"], response.error) == ("incomplete", "wall_time", None)
+        assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+        assert "ng_agent_outcome" not in response.metadata
+        assert not any(path.endswith("/output.json") for path in wired.sandbox.files)
+
+    async def test_a_rollout_stop_before_the_runner_saves_anything_ends_as_a_timeout(
+        self, wired: SimpleNamespace
+    ) -> None:
+        # A stop that lands while the runner still imports Harbor leaves no output.json; it is still a stop.
+        wired.sandbox = FakeSandbox(runner="dies_early")
+        agent, seed, request = await self._seeded(wired)
+        running = asyncio.create_task(agent.responses(request, _BODY))
+        await asyncio.wait_for(wired.sandbox.launched.wait(), 10)
+
+        assert (await agent.stop_rollout(seed.episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+        response = await asyncio.wait_for(running, 30)
+
+        assert (response.status, response.metadata["stop_reason"], response.error) == ("incomplete", "wall_time", None)
+        assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+
+    async def test_a_runner_that_saved_nothing_without_a_stop_is_still_an_error(self, wired: SimpleNamespace) -> None:
+        wired.sandbox = FakeSandbox(runner="dies_early")
+        agent, seed, request = await self._seeded(wired)
+        running = asyncio.create_task(agent.responses(request, _BODY))
+        await asyncio.wait_for(wired.sandbox.launched.wait(), 10)
+
+        # The runner ends on its own, without a rollout stop, and leaves no result.
+        wired.sandbox.ended.set()
+
+        with pytest.raises(RuntimeError, match="exited without output"):
+            await asyncio.wait_for(running, 30)
+
+    async def test_a_rollout_stop_while_running_keeps_the_saved_turns(self, wired: SimpleNamespace) -> None:
+        wired.sandbox = FakeSandbox(runner="blocks")
+        agent, seed, request = await self._seeded(wired)
+        running = asyncio.create_task(agent.responses(request, _BODY))
+        await asyncio.wait_for(wired.sandbox.launched.wait(), 10)
+
+        assert (await agent.stop_rollout(seed.episode_id.capture_key, RolloutStopRequest(reason="budget"))).stopped
+        response = await asyncio.wait_for(running, 30)
+
+        assert (response.status, response.metadata["stop_reason"]) == ("incomplete", "wall_time")
+        assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+        assert "ng_agent_outcome" not in response.metadata
+        assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
+
+    async def test_close_during_a_run_keeps_the_turns_the_runner_saved(self, wired: SimpleNamespace) -> None:
+        wired.sandbox = FakeSandbox(runner="blocks")
+        agent, seed, request = await self._seeded(wired)
+        running = asyncio.create_task(agent.responses(request, _BODY))
+        await asyncio.wait_for(wired.sandbox.launched.wait(), 10)
+
+        closed = await self._close(agent, seed, request)
+
+        # Close stopped the runner and captured its saved turns before it cancelled the activation.
+        response = await asyncio.wait_for(running, 30)
+        assert (response.status, response.metadata["stop_reason"]) == ("incomplete", "cancelled")
+        assert "ng_rollout_stop" not in response.metadata
+        assert "observation_capture_failed" not in {gap.code for gap in closed.agent_observations.gaps}
+        [invocation] = [record for record in closed.agent_observations.records if isinstance(record, AgentInvocation)]
+        assert (invocation.status, invocation.stop_reason) == ("incomplete", "cancelled")
+        assert [call.response_id for call in invocation.model_calls] == ["chatcmpl-1", "chatcmpl-2"]
+        wired.sandbox.disconnect.assert_awaited_once()
+
+
+class TestRun:
+    """``/run`` is the host path's compatibility endpoint; it needs a Resources server and no agent session."""
+
+    @staticmethod
+    def _agent(**kwargs) -> Terminus2Agent:
+        agent = _agent(**kwargs)
+        agent.server_client.post = AsyncMock(side_effect=AssertionError("a refused /run must not call any server"))
+        return agent
+
+    async def test_run_inside_an_agent_session_is_refused(self) -> None:
+        agent = self._agent(resources_server=ResourcesServerRef(type="resources_servers", name="resources"))
+        request = Request({"type": "http", "headers": [], "session": {"agent_session_id": "session"}})
+
+        with pytest.raises(HTTPException) as refused:
+            await agent.run(request, Terminus2AgentRunRequest(responses_create_params={"input": "task"}))
+
+        assert refused.value.status_code == 409
+
+    async def test_run_without_a_resources_server_is_refused(self) -> None:
+        agent = self._agent()
+        request = Request({"type": "http", "headers": [], "session": {}})
+
+        with pytest.raises(HTTPException) as refused:
+            await agent.run(request, Terminus2AgentRunRequest(responses_create_params={"input": "task"}))
+
+        assert refused.value.status_code == 422
+        assert "resources_server" in refused.value.detail
 
 
 class TestStageAndCollect:

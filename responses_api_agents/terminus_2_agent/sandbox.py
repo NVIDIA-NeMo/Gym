@@ -46,8 +46,24 @@ _UNUSED_HARBOR_DEPENDENCIES = (
 )
 # The files the runner imports, uploaded beside it for each session.
 _HARNESS_FILES = ("sandbox_runner.py", "terminus.py", "llm.py")
-# Harbor's tmux launcher runs util-linux `script` to give tmux a terminal.
-_TERMINAL_PROBE = "command -v script >/dev/null || { echo 'missing script (util-linux)'; exit 3; }; tmux -V"
+# Harbor's tmux launcher and its command runner need bash, and the launcher runs util-linux `script` to give tmux a
+# terminal.
+_TERMINAL_PROBE = (
+    "command -v bash >/dev/null || { echo 'missing bash'; exit 3; }; "
+    "command -v script >/dev/null || { echo 'missing script (util-linux)'; exit 3; }; tmux -V"
+)
+
+
+def _stopped_without_output() -> dict[str, JsonValue]:
+    """The result of a run a rollout stop ended before the runner saved anything; graded like a timeout."""
+    return {
+        "stop_reason": "wall_time",
+        "trajectory": {"steps": []},
+        "finished_naturally": False,
+        "response_ids": [],
+        "calls_without_usage": 0,
+        "compactions": [],
+    }
 
 
 def _sandbox_harbor_requirement() -> str:
@@ -113,9 +129,11 @@ class Terminus2SandboxSession(AgentSessionState):
         """
         sandbox = self.session.sandbox
         runtime = terminus_runtime()
-        prepared = await sandbox.exec(
-            f"mkdir -p {quote(self.harness_dir)} {quote(self.session.session_dir)}/logs", cwd="/", timeout_s=30
-        )
+        directories = [self.harness_dir, f"{self.session.session_dir}/logs"]
+        if self.session.owns_sandbox:
+            # Providers need not create the workdir; a borrowed sandbox's task directory belongs to Resources.
+            directories.append(self.session.workdir)
+        prepared = await sandbox.exec(f"mkdir -p {' '.join(map(quote, directories))}", cwd="/", timeout_s=30)
         if prepared.return_code != 0 or prepared.error_type is not None:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Terminus 2 sandbox paths")
         if not await runtime.is_installed(sandbox):
@@ -202,12 +220,28 @@ class Terminus2SandboxSession(AgentSessionState):
             ],
         )
 
+    async def _output_absent(self) -> bool:
+        """Whether the runner left no output.json, as opposed to a read that failed."""
+        path = quote(f"{self.session.session_dir}/output.json")
+        try:
+            probe = await self.session.sandbox.exec(f"[ -e {path} ] || echo absent", cwd="/", timeout_s=10)
+        except Exception:
+            return False
+        return probe.return_code == 0 and probe.error_type is None and (probe.stdout or "").strip() == "absent"
+
     async def collect_artifacts(self) -> dict[str, JsonValue]:
         """Copy the runner's result before close removes files, including an interrupted run's partial result."""
         path = f"{self.session.session_dir}/output.json"
+        if self.session.expired_before_launch:
+            # A rollout stop arrived before launch, so Terminus never ran: an empty run that ended at its limit.
+            return _stopped_without_output()
         try:
             output = json.loads(await read_text(self.session.sandbox, path=path))
         except Exception as error:
+            if self.session.expired and await self._output_absent():
+                # A rollout stop ended the runner before it could save anything (it was still importing Harbor).
+                LOG.warning("Terminus 2 saved no result before a rollout stop ended it; reporting an empty run")
+                return _stopped_without_output()
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Terminus 2 sandbox runner exited without output: {logs[-4000:]}") from error
         if not isinstance(output, dict):

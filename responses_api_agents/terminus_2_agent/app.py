@@ -71,6 +71,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import (
@@ -220,7 +221,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     def _prepare_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, str]:
-        """Apply the configured temperature and flatten the input into Terminus-2's instruction."""
+        """Apply the configured temperature and flatten the instructions and input into Terminus-2's instruction."""
         body = body.model_copy(deep=True)
         if body.temperature is None:
             body.temperature = self.config.temperature
@@ -228,7 +229,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
 
         user_instruction, input_system = _extract_instruction(body.input)
-        instruction_parts = [part for part in (self.config.system_prompt, input_system, user_instruction) if part]
+        instruction_parts = [
+            part for part in (self.config.system_prompt, body.instructions, input_system, user_instruction) if part
+        ]
         return body, "\n\n".join(instruction_parts)
 
     def _terminus_settings(self, body: NeMoGymResponseCreateParamsNonStreaming) -> dict[str, Any]:
@@ -416,7 +419,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         if not isinstance(workdir, str) or not workdir.startswith("/"):
             raise AgentSeedRejectedError(f"Terminus 2 needs an absolute sandbox workdir, got {workdir!r}")
 
-        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+        global_config = get_global_config_dict()
+        provider_config = resolve_provider_config(provider_ref, global_config)
         # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
         # without use_absolute_ip) would make every model call fail.
         assert_model_url_reachable_from_sandbox(
@@ -428,9 +432,17 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             if owns_sandbox:
                 sandbox = AsyncSandbox(provider)
                 sandbox_config = self.config.sandbox_config.copy()
-                # Provider TTLs outlive this server; reserve ten minutes for setup and cleanup.
+                sandbox_config["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **(sandbox_config.get("metadata") or {}),
+                    "gym-agent": "terminus_2",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
+                # Provider TTLs outlive this server; reserve both setup steps (runtime and tmux install), the run,
+                # and ten minutes for cleanup.
                 sandbox_config.setdefault(
-                    "ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600
+                    "ttl_s", 2 * self.config.sandbox_install_timeout_seconds + self.config.timeout + 600
                 )
                 await sandbox.start(SandboxSpec(**sandbox_config))
             else:
@@ -527,98 +539,116 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         ``conversation`` is the response output; without one it is converted again from the runner's trajectory.
         """
         invocation_id = state.invocation_id or "terminus2"
-        stop_reason = self._stop_reason(output)
-        status = self._status(output)
-        if conversation is None:
-            conversation = trajectory_to_responses(output.get("trajectory") or {"steps": []})
-        # Terminus runs a turn's whole command batch, then records one terminal result for it. Every command of a
-        # turn with a result ran; a turn without one was still running when the run stopped.
-        tool_status: dict[str, str] = {}
-        unfinished = {"wall_time": "timeout", "cancelled": "cancelled"}.get(stop_reason, "failed")
-        turn: list[str] = []
-        for item in [*conversation, {"type": "message"}]:
-            if item.get("type") == "function_call":
-                turn.append(item["call_id"])
-            elif item.get("type") == "function_call_output":
-                tool_status.update(dict.fromkeys(turn, "completed"))
-            elif item.get("type") == "message":
-                tool_status.update({call_id: unfinished for call_id in turn if call_id not in tool_status})
-                turn = []
-        model_calls = [
-            ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
-            for response_id in output.get("response_ids") or []
-            if isinstance(response_id, str) and response_id
-        ]
-        records: list[Any] = [
-            AgentInvocation(
-                invocation_id=invocation_id,
-                status=status,
-                stop_reason=stop_reason,
-                duration_ms=duration_ms,
-                error_type=output.get("error_type")
-                or {"wall_time": "timeout", "cancelled": "cancelled"}.get(stop_reason),
-                model_calls=model_calls,
-                conversation=conversation,
+        try:
+            stop_reason = self._stop_reason(output)
+            status = self._status(output)
+            if conversation is None:
+                conversation = trajectory_to_responses(output.get("trajectory") or {"steps": []})
+            # Terminus runs a turn's whole command batch, then records one terminal result for it. Every command of a
+            # turn with a result ran; a turn without one was still running when the run stopped.
+            tool_status: dict[str, str] = {}
+            unfinished = {"wall_time": "timeout", "cancelled": "cancelled"}.get(stop_reason, "failed")
+            turn: list[str] = []
+            for item in [*conversation, {"type": "message"}]:
+                if item.get("type") == "function_call":
+                    turn.append(item["call_id"])
+                elif item.get("type") == "function_call_output":
+                    tool_status.update(dict.fromkeys(turn, "completed"))
+                elif item.get("type") == "message":
+                    tool_status.update({call_id: unfinished for call_id in turn if call_id not in tool_status})
+                    turn = []
+            model_calls = [
+                ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
+                for response_id in output.get("response_ids") or []
+                if isinstance(response_id, str) and response_id
+            ]
+            records: list[Any] = [
+                AgentInvocation(
+                    invocation_id=invocation_id,
+                    status=status,
+                    stop_reason=stop_reason,
+                    duration_ms=duration_ms,
+                    error_type=output.get("error_type")
+                    or {"wall_time": "timeout", "cancelled": "cancelled"}.get(stop_reason),
+                    model_calls=model_calls,
+                    conversation=conversation,
+                )
+            ]
+            # Terminus runs the keystroke batches it parses from the model's text; the response presents each batch
+            # as a function call with the terminal output Terminus recorded for it.
+            records.extend(
+                ToolCallObservation(
+                    invocation_id=invocation_id,
+                    tool_call_id=item["call_id"],
+                    sandbox_id=state.sandbox_id,
+                    tool_name=item["name"],
+                    timing_source="harness",
+                    status=tool_status[item["call_id"]],
+                )
+                for item in conversation
+                if item.get("type") == "function_call"
             )
-        ]
-        # Terminus runs the keystroke batches it parses from the model's text; the response presents each batch
-        # as a function call with the terminal output Terminus recorded for it.
-        records.extend(
-            ToolCallObservation(
-                invocation_id=invocation_id,
-                tool_call_id=item["call_id"],
-                sandbox_id=state.sandbox_id,
-                tool_name=item["name"],
-                timing_source="harness",
-                status=tool_status[item["call_id"]],
-            )
-            for item in conversation
-            if item.get("type") == "function_call"
-        )
-        for compaction in output.get("compactions") or []:
+            for compaction in output.get("compactions") or []:
+                records.append(
+                    ContextCompactionObservation(
+                        invocation_id=invocation_id,
+                        observed_at=compaction.get("observed_at"),
+                        trigger="harbor_summarize",
+                        outcome=compaction.get("outcome", "unknown"),
+                        model_calls=[
+                            ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
+                            for response_id in compaction.get("response_ids") or []
+                        ],
+                    )
+                )
+            cleanup = state.session.cleanup
             records.append(
-                ContextCompactionObservation(
-                    invocation_id=invocation_id,
-                    observed_at=compaction.get("observed_at"),
-                    trigger="harbor_summarize",
-                    outcome=compaction.get("outcome", "unknown"),
-                    model_calls=[
-                        ModelCallRef(model_ref=self.config.model_server, response_id=response_id)
-                        for response_id in compaction.get("response_ids") or []
-                    ],
+                SandboxObservation(
+                    role="agent",
+                    provider=state.provider,
+                    sandbox_id=state.sandbox_id,
+                    outcome=_SANDBOX_OUTCOME_BY_STOP_REASON.get(
+                        stop_reason, "failed" if status == "failed" else "completed"
+                    ),
+                    exit_code=cleanup["return_code"] if cleanup is not None else None,
+                    error_type=output.get("error_kind") if status == "failed" else None,
                 )
             )
-        cleanup = state.session.cleanup
-        records.append(
-            SandboxObservation(
-                role="agent",
-                provider=state.provider,
-                sandbox_id=state.sandbox_id,
-                outcome=_SANDBOX_OUTCOME_BY_STOP_REASON.get(
-                    stop_reason, "failed" if status == "failed" else "completed"
-                ),
-                exit_code=cleanup["return_code"] if cleanup is not None else None,
-                error_type=output.get("error_kind") if status == "failed" else None,
-            )
-        )
-        gaps = [
-            # Terminus records no start or end time for a command batch.
-            ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id),
-        ]
-        if output.get("calls_without_usage"):
-            gaps.append(
-                ObservationGap(
-                    code="model_usage_unavailable",
-                    invocation_id=invocation_id,
-                    detail=f"{output['calls_without_usage']} model responses had no usage",
+            gaps = [
+                # Terminus records no start or end time for a command batch.
+                ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id),
+            ]
+            if output.get("calls_without_usage"):
+                gaps.append(
+                    ObservationGap(
+                        code="model_usage_unavailable",
+                        invocation_id=invocation_id,
+                        detail=f"{output['calls_without_usage']} model responses had no usage",
+                    )
                 )
+            return AgentObservationBundle(source="terminus2", records=records, gaps=gaps)
+        except Exception as error:
+            # A malformed result, which a task command could also have written, is a gap in the evidence; it must
+            # not fail the activation or every close retry.
+            LOG.exception("Could not build Terminus 2 observations from the runner's result")
+            return AgentObservationBundle(
+                source="terminus2",
+                gaps=[
+                    ObservationGap(
+                        code="observation_capture_failed", invocation_id=invocation_id, detail=type(error).__name__
+                    )
+                ],
             )
-        return AgentObservationBundle(source="terminus2", records=records, gaps=gaps)
 
     async def _run_sandbox_activation(
-        self, state: Terminus2SandboxSession, body: NeMoGymResponseCreateParamsNonStreaming
+        self,
+        state: Terminus2SandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        instruction: str,
+        chat_params: dict[str, Any],
     ) -> NeMoGymResponse:
-        body, instruction = self._prepare_request(body)
+        """Run a prepared request (see ``_prepare_request``) in the session's sandbox."""
         invocation_id = state.invocation_id = f"terminus2_{uuid4().hex}"
         payload = {
             "instruction": instruction,
@@ -627,18 +657,16 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             "model_base_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
-            "chat_params": chat_completion_params(
-                body.model_dump(mode="json", exclude_none=True),
-                collect_rollout_details=self.config.collect_rollout_details,
-            ),
+            "chat_params": chat_params,
             "invocation_id": invocation_id,
             "model_timeout_sec": self.config.model_timeout_sec,
             "command_timeout_sec": self.config.command_timeout_sec,
             "terminus": self._terminus_settings(body),
         }
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
-        started = monotonic()
         async with self.sem:
+            # The budget runs from launch: time spent waiting for a run slot is not the harness's.
+            started = monotonic()
             try:
                 output = await state.execute(
                     payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
@@ -705,10 +733,24 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             if state.request.episode_id.capture_key != rollout_id:
                 raise HTTPException(409, "Agent-session episode_id does not match the rollout route")
             if state.task is None:
+                prepared, instruction = self._prepare_request(body)
+                try:
+                    # Terminus types keystrokes and calls no tools, so the request's tool fields stay out of its
+                    # model calls. A field the converter cannot represent is refused before any sandbox work.
+                    chat_params = chat_completion_params(
+                        prepared.model_dump(
+                            mode="json", exclude_none=True, exclude={"tools", "tool_choice", "parallel_tool_calls"}
+                        ),
+                        collect_rollout_details=self.config.collect_rollout_details,
+                    )
+                except NotImplementedError as error:
+                    raise HTTPException(422, f"Terminus 2 cannot run this request: {error}") from error
                 # No await until the task and its request binding are installed: a retry arriving meanwhile must
                 # find them.
                 state.activation_request = body.model_copy(deep=True)
-                state.task = asyncio.create_task(self._run_sandbox_activation(state, body))
+                state.task = asyncio.create_task(
+                    self._run_sandbox_activation(state, prepared, instruction=instruction, chat_params=chat_params)
+                )
             elif body != state.activation_request:
                 raise HTTPException(409, "Terminus 2 sandbox sessions support one activation; retry the same request")
             # A disconnected HTTP waiter must not cancel the shared activation. Session close owns cancellation;

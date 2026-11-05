@@ -69,9 +69,13 @@ class LocalEnvironment:
         env: dict[str, str] | None = None,
         timeout_sec: int | float | None = None,
     ) -> ExecResult:
-        run_cwd = Path(cwd).resolve() if cwd else self.cwd
-        if not run_cwd.is_dir():
-            raise FileNotFoundError(f"Terminus-2 working directory does not exist: {run_cwd}")
+        if cwd:
+            run_cwd = Path(cwd).resolve()
+            if not run_cwd.is_dir():
+                raise FileNotFoundError(f"Terminus-2 working directory does not exist: {run_cwd}")
+        else:
+            # A command typed in the terminal can remove the workdir; Terminus's tmux commands do not need it.
+            run_cwd = self.cwd if self.cwd.is_dir() else Path("/")
 
         process_env = dict(self._base_env) if self._base_env is not None else os.environ.copy()
         if env:

@@ -86,6 +86,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "claude_code_agent",
         "osworld_agent",
         "harbor_oracle_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
         "miniswe_sandboxed_agent",
     ],

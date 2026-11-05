@@ -6,9 +6,15 @@ JSON (or XML) reply and reads the terminal back. It uses no function calling.
 
 - Harness: Harbor at commit `9dddd797b57ab8a0f9d6352a20fce73abbb29573`, pinned in `pyproject.toml`.
 - Model API: Chat Completions, through the Gym Model Server named by `model_server`.
-- Capability level: Observability. Agent sessions report the invocation, its model calls by response ID, each
-  command batch with the terminal output Terminus recorded for it, summarizations, and the sandbox outcome.
+- Capability level: Evaluation. Agent sessions report the invocation, its model calls by response ID, each
+  command batch with the terminal output Terminus recorded for it, summarizations, and the sandbox outcome, but the
+  evidence check's TE-5 (`tools.output`) fails on turns with several commands until
+  [#3520](https://github.com/NVIDIA-NeMo/Gym/pull/3520) lands. The level becomes Observability once it does and the
+  evidence is rerun.
 - Tool grants from Resources: none. A seed with a required grant is refused; keep `resources_tool_transports: []`.
+- Supported pairings: none declared. Smoke-tested: Terminal-Bench 2.1 with a borrowed sandbox (unsupported-pairing
+  override), and `math_with_judge` through `single_agent_turn_legacy` with an agent-owned sandbox. Terminal-Bench
+  2.1 support awaits a full evaluation.
 
 ## Execution modes
 
@@ -31,19 +37,24 @@ At seed, the agent prepares the sandbox before any activation:
    passes its import check. The runtime lives under `/tmp/nemo-gym-terminus-2-runtime-<key>`.
 2. It uploads `sandbox_runner.py`, `terminus.py` and `llm.py` into the session directory,
    `/tmp/nemo-gym-terminus-2-sessions/<id>`, outside the task's working directory and `HOME`.
-3. It checks that `script` (util-linux) and `tmux` run. A sandbox without `script` is refused. A sandbox without
-   `tmux` gets it from Harbor's own installer, which uses the image's package manager, so such a sandbox needs
-   network access to its package index. Install `tmux` in the image to avoid this.
+3. It checks that `bash`, `script` (util-linux) and `tmux` run. A sandbox without `bash` or `script` is refused.
+   A sandbox without `tmux` gets it from Harbor's own installer, which uses the image's package manager, so such a
+   sandbox needs root and network access to its package index. Install `tmux` in the image to avoid this.
+
+In a sandbox it starts itself, the agent also creates `sandbox_config.workdir`, since providers need not.
 
 The activation runs the runner under Gym's process supervisor in the task's working directory. The runner calls
 the Model Server directly with the rollout-qualified URL and an `x-session-id` header that names the invocation,
-so the sandbox must reach the Model Server (`++use_absolute_ip=true` for Docker). Terminus's terminal starts with
-the environment the runner started with, so tool commands keep the task's `HOME`, `PATH` and Python settings.
+so the sandbox must reach the Model Server. For Docker, set
+`++use_absolute_ip=true '++absolute_ip_server_types=[responses_api_models]'`: only the Model Server needs the
+address sandboxes reach, and an unseeded request to this agent runs Terminus on the Gym host. Terminus's terminal
+starts with the environment the runner started with, so tool commands keep the task's `HOME` and Python settings.
+The terminal runs `bash --login`, as Harbor's does, so the image's `/etc/profile` may reset `PATH`.
 
-When Terminus confirms completion, the runner exits and leaves the tmux terminal running, as Harbor does:
-services the agent started in it stay up for verification, until the sandbox's owner stops the sandbox. A run
-still going at the time limit, on a rollout stop, or on close is stopped by the supervisor with every process it
-started, including the terminal. The runner saves the turns taken so far before it exits.
+The tmux terminal and the commands running in it stay up after the runner ends, also after a deadline, rollout stop
+or close, until the sandbox's owner stops the sandbox, as in Harbor: services the agent started in it stay up for
+verification. A run still going at the time limit, on a rollout stop, or on close is stopped by the supervisor,
+and the runner saves the turns taken so far before it exits.
 
 The response status says how the run ended:
 
@@ -54,13 +65,18 @@ The response status says how the run ended:
 | Context overflow that summarization could not resolve | `incomplete` | `context_limit` |
 | Model request rejected or failed, other harness error | `failed`, with `ng_agent_outcome` | `error` |
 
-A failed response names `model_request_error` with the model's HTTP status, `model_transport_error`, or
-`unknown`, and the Environment Server's outcome policy decides whether to verify, retry or fail the episode.
-Usage is reported only when every model response carried it.
+A rollout stop that arrives before the runner saved anything, during seed or while the runner starts, ends the run
+as an empty `wall_time` run. A failed response names `model_request_error` with the model's HTTP status,
+`model_transport_error`, `agent_invalid_output` (a reply cut off at the output limit), or `unknown`, and the
+Environment Server's outcome policy decides whether to verify, retry or fail the episode. Usage is reported only
+when every model response carried it.
 
 ## Configuration
 
-`configs/terminus_2_agent.yaml` is the agent-session configuration (`resources_server: null`). Besides the Terminus
+`configs/terminus_2_agent.yaml` is the agent-session configuration (`resources_server: null`). Composing it onto a
+benchmark does not replace the benchmark's own agent. For a benchmark whose Resources server lends no sandbox, use
+`configs/profiles/benchmark.yaml` (below); for the host-path `/run`, set `resources_server` and front the agent with
+the [`legacy_agent`](../../environment_servers/legacy_agent/README.md) Environment Server. Besides the Terminus
 settings (`max_turns`, `parser_name`, `temperature`, `enable_summarize`, `model_info`, tmux pane size and others),
 it sets:
 
@@ -69,20 +85,62 @@ it sets:
 | `timeout` | The run's wall-clock budget. A task's `agent_timeout_sec` lowers it in agent sessions. |
 | `concurrency` | Concurrent runs, agent session activations or host runs. |
 | `sandbox_provider`, `sandbox_config` | An agent-owned sandbox for sessions without `sandbox_access`; `sandbox_config.workdir` must be absolute. |
-| `sandbox_install_timeout_seconds` | Runtime and tmux setup at seed. |
+| `sandbox_install_timeout_seconds` | Each setup step at seed (runtime install, tmux install). An owned sandbox's default `ttl_s` reserves both, the run's `timeout`, and ten minutes for cleanup. |
 | `session_close_timeout_seconds` | Each step of close: stopping Terminus, collecting its result, releasing the sandbox. |
 
-Request sampling fields are converted with Gym's vLLM converter and sent on every model call. `model_timeout_sec`
-bounds each model call and `command_timeout_sec` each terminal command. `record_terminal_session` applies only on
-the host path. `collect_rollout_details` returns token IDs and log probabilities; in a sandbox they come back in the
-runner's result file, which the task's commands could also write, so treat them as evaluation evidence only.
+Agent sessions treat the request's fields as follows:
 
-### Run on Terminal-Bench 2.1
+- Applied: `instructions` and the input's system and developer messages, which join the instruction before the
+  task; `temperature`, `top_p` and reasoning effort; `max_output_tokens`, as each model call's `max_tokens`. Gym's
+  Chat Completions converter converts them and the runner sends them on every model call.
+- Ignored by design: `tools`, `tool_choice` and `parallel_tool_calls`, because Terminus types keystrokes and calls no
+  tools. The input is flattened to text, so images and function-call history are not used.
+- Refused with 422 before any sandbox work: fields the converter cannot represent, such as `previous_response_id`,
+  `conversation`, `prompt`, `max_tool_calls`, `truncation` or `background`.
 
-Terminal-Bench 2.1 does not list `terminus_2_agent` in `allowed_agents` yet, so start its servers with
+`model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command.
+`record_terminal_session` applies only on the host path. `collect_rollout_details` returns token IDs and log
+probabilities; in a sandbox they come back in the runner's result file, which the task's commands could also write,
+so treat them as evaluation evidence only.
+
+### Benchmark profile
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs
+Terminus on the Gym host. Terminus derives the sandbox's lifetime from its own timeouts, and its terminal starts in
+`sandbox_config.workdir` (`/workspace`), which setup creates. Supply the image in `sandbox_config.image`; set other
+`sandbox_config` keys under the profile's own instance name,
+`terminus_2_agent.responses_api_agents.terminus_2_agent.sandbox_config`.
+
+The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
+APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
+fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
+model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+
+```yaml
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports: []
+```
+
+### Smoke-test on Terminal-Bench 2.1
+
+Terminal-Bench 2.1 does not list `terminus_2_agent` in `allowed_agents`, so start its servers with
 `--allow-unsupported-pairing`. Compose the run as the
 [benchmark README](../../benchmarks/terminal_bench_2_1/README.md#configure-a-run) shows, with
 `responses_api_agents/terminus_2_agent/configs/terminus_2_agent.yaml` and `agent_server.name: terminus_2_agent`.
+
+### Relation to terminus_2_sandboxed_agent
+
+[`terminus_2_sandboxed_agent`](../terminus_2_sandboxed_agent/README.md) also runs Harbor's Terminus 2 through agent
+sessions, but its loop runs on the Agent Server and sends each command to the sandbox, with Harbor 0.22.0. This
+adapter runs the whole loop inside the sandbox, with Harbor at the commit above. Terminal-Bench 2.1 declares only
+`terminus_2_sandboxed_agent`. The two differ in Harbor version and in where commands run, so their scores are not
+interchangeable.
 
 ## Host path and AnyTerminal
 
@@ -113,5 +171,14 @@ The agent converts the Terminus-2 trajectory to Responses API messages and prese
 ## Limits
 
 - Harness conformance probes do not drive Terminus-2 yet: they expect a function-calling shell tool.
+- The evidence check's TE-5 (`tools.output`) fails on turns with several commands until
+  [#3520](https://github.com/NVIDIA-NeMo/Gym/pull/3520) lands, so the capability level is Evaluation.
 - Terminus-2 records no start or end time for a command batch, so tool timing is reported as unavailable.
 - The tmux server uses the default socket under `/tmp/tmux-<uid>`; a task that runs its own tmux server shares it.
+- Sandbox runs are tested on glibc images; musl images are untested. Installing `tmux` at setup needs root and
+  network access.
+- A task command such as `pkill python` or `pkill -f '\.py'` can end the runner. SIGTERM is recorded as
+  `wall_time`; SIGKILL leaves no result, and the activation fails as an infrastructure error.
+- A model call still in flight at the deadline ends the run as `wall_time`, and the run is graded.
+- The runner's result file (status, stop reason, token IDs) is writable by task commands, so treat it as
+  evaluation evidence only.

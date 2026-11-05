@@ -81,6 +81,20 @@ class TestLocalEnvironment:
         assert result.return_code == 124
         assert "timed out" in (result.stderr or "")
 
+    @pytest.mark.asyncio
+    async def test_a_removed_workspace_moves_default_commands_to_the_root(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "task"
+        workspace.mkdir()
+        environment = LocalEnvironment(workspace, command_timeout_sec=5)
+        # A command typed in the terminal can move the workspace away; Terminus's own tmux commands must still run.
+        workspace.rename(tmp_path / "task.bak")
+
+        result = await environment.exec("pwd")
+
+        assert (result.return_code, result.stdout.strip()) == (0, "/")
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            await environment.exec("pwd", cwd=str(workspace))
+
 
 class TestLocalTmuxSession:
     def test_macos_launcher_does_not_use_linux_script_flags(self, tmp_path: Path) -> None:

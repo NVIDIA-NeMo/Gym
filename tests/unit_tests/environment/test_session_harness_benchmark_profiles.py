@@ -45,8 +45,9 @@ def test_profile_composes_onto_hle_with_its_limits_and_a_loopback_head_server(
     assert settings.sandbox_provider == "sandbox"
     assert settings.sandbox_config.image == IMAGE
     assert settings.sandbox_config.ready_timeout_s == 1200
-    # Hermes derives its TTL from its own timeouts; the others would get OpenSandbox's 10-minute default.
-    assert settings.sandbox_config.get("ttl_s") == (None if agent == "hermes_agent" else 14400)
+    # Hermes and Terminus derive their TTL from their own timeouts; the others would get OpenSandbox's 10-minute
+    # default.
+    assert settings.sandbox_config.get("ttl_s") == (None if agent in {"hermes_agent", "terminus_2_agent"} else 14400)
     if agent == "claude_code_agent":
         assert settings.claude_code_version == "2.1.108"
         assert settings.model_server.name == "policy_model"

@@ -5,6 +5,7 @@
 import importlib
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -52,6 +53,23 @@ def test_errors_are_classified_by_what_ended_the_run(error: BaseException, kind:
     assert _runner_module()._classify_error(error) == kind
 
 
+def test_the_runner_modules_import_without_nemo_gym() -> None:
+    """The sandbox runtime has only Harbor, so the runner and the modules beside it must not need nemo_gym."""
+    code = (
+        "import importlib.abc, sys\n"
+        "class Block(importlib.abc.MetaPathFinder):\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if name.split('.')[0] == 'nemo_gym':\n"
+        "            raise ImportError(name)\n"
+        "sys.meta_path.insert(0, Block())\n"
+        f"sys.path.insert(0, {str(RUNNER.parent)!r})\n"
+        "import sandbox_runner, terminus, llm\n"
+        "llm.NemoGymLLM(model_name='m', api_base='http://x/v1', chat_params={})\n"
+    )
+
+    subprocess.run([sys.executable, "-I", "-c", code], check=True, capture_output=True, timeout=120)
+
+
 def test_an_unreadable_input_still_writes_a_result(tmp_path: Path) -> None:
     output = tmp_path / "output.json"
 
@@ -71,9 +89,12 @@ def test_an_unreadable_input_still_writes_a_result(tmp_path: Path) -> None:
 
 
 class _Model:
-    """Scripted Terminus replies: one command, then a confirmed completion; optionally stall before completing."""
+    """Scripted Terminus replies: one command, then a confirmed completion; optionally stall before completing.
 
-    def __init__(self, command: str, *, stall: float = 0) -> None:
+    Without ``complete``, every reply sends the command again and never claims completion.
+    """
+
+    def __init__(self, command: str, *, stall: float = 0, complete: bool = True) -> None:
         self.headers: list[str | None] = []
         owner = self
 
@@ -85,7 +106,7 @@ class _Model:
                 if turns and stall:
                     time.sleep(stall)
                 reply = {"analysis": "a", "plan": "p", "commands": [], "task_complete": True}
-                if turns == 0:
+                if turns == 0 or not complete:
                     reply = {**reply, "commands": [{"keystrokes": command, "duration": 1}], "task_complete": False}
                 data = json.dumps(
                     {
@@ -122,7 +143,7 @@ def episode(tmp_path: Path):
     environment = {**os.environ, "TMUX_TMPDIR": str(sockets), "TASK_MARKER": "from-task"}
     environment.pop("TMUX", None)
 
-    def payload(model: _Model) -> Path:
+    def payload(model: _Model, *, max_turns: int = 5) -> Path:
         path = tmp_path / "input.json"
         path.write_text(
             json.dumps(
@@ -138,7 +159,7 @@ def episode(tmp_path: Path):
                     "stop_request_path": str(tmp_path / "stop.request"),
                     "workdir": str(workdir),
                     "terminus": {
-                        "max_turns": 5,
+                        "max_turns": max_turns,
                         "parser_name": "json",
                         "temperature": 0.0,
                         "reasoning_effort": None,
@@ -219,3 +240,58 @@ def test_sigterm_saves_the_turns_taken_so_far(tmp_path: Path, episode, stop_requ
     assert result["stop_reason"] == reason
     assert result["finished_naturally"] is False
     assert [step["source"] for step in result["trajectory"]["steps"]].count("agent") >= 1
+
+
+def _run(tmp_path: Path, environment: dict[str, str], input_path: Path) -> dict:
+    """Run the runner to its end and return its result."""
+    finished = subprocess.run(
+        [sys.executable, "-s", str(RUNNER), str(input_path), str(tmp_path / "output.json")],
+        env=environment,
+        capture_output=True,
+        timeout=240,
+    )
+    assert finished.returncode == 0, finished.stderr.decode(errors="replace")[-2000:]
+    return json.loads((tmp_path / "output.json").read_text())
+
+
+@needs_tmux
+def test_a_run_that_uses_every_turn_ends_at_max_turns(tmp_path: Path, episode) -> None:
+    workdir, environment, payload = episode
+    model = _Model("echo turn >> turns.txt\n", complete=False)
+    try:
+        result = _run(tmp_path, environment, payload(model, max_turns=2))
+    finally:
+        model.close()
+
+    assert (result["stop_reason"], result["finished_naturally"], result["error"]) == ("max_turns", False, None)
+    assert len(model.headers) == 2
+
+
+@needs_tmux
+def test_a_command_that_moves_the_workdir_away_does_not_end_the_run(tmp_path: Path, episode) -> None:
+    workdir, environment, payload = episode
+    moved = workdir.with_name("task.bak")
+    model = _Model(f"mv {shlex.quote(str(workdir))} {shlex.quote(str(moved))}\n")
+    try:
+        result = _run(tmp_path, environment, payload(model))
+    finally:
+        model.close()
+
+    # Terminus's own tmux commands no longer run in the workdir, so the run continues to its completion.
+    assert (result["stop_reason"], result["finished_naturally"], result["error"]) == ("completed", True, None)
+    assert moved.is_dir() and not workdir.exists()
+
+
+@needs_tmux
+def test_a_background_process_holding_the_terminal_does_not_hold_the_run(tmp_path: Path, episode) -> None:
+    workdir, environment, payload = episode
+    model = _Model("(sleep 60; echo late > late.txt) & echo started > marker.txt\n")
+    try:
+        result = _run(tmp_path, environment, payload(model))
+    finally:
+        model.close()
+
+    assert result["stop_reason"] == "completed"
+    assert (workdir / "marker.txt").read_text().strip() == "started"
+    # The run ended while the background process was still running.
+    assert not (workdir / "late.txt").exists()

@@ -162,9 +162,9 @@ async def _run(payload: dict[str, Any], output_path: Path) -> dict[str, Any]:
             raise
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
-    # The tmux session stays up: commands the agent left running in it, such as a service, remain available to
-    # verification, as in Harbor, until the sandbox's owner stops the sandbox. A run the supervisor ends at its
-    # deadline or on close loses the terminal with the rest of the harness.
+    # The tmux terminal and the commands running in it, such as a service, stay up after the runner ends, also after
+    # a deadline, rollout stop or close, until the sandbox's owner stops the sandbox, as in Harbor. They remain
+    # available to verification.
     if stop_reason is None:
         if agent.run_error is not None:
             stop_reason = "error"
