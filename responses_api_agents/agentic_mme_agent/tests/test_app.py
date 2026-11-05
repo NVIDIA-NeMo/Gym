@@ -11,10 +11,10 @@ from PIL import Image
 
 from nemo_gym.client import ServerClient
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
+from resources_servers.agentic_mme.image_tools import image_data_url
 from resources_servers.agentic_mme.tests.test_app import response
 from responses_api_agents.agentic_mme_agent.app import AgenticMMEAgent, AgenticMMEAgentConfig, AgenticMMERunRequest
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
-from responses_api_agents.agentic_mme_agent.tools import image_data_url
 
 
 class FakeResponse:

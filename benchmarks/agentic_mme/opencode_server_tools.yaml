@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agentic-MME with OpenCode and the 14 image tools on the resources server. The resources server lends OpenCode an
+# empty sandbox, with no task images in it, and serves the tools over MCP. Each tool reply returns its new image as
+# MCP image content, which OpenCode passes on to the model. OpenCode's own shell, file and web tools are off, so the
+# model works only through the 14 tools, with the same prompt as config.yaml. Its scores should compare with that
+# track. Web search is off.
+#
+# Needs what opencode.yaml needs. The sandbox must also reach the resources server's /mcp route, so a run with a
+# remote sandbox provider sets ++use_absolute_ip=true and
+# '++absolute_ip_server_types=[responses_api_models,resources_servers]'.
+config_paths:
+  - benchmarks/agentic_mme/opencode.yaml
+
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      serve_image_tools: true
+      task_images_in_sandbox: false
+      expose_tools_over_mcp: true
+
+agentic_mme_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      description: Agentic-MME with OpenCode and the 14 image tools served over MCP
+      opencode_config:
+        # OpenCode's built-in tools in 1.17.11; edit also covers write and apply_patch. The MCP tools stay on.
+        tools:
+          bash: false
+          read: false
+          glob: false
+          grep: false
+          edit: false
+          todowrite: false
+          skill: false
+          question: false
+          lsp: false
+          plan_exit: false
+      datasets:
+        - name: agentic_mme_opencode_server_tools
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_opencode_server_tools_benchmark.jsonl
+          prepare_script: benchmarks/agentic_mme/prepare.py
+          num_repeats: 1
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/agentic_mme/data/example_opencode_server_tools.jsonl
+          num_repeats: 1
+
+agentic_mme_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports:
+        - mcp

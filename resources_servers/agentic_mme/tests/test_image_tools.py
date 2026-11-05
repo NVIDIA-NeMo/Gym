@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFilter, ImageOps
 
-from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema, image_data_url
+from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema, image_data_url
 
 
 @pytest.fixture

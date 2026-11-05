@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_runtime.base_server import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
 
 
@@ -103,7 +103,7 @@ async def test_terminal_tool_and_incomplete_do_not_score(server) -> None:
 
 
 def completion(content: str):
-    from nemo_gym.core.responses_api_types import NeMoGymChatCompletion
+    from nemo_gym.core import NeMoGymChatCompletion
 
     return NeMoGymChatCompletion.model_validate(
         {
@@ -181,7 +181,7 @@ async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward)
 
 @pytest.mark.asyncio
 async def test_judge_error_scores_zero(judged_server, monkeypatch) -> None:
-    from nemo_gym.verification.judge import JudgeError
+    from nemo_gym.verification import JudgeError
 
     async def failing_call_judge(*args, **kwargs):
         raise JudgeError("judge down")

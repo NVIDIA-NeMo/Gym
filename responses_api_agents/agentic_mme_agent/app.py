@@ -34,8 +34,8 @@ from nemo_gym.core import (
 )
 from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
+from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
-from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 
 
 class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
