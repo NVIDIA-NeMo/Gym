@@ -7,7 +7,7 @@ Runs [Auto Ontology](https://github.com/NVIDIA/auto-ontology), NVIDIA's text-to-
 |---|---|
 | Harness | Auto Ontology at `dd78d0689ef9a8e062af90a294fa903cb6643015`, the revision auto-ontology-eval pins at `8657bd6` |
 | Execution | In process: Auto Ontology is a Python library, so it runs in the Agent Server's process, with no sandbox |
-| Capability level | Evaluation |
+| Capability level | Observability: each model call carries its rollout and the activation that made it. Not yet checked on saved rollouts |
 | Pairing | `bird_interact`, c-Interact (`benchmarks/bird_interact/auto_ontology.yaml`) |
 | Tool grants | One direct HTTP grant: the episode's `ask_user` and `submit_sql` |
 | Dependencies | `pyproject.toml` and `uv.lock`. Gym's root uv policy excludes `sqlalchemy` and `alembic` from server venvs. `scripts/component-lock-policy.json` keeps them for this agent, because Auto Ontology's catalog code imports them. |
@@ -30,6 +30,27 @@ The agent reads the ADK's texts exactly (`c_interact.py`). A text it does not kn
 so a protocol change cannot pass unnoticed. Before it submits, the agent drops the database name that Auto Ontology
 puts before each table, because the grader runs the SQL in another database (`<database>_template`). auto-ontology-eval
 does the same.
+
+## Model calls
+
+Auto Ontology keeps one model client for each role for the whole process, and calls it from threads. The agent gives
+these clients an HTTP transport (`model_calls.py`) that sends each call through Gym's `ServerClient`:
+
+- The Environment Server activates the session on its rollout's route: `/ng-rollout/<capture key>`, with the
+  training-capture segment when training capture is on. Each model call of the activation takes the same route, so the
+  Model Server captures the call for its rollout, and vLLM keeps the rollout's calls on one backend.
+- Each call sends the activation's invocation ID (`root`, `activation-2`, ...) as `x-session-id`. Gym uses it to give
+  the captured call to its invocation.
+- Each response carries the usage of its activation's model calls, when every call reported its usage.
+
+The activation keeps the route in a context variable, which `asyncio.to_thread` and LangChain's executors copy into
+Auto Ontology's threads. At the pinned revision, Auto Ontology takes neither an HTTP client nor an executor, so the
+agent sets two attributes of its modules when it imports it: `llm_invoke._build_client`, which then gives each chat
+client the transport, and the `ThreadPoolExecutor` of `apply_user_answer`'s module, which becomes LangChain's
+`ContextThreadPoolExecutor`. A test checks both at the pinned revision; run it when the pin changes.
+
+A call that still loses the context reaches its Model Server without a rollout. The transport counts it, and each
+session that was open at the time declares `model_call_ownership_unavailable` at close.
 
 ## Setup
 
@@ -74,17 +95,19 @@ Auto Ontology has two model roles, and each goes through its own Gym Model Serve
 - **Fast.** It makes helper calls: it merges the user's answers into the question, checks evidence and extracts
   structured fields. It runs on `auto_ontology_fast_model`, a fixed model, as auto-ontology-eval runs
   `aws/anthropic/bedrock-claude-sonnet-5-5` beside `aws/anthropic/bedrock-claude-opus-4-8` for reasoning. To run both
-  roles on the policy, set `fast_model_server` to `policy_model` and `fast_model` to its name.
+  roles on the policy, set `fast_model_server` to `policy_model` and `fast_model` to `openai/<its name>`.
 
-The model name Auto Ontology sends selects its client: an `openai/`, `azure/` or `aws/` prefix selects its
-OpenAI-compatible client.
+The model names need an `openai/`, `azure/` or `aws/` prefix, which selects Auto Ontology's OpenAI-compatible client,
+the only one whose calls go through Gym. Gym's Model Servers send their own model name, so `openai/<any name>` works.
+Auto Ontology uses the name only to choose its client, and to use function calling for structured output when the name
+contains `anthropic` or `claude`.
 
 ## Settings
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `reasoning_model_server`, `reasoning_model` | `policy_model`, `${policy_model_name}` | Auto Ontology's reasoning model, the policy |
-| `fast_model_server`, `fast_model` | `auto_ontology_fast_model`, `${auto_ontology_fast_model_name}` | Auto Ontology's fast model, from `env.yaml` |
+| `reasoning_model_server`, `reasoning_model` | `policy_model`, `openai/${policy_model_name}` | Auto Ontology's reasoning model, the policy |
+| `fast_model_server`, `fast_model` | `auto_ontology_fast_model`, `openai/${auto_ontology_fast_model_name}` | Auto Ontology's fast model, from `env.yaml` |
 | `embedding_*` | from `env.yaml` | Auto Ontology's embedding endpoint, which it calls directly |
 | `catalog` | `localhost:5432`, `postgres`, `auto_ontology` | The catalog database |
 | `source_database_url` | from `env.yaml` | The source databases, with a `{database}` field |
@@ -104,10 +127,9 @@ agents. Auto Ontology also probes the source databases and its catalog directly,
 - **c-Interact only.** A first activation without `ask_user` and `submit_sql`, such as a-Interact's, gets HTTP 422.
   a-Interact needs a loop in Auto Ontology that chooses the lookup tools.
 - **Query tasks.** Auto Ontology writes one `SELECT`, so it fails management tasks until it has a path for DDL and DML.
-- **Model calls are not attributed to rollouts.** Auto Ontology builds its model clients once for the process, so its
-  calls reach the Model Server without the rollout prefix. The close bundle declares `model_call_ownership_unavailable`
-  and `model_call_usage_unavailable`, and responses carry no usage. Token capture for training needs each of Auto
-  Ontology's model calls to carry its rollout.
+- **Embedding calls do not go through Gym.** Auto Ontology calls its embedding endpoint directly.
+- **No training yet.** The training-capture route reaches every model call. But in each step Auto Ontology makes many
+  model calls with prompts that it builds, not one conversation, and how to train a policy on them is open.
 - **One Auto Ontology for each process.** Auto Ontology reads its settings and feature flags at import, so one Agent
   Server process serves one set of them.
 - **A running step finishes in its thread.** Closing a session stops it between steps, not during one.
