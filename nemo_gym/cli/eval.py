@@ -944,14 +944,17 @@ def _rejudge_saved_judge_failures(
         run_config = OmegaConf.to_container(global_config_dict, resolve=True)
     else:
         run_config = dict(global_config_dict)
+    scored = 0
     try:
         scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
     except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
+    # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
+    # not a normal return, decides whether its metrics are rebuilt.
+    if not scored and not (complete_only and _saved_run_complete(output)):
         return
-    if not scored:
-        return
-    print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
+    if scored:
+        print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
         return
     if complete_only and not _saved_run_complete(output):
