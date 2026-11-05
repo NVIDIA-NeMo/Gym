@@ -853,7 +853,7 @@ VERIFY_BODY = {
 }
 
 
-def _typed_seed(resources_session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
+def _episode_seed(resources_session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
     # The rows carry no task fields, so an Environment Server's task_data is empty.
     return ResourcesSeedSessionRequest(
         resources_session_id=resources_session_id,
@@ -863,7 +863,7 @@ def _typed_seed(resources_session_id: str = "resources-session") -> ResourcesSee
     )
 
 
-def _typed_close(resources_session_id: str = "resources-session") -> dict:
+def _episode_close(resources_session_id: str = "resources-session") -> dict:
     return ResourcesCloseSessionRequest(
         resources_session_id=resources_session_id, episode_id=EpisodeId(rollout_id="rollout", attempt=0)
     ).model_dump(mode="json")
@@ -889,7 +889,7 @@ class TestResourcesSessions:
 
         check_resources_session_contract(
             server.setup_webserver(),
-            _typed_seed("contract-session"),
+            _episode_seed("contract-session"),
             keeps_state=True,
             holds_state=lambda resources_session_id: resources_session_id in server._sessions,
             verify_body=VERIFY_BODY,
@@ -899,17 +899,17 @@ class TestResourcesSessions:
         for env in envs:
             env.close.assert_called_once()
 
-    def test_typed_seed_binds_cookie_and_repeated_seed_keeps_env(self) -> None:
+    def test_episode_seed_binds_cookie_and_repeated_seed_keeps_env(self) -> None:
         step_obs = MagicMock(reward=0.5, done=False)
         step_obs.model_dump.return_value = {"reward": 0.5, "done": False}
         server, envs = _session_server(step_obs=step_obs)
 
         with TestClient(server.setup_webserver()) as client:
-            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
             assert client.post("/step", json={}).status_code == 200
             # A seed retried after its reply was lost arrives without the cookie.
             client.cookies.clear()
-            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
             response = client.post("/verify", json=VERIFY_BODY)
 
         assert len(envs) == 1
@@ -920,38 +920,38 @@ class TestResourcesSessions:
         server, envs = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
             assert client.post("/verify", json=VERIFY_BODY).status_code == 200
-            response = client.post("/close_session", json=_typed_close())
+            response = client.post("/close_session", json=_episode_close())
 
         assert response.status_code == 200
         envs[0].close.assert_called_once()
         assert server._sessions == {}
         assert server._session_episodes == {}
 
-    def test_typed_verify_retry_preserves_reward_until_close(self) -> None:
+    def test_episode_verify_retry_preserves_reward_until_close(self) -> None:
         server, envs = _session_server(reset_obs=MagicMock(reward=0.5, done=False))
 
         with TestClient(server.setup_webserver()) as client:
-            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
             for _ in range(2):
                 response = client.post("/verify", json=VERIFY_BODY)
                 assert response.status_code == 200
                 assert response.json()["reward"] == pytest.approx(0.5)
                 assert response.json()["mask_sample"] is False
             envs[0].close.assert_called_once()
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         envs[0].close.assert_called_once()
         assert server._sessions == {}
 
-    def test_step_after_typed_verify_cannot_change_a_retried_verify(self) -> None:
+    def test_step_after_episode_verify_cannot_change_a_retried_verify(self) -> None:
         step_obs = MagicMock(reward=1.0, done=False)
         step_obs.model_dump.return_value = {"reward": 1.0, "done": False}
         server, envs = _session_server(reset_obs=MagicMock(reward=0.5, done=False), step_obs=step_obs)
 
         with TestClient(server.setup_webserver()) as client:
-            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == pytest.approx(0.5)
             # A tool call still in flight when the Environment Server verified.
             late = client.post("/step", json={})
@@ -966,17 +966,17 @@ class TestResourcesSessions:
         server, envs = _session_server()
 
         with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
-            client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
             envs[0].close.side_effect = RuntimeError("env would not stop")
-            response = client.post("/close_session", json=_typed_close())
+            response = client.post("/close_session", json=_episode_close())
             assert response.status_code == 500
             # Not recorded as closed: the env is still held and a later seed is not fenced.
             assert "resources-session" in server._sessions
-            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
             assert len(envs) == 1
 
             envs[0].close.side_effect = None
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert server._sessions == {}
         assert envs[0].close.call_count == 2
@@ -985,8 +985,8 @@ class TestResourcesSessions:
         server, envs = _session_server()
 
         with TestClient(server.setup_webserver()) as client:
-            client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
-            client.post("/close_session", json=_typed_close())
+            client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
+            client.post("/close_session", json=_episode_close())
             response = client.post("/step", json={})
 
         assert response.status_code == 404
@@ -1005,7 +1005,7 @@ class TestResourcesSessions:
         server._env_class = MagicMock(side_effect=failing_env)
 
         with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
-            response = client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+            response = client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
 
         assert response.status_code == 500
         envs[0].close.assert_called_once()
@@ -1022,10 +1022,10 @@ class TestResourcesSessions:
 
         with TestClient(server.setup_webserver()) as client:
             with pytest.raises(RuntimeError, match="reset failed"):
-                client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+                client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
             assert server._sessions == {}
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert env.close.call_count == 2
         server._env_class.assert_called_once()
@@ -1040,27 +1040,27 @@ class TestResourcesSessions:
 
         with TestClient(server.setup_webserver()) as client:
             with pytest.raises(RuntimeError, match="reset failed"):
-                client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+                client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
             with pytest.raises(RuntimeError, match="still unavailable"):
-                client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+                client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
             server._env_class.assert_called_once()
-            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
             assert server._sessions["resources-session"].env is replacement_env
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
 
         assert failed_env.close.call_count == 3
         replacement_env.close.assert_called_once()
 
 
 @pytest.mark.parametrize("stage", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+def test_agent_run_seed_cannot_overwrite_episode_or_closed_cookie(stage: str) -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     with TestClient(server.setup_webserver()) as client:
-        assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/seed_session", json=_episode_seed().model_dump(mode="json")).status_code == 200
         if stage == "verified":
             assert client.post("/verify", json=VERIFY_BODY).status_code == 200
         elif stage == "closed":
-            assert client.post("/close_session", json=_typed_close()).status_code == 200
+            assert client.post("/close_session", json=_episode_close()).status_code == 200
         before = dict(server._sessions)
         assert client.post("/seed_session", json={}).status_code == 409
         assert server._sessions == before
@@ -1071,11 +1071,11 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
     "malformed",
     [
         {"resources_session_id": "resources-session"},
-        _typed_seed().model_dump(mode="json", exclude={"resources_session_id"}),
+        _episode_seed().model_dump(mode="json", exclude={"resources_session_id"}),
     ],
     ids=["session_id_without_envelope", "envelope_without_session_id"],
 )
-def test_malformed_typed_seed_does_not_fall_back_to_legacy(malformed: dict, expose_tools_over_mcp: bool) -> None:
+def test_malformed_episode_seed_does_not_fall_back_to_legacy(malformed: dict, expose_tools_over_mcp: bool) -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     server.config.expose_tools_over_mcp = expose_tools_over_mcp
     app = server.setup_webserver()
@@ -1085,15 +1085,15 @@ def test_malformed_typed_seed_does_not_fall_back_to_legacy(malformed: dict, expo
         assert server._sessions == {}
         assert server._session_episodes == {}
 
-        # The refused body did not seed a cookie session, so the complete typed seed of that session succeeds.
-        response = client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+        # The refused body did not seed a cookie session, so the complete episode seed of that session succeeds.
+        response = client.post("/seed_session", json=_episode_seed().model_dump(mode="json"))
         assert response.status_code == 200
         assert (response.json().get("resources_tools") is not None) is expose_tools_over_mcp
     assert list(server._sessions) == ["resources-session"]
 
 
-@pytest.mark.parametrize("typed", [False, True])
-def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed: bool, monkeypatch) -> None:
+@pytest.mark.parametrize("episode", [False, True])
+def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(episode: bool, monkeypatch) -> None:
     from omegaconf import DictConfig
 
     clock = [100.0]
@@ -1106,7 +1106,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
     with TestClient(server.setup_webserver()) as client:
         assert (
             client.post(
-                prefix + "/seed_session", json=_typed_seed().model_dump(mode="json") if typed else {}
+                prefix + "/seed_session", json=_episode_seed().model_dump(mode="json") if episode else {}
             ).status_code
             == 200
         )
@@ -1121,8 +1121,8 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         env.close.assert_called_once()
         retry = client.post(prefix + "/verify", json=VERIFY_BODY).json()
         assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
-        if typed:
-            wrong_owner = _typed_close()
+        if episode:
+            wrong_owner = _episode_close()
             wrong_owner["episode_id"]["rollout_id"] = "other"
             assert client.post(prefix + "/close_session", json=wrong_owner).status_code == 409
         clock[0] += server.config.session_close_retry_window_seconds + 1
@@ -1144,8 +1144,8 @@ def test_next_legacy_run_keeps_its_cookie_and_starts_a_new_environment() -> None
         assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is False
 
 
-@pytest.mark.parametrize("typed", [False, True])
-def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
+@pytest.mark.parametrize("episode", [False, True])
+def test_checkpoint_retire_releases_live_session(episode: bool) -> None:
     from omegaconf import DictConfig
 
     server = _session_server()[0]
@@ -1155,7 +1155,7 @@ def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
     with TestClient(server.setup_webserver()) as client:
         assert (
             client.post(
-                "/ng-rollout/rollout/seed_session", json=_typed_seed().model_dump(mode="json") if typed else {}
+                "/ng-rollout/rollout/seed_session", json=_episode_seed().model_dump(mode="json") if episode else {}
             ).status_code
             == 200
         )
@@ -1175,31 +1175,31 @@ def test_checkpoint_retire_retries_failed_environment_close() -> None:
         {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
     )
     with TestClient(server.setup_webserver()) as client:
-        client.post("/ng-rollout/rollout/seed_session", json=_typed_seed().model_dump(mode="json"))
+        client.post("/ng-rollout/rollout/seed_session", json=_episode_seed().model_dump(mode="json"))
         envs[0].close.side_effect = [RuntimeError("close failed"), None]
         with pytest.raises(RuntimeError, match="close failed"):
             client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
         assert "resources-session" in server._sessions
         assert "resources-session" in server._session_episodes
-        assert server._fence.closed_episode("resources-session") is None
+        assert "resources-session" not in server._resources_session_fences
         client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
         assert server._sessions == {} and server._session_episodes == {}
         assert envs[0].close.call_count == 2
 
 
-def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+def test_episode_seed_cannot_replace_a_live_legacy_session() -> None:
     server = _session_server()[0]
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={}).status_code == 200
         sid = next(iter(server._sessions))
         original = server._sessions[sid]
-        assert client.post("/seed_session", json=_typed_seed(sid).model_dump(mode="json")).status_code == 409
+        assert client.post("/seed_session", json=_episode_seed(sid).model_dump(mode="json")).status_code == 409
         assert server._sessions[sid] is original
         assert server._session_episodes == {}
         original.env.close.assert_not_called()
 
 
-def test_failed_cookie_reseed_keeps_previous_reward_until_initialization_succeeds() -> None:
+def test_failed_agent_run_reseed_keeps_previous_reward_until_initialization_succeeds() -> None:
     server, envs = _session_server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={}).status_code == 200

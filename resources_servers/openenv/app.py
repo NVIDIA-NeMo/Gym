@@ -80,7 +80,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     """Generic adapter that wraps any OpenEnv environment as a NeMo-Gym resource server."""
 
     config: OpenEnvResourcesServerConfig
-    # Keyed by the session cookie's SESSION_ID_KEY, which a typed seed binds to its resources_session_id.
+    # Keyed by the session cookie's SESSION_ID_KEY, which an episode seed binds to its resources_session_id.
     _sessions: Dict[str, SessionState] = {}
     # Failed resets whose cleanup also failed still belong to the session's eventual close.
     _pending_envs: Dict[str, Any] = {}
@@ -275,7 +275,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         """Release the environment and retain only its reward for a bounded verification retry window."""
         session_id = request.session[SESSION_ID_KEY]
         verified = self._verified_sessions.get(session_id)
-        if self._fence.closed_episode(session_id) is None:
+        if session_id not in self._resources_session_fences:
             if verified is not None:
                 return BaseVerifyResponse(**body.model_dump(), reward=verified[1])
             session = self._sessions.get(session_id)

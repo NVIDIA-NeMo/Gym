@@ -217,24 +217,23 @@ For MCP environments, tool endpoints are discovered at startup via `ListToolsAct
 
 `SimpleResourcesServer` supplies seed, close, and checkpoint retirement. OpenEnv implements live-state lookup,
 environment initialization, and environment release. Its own `/verify` also keeps part of the session bookkeeping: it
-masks a verify that arrives after close, moves the typed identity out of `_session_episodes`, and records the reward,
+masks a verify that arrives after close, moves the episode identity out of `_session_episodes`, and records the reward,
 with that identity if any, in `_verified_sessions`. The base owns the rest of the identity and retry bookkeeping.
 
 The shipped configs (`configs/openenv_{echo,coding,maze}.yaml`) pair OpenEnv with `legacy_agent`, which relays `/run`
-to `simple_agent`. That agent seeds by cookie with the dataset row, so these configs use the cookie seed, not the
-typed seed described next.
+to `simple_agent`. That agent seeds by cookie with the dataset row, so these configs use the agent-run seed.
 
-An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest` instead of the legacy
+An environment server such as `single_agent_turn` sends an episode seed with `ResourcesSeedSessionRequest` instead of the legacy
 body. The environment instance is keyed by its `resources_session_id`, and the session cookie is bound to that ID so
 the agent's tool calls reach it. Seeding the same ID again for the same episode keeps the instance it already has; a
 seed that binds the ID to another episode is refused with 409. The rows carry no task fields, so the seed reads nothing from `task_data`.
 
-`/verify` closes both typed and legacy environments before checkpoint tracking ends. It keeps only the measured
-reward and optional typed identity for `session_close_retry_window_seconds`, so a lost reply can be retried without
+`/verify` closes both episode and agent-run environments before checkpoint tracking ends. It keeps only the measured
+reward and optional episode identity for `session_close_retry_window_seconds`, so a lost reply can be retried without
 keeping an environment alive. `/close_session` fences that record and releases any still-active or incomplete
 instance. If `env.close()` raises, ownership is retained and close or checkpoint retirement can retry. An instance
 whose reset and cleanup both failed remains owned until cleanup succeeds. Checkpoint retirement also releases live
-instances. A typed seed cannot reopen a verified or closed ID, and a legacy seed cannot replace a typed or closed
+instances. An episode seed cannot reopen a verified or closed ID, and an agent-run seed cannot replace an episode or closed
 session; a new legacy `/run` reusing a verified legacy cookie replaces the finished run's environment under the
 same session ID.
 
