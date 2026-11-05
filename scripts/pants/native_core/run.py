@@ -174,8 +174,6 @@ def execute_batch(
         pytest_args.append("--junit-prefix=nemo_gym.core")
     if workers is not None:
         pytest_args.extend(["-n", str(workers), "--dist=loadfile"])
-    if cacheable:
-        pytest_args.append("--basetemp=extra-output/pytest-temp")
     command = (
         prefix
         + options
