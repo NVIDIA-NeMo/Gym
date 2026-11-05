@@ -196,8 +196,8 @@ publishing refuses Python verifiers that read `response` or grade in separate mo
 - Windows and TPU tasks are not supported.
 - Network restrictions apply only to a verifier in separate mode, on OpenSandbox.
 - Compose tasks run only on OpenSandbox.
-- A multi-step task that seeds the agent with a transcript (`steps/<first step>/trajectory.json`) runs only with the
-  oracle.
+- A task that seeds the agent with a transcript (`trajectory.json`, or `steps/<first step>/trajectory.json` in a
+  multi-step task) runs only with the oracle.
 
 ## What the loader refuses
 
