@@ -33,6 +33,7 @@ from packaging.version import InvalidVersion, Version
 
 import nemo_gym
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.global_config import (
     COMPONENT_EXTRAS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
@@ -549,3 +550,6 @@ def run_command(
         stderr=redirect_stderr,
         start_new_session=start_new_session,
     )
+
+
+__getattr__ = moved_names_getattr(__name__)
