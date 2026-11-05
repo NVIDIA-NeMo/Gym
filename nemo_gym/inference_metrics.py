@@ -91,6 +91,8 @@ MOONCAKE_EVICTION_COUNTERS = {
     for metric in ("successful_evictions", "attempted_evictions", "evicted_key_count", "evicted_size_bytes")
     for tier in ("", "_mem", "_nof")
 }
+# vLLM gauges also exported per data-parallel engine, alongside the replica total, to expose rank imbalance.
+VLLM_PER_ENGINE_GAUGES = {"num_requests_running", "num_requests_waiting"}
 # These SGLang gauges describe ratios or averages, not additive quantities.
 SGLANG_MEAN_GAUGES = {
     "token_usage",
@@ -226,6 +228,14 @@ class InferenceMetricsCollector:
                 key = f"{namespace}/{metric_replica}/{name}{suffix}"
                 series_key = f"{key}/{labels}"
                 result[key] = result.get(key, 0.0) + sample.value
+                if (
+                    family.type == "gauge"
+                    and namespace == "vllm"
+                    and name in VLLM_PER_ENGINE_GAUGES
+                    and sample.labels.get("engine")
+                ):
+                    engine_key = f"{key}/engine/{sample.labels['engine']}"
+                    result[engine_key] = result.get(engine_key, 0.0) + sample.value
                 if family.type == "gauge" and (
                     name == "kv_cache_usage_perc" or (namespace == "sglang" and name in SGLANG_MEAN_GAUGES)
                 ):
