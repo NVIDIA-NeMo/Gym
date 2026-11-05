@@ -656,6 +656,7 @@ IMAGE_CONFIGS = {
 class FakeCompose:
     def __init__(self, services):
         self.services = services
+        self.document = {"services": {"main": {}}}
         self.stopped = False
 
     async def stop(self):

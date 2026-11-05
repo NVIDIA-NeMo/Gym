@@ -15,6 +15,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_REQUEST_ERROR,
     MODEL_SERVER_QUEUE_TIMEOUT,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_OOM_KILLED,
     FailureClassificationConfig,
     classify_failure,
 )
@@ -76,6 +77,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
             MODEL_SERVER_QUEUE_TIMEOUT: OutcomeAction.RETRY,
+            PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
         }
     )
