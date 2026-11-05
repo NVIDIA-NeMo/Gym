@@ -58,7 +58,7 @@ def build_suite_comparison(
             for role, run in (("baseline", baseline), ("candidate", candidate)):
                 label = f"{model}/{benchmark} {role}"
                 for source_kind, source_path in (("aggregate", run.aggregate_metrics), ("rollouts", run.rollouts)):
-                    identity = source_kind, source_path, run.agent
+                    identity = source_kind, source_path.resolve(), run.agent
                     if identity in observed_sources:
                         raise ConfigError(
                             f"{label} reuses the same {source_kind} file and agent as {observed_sources[identity]}. "

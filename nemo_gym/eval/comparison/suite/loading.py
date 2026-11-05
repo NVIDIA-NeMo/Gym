@@ -38,6 +38,7 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteMetricResult,
     SuiteRunSource,
 )
+from nemo_gym.rollouts.rollout_records import resolve_rollout_path
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 
 
@@ -239,7 +240,7 @@ def _repeat_count(
 
 def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun:
     """Select one aggregate entry by agent and/or server, retaining its recorded repeat rows."""
-    rollouts = _resolve_path(source.rollouts, directory)
+    rollouts = resolve_rollout_path(directory / source.rollouts, read_only=True)
     metrics = (
         _resolve_path(source.aggregate_metrics, directory)
         if source.aggregate_metrics is not None

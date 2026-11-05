@@ -2041,7 +2041,7 @@ def compare_suite() -> None:
     from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig
 
     config_dict = get_global_config_dict()
-    if not config_dict.get("suite_fpath"):
+    if not config_dict.get("suite_fpath") and not (config_dict.get("help") or config_dict.get("h")):
         raise ConfigError("gym eval compare-suite requires --suite PATH.")
     config = SuiteComparisonConfig.model_validate(config_dict)
     result = build_suite_comparison(config, invoked_command(), reward_metric_resolver=resolve_benchmark_reward_metric)
