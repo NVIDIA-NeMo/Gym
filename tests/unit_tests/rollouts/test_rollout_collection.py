@@ -3392,9 +3392,11 @@ class TestRolloutCollection:
             "coverage/masked": 0,
             "coverage/unscored": 0,
             "coverage/failed": 0,
+            "coverage/failed_masked": 0,
             "coverage/omitted": 0,
             "coverage/not_started": 0,
             "coverage/missing_outcomes": 1,
+            "coverage/open": 1,
             "coverage/failure_budget_exhausted": 0,
         }
         assert "Scored as zero because they left no row: 1 of 2 rollouts" in capsys.readouterr().out
@@ -3469,9 +3471,11 @@ class TestRolloutCollection:
             "coverage/masked": 0,
             "coverage/unscored": 0,
             "coverage/failed": 1,
+            "coverage/failed_masked": 0,
             "coverage/omitted": 0,
             "coverage/not_started": 0,
             "coverage/missing_outcomes": 0,
+            "coverage/open": 0,
             "coverage/failure_budget_exhausted": 1,
             # Task 0 failed with this class before it landed: the reopened tracking run is told it is 0 now.
             f"coverage/failed/{AGENT_REQUEST_FAILED_FAILURE_CLASS}": 0,

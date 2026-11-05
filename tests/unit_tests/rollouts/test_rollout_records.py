@@ -571,9 +571,12 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
         "coverage/masked": int(masked),
         "coverage/unscored": 0,
         "coverage/failed": 1,
+        "coverage/failed_masked": 1,
         "coverage/omitted": 1,
         "coverage/not_started": 1,
         "coverage/missing_outcomes": 1,
+        # Not started, missing, and the retryable agent failure; a judge failure is left to recovery, so not open.
+        "coverage/open": 2 + int(failure_class == "agent_run_error"),
         "coverage/failure_budget_exhausted": 0,
     }
     assert report["coverage_known"] and not report["complete"]
