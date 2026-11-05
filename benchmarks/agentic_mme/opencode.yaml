@@ -54,6 +54,11 @@ agentic_mme_opencode_agent:
           webfetch: false
           websearch: false
           task: false
+        permission:
+          # OpenCode asks before it reads or writes outside the working directory, as when the model saves a crop
+          # under /tmp. `opencode run` rejects every request that would ask, and a rejection ends the run with no
+          # answer. The lent sandbox holds only the task images, so allow every path.
+          external_directory: allow
       datasets:
         - name: agentic_mme_opencode
           type: benchmark
