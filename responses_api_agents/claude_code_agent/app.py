@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -830,9 +831,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             assert isinstance(state, ClaudeCodeSandboxSession)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "Claude activation does not match the seeded session and rollout")
+                raise AgentSessionConflictError("Claude activation does not match the seeded session and rollout")
             if state.session.closing:
-                raise HTTPException(409, "Claude session is closing")
+                raise AgentSessionConflictError("Claude session is closing")
             self._validate_sandbox_request(body)
             prompt, system = self._conversation_input(body)
             if state.task is None:
@@ -841,7 +842,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     self._sandbox_response(state, state.activation_request, prompt=prompt, system=system)
                 )
             elif body != state.activation_request:
-                raise HTTPException(409, "Claude sandbox sessions support one activation; retry the same request")
+                raise AgentSessionConflictError(
+                    "Claude sandbox sessions support one activation; retry the same request"
+                )
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
@@ -923,7 +926,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
-            raise HTTPException(409, "Claude Code sandbox sessions must use EnvironmentServer /run")
+            raise AgentSessionConflictError("Claude Code sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
             raise HTTPException(422, "Local Claude Code /run requires resources_server")
         async with self.sem:

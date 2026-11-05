@@ -37,6 +37,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     SimpleResourcesServer,
     lost_session_verification,
 )
@@ -218,7 +219,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         self._expire_sessions()
         resolved_row = task.resolved_row
         if body.resources_session_id in self.fenced_resources_session_ids:
-            raise HTTPException(status_code=409, detail="Resources session is already closed")
+            raise ResourcesSessionConflictError("Resources session is already closed")
         existing_session_id = (
             session_id
             if session_id in self.session_id_to_seed
@@ -232,7 +233,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
                 or existing.task_id != body.task_id
                 or existing.resolved_row_sha256 != _row_digest(resolved_row)
             ):
-                raise HTTPException(status_code=409, detail="Resources session is already seeded for another task")
+                raise ResourcesSessionConflictError("Resources session is already seeded for another task")
             if existing_session_id != session_id:
                 # A seed retried after its reply was lost carries a new cookie; move the record to it.
                 self.session_id_to_seed[session_id] = self.session_id_to_seed.pop(existing_session_id)
@@ -273,15 +274,15 @@ class UserSimResourcesServer(SimpleResourcesServer):
             return UserSimVerification(**lost, reward_components={}, scenario_completed=False)
         verification_input = body.verification_input
         if body.episode_id != seeded.episode_id or body.task_id != seeded.task_id:
-            raise HTTPException(status_code=409, detail="Verification identity does not match the seeded episode")
+            raise ResourcesSessionConflictError("Verification identity does not match the seeded episode")
         if _row_digest(verification_input.resolved_row) != seeded.resolved_row_sha256:
-            raise HTTPException(status_code=409, detail="Verified resolved row does not match the seeded task")
+            raise ResourcesSessionConflictError("Verified resolved row does not match the seeded task")
 
         usersim_result = verification_input.usersim_result
         result_row = usersim_result.model_dump(mode="python")
         trajectory_id = seeded.resolved_row.get("trajectory_id")
         if trajectory_id and result_row.get("trajectory_id") != trajectory_id:
-            raise HTTPException(status_code=409, detail="UserSim result trajectory_id does not match the seeded task")
+            raise ResourcesSessionConflictError("UserSim result trajectory_id does not match the seeded task")
 
         if usersim_result.simulation_outcome.get("failure_attribution") == "assistant_model":
             participants_completed = {"user", "assistant"} <= _conversation_roles(usersim_result)
@@ -468,7 +469,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         self._expire_sessions()
         fenced = self.fenced_resources_session_ids.get(body.resources_session_id)
         if fenced is not None and fenced[0] != body.episode_id:
-            raise HTTPException(status_code=409, detail="Resources session was closed by another episode")
+            raise ResourcesSessionConflictError("Resources session was closed by another episode")
         # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
         session_id = self.resources_session_id_to_session_id.get(
             body.resources_session_id, request.session[SESSION_ID_KEY]
@@ -476,7 +477,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
         seeded = self.session_id_to_seed.get(session_id)
         if seeded is not None:
             if body.resources_session_id != seeded.resources_session_id or body.episode_id != seeded.episode_id:
-                raise HTTPException(status_code=409, detail="Resources session does not match the active episode")
+                raise ResourcesSessionConflictError("Resources session does not match the active episode")
             del self.session_id_to_seed[session_id]
             self.resources_session_id_to_session_id.pop(seeded.resources_session_id, None)
         self.fenced_resources_session_ids.setdefault(

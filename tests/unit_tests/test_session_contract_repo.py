@@ -89,3 +89,36 @@ def test_resources_servers_close_through_the_base_route() -> None:
                     f"{_location(path, cls)} accepts an episode seed but does not override close_resources_session"
                 )
     assert not violations, "\n".join(violations)
+
+
+def _is_plain_409(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    name = node.func.attr if isinstance(node.func, ast.Attribute) else getattr(node.func, "id", None)
+    if name != "HTTPException":
+        return False
+    status = node.args[0] if node.args else next((kw.value for kw in node.keywords if kw.arg == "status_code"), None)
+    return isinstance(status, ast.Constant) and status.value == 409
+
+
+# Files whose 409s refuse something other than a session request.
+_NOT_SESSION_CONFLICTS = {
+    "resources_servers/genrm_compare/app.py",  # A comparison cohort or group that received conflicting members.
+    "resources_servers/osworld/worker.py",  # A worker reserved by another deployment.
+}
+
+
+def test_session_refusals_raise_the_conflict_errors() -> None:
+    """A 409 from a server or agent is a session conflict, so it raises the error that names one."""
+    violations = []
+    for directory, error in (
+        ("resources_servers", "ResourcesSessionConflictError"),
+        ("responses_api_agents", "AgentSessionConflictError"),
+    ):
+        for path in _sources(directory):
+            if str(path.relative_to(REPO_ROOT)) in _NOT_SESSION_CONFLICTS:
+                continue
+            for node in ast.walk(ast.parse(path.read_text())):
+                if _is_plain_409(node):
+                    violations.append(f"{_location(path, node)} raises HTTPException(409); raise {error} instead")
+    assert not violations, "\n".join(violations)

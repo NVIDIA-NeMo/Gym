@@ -43,6 +43,7 @@ from nemo_gym.server_runtime import (
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -244,7 +245,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             record = self._session_id_to_state.setdefault(session_id, _ResourcesSessionState())
             if close_episode_id is not None:
                 if record.episode_id is not None and record.episode_id != close_episode_id:
-                    raise HTTPException(409, "episode_id does not match the resources session")
+                    raise ResourcesSessionConflictError("episode_id does not match the resources session")
                 record.episode_id = close_episode_id
                 # Mark the session as closing before waiting: a timed-out close must not leave a late allocation running.
                 record.closing = True
@@ -418,12 +419,12 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         async with self._locked_resources_session(session_id) as session:
             if session.closing or self._shutting_down:
-                raise HTTPException(409, "Resources session is already closed")
+                raise ResourcesSessionConflictError("Resources session is already closed")
             if session.request is not None:
                 if session.request != body:
-                    raise HTTPException(409, "resources_session_id is already bound to a different request")
+                    raise ResourcesSessionConflictError("resources_session_id is already bound to a different request")
                 if session.response is None or session.verification_request is not None:
-                    raise HTTPException(409, "Resources session is no longer available for seeding")
+                    raise ResourcesSessionConflictError("Resources session is no longer available for seeding")
                 request.session[SESSION_ID_KEY] = session_id
                 return session.response
             session.request = body.model_copy(deep=True)
@@ -431,7 +432,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             try:
                 sandbox = await self._create_sandbox(task, session_id=session_id)
                 if session.closing:
-                    raise HTTPException(409, "Resources session closed during setup")
+                    raise ResourcesSessionConflictError("Resources session closed during setup")
                 working_directory = await sandbox.exec("pwd", timeout_s=30)
                 workdir = (working_directory.stdout or "").strip()
                 if working_directory.return_code != 0 or not Path(workdir).is_absolute():
@@ -447,7 +448,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     ),
                 )
                 if session.closing:
-                    raise HTTPException(409, "Resources session closed during setup")
+                    raise ResourcesSessionConflictError("Resources session closed during setup")
             except BaseException:
                 try:
                     await self._stop_session_sandbox(session_id)
@@ -522,14 +523,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if session_id in self._session_id_to_state:
             async with self._locked_resources_session(session_id) as session:
                 if session.closing or session.request is None or session.response is None:
-                    raise HTTPException(409, "Resources session is not available for verification")
+                    raise ResourcesSessionConflictError("Resources session is not available for verification")
                 try:
                     task = TerminalBench21SeedSessionRequest.model_validate(session.request.task_data)
                     if task != TerminalBench21SeedSessionRequest.model_validate(body.model_dump()):
-                        raise HTTPException(409, "Verification task does not match the seeded task")
+                        raise ResourcesSessionConflictError("Verification task does not match the seeded task")
                     if session.verification_request is not None:
                         if session.verification_request != body:
-                            raise HTTPException(409, "Verification request does not match the first request")
+                            raise ResourcesSessionConflictError(
+                                "Verification request does not match the first request"
+                            )
                         if session.verification_response is None:
                             # The verifier may have mutated the task before failing.
                             raise HTTPException(503, "Previous verification did not complete; retry the episode")
@@ -548,7 +551,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                                 "Failed to stop closing Terminal-Bench session %s after verification", session_id
                             )
         if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
-            raise HTTPException(409, "Resources session is unknown or closed")
+            raise ResourcesSessionConflictError("Resources session is unknown or closed")
         try:
             return await self._verify(request, body)
         finally:

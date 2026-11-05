@@ -33,6 +33,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -367,12 +368,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             if not isinstance(state, BrowsecompSandboxSession):
                 raise TypeError("Expected BrowseComp agent session state")
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-                raise HTTPException(409, "Agent sessions require the seeded attempt-qualified rollout path")
+                raise AgentSessionConflictError("Agent sessions require the seeded attempt-qualified rollout path")
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(self._sandbox_responses(request, body, state))
             elif body != state.activation_request:
-                raise HTTPException(409, "BrowseComp sessions support one activation; retry the same request")
+                raise AgentSessionConflictError("BrowseComp sessions support one activation; retry the same request")
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         except Exception as e:
             print(f"[browsecomp][responses_exc] error_type={type(e).__name__} error={str(e)[:300]}", flush=True)
@@ -511,7 +512,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Count a session's prompt without copying the upstream API credential into its sandbox."""
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "Token counting requires an active agent session")
+            raise AgentSessionConflictError("Token counting requires an active agent session")
         self._require_agent_session(session_id)
         if not self.config.save_model_call_using_vllm_tokenize_endpoint:
             raise HTTPException(422, "vLLM token counting is disabled")

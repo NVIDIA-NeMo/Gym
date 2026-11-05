@@ -335,10 +335,10 @@ class ResourcesSeedRejectedError(HTTPException, ValueError):
 
 
 class ResourcesSessionConflictError(HTTPException, ValueError):
-    """Refuse a seed or close that conflicts with what this server recorded for the session.
+    """Refuse a session request that conflicts with what this server recorded for the session.
 
     Examples: a ``resources_session_id`` already bound to another episode or task, a close that names another
-    episode, or a seed for a session that already closed. FastAPI answers it with HTTP 409, which an Environment
+    episode, a seed for a session that already closed, or a verify that names another task than the seed. FastAPI answers it with HTTP 409, which an Environment
     Server treats as terminal. It is also a ``ValueError`` for direct callers.
     """
 

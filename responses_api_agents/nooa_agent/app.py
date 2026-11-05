@@ -23,6 +23,7 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
@@ -135,20 +136,20 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is None:
-            raise HTTPException(409, "NOOA requires an agent session")
+            raise AgentSessionConflictError("NOOA requires an agent session")
         state = self._require_agent_session(session_id)
         assert isinstance(state, NOOASessionState)
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Agent session does not match the rollout route")
+            raise AgentSessionConflictError("Agent session does not match the rollout route")
         if body.tools and state.tool_access is None:
             raise HTTPException(422, "Resource tools require a direct HTTP grant")
         route = self.url_path_for_request("/v1/responses", request)
         async with state.lock:
             if state.closing:
-                raise HTTPException(409, "Agent session is closing")
+                raise AgentSessionConflictError("Agent session is closing")
             key = (body.model_copy(deep=True), route)
             if state.activation_key is not None and state.activation_key != key:
-                raise HTTPException(409, "Session already has another activation")
+                raise AgentSessionConflictError("Session already has another activation")
             if state.execution is None:
                 state.activation_key = key
                 state.execution = asyncio.create_task(self._execute_session(state, body, route))
@@ -158,7 +159,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         except asyncio.CancelledError:
             request_task = asyncio.current_task()
             if state.closing and request_task is not None and not request_task.cancelling():
-                raise HTTPException(409, "Agent session is closing") from None
+                raise AgentSessionConflictError("Agent session is closing") from None
             raise
 
     async def _execute_session(
