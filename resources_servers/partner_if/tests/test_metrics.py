@@ -5,7 +5,7 @@
 import pytest
 from pytest import approx
 
-from nemo_gym.config_types import AggregateMetricsRequest
+from nemo_gym.config import AggregateMetricsRequest
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin, origin_subset, score
 from resources_servers.partner_if.tests.test_app import server
 

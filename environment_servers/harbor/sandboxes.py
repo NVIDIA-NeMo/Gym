@@ -33,39 +33,46 @@ from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.compose_config import (
-    adapt_non_root_sidecars,
-    deployment_platform,
-    document_volume_sources,
-    opensandbox_shm_labels,
-    resolve_compose,
-    sandbox_platform,
-)
-from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
-from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import apply_rollout_prefix
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.compose_overlay import overlay_files
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.image_configs import (
+from nemo_gym.agents import sandbox_server_url
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.data.tasks.harbor import (
+    MAIN_SERVICE,
+    RECORD_VERSION,
+    HarborEnvironment,
+    HarborTask,
+    HarborTaskError,
+    ImageConfigError,
     check_task_compose_fields,
     check_task_compose_services,
     check_task_sidecar_extra_hosts,
     load_compose_document,
+    overlay_files,
     plan_task_compose_volumes,
     reusable_record,
     task_declares_gpus,
     without_restated_main_build,
 )
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE
-from nemo_gym.tasks.harbor.registry import ImageConfigError
+from nemo_gym.sandbox import (
+    ORPHAN_REAP_TIMEOUT_S,
+    AsyncSandbox,
+    AsyncSandboxCompose,
+    SandboxCreateError,
+    SandboxSpec,
+    adapt_non_root_sidecars,
+    clamp_resource_requests,
+    cpu_cap_env,
+    deployment_platform,
+    document_volume_sources,
+    opensandbox_shm_labels,
+    resolve_compose,
+    resolve_provider_config,
+    resolve_provider_metadata,
+    resolve_provider_volume_sources,
+    sandbox_platform,
+    service_gpus,
+    service_resources,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -394,7 +401,7 @@ class HarborSandboxMixin:
         """Refuse, before anything is provisioned, a Compose group whose images prepare did not record for this
         deployment: the record file missing next to the task folders, or a service of the merged document (an overlay's,
         or ``main`` with the task's image) without an entry this deployment can use, by prepare's own rule
-        (:func:`~nemo_gym.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
+        (:func:`~nemo_gym.data.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
         sandboxes run; ``resolve_compose`` refuses a record of another platform at the group's start). A dataset
         prepared without the ``compose_overlay`` the server now runs with, or for another platform (prepared on x86,
         served on arm64), is the usual cause; it is a configuration error, so the seed is refused terminally (422)
@@ -853,7 +860,9 @@ class HarborSandboxMixin:
                 except Exception:
                     # Still owned: shutdown retries the stop. Do not start a second sandbox under the same key.
                     LOGGER.exception(f"{task.task_id}: could not stop the {what} of a failed image pull")
-                    raise exc from None
+                    # Hide cleanup context without erasing the provider failure's existing cause.
+                    exc.__suppress_context__ = True
+                    raise exc
                 await asyncio.sleep(_pull_retry_delay(attempt))
         raise AssertionError("unreachable")  # pragma: no cover
 

@@ -15,9 +15,9 @@ from unittest.mock import patch
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.token_id_capture.completion import completion_items, output_item_fingerprint
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.models.token_capture import completion_items, output_item_fingerprint
 from responses_api_agents.osworld_agent.app import (
     OSWorldRunRequest,
     _build_messages_model_fn,
@@ -25,7 +25,7 @@ from responses_api_agents.osworld_agent.app import (
 )
 
 
-_WRAP = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=True)
+_WRAP = ChatCompletionsConverter(return_token_id_information=False, uses_reasoning_parser=True)
 
 
 def _served(reasoning: str, content: str) -> str:
@@ -188,6 +188,34 @@ def test_rejected_terminal_is_not_reattributed_to_an_earlier_accepted_call() -> 
     assert response["terminal_response_id"] == "chatcmpl-5"
     assert response["reward"] == 1.0
     assert response["mask_sample"] is False
+
+
+@pytest.mark.parametrize(
+    ("reason", "failure_kind"),
+    [("evaluator_error", "infrastructure_error"), ("model_timeout", "model_policy_response_timeout")],
+)
+def test_capture_history_keeps_runtime_failure_fields(reason: str, failure_kind: str) -> None:
+    result = _capture_on_result()
+    result.update(
+        reward=0.0,
+        score=0.0,
+        finished=False,
+        evaluation_completed=False,
+        runtime_eligible=False,
+        runtime_admission_reason=reason,
+        mask_sample=True,
+        error="TimeoutError: request timed out",
+    )
+
+    response = _build_response(_request(), result, "policy", 0.6, 0.95, served_call_output=True).model_dump()
+
+    assert response["terminal_response_id"] == "chatcmpl-5"
+    assert response["failure_kind"] == failure_kind
+    assert response["_ng_failure_class"] == failure_kind
+    assert response["mask_sample"] is True
+    assert [item["content"][0]["text"] for item in response["response"]["output"]] == [
+        _SERVED[rid] for rid in ("chatcmpl-1", "chatcmpl-3", "chatcmpl-5")
+    ]
 
 
 @pytest.mark.parametrize("kind", ["rejected", "empty", "missing"])

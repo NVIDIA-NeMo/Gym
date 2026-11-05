@@ -137,11 +137,11 @@ are not carried through. They *are* preserved in the run's `*_materialized_input
 
 **Join on the pair, not the task index.** Rows are identified by `(_ng_task_index,
 _ng_rollout_index)` together; the task index alone is not unique, and with repeats it is shared by
-every rollout of the same task. `nemo_gym.reward_profile.RewardProfiler.align_rows_and_results`
+every rollout of the same task. `nemo_gym.metrics.reward_profile.RewardProfiler.align_rows_and_results`
 already implements this join and raises on duplicate keys and unmatched rows — reuse it:
 
 ```python
-from nemo_gym.reward_profile import RewardProfiler
+from nemo_gym.metrics import RewardProfiler
 
 pairs = RewardProfiler().align_rows_and_results(materialized_input_rows, rollout_rows)
 ```

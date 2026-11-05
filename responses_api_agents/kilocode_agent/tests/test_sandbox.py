@@ -17,20 +17,19 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    SandboxSession,
 )
-from nemo_gym.base_responses_api_model import ModelCallRecord
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, join_model_call_observations
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.rollouts import run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRecord, join_agent_model_calls
 from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest, _runtime_failure
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession, _sandbox_prepare_command
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
@@ -115,7 +114,7 @@ def test_kilo_session_capture_join_enables_health_checks(tmp_path: Path, complet
         request={"messages": [{"role": "user", "content": "hi"}]},
         response={"choices": [{"message": {"role": "assistant", "content": "answer"}}]},
     )
-    joined = join_model_call_observations(observations, [call])
+    joined = join_agent_model_calls(observations, [call])
     assert joined.records[0].invocation_id == "ses-kilo"
     assert joined.records[0].status == "completed"
     assert joined.records[0].model_calls[0].model_call_id == "call-1"
@@ -219,6 +218,7 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
     provider = AsyncMock()
     with (
         patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={"source": "provider", "gym-agent": "overridden"}),
         patch(f"{APP}.get_global_config_dict", return_value={}),
         patch(f"{APP}.create_provider", return_value=provider),
         patch(f"{APP}.AsyncSandbox", return_value=sandbox) as api,
@@ -239,6 +239,12 @@ async def test_seed_selects_owner_and_installs_in_sandbox(borrowed: bool) -> Non
     else:
         spec = sandbox.start.call_args.args[0]
         assert spec.workdir == "/app" and spec.ttl_s == 2400
+        assert spec.metadata == {
+            "source": "provider",
+            "gym-agent": "kilocode",
+            "gym-session": "session-1",
+            "gym-rollout": "rollout-1-a2",
+        }
         assert agent.config.sandbox_config == {"image": "test"}
         sandbox.exec.assert_awaited_once_with("mkdir -p -- /app", cwd="/", timeout_s=30)
 
@@ -447,6 +453,65 @@ async def test_sandbox_output_and_failures(
 CONNECT_ERROR = 'level=ERROR message="stream error" error.error="AI_APICallError: Cannot connect to API"'
 
 
+@pytest.mark.parametrize("status_code", [400, 429, 503])
+@pytest.mark.parametrize("exit_code", [0, 1])
+async def test_model_http_error_reaches_environment(status_code: int, exit_code: int) -> None:
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = receipt(return_code=exit_code)
+    session.mcp_header_values = ("test-mcp-credential",)
+    error = {"name": "APIError", "data": {"message": "controlled model failure", "statusCode": status_code}}
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(
+            task_environment_ready=True,
+            stdout=json.dumps({"type": "error", "error": error}),
+            stderr="test-mcp-credential",
+            exit_code=exit_code,
+        )
+    )
+    response = await agent._sandbox_response(
+        session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+    )
+    assert response.status == "failed"
+    assert "controlled model failure" in response.error.message
+    assert "test-mcp-credential" not in response.error.message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status_code,
+    }
+    assert response.metadata["harness_execution"] == "sandbox"
+
+
+@pytest.mark.parametrize(
+    "cleanup,exit_code,ready",
+    [
+        (receipt(return_code=125), 125, True),
+        (receipt(return_code=127), 127, True),
+        (receipt(return_code=1), 125, True),
+        (receipt(return_code=1, timed_out=True), 1, True),
+        (receipt(error="cleanup failed"), 0, True),
+        (None, 0, True),
+        (receipt(), 0, False),
+    ],
+)
+async def test_model_error_does_not_hide_runtime_failure(cleanup: dict | None, exit_code: int, ready: bool) -> None:
+    agent = _make_model_server_agent(model="m")
+    session = state()
+    session.session.cleanup = cleanup
+    session.session.execute = AsyncMock(
+        return_value=KiloArtifacts(
+            task_environment_ready=ready,
+            stdout=json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}}),
+            stderr="",
+            exit_code=exit_code,
+        )
+    )
+    with pytest.raises(RuntimeError):
+        await agent._sandbox_response(
+            session, NeMoGymResponseCreateParamsNonStreaming(input="hi"), rollout_id="rollout-1-a2"
+        )
+
+
 @pytest.mark.parametrize(
     "stdout",
     ["", '{"type":"step_finish","part":{"id":"p1","tokens":{"input":0,"output":0},"reason":"stop"}}'],
@@ -536,16 +601,30 @@ class LocalFiles:
         shutil.copyfile(source, destination)
 
 
-async def stage_locally(directory: Path, workdir: Path, command: list[str]) -> list[str]:
+async def stage_locally(
+    directory: Path,
+    workdir: Path,
+    command: list[str],
+    *,
+    config: str = "{}",
+    required_mcp_servers: tuple[str, ...] = (),
+    mcp_preflight: bool = False,
+    output_token_max: int | None = None,
+) -> list[str]:
     """Stage an activation into ``directory`` as the sandbox would receive it; return the runner argv."""
     session = KiloSandboxSession(
         request=seed(workdir=str(workdir)),
+        required_mcp_servers=required_mcp_servers,
         session=SandboxSession(
             sandbox=LocalFiles(), session_dir=str(directory), workdir=str(workdir), harness="KiloCode"
         ),
     )
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
-    return (await session.stage_activation(command=command, config="{}")).argv
+    return (
+        await session.stage_activation(
+            command=command, config=config, mcp_preflight=mcp_preflight, output_token_max=output_token_max
+        )
+    ).argv
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
@@ -559,15 +638,17 @@ async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int)
         "print(json.dumps({'cwd':os.getcwd(),'config':os.environ['KILO_CONFIG'],"
         "'home':os.environ['HOME'],'db':os.environ['KILO_DB'],"
         "'project':os.environ['KILO_DISABLE_PROJECT_CONFIG'],'key':os.getenv('OPENAI_API_KEY'),"
+        "'output_limit':os.getenv('KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX'),"
         "'kilo':os.getenv('KILO_MODEL'),'kept':os.getenv('KEPT'),'stdin':sys.stdin.read()})); "
         "sys.stderr.buffer.write(b'diagnostic\\xff'); "
         f"sys.exit({exit_code})"
     )
-    argv = await stage_locally(directory, repo, [sys.executable, "-c", script])
+    argv = await stage_locally(directory, repo, [sys.executable, "-c", script], output_token_max=65536)
     assert argv == ["bash", f"{directory}/harness_runner.sh", f"{directory}/params.sh"]
     task_home = str(tmp_path / 'task "home" \\')
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
     inherited = {"OPENAI_API_KEY": "test-credential", "KILO_MODEL": "other", "KEPT": "yes", "HOME": task_home}
+    inherited["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = "1"
     result = subprocess.run(argv, env=env | inherited, input=b"unexpected inherited input", capture_output=True)
     assert result.returncode == exit_code, result.stderr
     output = json.loads((directory / "stdout.jsonl").read_text())
@@ -580,6 +661,7 @@ async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int)
         "key": None,
         "kilo": None,
         "kept": "yes",
+        "output_limit": "65536",
         "stdin": "",
     }
     assert (repo / "patch.txt").read_text() == "changed"
@@ -727,6 +809,7 @@ async def test_owned_sandbox_whose_start_cleanup_fails_is_retained_for_close() -
     sandbox.start.side_effect = RuntimeError("initial upload failed")
     with (
         patch(f"{APP}.resolve_provider_config", return_value={}),
+        patch(f"{APP}.resolve_provider_metadata", return_value={}),
         patch(f"{APP}.get_global_config_dict", return_value={}),
         patch(f"{APP}.create_provider", return_value=AsyncMock()),
         patch(f"{APP}.AsyncSandbox", return_value=sandbox),

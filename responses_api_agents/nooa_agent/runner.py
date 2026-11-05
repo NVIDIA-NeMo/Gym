@@ -22,34 +22,27 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from threading import Lock
-from types import FrameType
 from typing import Any, Protocol
 from uuid import uuid4
 
-from nooa.errors import GenerationError
 from nooa.runtime.hooks import hooks_scope
-from nooa.strategies.codeact import CodeActSession, CodeActStrategy
-from nooa.strategies.predict import PredictStrategy
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, TrajectoryRecord
-from nemo_gym.tool_access import DirectHTTPToolAccess
-from responses_api_agents.nooa_agent.config import NOOAInvocationConfig, validate_invocation
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import DirectHTTPToolAccess
+from nemo_gym.trajectory import AgentEpisode, TrajectoryRecord
 from responses_api_agents.nooa_agent.gym_llm import (
     GymModelClient,
     GymResponsesLLM,
-    InvalidPolicyOutputError,
-    OutputTokenLimitExceeded,
-    PolicyCallBudgetExceeded,
     RolloutLLMState,
 )
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (
     ResourceToolDispatcher,
     create_agent_class_with_resource_methods,
     validate_agent_resource_method_bindings,
 )
-from responses_api_agents.nooa_agent.termination import NOOATerminationReason
+from responses_api_agents.nooa_agent.termination import NOOATerminationReason, cleanup_errors, policy_termination
 
 
 logger = logging.getLogger(__name__)
@@ -81,7 +74,15 @@ class NOOARunFailure(RuntimeError):
     """A failure carrying the same episode representation as a successful run."""
 
     def __init__(self, error: BaseException, result: NOOARunResult) -> None:
-        super().__init__(str(error))
+        message = str(error)
+        retained = cleanup_errors(error)
+        if retained:
+            # Bound each cleanup detail so both stages fit in the worker's 2,000-character diagnostic.
+            details = "; ".join(f"{type(cleanup).__name__}: {str(cleanup)[:500]}" for cleanup in retained)
+            message = f"Cleanup failed: {details}"
+            if all(cleanup is not error for cleanup in retained):
+                message += f". Original task failure: {error}"
+        super().__init__(message)
         self.result = result
 
 
@@ -105,37 +106,6 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
-def _generation_error_frame(error: BaseException) -> FrameType | None:
-    # GenerationError is also available to arbitrary agent code. Recognize the
-    # pinned strategies by the code that raised it, not its type or message alone.
-    if type(error) is not GenerationError or error.__traceback__ is None:
-        return None
-    traceback = error.__traceback__
-    while traceback.tb_next is not None:
-        traceback = traceback.tb_next
-    return traceback.tb_frame
-
-
-def _codeact_failure_session(error: BaseException) -> CodeActSession | None:
-    frame = _generation_error_frame(error)
-    if frame is None or frame.f_code is not CodeActStrategy._run_generation.__code__:
-        return None
-    session = frame.f_locals.get("session")
-    return session if isinstance(session, CodeActSession) else None
-
-
-def _is_codeact_iteration_exhaustion(error: BaseException) -> bool:
-    # The pinned NOOA uses the same error type for iteration and retry exhaustion.
-    session = _codeact_failure_session(error)
-    return (
-        session is not None
-        and session.max_iterations is not None
-        and session.iteration >= session.max_iterations
-        and session.error_count < session.max_retries
-        and str(error) == str(session.build_failure_error())
-    )
-
-
 class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -147,12 +117,14 @@ class InProcessNOOARunner:
         model_server_name: str,
         max_policy_calls: int | None,
         on_progress: Callable[[NOOARunResult], None] | None = None,
+        context_window: int | None = None,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
         self._model_server_name = model_server_name
         self._max_policy_calls = max_policy_calls
         self._on_progress = on_progress
+        self._context_window = context_window
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
@@ -164,10 +136,9 @@ class InProcessNOOARunner:
             if self._on_progress is None:
                 return
             # NOOA's synchronous callbacks do not yield to sibling async calls.
-            # Keep projection and persistence in one critical section as well,
-            # so concurrent callbacks cannot publish older snapshots last. Publish
-            # before execution resumes: a queued write could lose this boundary
-            # if the worker is killed immediately after the callback returns.
+            # Capture a consistent projection before sibling calls resume. The
+            # sandbox callback detaches it on this loop, then queues serialization
+            # and persistence; a writer thread must never inspect the live trace.
             with progress_lock:
                 try:
                     episode, trajectory = trace.project(
@@ -205,6 +176,7 @@ class InProcessNOOARunner:
             on_call=trace.on_model_call,
             on_response=checkpoint,
             sampling_overrides=sampling_overrides,
+            context_window=self._context_window,
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,
@@ -228,35 +200,7 @@ class InProcessNOOARunner:
                 return_value = await self._invocation_adapter(agent, request.responses_create_params)
         except BaseException as error:
             failure = error
-            # Only known NOOA strategy wrappers deliberately chain model errors.
-            # Cleanup failures can carry a preceding limit as context and must stay fatal.
-            cause: BaseException | None = error
-            seen: set[int] = set()
-            while isinstance(error, Exception) and cause is not None and id(cause) not in seen:
-                seen.add(id(cause))
-                if isinstance(cause, OutputTokenLimitExceeded):
-                    termination_reason = NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED
-                    termination_error = str(cause)
-                    break
-                if isinstance(cause, (PolicyCallBudgetExceeded, InvalidPolicyOutputError)):
-                    termination_reason = (
-                        NOOATerminationReason.POLICY_BUDGET_EXCEEDED
-                        if isinstance(cause, PolicyCallBudgetExceeded)
-                        else NOOATerminationReason.INVALID_POLICY_OUTPUT
-                    )
-                    termination_error = str(cause)
-                    break
-                if _is_codeact_iteration_exhaustion(cause):
-                    termination_reason = NOOATerminationReason.MAX_ITERATIONS_EXCEEDED
-                    termination_error = str(cause)
-                    break
-                frame = _generation_error_frame(cause)
-                if frame is None or frame.f_code not in (
-                    CodeActStrategy._run_generation.__code__,
-                    PredictStrategy._execute_inner.__code__,
-                ):
-                    break
-                cause = cause.__cause__
+            termination_reason, termination_error = policy_termination(error)
 
         fatal_error = dispatcher.fatal_error
         if state.fatal_error is not None:
@@ -277,6 +221,12 @@ class InProcessNOOARunner:
             task_id=request.task_id,
             rollout_id=request.rollout_id,
             default_model=self._model_server_name,
+            root_status="incomplete"
+            if termination_reason is not None
+            else "failed"
+            if failure is not None
+            else "completed",
+            root_error_type=type(failure).__name__ if failure is not None else None,
         )
         result = NOOARunResult(
             episode=episode,

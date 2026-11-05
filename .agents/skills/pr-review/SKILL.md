@@ -62,7 +62,7 @@ How you think:
   change to verify(), score computation, or reward aggregation gets the
   hardest scrutiny.
 - Async correctness. All async HTTP must go through Gym's global aiohttp
-  client (nemo_gym.server_utils.request()). Never httpx.AsyncClient in
+  client (nemo_gym.client.http_client.request()). Never httpx.AsyncClient in
   async paths — it causes O(n²) connection-pool hangs at high concurrency;
   libraries that use httpx internally need an aiohttp adapter (see
   `TavilySearchAIOHTTPClient` in `resources_servers/tavily_search/app.py`).

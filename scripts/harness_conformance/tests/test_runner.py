@@ -14,18 +14,21 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
-from scripts.harness_conformance.provider import Probe
+from scripts.harness_conformance.provider import SUMMARY_PROMPTS, OpenClawProbe, Probe, is_compaction_request
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
-from scripts.harness_conformance.scenarios import SCENARIOS
+from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.harness_capabilities.cli import json_rows
-from nemo_gym.observability.model_calls import build_model_call_record
-from nemo_gym.server_utils import ServerClient
-from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ConfigError
+from nemo_gym.rollouts.harness_capabilities import json_rows
+from nemo_gym.trajectory import build_model_call_record
+from tests.unit_tests.rollouts.harness_capabilities.synthetic import evidence_and_witness
 
 
 SCENARIO = {s.name: s for s in SCENARIOS}
+# The fixture is tested independently of its later catalog/CI registration.
+SCENARIO["context_compaction"] = Scenario("context_compaction", "Compact shell history", tier="P1", compaction=True)
 TOOL = {
     "type": "function",
     "function": {
@@ -57,10 +60,16 @@ def test_catalog_covers_p0_without_exposing_expectations():
 @pytest.mark.parametrize("use_agent_sessions", [False, True])
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_sessions, tmp_path):
-    config = _config(harness, tmp_path, [10001, 10002, 10003, 10004], 12, use_agent_sessions=use_agent_sessions)
+    config = _config(
+        harness,
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+        use_agent_sessions=use_agent_sessions,
+    )
     from omegaconf import OmegaConf
 
-    from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
+    from nemo_gym.rollouts.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 
     assert (
         _environment_server_for_agent("probe_agent", _environment_servers_by_agent(OmegaConf.create(config)))
@@ -77,9 +86,16 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         SingleAgentTurnEnvironmentServerConfig.model_validate(
             config["probe_environment"]["environment_servers"][environment_type]
         )
-        assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
         assert "resources_server" not in agent
-        assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
+        if harness == "simple":
+            assert "sandbox_provider" not in agent
+            assert "probe_sandbox" not in config
+            assert config["probe_environment"]["environment_servers"][environment_type][
+                "resources_tool_transports"
+            ] == ["direct_http"]
+        else:
+            assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
+            assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}
         if harness == "codex":
             assert "cwd" not in agent and "extra_config" not in agent
         if harness == "opencode":
@@ -93,7 +109,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
-    from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
+    from nemo_gym.agents import SimpleResponsesAPIAgent
 
     class LegacyAgent(SimpleResponsesAPIAgent):
         pass
@@ -141,17 +157,17 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     from fastapi import HTTPException, Request
     from scripts.harness_conformance import episode
 
-    import nemo_gym.global_config
-    import nemo_gym.server_utils
-    from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-    from nemo_gym.base_responses_api_agent import (
+    import nemo_gym.config.global_config
+    import nemo_gym.server_runtime.base_server
+    from nemo_gym.agents import (
         AgentCloseSessionResponse,
         AgentSessionState,
         BaseResponsesAPIAgentConfig,
         SimpleResponsesAPIAgent,
     )
-    from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+    from nemo_gym.trajectory import AgentObservationBundle
 
     calls = []
     response = NeMoGymResponse(
@@ -213,8 +229,8 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
-    monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
-    monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
     monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
     if interface.endswith("error"):
         with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
@@ -256,7 +272,12 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
 def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_name):
     from omegaconf import OmegaConf
 
-    config = _config("opencode", tmp_path, [10001, 10002, 10003, 10004], 12)
+    config = _config(
+        "opencode",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        12,
+    )
     server_client = ServerClient(head_server_config=config["head_server"], global_config_dict=OmegaConf.create(config))
     header = server_client.assistant_message_header("policy_model")
     assert header is not None
@@ -274,12 +295,15 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
     assert call.client_assistant_message_id == "assistant-message"
 
 
+@pytest.mark.parametrize("tool_name", ["bash", "exec"])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
-def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
+def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name, tool_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
     messages = [{"role": "user", "content": "Run checks"}]
-    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    tool = copy.deepcopy(TOOL)
+    tool["function"]["name"] = tool_name
+    body = {"model": "conformance-model", "messages": messages, "tools": [tool]}
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
             response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
@@ -289,6 +313,8 @@ def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path,
             assert response.status_code == 200
             message = response.json()["choices"][0]["message"]
             call = message["tool_calls"][0]
+            assert call["id"].startswith("call_")
+            assert call["function"]["name"] == tool_name
             execution = subprocess.run(
                 json.loads(call["function"]["arguments"])["command"],
                 shell=True,
@@ -344,6 +370,115 @@ def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
     assert json.loads(call["function"]["arguments"]) == {"reason": "CONFORMANCE_DONE", "paths": []}
     assert probe.finished and not probe.violations
     assert probe.finish_call["id"] == call["id"]
+
+
+@pytest.mark.parametrize("probe_cls", [Probe, OpenClawProbe])
+@pytest.mark.parametrize("replay", ["matched", "missing_call", "wrong_name", "wrong_arguments", "wrong_result"])
+def test_rewritten_ids_require_openclaw_and_matching_replayed_call(tmp_path, probe_cls, replay):
+    probe = probe_cls(SCENARIO["tool_success"], tmp_path)
+    body = {"model": "probe", "messages": [], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        message = client.post("/v1/chat/completions", json=body).json()["choices"][0]["message"]
+        call = message["tool_calls"][0]
+        original_id = call["id"]
+        assert original_id.startswith("call_")
+        execution = subprocess.run(
+            json.loads(call["function"]["arguments"])["command"],
+            shell=True,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        call["id"] = original_id.replace("_", "")
+        # Replay may serialize equivalent arguments differently.
+        call["function"]["arguments"] = json.dumps(json.loads(call["function"]["arguments"]), separators=(",", ":"))
+        if replay == "wrong_name":
+            call["function"]["name"] = "other_tool"
+        if replay == "wrong_arguments":
+            call["function"]["arguments"] = '{"command":"false"}'
+        body["messages"] = [] if replay == "missing_call" else [message]
+        body["messages"].append(
+            {
+                "role": "tool",
+                "tool_call_id": "other" if replay == "wrong_result" else call["id"],
+                "content": execution.stdout,
+            }
+        )
+        response = client.post("/v1/chat/completions", json=body)
+    accepted = probe_cls is OpenClawProbe and replay == "matched"
+    assert response.status_code == (200 if accepted else 409)
+    assert probe.tool_calls[0]["result_seen"] == accepted
+    assert probe.tool_calls[0]["id"] == original_id
+    assert probe.attempts[0]["response"]["choices"][0]["message"]["tool_calls"][0]["id"] == original_id
+    assert probe.attempts[1]["request"] == body
+
+
+@pytest.mark.parametrize("compaction", [True, False])
+def test_compaction_probe_keeps_summary_separate_from_policy_replies(tmp_path, compaction):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
+    probe = Probe(scenario, tmp_path)
+    messages = [{"role": "user", "content": "Run checks"}]
+    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        for index in range(2):
+            response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+            assert response.status_code == 200
+            message = response.json()["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            execution = subprocess.run(
+                json.loads(call["function"]["arguments"])["command"],
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
+            if compaction and index == 0:
+                helper = client.post(
+                    "/ng-rollout/0-0/v1/chat/completions",
+                    json={**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]},
+                ).json()
+                assert helper["choices"][0]["message"]["content"] == probe.compaction_summary
+                assert helper["usage"]["total_tokens"] == 511
+                assert not probe.finished and len(probe.tool_calls) == 1
+                messages.append(helper["choices"][0]["message"])
+        final = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+    assert final.json()["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+    assert probe.finished and not probe.violations
+    assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
+    witness = json.loads((tmp_path / "witness.json").read_text())
+    assert len(witness["attempts"]) == 3 + int(compaction)
+    assert len(witness["compaction"]["response_ids"]) == int(compaction)
+    assert sum(a["response"]["usage"]["total_tokens"] for a in witness["attempts"]) == (27738 if compaction else 81027)
+
+
+@pytest.mark.parametrize("prompt", SUMMARY_PROMPTS)
+@pytest.mark.parametrize("tools", [[], [TOOL]])
+def test_summary_recognition_requires_an_explicit_last_user_instruction(prompt, tools):
+    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "tools": tools}
+    assert is_compaction_request(body)
+    body["messages"].append({"role": "tool", "content": prompt})
+    assert not is_compaction_request(body)
+    assert not is_compaction_request({"messages": [{"role": "user", "content": "Run checks"}], "tools": []})
+
+
+def test_summary_does_not_waive_policy_tool_result_requirement(tmp_path):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path)
+    body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/chat/completions", json=body).status_code == 200
+        helper = {**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]}
+        assert client.post("/v1/chat/completions", json=helper).status_code == 200
+        assert client.post("/v1/chat/completions", json=body).status_code == 409
+    assert len(probe.compaction_response_ids) == 1
+
+
+def test_compaction_probe_rejects_unexpected_summary_request(tmp_path):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path)
+    with TestClient(probe.model_app()) as client:
+        response = client.post("/v1/chat/completions", json={"model": "conformance-model", "messages": []})
+    assert response.status_code == 409
+    assert probe.violations and not probe.compaction_response_ids
 
 
 def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
@@ -710,7 +845,8 @@ def test_witness_detects_changed_payload_even_when_attempt_identity_matches(reta
     assert "canonical" in " ".join(result["issues"])
 
 
-def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error", [ValueError, ConfigError])
+def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch, error):
     from scripts.harness_conformance import runner
 
     inspected = []
@@ -718,13 +854,62 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
 
     def fail_inspection(scenario, directory, execution):
         inspected.append(scenario.name)
-        raise ValueError("truncated rollout")
+        raise error("truncated rollout")
 
     monkeypatch.setattr(runner, "inspect_episode", fail_inspection)
     summary, code = run_suite(harnesses=["pi"], scenarios=SCENARIOS[:2], output=tmp_path / "run", timeout=1)
     assert code == 2
     assert inspected == ["tool_success", "tool_failure"]
     assert summary["harnesses"]["pi"]["evidence"]["TE-1"] == {"required": 2, "observed": 0, "passed": 0}
+
+
+@pytest.mark.parametrize(
+    "failed_scenario,gate_tier,expected_code",
+    [("context_compaction", "P0", 0), ("context_compaction", "P1", 2), ("tool_success", "P0", 2)],
+)
+def test_checker_error_preserves_independent_ci_measurements(
+    tmp_path, monkeypatch, failed_scenario, gate_tier, expected_code
+):
+    from scripts.harness_conformance import ci_table, runner
+
+    scenarios = tuple(s for s in SCENARIOS if s.name != "context_compaction") + (SCENARIO["context_compaction"],)
+    monkeypatch.setattr(runner, "SCENARIOS", scenarios)
+    monkeypatch.setattr(ci_table, "SCENARIOS", scenarios)
+    monkeypatch.setattr(runner, "run_process", lambda *args, **kwargs: {"returncode": 0, "timed_out": False})
+
+    def inspect(scenario, directory, execution):
+        if scenario.name == failed_scenario:
+            raise ValueError("truncated rollout")
+        return {
+            "scenario": scenario.name,
+            "tier": scenario.tier,
+            "exercised": True,
+            "verdict": "fulfilled",
+            "checks": [{"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "pass"}]
+            + (
+                [{"id": "compaction.event", "kind": "behavioral", "tier": "P1", "status": "pass"}]
+                if scenario.compaction
+                else []
+            ),
+            "evidence": {},
+        }
+
+    monkeypatch.setattr(runner, "inspect_episode", inspect)
+    artifacts = tmp_path / "artifacts"
+    probes = artifacts / "pi" / "probes"
+    summary, code = run_suite(harnesses=["pi"], scenarios=scenarios, output=probes, timeout=1, gate_tier=gate_tier)
+    assert code == expected_code
+    result = next(s for s in summary["harnesses"]["pi"]["scenarios"] if s["scenario"] == failed_scenario)
+    assert result["checks"] == [] and result["checker_error"] == "ValueError"
+    commit = "a" * 40
+    (probes / "ci-result.json").write_text(
+        json.dumps({"harness": "pi", "sha": commit, "status": "passed" if code == 0 else "unavailable"})
+    )
+    output = tmp_path / "table.mdx"
+    ci_table.render_ci(artifacts=artifacts, commit=commit, output=output, run_url="https://example.com/run")
+    count = len(scenarios) - 1
+    p1 = "—" if failed_scenario == "context_compaction" else '<Badge intent="launch" minimal>1/1</Badge>'
+    assert f'`pi` | <Badge intent="launch" minimal>{count}/{count}</Badge> | {p1} | —' in output.read_text()
 
 
 def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatch):
@@ -738,6 +923,50 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
     with pytest.raises(KeyboardInterrupt):
         run_suite(harnesses=["pi"], scenarios=SCENARIOS[:1], output=output, timeout=1)
     assert not (output / "conformance_summary.json").exists()
+
+
+@pytest.mark.parametrize("gate_tier", ["P0", "P1"])
+def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained_episode, monkeypatch, gate_tier):
+    from scripts.harness_conformance import runner
+
+    source, _ = retained_episode
+    files = {
+        name: (source / name).read_bytes() for name in ("rollouts.jsonl", "witness.json", "capture/0-0.capture.jsonl")
+    }
+    launched = []
+
+    def run(command, *, directory, timeout):
+        launched.append((directory.parent.name, directory.name))
+        for name, content in files.items():
+            destination = directory / name
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_bytes(content)
+        return {"returncode": 0, "timed_out": False}
+
+    monkeypatch.setattr(runner, "run_process", run)
+    # Valid existing evidence deliberately lacks a compaction event/witness.
+    scenarios = (
+        SCENARIO["verifier_failure"],
+        dataclasses.replace(SCENARIO["context_compaction"], expected_reward=0.0, tool_steps=2),
+    )
+    summary, code = run_suite(
+        harnesses=list(HARNESSES), scenarios=scenarios, output=source / "run", timeout=1, gate_tier=gate_tier
+    )
+    assert set(launched) == {(h, s.name) for h in HARNESSES for s in scenarios}
+    assert code == (0 if gate_tier == "P0" else 1)
+    for row in summary["harnesses"].values():
+        assert row["verdict"] == ("fulfilled" if gate_tier == "P0" else "not_fulfilled")
+        result = row["scenarios"][1]
+        assert result["p0_verdict"] == "fulfilled" and result["verdict"] == "not_fulfilled"
+        assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
+
+
+def test_compaction_only_run_cannot_pass_an_empty_p0_gate(tmp_path):
+    with pytest.raises(ValueError, match="--gate-tier P1"):
+        run_suite(
+            harnesses=["opencode"], scenarios=(SCENARIO["context_compaction"],), output=tmp_path / "run", timeout=1
+        )
+    assert not (tmp_path / "run").exists()
 
 
 @pytest.mark.parametrize(
@@ -854,3 +1083,46 @@ def test_chat_fingerprint_ignores_creation_clock():
     response = {"id": "r", "object": "chat.completion", "created": 123, "choices": []}
     without_clock = {key: value for key, value in response.items() if key != "created"}
     assert _fingerprint(request, 200, response) == _fingerprint(request, 200, without_clock)
+
+
+def test_manifest_backed_episode_reaches_conformance_report(retained_episode):
+    from nemo_gym.rollouts import RolloutStore, RunManifest
+
+    directory, _ = retained_episode
+    output = directory / "rollouts.jsonl"
+    result = json.loads(output.read_text())
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source = directory / "inputs.jsonl"
+    source.write_text(json.dumps(rows[0]) + "\n")
+    manifest = RunManifest.create(source, rows, {}, {})
+    with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        store.record_outcome(result | row)
+    report = inspect_episode(SCENARIO["verifier_failure"], directory, {"returncode": 0, "timed_out": False})
+    assert report["verdict"] == "fulfilled", report["issues"]
+
+
+def test_cli_reports_configuration_error_as_execution_error(tmp_path, monkeypatch, capsys):
+    from scripts.harness_conformance import runner
+
+    def fail(**kwargs):
+        raise ConfigError("conflicting recovery history")
+
+    monkeypatch.setattr(runner, "run_suite", fail)
+    assert main(["--output", str(tmp_path / "run")]) == 2
+    assert "runner_error: conflicting recovery history" in capsys.readouterr().err
+
+
+def test_missing_judge_reference_fails_p1_without_blocking_p0(retained_episode):
+    from dataclasses import replace
+
+    directory, _ = retained_episode
+    scenario = replace(SCENARIO["verifier_failure"], judge_verifier=True)
+    result = inspect_episode(scenario, directory, {"returncode": 0, "timed_out": False})
+    check = next(c for c in result["checks"] if c["id"] == "verifier.judge_reference")
+    assert check["tier"] == "P1"
+    assert check["status"] == "fail"
+    assert result["behavioral_status"] == "fail"
+    assert result["verdict"] == "fulfilled"
+    assert all(c["status"] in {"pass", "not_applicable"} for c in result["checks"] if c["tier"] == "P0")

@@ -58,21 +58,21 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+)
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymResponse,
-)
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 
 
 # ---------------------------------------------------------------------------
@@ -324,9 +324,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                         json=params,
                         response_model=NeMoGymChatCompletion,
                     )
-                except JudgeError as e:
-                    # A transport/HTTP failure is not a parse failure -- don't
-                    # retry it here, let judge_failsafe route the row.
+                except JUDGE_FAILURES as e:
+                    if not is_judge_failure(e):
+                        raise
                     print(f"[gdp_pdf] judge HTTP error: {e}", flush=True)
                     raise
 

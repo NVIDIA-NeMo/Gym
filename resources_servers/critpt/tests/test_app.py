@@ -20,20 +20,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.critpt.app import (
     _REPO_ROOT,
+    CritPtAccessDenied,
     CritPtRateLimitExceeded,
     CritPtResourcesServer,
     CritPtResourcesServerConfig,
     CritPtVerifyRequest,
     _extract_code,
+    _key_fingerprint,
     _resolve_cache_dir,
 )
 
@@ -578,3 +580,171 @@ class TestKeyRotation:
             assert server._key_index == 0
         finally:
             _stop_patches(patches)
+
+
+class TestAccessDenied:
+    """HTTP 403 from AA: the key authenticated but its account is not approved
+    for CritPt grading.
+
+    Distinct from 429 (approved, out of quota): AA rejects at the auth layer, so
+    nothing is graded and no quota is spent. Before this was typed, a pool of
+    unapproved keys turned into a bare RuntimeError, a 500 on /verify, and an
+    aborted run.
+    """
+
+    _DENIED_BODY = (
+        '{"error":"CritPt grading requires approved access. To protect benchmark integrity '
+        "and ensure server capacity, the grading endpoint is limited to approved labs and "
+        'researchers; access remains free."}'
+    )
+
+    @pytest.mark.asyncio
+    async def test_403_raises_typed_access_denied_not_bare_runtime_error(self):
+        """A 403 must surface as CritPtAccessDenied carrying AA's body."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+
+        mock_request, patches = _mock_api_sequence([{"status": 403, "body": self._DENIED_BODY}])
+        try:
+            with pytest.raises(CritPtAccessDenied) as exc_info:
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert "approved access" in exc_info.value.body
+            # The message must tell the operator what to actually do.
+            assert "critpt@artificialanalysis.ai" in str(exc_info.value)
+            assert mock_request.call_count == 1
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_403_is_not_confused_with_quota(self):
+        """A 403 must NOT be reported as a rate limit. The two have different fixes:
+        429 means wait, 403 means get the account approved."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+
+        mock_request, patches = _mock_api_sequence([{"status": 403, "body": self._DENIED_BODY}])
+        try:
+            with pytest.raises(CritPtAccessDenied):
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert mock_request.call_count == 1
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_rotates_past_denied_key_to_approved_key(self):
+        """Mixed pool: k0's account is unapproved, k1's is approved.
+
+        Rotation is what makes a mixed pool recover. A 403 costs no quota, so
+        trying the next key is free.
+        """
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1"]))
+
+        mock_request, patches = _mock_api_sequence(
+            [
+                {"status": 403, "body": self._DENIED_BODY},
+                {"status": 200, "json": {"accuracy": 0.5, "timeout_rate": 0.0}},
+            ]
+        )
+        try:
+            results = await asyncio.gather(
+                server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+            )
+            sent_keys = [call.kwargs["headers"]["x-api-key"] for call in mock_request.call_args_list]
+            assert sent_keys == ["k0", "k1"]
+            for r in results:
+                assert r.reward == 0.5
+            # Cursor sticks to the approved key so later batches skip the dead one.
+            assert server._key_index == 1
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_all_keys_403_raises_after_full_cycle(self):
+        """Every key denied: one attempt per key, then CritPtAccessDenied.
+
+        Without rotation on 403 the server gave up after the first key.
+        """
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1", "k2"]))
+
+        mock_request, patches = _mock_api_sequence(
+            [
+                {"status": 403, "body": self._DENIED_BODY},
+                {"status": 403, "body": self._DENIED_BODY},
+                {"status": 403, "body": self._DENIED_BODY},
+            ]
+        )
+        try:
+            with pytest.raises(CritPtAccessDenied):
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert mock_request.call_count == 3
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("denied_first", [False, True], ids=["429-then-403", "403-then-429"])
+    async def test_mixed_rate_limited_and_denied_pool_reports_the_rate_limit(self, denied_first: bool):
+        """An approved key out of quota and an unapproved key: the error is the rate limit, with the approved key's
+        reset, whichever key rotation tried last. Waiting helps; approval is not the only fix."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0", "k1"]))
+        limited = {"status": 429, "headers": {"Retry-After": "60", "X-Ratelimit-Reset": "111"}, "body": "rl"}
+        denied = {"status": 403, "body": self._DENIED_BODY}
+
+        mock_request, patches = _mock_api_sequence([denied, limited] if denied_first else [limited, denied])
+        try:
+            with pytest.raises(CritPtRateLimitExceeded) as exc_info:
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert (exc_info.value.retry_after_seconds, exc_info.value.reset_unix) == (60, 111)
+            assert "1 of 2 key(s) were denied" in "\n".join(getattr(exc_info.value, "__notes__", []))
+            assert mock_request.call_count == 2
+        finally:
+            _stop_patches(patches)
+
+    @pytest.mark.asyncio
+    async def test_non_403_non_429_client_error_still_bare_runtime_error(self):
+        """A 400 keeps the old fail-fast behaviour; only 403 gained a type."""
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+
+        mock_request, patches = _mock_api_sequence([{"status": 400, "body": "bad payload"}])
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                await asyncio.gather(
+                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+                )
+            assert not isinstance(exc_info.value, CritPtAccessDenied)
+            assert not isinstance(exc_info.value, CritPtRateLimitExceeded)
+            assert mock_request.call_count == 1
+        finally:
+            _stop_patches(patches)
+
+
+class TestKeyFingerprint:
+    """Fingerprints let us tell from a log which AA account a run used.
+
+    $ARTIFICIAL_ANALYSIS_API_KEY usually comes from the launching user's
+    environment, so it is absent from the run config.
+    """
+
+    def test_is_stable_and_short(self):
+        assert _key_fingerprint("k0") == _key_fingerprint("k0")
+        assert len(_key_fingerprint("k0")) == 8
+
+    def test_distinguishes_keys(self):
+        assert _key_fingerprint("k0") != _key_fingerprint("k1")
+
+    def test_never_reveals_the_key(self):
+        secret = "aa_averysecretkeyvalue0123456789"  # pragma: allowlist secret
+        fp = _key_fingerprint(secret)
+        assert secret not in fp
+        assert fp not in secret

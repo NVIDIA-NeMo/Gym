@@ -20,7 +20,7 @@ Two **opt-in** top-level config keys that servers can consult for state that out
 | Key | Default | Read today by |
 |-----|---------|---------------|
 | `results_dir` | `<working dir>/results` | the `swe_agents` server (per-run results) and the W&B run directory |
-| `cache_dir` | `<working dir>/cache` | the `swe_agents` server (setup trees) and the `uv_cache_dir` default |
+| `cache_dir` | `<working dir>/cache` | the `swe_agents` server (setup trees), the `uv_cache_dir` default, and `sandbox_python/` (host-built harness runtime archives) |
 
 These are opt-in settings, not a global redirect: components that don't consult them (profiling output, rollout capture, logs, Hugging Face caches, other agents) keep their own locations, and the module-level `RESULTS_DIR`/`CACHE_DIR` constants remain unchanged defaults for such consumers. New artifact producers are encouraged to read these keys.
 
@@ -376,6 +376,11 @@ extra and continues the run without that backend.
 Each backend writes its run id to `<output stem>_<backend>_run_id` next to `output_jsonl_fpath`, for
 example `rollouts_mlflow_run_id` or `rollouts_wandb_run_id`. A resumed or resubmitted run with the same
 output logs to that run. Delete the file to start a new one.
+
+A finished run can also be sent afterwards with `gym eval export mlflow` or `gym eval export wandb`, which log the run's
+saved config, aggregate metrics and rollouts through the same backend. They keep their own `<output stem>_<backend>_export_done`
+marker, so exporting never changes which run a resumed run logs to. A run that was logged live is exported again as a
+separate run, because the run id file shows only that the live run opened, not that every upload landed. See [`gym eval export`](/reference/cli-commands#gym-eval-export).
 
 ### Weights & Biases
 

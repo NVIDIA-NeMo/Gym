@@ -25,22 +25,22 @@ import aiohttp
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict, get_global_config_dict
-from nemo_gym.openai_utils import (
-    NeMoGymAsyncOpenAI,
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import NeMoGymAsyncOpenAI, get_response_json, raise_for_status
+from nemo_gym.config import (
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -50,9 +50,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from responses_api_models.vllm_model.app import VLLMConverter
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 
 
 def _qid(text: str) -> str:
@@ -939,7 +938,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 flush=True,
             )
             # CONTAIN the failure to this one sample. Re-raising makes /run return 500, which
-            # the collector treats as fatal (raise_for_status in nemo_gym/rollout_collection.py)
+            # the collector treats as fatal (raise_for_status in nemo_gym/rollouts/rollout_collection.py)
             # and every remaining sample dies with it — that cost two full multi-node
             # allocations, each dying part-way through a run on one bad sample.
             #
@@ -958,12 +957,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                     tool_choice="none",
                     tools=[],
                 ).model_dump()
-            # EXCEPT when the HARNESS is what broke. Then nothing about this sample failed, so
-            # scoring it 0 is wrong, and persisting a row is worse: _load_from_cache keys on
-            # (task_index, rollout_index) and would treat it as permanently done. NG_NO_PERSIST_KEY
-            # writes no row at all (nemo_gym/rollout_collection.py), so resume's set-difference
-            # re-dispatches it on the next chain-hop. The 4h cluster cap makes chain-hops
-            # unavoidable on a 1266-sample run, so this path is load-bearing, not a corner case.
+            # A harness failure is not a scored model outcome. Gym's manifest-backed collector
+            # persists nonterminal kill_shaped in the failure sidecar without charging the
+            # counted-failure budget, leaving it eligible for resume. Retain NG_NO_PERSIST_KEY
+            # for legacy consumers.
             # Merged LAST so a stale sentinel echoed from `body` cannot shadow the fresh value.
             routing = {NG_NO_PERSIST_KEY: True, NG_FAILURE_CLASS_KEY: "kill_shaped"} if infra else {}
             return BrowsecompAgentVerifyResponse.model_validate(
@@ -1098,7 +1095,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """Hit the policy model's vLLM /tokenize endpoint and return the prompt
         token count (used to decide context reset without a full generation).
         (ported from gym-gitlab b66e37c6)"""
-        converter = VLLMConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         chat_completion_create_params = converter.responses_to_chat_completion_create_params(body)
         chat_completion_create_params = chat_completion_create_params.model_dump()
         # Same projection as vllm_model/app.py's tokenize path.
