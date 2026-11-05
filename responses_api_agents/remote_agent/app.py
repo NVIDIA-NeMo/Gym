@@ -120,12 +120,13 @@ class RemoteAgentDeadlineError(RemoteAgentError):
 
 @dataclass(frozen=True)
 class _Deadline:
-    """A limit of this agent that fired: which limit, its configured length, how long the step had run, the step
-    that was active (``seed_session``, ``agent`` or ``verify``) and the error that ended it."""
+    """A limit of this agent that fired: which limit, its configured length, how long the step had run (None when
+    that is not known), the step that was active (``seed_session``, ``agent`` or ``verify``) and the error that ended
+    it."""
 
     limit: str
     configured_s: float
-    elapsed_s: float
+    elapsed_s: float | None
     operation: str
     cause: BaseException | None = None
 
@@ -472,7 +473,6 @@ class RemoteAgent(SimpleResponsesAPIAgent):
 
         if active is not None:
             active["operation"] = "agent"
-        loop_started = time.monotonic()
         try:
             loop_response = await self.server_client.post(
                 server_name=self.config.name,
@@ -495,7 +495,9 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 _Deadline(
                     limit="remote_responses_timeout_secs",
                     configured_s=self.config.remote_responses_timeout_secs,
-                    elapsed_s=time.monotonic() - loop_started,
+                    # The request that expired ran inside the self-post, after any earlier turns of the loop;
+                    # its own duration does not cross back, so it is left out rather than overstated.
+                    elapsed_s=None,
                     operation="agent",
                     cause=e,
                 )

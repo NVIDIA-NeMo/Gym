@@ -1113,7 +1113,12 @@ class TestDeadlineEvidence:
 
         [timeout] = result["timeouts"]
         assert (timeout["limit"], timeout["enforcer"], timeout["evidence"]) == (limit, "remote_agent", "internal")
-        assert timeout["configured_s"] == configured_s and timeout["elapsed_s"] >= 0
+        assert timeout["configured_s"] == configured_s
+        if limit == "remote_responses_timeout_secs":
+            # The expired request's own duration does not cross the self-post; the loop's would overstate it.
+            assert "elapsed_s" not in timeout
+        else:
+            assert timeout["elapsed_s"] >= 0
         timed_out = classify_timeout(result)
         assert (timed_out.evidence, timed_out.limit, timed_out.enforcer) == ("typed", limit, "remote_agent")
         [failure] = observed

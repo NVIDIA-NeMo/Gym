@@ -42,6 +42,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ConnectionTimeoutError,
     ServerDisconnectedError,
 )
 from anyio import CancelScope
@@ -14449,36 +14450,21 @@ def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
 
 
 class TestCollectorTransportDeadline:
-    """Collection's own HTTP deadline for a /run leaves typed deadline evidence on the failure; a status or a refused
-    connection does not."""
-
-    async def test_an_expired_transport_deadline_is_a_typed_timeout_tied_to_the_dispatch_failure(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        from nemo_gym.rollouts.health.timeouts import classify_timeout
-
-        install_fake_server_client(monkeypatch, AsyncMock(side_effect=asyncio.TimeoutError()))
-        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
-        [timeout] = result["timeouts"]
-        assert (timeout["limit"], timeout["enforcer"], timeout["evidence"]) == (
-            "collection.run",
-            "collection",
-            "internal",
-        )
-        timed_out = classify_timeout(result)
-        assert (timed_out.evidence, timed_out.limit, timed_out.enforcer) == ("typed", "collection.run", "collection")
-        # The named collection failure is preserved as before.
-        assert result["_ng_failure_type"] == "TimeoutError"
+    """Collection sets no deadline of its own on /run (the shared client is unbounded), so no transport failure it
+    sees is attributed to one: a timeout from a connect sub-limit or elsewhere on the dispatch path, a status and a
+    refused connection carry no deadline evidence."""
 
     @pytest.mark.parametrize(
         "post",
         [
             AsyncMock(return_value=FakeResponse(504)),
             AsyncMock(side_effect=ClientConnectorError(MagicMock(), OSError("connection refused"))),
+            AsyncMock(side_effect=asyncio.TimeoutError()),
+            AsyncMock(side_effect=ConnectionTimeoutError()),
         ],
-        ids=["gateway-timeout-status", "refused"],
+        ids=["gateway-timeout-status", "refused", "timeout", "connect-timeout"],
     )
-    async def test_a_status_or_a_refused_connection_is_not_a_collector_deadline(
+    async def test_a_transport_failure_is_not_a_collector_deadline(
         self, monkeypatch: pytest.MonkeyPatch, post
     ) -> None:
         from nemo_gym.rollouts.health.timeouts import classify_timeout

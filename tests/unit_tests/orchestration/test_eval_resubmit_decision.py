@@ -2191,7 +2191,7 @@ def test_collector_projection_preserves_verification_stop_without_regenerating(t
     else:
         failure, status = TimeoutError("dispatch timed out"), None
     row = _agent_request_failure_row(failure, status)
-    row = FailureReportRow.merged_into(row, _collection_failure_report(failure, {}))
+    row = FailureReportRow.merged_into(row, _collection_failure_report(failure, row["_ng_failure_class"], {}))
     row.update(ident(0, _ng_attempt_index=0, _ng_failure_max_attempts=3))
     if case == "verifier_saved":
         row["ng_trajectory"] = {
@@ -2304,7 +2304,7 @@ def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, cas
 
     failure = TimeoutError("dispatch did not reach the agent")
     row = _agent_request_failure_row(failure, None)
-    row = FailureReportRow.merged_into(row, _collection_failure_report(failure, {}))
+    row = FailureReportRow.merged_into(row, _collection_failure_report(failure, row["_ng_failure_class"], {}))
     row.update(ident(0, _ng_failure_max_attempts=3))
     selected_id = row["_ng_failure_id"]
     selected = row["_ng_failure_events"][selected_id]
