@@ -140,7 +140,9 @@ Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
 gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
-training token-ID/logprob support or benchmark accuracy.
+training token-ID/logprob support or benchmark accuracy. Sandbox observations use the shared
+`FailureStage` vocabulary: execution is `agent`, while OpenCode’s own setup failure events use `seed`.
+An existing failure stage is preserved when forwarded; scoring and retries belong to the caller’s outcome policy.
 
 For local calls, OpenCode is installed on first use in a shared background-thread
 task, without blocking the event loop. Failed installs can be retried. A configured `repo_dir` is
