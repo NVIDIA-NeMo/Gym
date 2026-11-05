@@ -6,8 +6,8 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.core.episode import EpisodeId, TaskId
-from nemo_gym.core.episode_types import BaseEpisodeResponse, EpisodeFailure
+from nemo_gym.core.episode_types import BaseEpisodeResponse, EpisodeId, TaskId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailure, RolloutFailureRecord
 
 

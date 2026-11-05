@@ -207,6 +207,10 @@ class AmbiguousAgentRenameError(ConfigError, ValueError):
     """An environment server references an agent inherited by several new instances."""
 
 
+class AmbiguousResourcesRenameError(ConfigError, ValueError):
+    """An environment server references resources inherited by several new instances."""
+
+
 class AgentCompositionError(ConfigError, ValueError):
     """A standalone agent config could not be composed onto the merged config's agent instances."""
 
@@ -532,6 +536,8 @@ class DatasetConfig(BaseModel):
     type: DatasetType
     jsonl_fpath: str
     prepare_script: Optional[Path] = None
+    prepare_project: Optional[Path] = None
+    # Optional `uv pip install` arguments, preserved for existing preparation configs.
     prepare_dependencies: List[str] = Field(default_factory=list)
     taskset: Optional[str] = Field(
         default=None,
@@ -558,6 +564,8 @@ class DatasetConfig(BaseModel):
         data = handler(self)
         if self.prepare_script is None:
             data.pop("prepare_script", None)
+        if self.prepare_project is None:
+            data.pop("prepare_project", None)
         if not self.prepare_dependencies:
             data.pop("prepare_dependencies", None)
         return data
@@ -641,6 +649,9 @@ class BenchmarkDatasetConfig(BaseModel):
     )
     prompt_config: Optional[Path] = None
     num_repeats: int = Field(default=1, ge=1)
+    # Isolated project containing the committed dependency lock for preparation.
+    prepare_project: Optional[Path] = None
+    # Optional `uv pip install` arguments, preserved for existing preparation configs.
     # Catalog metadata, as on `DatasetConfig`. A benchmark needs no license, and in-repo benchmark entries
     # spell theirs freely, so `license` stays an ignored extra here as it always was.
     domain: Optional[Domain] = Field(default=None, exclude_if=lambda value: value is None)
