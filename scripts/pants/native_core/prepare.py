@@ -146,7 +146,7 @@ def export_requirements(repo: Path, destination: Path, *, uv: str = "uv") -> Non
         (destination / f"{resolve}.requirements.txt").write_text(result.stdout)
 
 
-def write_build_configuration(repo: Path) -> dict[str, object]:
+def write_build_configuration(repo: Path, *, incremental: bool = False) -> dict[str, object]:
     """Declare all test files and broad explicit assets without removing import edges."""
     native = repo / "scripts/pants/native_core"
     snapshot_git(repo)
@@ -174,11 +174,16 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
     # Separate resolves keep optional-dependency availability identical to the two CI jobs.
     lines = [HEADER]
     for resolve in EXTRAS:
+        overrides = ""
+        if incremental and resolve == "core":
+            from incremental import MIGRATION_TEST
+
+            overrides = f", overrides={{{MIGRATION_TEST!r}: {{'dependencies': [':incremental-assets'], 'batch_compatibility_tag': 'incremental-migration'}}}}"
         lines.append(f"python_sources(name={resolve + '-sources'!r}, sources={sources!r}, resolve={resolve!r})\n")
         lines.append(
             f"python_tests(name={resolve + '-tests'!r}, sources={tests!r}, resolve={resolve!r}, "
             f"dependencies=[':assets', ':native-project'], tags=['native-core-{resolve}'], "
-            f"batch_compatibility_tag={'native-' + resolve!r})\n"
+            f"batch_compatibility_tag={'native-' + resolve!r}{overrides})\n"
         )
     # Several core tests inspect source files as fixtures (for example every agent
     # app's session declaration). Imports do not describe those reads. Start with
@@ -193,6 +198,10 @@ def write_build_configuration(repo: Path) -> dict[str, object]:
     runtime_assets.append("scripts/pants/native_core/symlinks.json")
     lines.append(f"files(name='assets', sources={sorted(set(assets + sources + tests + runtime_assets))!r})\n")
     lines.append(distribution_targets(repo))
+    if incremental:
+        from incremental import build_target
+
+        lines.append(build_target(repo))
     (repo / "BUILD.native").write_text("".join(lines))
     (native / "BUILD.native").write_text(
         HEADER

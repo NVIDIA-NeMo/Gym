@@ -18,8 +18,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from xml.etree import ElementTree
 
-from batching import validate_plan, verify_batch_result
+from batching import validate_plan
 from collect import targets
+from incremental import ENVIRONMENT as INCREMENTAL_ENVIRONMENT
+from incremental import MIGRATION_TEST, eligibility
 from prepare import BATCH_SIZE, requirement_pins, snapshot_distribution, validate_lock, write_build_configuration
 
 
@@ -116,6 +118,102 @@ def combine_junit(reports: Path, output: Path, *, collection: Path | None = None
     ElementTree.ElementTree(combined).write(output, encoding="utf-8", xml_declaration=True)
 
 
+def execute_batch(
+    *,
+    checkout: Path,
+    output: Path,
+    identifier: str,
+    selected: list[str],
+    cacheable: bool,
+    args: argparse.Namespace,
+    workers: int | None,
+    environment: dict[str, str],
+) -> dict:
+    """Run one verified native batch, retaining authentic Pants result provenance."""
+    directory = checkout / "results/incremental" / identifier
+    directory.mkdir(parents=True, exist_ok=False)
+    prefix = [
+        str(Path(args.pants).resolve()),
+        "--no-pantsd",
+        "--pants-config-files=pants.native.toml",
+        "--process-execution-local-parallelism=1",
+    ]
+    batch_environment = dict(environment)
+    store = environment.get("PANTS_LOCAL_STORE_DIR")
+    if store:
+        batch_environment["PANTS_LOCAL_STORE_DIR"] = str(Path(store) / ("reusable" if cacheable else "forced"))
+    options = []
+    if cacheable:
+        options.append(
+            "--test-extra-env-vars=" + json.dumps([f"{key}={value}" for key, value in INCREMENTAL_ENVIRONMENT.items()])
+        )
+    with (output / f"{identifier}-batch-plan.log").open("w") as log:
+        planning = subprocess.run(
+            prefix + options + ["native-batch-plan", *selected],
+            cwd=checkout,
+            env=batch_environment,
+            stdout=subprocess.PIPE,
+            stderr=log,
+            text=True,
+            check=True,
+        )
+    plan = json.loads(planning.stdout)
+    size = validate_plan(plan, selected)
+    (output / f"{identifier}-batch-plan.json").write_text(json.dumps(plan, indent=2) + "\n")
+    pytest_args = [
+        "-m",
+        "not sandbox" if args.group == "core" else "sandbox",
+        "--cov-fail-under=0",
+        "-p",
+        "scripts.pants.native_core.incremental_runtime" if cacheable else "scripts.pants.native_core.runtime",
+    ]
+    if args.group == "core":
+        pytest_args.append("--junit-prefix=nemo_gym.core")
+    if workers is not None:
+        pytest_args.extend(["-n", str(workers), "--dist=loadfile"])
+    if cacheable:
+        pytest_args.append("--basetemp=extra-output/pytest-temp")
+    command = (
+        prefix
+        + options
+        + [
+            "test",
+            *selected,
+            "--stats-log",
+            "--stats-format=jsonlines",
+            "--stats-output-file=" + str(output / f"{identifier}-pants-stats.jsonl"),
+            "--test-use-coverage",
+            "--test-report",
+            "--test-experimental-report-test-result-info",
+            f"--test-batch-size={size}",
+            "--test-report-dir=" + str(directory.relative_to(checkout) / "junit"),
+            "--coverage-py-output-dir=" + str(directory.relative_to(checkout) / "coverage"),
+            "--pytest-junit-family=" + ("xunit1" if args.group == "core" else "xunit2"),
+        ]
+    )
+    if not cacheable:
+        command.append("--test-force")
+    command += ["--", *pytest_args]
+    previous = set(checkout.glob("test_result_info_report_runid*.json"))
+    (output / f"{identifier}-command.json").write_text(json.dumps(command, indent=2) + "\n")
+    with (output / f"{identifier}-pants.log").open("w") as log:
+        result = subprocess.run(command, cwd=checkout, env=batch_environment, stdout=log, stderr=subprocess.STDOUT)
+    reports = set(checkout.glob("test_result_info_report_runid*.json")) - previous
+    if len(reports) != 1:
+        raise ValueError("Expected one fresh native result-info report per invocation")
+    shutil.copy2(reports.pop(), directory / "result-info.json")
+    if result.returncode:
+        # Keep failed evidence; failures must never be presented as successful reused output.
+        shutil.copytree(directory, output / "failed-batches" / identifier)
+        raise subprocess.CalledProcessError(result.returncode, command)
+    return {
+        "id": identifier,
+        "mode": "cacheable" if cacheable else "forced",
+        "directory": directory,
+        "targets": selected,
+    }
+
+
 def run(args: argparse.Namespace) -> int:
     started = datetime.now(timezone.utc).isoformat()
     start = time.monotonic()
@@ -125,6 +223,7 @@ def run(args: argparse.Namespace) -> int:
         raise FileExistsError(f"Refusing to overwrite a previous native run: {output}")
     source = args.source.resolve()
     assets = Path(__file__).resolve().parent
+    mode = getattr(args, "execution_mode", "incremental")
     workers = core_worker_count(source) if args.group == "core" else None
     environment = dict(os.environ)
     if args.group == "core":
@@ -139,7 +238,8 @@ def run(args: argparse.Namespace) -> int:
         "exit_code": 1,
         "command_exit_code": None,
         "prototype": True,
-        "pants_result_cache": "forced-native-tests",
+        "pants_result_cache": "incremental-native-tests" if mode == "incremental" else "forced-native-tests",
+        "execution_mode": mode,
         "batching": {
             "compatibility": "per-resolve",
             "target_files": BATCH_SIZE,
@@ -206,7 +306,6 @@ def run(args: argparse.Namespace) -> int:
                 )
             manifest = json.loads(manifest_path.read_text())
             snapshot_distribution(checkout)
-            write_build_configuration(checkout)
             if manifest["source_sha"] != metadata["source_sha"]:
                 raise ValueError("Source changed while preparing native execution")
             expected_durations = hashlib.sha256(
@@ -218,96 +317,76 @@ def run(args: argparse.Namespace) -> int:
             if not selected:
                 raise ValueError("Native collection selected no test files")
             (output / "targets.json").write_text(json.dumps(selected, indent=2) + "\n")
-            marker = "not sandbox" if args.group == "core" else "sandbox"
-            pytest_args = ["-m", marker, "--cov-fail-under=0", "-p", "scripts.pants.native_core.runtime"]
-            if args.group == "core":
-                pytest_args.append("--junit-prefix=nemo_gym.core")
-            if workers is not None:
-                pytest_args.extend(["-n", str(workers), "--dist=loadfile"])
-            command = [
-                str(Path(args.pants).resolve()),
-                "--no-pantsd",
-                "--pants-config-files=pants.native.toml",
-                "--process-execution-local-parallelism=1",
-                "test",
-                *selected,
-                "--stats-log",
-                "--stats-format=jsonlines",
-                "--stats-output-file=" + str(output / "pants-stats.jsonl"),
-                "--test-use-coverage",
-                "--test-force",
-                "--test-report",
-                "--test-report-dir=results/native-junit",
-                "--coverage-py-output-dir=results/native-coverage",
-                "--pytest-junit-family=" + ("xunit1" if args.group == "core" else "xunit2"),
-                "--",
-                *pytest_args,
-            ]
+            incremental = False
+            policy = assets / "incremental-policy.json"
+            decision = {"eligible": False, "forced_reasons": ["forced execution requested"]}
+            if mode == "incremental" and args.group == "core" and policy.is_file():
+                decision = eligibility(checkout, policy)
+                if sys.platform != "linux":
+                    decision = {"eligible": False, "forced_reasons": ["runtime verification supports Linux only"]}
+                if decision["eligible"] and any(MIGRATION_TEST in target for target in selected):
+                    captured_at = time.monotonic()
+                    with (output / "runtime-fingerprint.log").open("w") as log:
+                        capture = subprocess.run(
+                            [
+                                str(checkout / ".venv/bin/python"),
+                                str(assets / "runtime_fingerprint.py"),
+                                str(native / "runtime-inputs.json"),
+                            ],
+                            env=environment,
+                            stdout=log,
+                            stderr=subprocess.STDOUT,
+                        )
+                    metadata["runtime_fingerprint_seconds"] = round(time.monotonic() - captured_at, 3)
+                    if capture.returncode:
+                        decision = {
+                            "eligible": False,
+                            "forced_reasons": [
+                                "runtime fingerprint could not be verified; see runtime-fingerprint.log"
+                            ],
+                        }
+                    else:
+                        shutil.copy2(policy, native / policy.name)
+                        shutil.copy2(native / "runtime-inputs.json", output / "runtime-inputs.json")
+                        incremental = True
+            metadata["incremental_eligibility"] = decision
+            write_build_configuration(checkout, incremental=incremental)
             interpreter = subprocess.check_output(
                 [args.uv, "python", "find", (checkout / ".python-version").read_text().strip()], text=True
             ).strip()
             environment["PATH"] = str(Path(interpreter).parent) + os.pathsep + environment.get("PATH", "")
-            if args.group == "core":
-                with (output / "batch-plan.log").open("w") as log:
-                    planning = subprocess.run(
-                        command[:4] + ["native-batch-plan", *selected],
-                        cwd=checkout,
-                        env=environment,
-                        stdout=subprocess.PIPE,
-                        stderr=log,
-                        text=True,
-                        check=True,
-                    )
-                plan = json.loads(planning.stdout)
-                size = validate_plan(plan, selected)
-                (output / "batch-plan.json").write_text(json.dumps(plan, indent=2) + "\n")
-                command[command.index("--") : command.index("--")] = [
-                    f"--test-batch-size={size}",
-                    "--test-experimental-report-test-result-info",
-                ]
-                metadata["batching"].update(
-                    target_files=size,
-                    partition="verified-single-forced-batch",
-                    expected_pytest_batches=1,
+            reusable = [target for target in selected if incremental and MIGRATION_TEST in target]
+            forced = [target for target in selected if target not in reusable]
+            batches = []
+            for identifier, addresses, cacheable in (("migration", reusable, True), ("forced", forced, False)):
+                if not addresses:
+                    continue
+                batch = execute_batch(
+                    checkout=checkout,
+                    output=output,
+                    identifier=identifier,
+                    selected=addresses,
+                    cacheable=cacheable,
+                    args=args,
+                    workers=workers,
+                    environment=environment,
                 )
-            (output / "command.json").write_text(json.dumps(command, indent=2) + "\n")
-            with (output / "pants.log").open("w") as log:
-                result = subprocess.run(command, cwd=checkout, env=environment, stdout=log, stderr=subprocess.STDOUT)
-            metadata["command_exit_code"] = result.returncode
-            reports = checkout / "results/native-junit"
-            if reports.exists():
-                combine_junit(
-                    reports, output / "junit" / f"{args.group}.xml", collection=manifest_path.with_suffix(".xml")
-                )
-            raw = checkout / "results/native-coverage/.coverage"
-            if raw.exists():
-                coverage_name = f".coverage.core-{args.shard}" if args.group == "core" else ".coverage.sandbox"
-                collection_coverage = manifest_path.with_suffix(".coverage")
-                if not collection_coverage.is_file():
-                    raise ValueError("Global collection did not return raw coverage")
-                coverage_environment = dict(environment, COVERAGE_FILE=str(output / coverage_name))
-                subprocess.run(
-                    [
-                        str(checkout / ".venv/bin/python"),
-                        "-m",
-                        "coverage",
-                        "combine",
-                        "--keep",
-                        str(collection_coverage),
-                        str(raw),
-                    ],
-                    cwd=checkout,
-                    env=coverage_environment,
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            if result.returncode:
-                raise subprocess.CalledProcessError(result.returncode, command)
-            if args.group == "core":
-                metadata["batching"].update(verify_batch_result(checkout, reports, output, selected))
-            if not raw.is_file() or not list((output / "junit").rglob("*.xml")):
-                raise ValueError("Native execution did not return both raw coverage and JUnit reports")
+                batches.append(batch)
+            sys.path.insert(0, str(assets.parent))
+            from full_ci_aggregate import merge_execution_outputs
+
+            accounting = merge_execution_outputs(
+                checkout=checkout,
+                batches=batches,
+                collection_json=manifest_path,
+                output=output,
+                group=args.group,
+                shard=args.shard,
+                env=environment,
+            )
+            metadata["execution_accounting"] = {"path": "test-accounting.json", "counts": accounting["counts"]}
+            metadata["command_exit_code"] = 0
+            metadata["batching"].update(actual_pytest_batches=len(batches), partition="verified-explicit-groups")
             metadata["exit_code"] = 0
     except (OSError, ValueError, subprocess.SubprocessError) as error:
         metadata["error"] = str(error)
@@ -327,6 +406,7 @@ def main() -> None:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--pants", default=os.environ.get("PANTS_BIN", "pants"))
     parser.add_argument("--uv", default="uv")
+    parser.add_argument("--execution-mode", choices=["incremental", "forced"], default="incremental")
     args = parser.parse_args()
     if not Path(args.pants).is_file():
         args.pants = shutil.which(args.pants) or args.pants

@@ -16,6 +16,7 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+from full_ci_aggregate import verify_accounting
 from full_ci_junit import compare_reports, summarize_reports
 
 
@@ -102,6 +103,7 @@ def prepare(args: argparse.Namespace) -> None:
         parent_sha=args.parent,
         experiment_sha=args.experiment_sha,
         force_full=args.force_full,
+        execution_mode=args.execution_mode,
         exclusions=EXCLUSIONS,
     )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
@@ -218,8 +220,9 @@ def execution_description(execution: dict) -> str:
     return (
         f"Recorded Pants execution: {native} native Python test jobs and {workspace} whole-job workspace jobs. "
         f"Result-cache modes: {', '.join(cache_modes)}. "
-        "forced-native-tests means --test-force; session-only workspace jobs never replay successes from another run. "
-        "Persistent engine/dependency caches may be restored. These parity runs do not establish test-result reuse or selective pruning."
+        "Session-only workspace jobs never replay successes from another run. "
+        "Native reuse is counted only from retained Pants result provenance, JUnit and raw coverage; "
+        "a cache-policy label alone does not establish a cache hit."
     )
 
 
@@ -250,12 +253,16 @@ def report(args: argparse.Namespace) -> None:
         else:
             value = json.loads(metadata.read_text())
             result.setdefault("execution", {})[directory.name] = {
-                key: value.get(key) for key in ("implementation", "pants_result_cache", "execution_provenance")
+                key: value.get(key)
+                for key in ("implementation", "pants_result_cache", "execution_provenance", "execution_mode")
             }
             if value.get("exit_code") != 0 or value.get("command_exit_code") != 0:
                 errors.append(f"Execution failed: {directory.name}")
             if value.get("source_sha") != route["source_sha"]:
                 errors.append(f"Wrong sampled source: {directory.name}")
+            if value.get("implementation") == "native Python test targets" and route.get("execution_mode"):
+                if value.get("execution_mode") != route["execution_mode"]:
+                    errors.append(f"Native execution mode differs from requested comparison: {directory.name}")
     comparisons = {}
     for item in route["matrix"]["include"]:
         if item["engine"] != "baseline":
@@ -283,6 +290,45 @@ def report(args: argparse.Namespace) -> None:
             errors.append(f"Test outcome mismatch or incomplete evidence: {label}")
         if len(manifests) == 2 and manifests["baseline"] != manifests["pants"]:
             errors.append(f"Test scope manifest mismatch: {label}")
+        for engine in ("baseline", "pants"):
+            directory = args.artifacts / f"full-ci-{engine}-{label}"
+            execution = result.get("execution", {}).get(directory.name, {})
+            if (
+                engine == "pants"
+                and execution.get("implementation") == "native Python test targets"
+                and (
+                    execution.get("execution_mode") == "incremental"
+                    or execution.get("pants_result_cache") == "incremental-native-tests"
+                    or (directory / "native/test-accounting.json").exists()
+                )
+            ):
+                accounting = verify_accounting(
+                    directory / "native", report=pair[engine], source_sha=route["source_sha"]
+                )
+                if not accounting["valid"]:
+                    errors.append(f"Invalid execution/cache accounting for {label}: {accounting['errors']}")
+                elif execution.get("execution_mode") == "forced" and (
+                    accounting["counts"]["cached"] or accounting["counts"]["executed"]
+                ):
+                    errors.append(f"Forced comparison contains cacheable test execution: {label}")
+            else:
+                # Historical metadata establishes forced execution only for the
+                # explicit existing modes; never relabel unknown cache policy.
+                known_forced = engine == "baseline" or execution.get("pants_result_cache") in {
+                    "session-only",
+                    "forced-native-tests",
+                }
+                accounting = {
+                    "valid": known_forced,
+                    "counts": {
+                        "forced": pair[engine]["testcase_count"] if known_forced else 0,
+                        "executed": 0,
+                        "cached": 0,
+                        "collection_skips": 0,
+                        "total": pair[engine]["testcase_count"],
+                    },
+                }
+            result.setdefault("test_accounting", {})[f"{engine}/{label}"] = accounting
         if item["job"] in ("core", "sandbox"):
             coverage_name = f".coverage.core-{item['shard']}" if item["job"] == "core" else ".coverage.sandbox"
             measured = {}
@@ -326,6 +372,17 @@ def report(args: argparse.Namespace) -> None:
             lines.append(f"| {job['name']} | {job['conclusion']} | {job['job_seconds']} | {job['feedback_seconds']} |")
     lines += [
         "",
+        "| Test scope | Forced | Executed cacheable | Reused | Collection skips | Total |",
+        "|---|---:|---:|---:|---:|---:|",
+    ]
+    for scope, accounting in result.get("test_accounting", {}).items():
+        counts = accounting["counts"]
+        lines.append(
+            f"| {scope} | {counts['forced']} | {counts['executed']} | {counts['cached']} | "
+            f"{counts['collection_skips']} | {counts['total']} |"
+        )
+    lines += [
+        "",
         "Baseline/Pants validation: " + ("passed" if result["valid"] else "FAILED; no speedup claim"),
         "",
         *errors,
@@ -346,6 +403,7 @@ def main() -> None:
     prep.add_argument("--parent", required=True)
     prep.add_argument("--experiment-sha", required=True)
     prep.add_argument("--force-full", action="store_true")
+    prep.add_argument("--execution-mode", choices=("incremental", "forced"), default="incremental")
     prep.add_argument("--output", type=Path, required=True)
     summary = sub.add_parser("report")
     for name in ("route", "jobs", "run", "artifacts", "output"):

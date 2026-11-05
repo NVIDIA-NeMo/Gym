@@ -21,7 +21,12 @@ on:
       force_full:
         description: Run all core and eight server shards, irrespective of source diff
         type: boolean
-        default: false
+        default: true
+      execution_mode:
+        description: Reuse declared Pants test results, or force a full execution control
+        type: choice
+        options: [incremental, forced]
+        default: incremental
 
 permissions:
   contents: read
@@ -69,7 +74,7 @@ jobs:
           git merge-base --is-ancestor "$source_sha" origin/main
           echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
           echo "parent_sha=$(git rev-parse "$source_sha^")" >> "$GITHUB_OUTPUT"
-          echo "cache_contract=$(git ls-files -z scripts/pants/full_ci.py scripts/pants/full_ci.toml scripts/pants/full_ci.BUILD scripts/pants/native_core | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+          echo "cache_contract=$(git ls-files -z 'scripts/pants/full_ci*.py' scripts/pants/full_ci.toml scripts/pants/full_ci.BUILD scripts/pants/native_core | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
           ref: ${{ steps.source.outputs.source_sha }}
@@ -81,11 +86,13 @@ jobs:
         env:
           PARENT: ${{ steps.source.outputs.parent_sha }}
           FORCE_FULL: ${{ inputs.force_full }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
         run: |
           flags=()
           if [[ "$FORCE_FULL" == true ]]; then flags+=(--force-full); fi
           python3 controller/scripts/pants/full_ci_report.py prepare \
             --source sample --parent "$PARENT" --experiment-sha "$GITHUB_SHA" \
+            --execution-mode "$EXECUTION_MODE" \
             --output "$RUNNER_TEMP/routing.json" "${flags[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -107,6 +114,7 @@ jobs:
       coverage: ${{ needs.prepare.outputs.coverage == 'true' }}
       changed_server_files: ${{ needs.prepare.outputs.changed_server_files }}
       cache_contract: ${{ needs.prepare.outputs.cache_contract }}
+      execution_mode: ${{ inputs.execution_mode }}
 
   pants:
     name: pants
@@ -120,6 +128,7 @@ jobs:
       coverage: ${{ needs.prepare.outputs.coverage == 'true' }}
       changed_server_files: ${{ needs.prepare.outputs.changed_server_files }}
       cache_contract: ${{ needs.prepare.outputs.cache_contract }}
+      execution_mode: ${{ inputs.execution_mode }}
 
   report:
     name: Compare outcomes and complete CI timing

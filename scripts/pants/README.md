@@ -16,7 +16,7 @@ The baseline uses the source revision's CI commands. Both arms preserve its test
 - Session-routing end-to-end tests when selected, and lint.
 - Existing runner types, system dependencies, test data, Python, uv and extras.
 
-Use `force_full=true` to exercise the full test workload, including all server
+The default `force_full=true` exercises the full test workload, including all server
 shards. Use `false` to reproduce routing for a particular commit against its
 parent. Both lanes receive the same routing decisions, before experiment files
 could influence them.
@@ -32,7 +32,7 @@ check or a release pipeline.
 ```bash
 gh workflow run pants-full-ci.yml -R NVIDIA-NeMo/Gym \
   --ref glovisotto/pants-pilot \
-  -f source_sha=<full-main-commit-sha> -f force_full=true
+  -f source_sha=<full-main-commit-sha> -f force_full=true -f execution_mode=incremental
 ```
 
 The workflow's push event only registers the branch workflow. Actual compute is
@@ -66,64 +66,71 @@ and validates exact package pins and VCS integrity before publishing the files
 together. It leaves the sampled checkout unchanged. Commit the validated
 controller assets before dispatch; stale locks fail the comparison explicitly.
 
-## What Pants does in this phase
+## Full scope and incremental execution
 
-Core and sandbox suites use native Pants Python targets, one per test file.
-Each forced core shard plans one pytest batch using the installed Pants 2.30.2
-compatibility and stable partitioners. The planner selects a supported batch size
-for the actual target set and rejects incompatible or incomplete selections;
-execution also verifies that exactly one batch produced results. This removes
-extra serial batches without changing the target graph or shard assignments.
-Core pytest matches the sampled main's worker count and file-based distribution
-(currently four workers with `--dist=loadfile`), including its numerical-library
-thread limits. Sandbox keeps serial pytest and the existing stable batching
-policy. Test-result reuse remains disabled. The adapter checks dependency parity
-against `uv.lock` and preserves each job's JUnit and raw coverage inputs. Native
-artifacts also retain Pants end-of-run JSON execution counters; these are
-diagnostic counts, not a detailed timing profile or proof of result reuse.
+`force_full` controls workload routing. `execution_mode` independently selects
+`incremental` (default) or `forced` (a full execution control). The baseline
+executes main's commands in either mode. Incremental Pants still accounts for
+every selected test and preserves the complete JUnit and coverage gates; it may
+reuse a successful result only for a target with declared inputs and a verified
+runtime contract.
 
-Server tests, session-routing E2E and lint retain their existing commands through
-Pants workspace processes, preserving nested server environments and external
-fixtures. The execution adapter records tracked-source inputs for both arms.
+Core and sandbox suites use native Pants targets, one per test file. Core pytest
+preserves main's worker count and file distribution (currently four workers with
+`--dist=loadfile`), including numerical-library thread limits. Sandbox remains
+serial. The planner verifies one batch per explicit execution group. The first
+incremental candidate is `test_add_legacy_agent_environment_servers.py`; its
+migration scanner inputs, configuration, dependencies and runtime fingerprint
+form its cache key. Other native tests remain forced, including tests requiring
+the actual Git tree. Failed runtime eligibility checks fall back to forced
+execution. Server tests, session-routing E2E and lint retain their existing
+commands through session-only Pants workspace processes.
 
-This phase establishes full-scope execution parity. Native tests currently use
-`--test-force`, so recorded metadata labels them `forced-native-tests`; successful
-test results are not reused. Workspace jobs use session-only result caching,
-because server dependencies and external resources are not fully pinned. Engine
-and dependency caches persist between runs. Do not claim selective test pruning
-or cross-run test-result savings from these measurements.
+Native artifacts include each batch's original Pants result-info, JUnit, raw
+coverage and `test-accounting.json`. Reports distinguish executed, cached and
+forced cases from actual Pants provenance, and merge collection skips and all
+batch coverage exactly once. A request for incremental mode is not evidence of
+a cache hit. Editable-install snapshots canonicalize temporary paths and restore
+the genuine distribution and console scripts at runtime for forced tests.
 
-Editable-install snapshots canonicalize temporary checkout paths and installer
-timestamps before hashing, then restore real sandbox paths and valid RECORD
-hashes at runtime. This removes incidental input changes without replacing the
-genuine project wheel or its console scripts. `native_core/reuse.py` records a
-five-module source audit and a fail-closed runtime contract, but is not connected
-to execution. A verified runtime/environment fingerprint, reduced native target
-graph, and full cold/hit outcome and invalidation checks are still required before
-enabling result reuse.
+For evidence, run a cold full comparison, repeat the same source to verify real
+result hits, then sample a changed commit. A safe unrelated input change should
+retain eligible results; a declared-input change must execute them again. Keep
+`force_full=true` throughout this sequence. Use `execution_mode=forced` for an
+explicit control, and compare whole-job costs, including collection, setup and
+cache transfers. Hosted incremental timing remains unproven until that sequence
+passes full outcome and coverage checks.
 
-The uv cache mirrors main's policy: one immutable OS/`uv.lock` key shared across
-jobs, with an OS-level restore prefix. Baseline and Pants use separate namespaces
-so one arm cannot warm the other. The `pants-full-v2-uv-` namespace starts cold
-for both arms and excludes earlier experiment caches. Pants engine caches are shared by shards of the same job type. Their keys include
-the implementation/dependency contract and sampled source commit. Every shard
-restores, but only core shard three (or shard zero of other job types) saves after
-a primary-key miss. Core shard three finished substantially before the critical
-core shard zero in measured runs, so it owns cache compression and upload.
-Missing content-addressed entries on other shards rebuild normally; if the
-writer fails, that job type does not refresh its cache.
+## Cache policy
 
-The `pants-full-engine-v4-` layout stores Pants work, named and content stores.
-The launcher's `~/.cache/nce` directory has a separate exact-key archive shared
-only by ARC runners, keyed by runner platform, launcher checksum and Pants
-version. Successful core shard three is its sole writer. Routed runs without
-that shard may restore an existing archive but do not refresh it. Hosted lint
-and session-routing jobs bootstrap the launcher independently. This avoids
-copying the launcher into every job-type archive and keeps its original ARC
-absolute paths. The monitor bounds branch-scoped experiment caches to 5 GiB and
-removes obsolete experiment entries.
-Actual cache hits must be inspected: matching policies alone do not establish
-matching cache warmth.
+The uv cache mirrors main's immutable OS/`uv.lock` key and OS-level restore
+prefix, with separate baseline and Pants namespaces. Existing exact hits can
+contain different dependencies because each arm's first successful writer may
+differ; matching keys do not establish equal warmth.
+
+Native reusable process stores use `pants-full-results-v1-` archives partitioned
+by runner platform, job, shard, implementation contract and dependency digest.
+The sampled source is the final key segment; a compatible prior-source archive
+may restore before Pants evaluates its declared inputs. Every successful native
+shard with an eligible batch owns its result archive, including sandbox if it
+later gains eligible targets. Only primary-key misses save. Each store must fit
+512 MiB by both apparent and allocated size. Forced process stores and native
+named dependency trees are not archived; their repeated PEX/setup cost remains
+part of measured CI time. Forced controls neither restore nor save result stores.
+
+Workspace jobs retain the `pants-full-engine-v4-` dependency archives with shard
+zero as writer. The launcher's `~/.cache/nce` has a separate exact-key ARC archive
+keyed by platform, launcher checksum and Pants version; successful core shard
+three is its sole writer. Routed runs without that shard do not refresh it.
+Hosted lint and session-routing jobs bootstrap independently. Bootstrap retries
+are limited to setup; test and lint commands execute once.
+
+The monitor bounds branch-scoped experiment caches to 5 GiB: remove obsolete
+contracts and older source generations per job/shard/key/version, then optional
+workspace engine archives before reusable results. UV and shared launcher
+archives retain their existing policy. The five possible native stores total at
+most 2.5 GiB, but the monitor must still check actual aggregate usage and retain
+cache inventories. Inspect actual restore/save outcomes for every comparison.
 
 ## Evidence
 

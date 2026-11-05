@@ -302,6 +302,7 @@ def test_native_groups_preserve_entire_requested_shard_and_never_fallback(tmp_pa
     assert invoke(monkeypatch, engine="pants", job=job) == 7
     assert len(seen) == 1
     assert seen[0]["job"] == job
+    assert seen[0]["execution_mode"] == "incremental"
     assert (seen[0]["shard"], seen[0]["shards"]) == (2, 4)
     metadata = json.loads(Path("results/full-ci/metadata.json").read_text())
     assert metadata["implementation"] == "native Python test targets"
@@ -309,9 +310,10 @@ def test_native_groups_preserve_entire_requested_shard_and_never_fallback(tmp_pa
     assert metadata["command_exit_code"] == metadata["exit_code"] == 7
 
 
+@pytest.mark.parametrize("execution_mode", ["incremental", "forced"])
 @pytest.mark.parametrize("missing_coverage", [False, True])
 def test_native_artifacts_preserve_coverage_and_junit_and_require_complete_success(
-    tmp_path, monkeypatch, missing_coverage
+    tmp_path, monkeypatch, missing_coverage, execution_mode
 ):
     repository(tmp_path, monkeypatch)
     output = Path("results/full-ci")
@@ -320,6 +322,7 @@ def test_native_artifacts_preserve_coverage_and_junit_and_require_complete_succe
     monkeypatch.setattr(full_ci.shutil, "which", lambda *args, **kwargs: "/test/uv")
 
     def native_process(command, *, log, env):
+        assert command[command.index("--execution-mode") + 1] == execution_mode
         assert command[command.index("--source") + 1] == str(tmp_path)
         assert command[command.index("--group") + 1] == "core"
         assert command[command.index("--shard") + 1] == "2"
@@ -328,7 +331,9 @@ def test_native_artifacts_preserve_coverage_and_junit_and_require_complete_succe
         native = Path(command[command.index("--output") + 1])
         (native / "junit").mkdir(parents=True)
         (native / "junit/core.xml").write_text("all native testcase occurrences")
-        (native / "metadata.json").write_text(json.dumps({"exit_code": 0, "source_sha": "sample"}))
+        (native / "metadata.json").write_text(
+            json.dumps({"exit_code": 0, "source_sha": "sample", "execution_mode": execution_mode})
+        )
         if not missing_coverage:
             (native / ".coverage.core-2").write_bytes(b"raw coverage database")
         return 0
@@ -336,8 +341,25 @@ def test_native_artifacts_preserve_coverage_and_junit_and_require_complete_succe
     monkeypatch.setattr(full_ci, "run_logged", native_process)
     if missing_coverage:
         with pytest.raises(ValueError, match="without required"):
-            full_ci.run_native(job="core", shard=2, shards=4, output=output, env={"GITHUB_SHA": "sample"})
+            full_ci.run_native(
+                job="core",
+                shard=2,
+                shards=4,
+                output=output,
+                env={"GITHUB_SHA": "sample"},
+                execution_mode=execution_mode,
+            )
     else:
-        assert full_ci.run_native(job="core", shard=2, shards=4, output=output, env={"GITHUB_SHA": "sample"}) == 0
+        assert (
+            full_ci.run_native(
+                job="core",
+                shard=2,
+                shards=4,
+                output=output,
+                env={"GITHUB_SHA": "sample"},
+                execution_mode=execution_mode,
+            )
+            == 0
+        )
         assert (output / ".coverage.core-2").read_bytes() == b"raw coverage database"
         assert (output / "junit/core.xml").read_text() == "all native testcase occurrences"

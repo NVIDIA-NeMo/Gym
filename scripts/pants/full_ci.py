@@ -254,7 +254,9 @@ def pants_environment(env: dict[str, str]) -> dict[str, str]:
     return result
 
 
-def run_native(*, job: str, shard: int, shards: int, output: Path, env: dict[str, str]) -> int:
+def run_native(
+    *, job: str, shard: int, shards: int, output: Path, env: dict[str, str], execution_mode: str = "incremental"
+) -> int:
     """Run the entire native core shard or sandbox suite, with no fallback."""
     native = output / "native"
     runner = HERE / "native_core/run.py"
@@ -267,6 +269,8 @@ def run_native(*, job: str, shard: int, shards: int, output: Path, env: dict[str
     command = [
         sys.executable,
         str(runner),
+        "--execution-mode",
+        execution_mode,
         "--source",
         str(Path.cwd()),
         "--group",
@@ -298,6 +302,8 @@ def run_native(*, job: str, shard: int, shards: int, output: Path, env: dict[str
     metadata = json.loads((native / "metadata.json").read_text())
     if metadata.get("exit_code") != 0 or metadata.get("source_sha") != env["GITHUB_SHA"]:
         raise ValueError("Native CI provenance disagrees with the sampled source or success status")
+    if metadata.get("execution_mode") != execution_mode:
+        raise ValueError("Native CI execution mode disagrees with the requested mode")
     return 0
 
 
@@ -358,6 +364,12 @@ def run_pants(*, script: Path, output: Path, env: dict[str, str]) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--engine", choices=("baseline", "pants"), required=True)
+    parser.add_argument(
+        "--execution-mode",
+        choices=("incremental", "forced"),
+        default="incremental",
+        help="Pants native result policy; the baseline always executes its complete routed workload",
+    )
     parser.add_argument("--job", choices=JOBS, required=True)
     parser.add_argument("--shard", type=int, default=0)
     parser.add_argument("--shards", "--num-shards", type=int, default=1)
@@ -420,7 +432,14 @@ def main() -> int:
     native = args.engine == "pants" and args.job in ("core", "sandbox")
     try:
         if native:
-            command_code = run_native(job=args.job, shard=args.shard, shards=args.shards, output=output, env=env)
+            command_code = run_native(
+                job=args.job,
+                shard=args.shard,
+                shards=args.shards,
+                output=output,
+                env=env,
+                execution_mode=args.execution_mode,
+            )
         elif args.engine == "pants":
             command_code = run_pants(script=script, output=output, env=env)
         else:
@@ -445,7 +464,10 @@ def main() -> int:
                 "exit_code": code,
                 "command_exit_code": command_code,
                 "source_changed": source_changed,
-                "pants_result_cache": "forced-native-tests"
+                "execution_mode": args.execution_mode if native else "forced",
+                "pants_result_cache": (
+                    "incremental-native-tests" if args.execution_mode == "incremental" else "forced-native-tests"
+                )
                 if native
                 else "session-only"
                 if args.engine == "pants"

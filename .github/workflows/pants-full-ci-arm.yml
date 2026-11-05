@@ -26,6 +26,9 @@ on:
       cache_contract:
         required: true
         type: string
+      execution_mode:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -86,18 +89,17 @@ jobs:
         with:
           path: ~/.cache/nce
           key: pants-full-launcher-v1-arc-${{ runner.os }}-${{ runner.arch }}-2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0-pants-2.30.2
-      - name: Restore compatible Pants artifacts
-        id: pants-cache
-        if: inputs.engine == 'pants'
+      # Each native job owns its reusable process results; forced results and
+      # named dependency trees stay local instead of duplicating large archives.
+      - name: Restore reusable Pants test results
+        id: pants-results
+        if: inputs.engine == 'pants' && inputs.execution_mode == 'incremental'
         uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: |
-            ~/.cache/pants/full-ci
-            ~/.cache/pants/named_caches
-            ~/.cache/pants/lmdb_store
-          key: pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          path: ~/.cache/pants/lmdb_store/reusable
+          key: pants-full-results-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
           restore-keys: |
-            pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+            pants-full-results-v1-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
       - name: Install system test dependencies
         if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
         working-directory: sample
@@ -157,9 +159,11 @@ jobs:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ matrix.shards }}
           CHANGED_SERVER_FILES: ${{ inputs.changed_server_files }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
         run: |
           python3 ../controller/scripts/pants/full_ci.py \
             --engine "$ENGINE" --job "$JOB" --shard "$SHARD" --shards "$SHARDS" \
+            --execution-mode "$EXECUTION_MODE" \
             --output results/full-ci --changed-server-files "$CHANGED_SERVER_FILES"
       - name: Upload execution, test outcomes and raw coverage
         if: always()
@@ -179,16 +183,44 @@ jobs:
           path: ~/.cache/nce
           key: ${{ steps.launcher-cache.outputs.cache-primary-key }}
 
-      # Core shard 3 writes away from the measured critical path; other job types use shard 0.
-      - name: Save compatible Pants artifacts
-        if: success() && inputs.engine == 'pants' && ((matrix.job == 'core' && matrix.shard == 3) || (matrix.job != 'core' && matrix.shard == 0)) && steps.pants-cache.outputs.cache-hit != 'true'
+      - name: Check reusable result cache budget
+        id: result-budget
+        if: success() && inputs.engine == 'pants' && inputs.execution_mode == 'incremental'
+        run: |
+          eligible=$(python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("sample/results/full-ci/native/test-accounting.json").read_text())
+          print("true" if any(batch["mode"] == "cacheable" and batch["targets"] for batch in report["batches"]) else "false")
+          PYTHON
+          )
+          if [[ "$eligible" != true ]]; then
+            echo 'populated=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          result_store="$PANTS_LOCAL_STORE_DIR/reusable"
+          if [[ ! -d "$result_store" ]] || [[ -z "$(find "$result_store" -type f -print -quit)" ]]; then
+            echo 'Eligible native batch produced no reusable store' >&2
+            exit 1
+          fi
+          apparent=$(du --apparent-size --summarize --block-size=1 "$result_store" | cut -f1)
+          allocated=$(du --summarize --block-size=1 "$result_store" | cut -f1)
+          bytes=$(( apparent > allocated ? apparent : allocated ))
+          echo "Reusable result store: $apparent apparent, $allocated allocated bytes"
+          # Four core shards plus sandbox total at most 2.5 GiB, leaving room for the
+          # unchanged uv policy and shared launcher within the 5 GiB cap. The
+          # retention monitor removes older generations before enforcing that cap.
+          if (( bytes > 536870912 )); then
+            echo 'Reusable result store exceeds its 512 MiB shard budget' >&2
+            exit 1
+          fi
+          echo 'populated=true' >> "$GITHUB_OUTPUT"
+      - name: Save reusable Pants test results
+        if: success() && steps.result-budget.outputs.populated == 'true' && steps.pants-results.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
-          path: |
-            ~/.cache/pants/full-ci
-            ~/.cache/pants/named_caches
-            ~/.cache/pants/lmdb_store
-          key: ${{ steps.pants-cache.outputs.cache-primary-key }}
+          path: ~/.cache/pants/lmdb_store/reusable
+          key: ${{ steps.pants-results.outputs.cache-primary-key }}
 
   other:
     name: ${{ matrix.job }} / ${{ matrix.shard }}
@@ -294,9 +326,11 @@ jobs:
           SHARD: ${{ matrix.shard }}
           SHARDS: ${{ matrix.shards }}
           CHANGED_SERVER_FILES: ${{ inputs.changed_server_files }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
         run: |
           python3 ../controller/scripts/pants/full_ci.py \
             --engine "$ENGINE" --job "$JOB" --shard "$SHARD" --shards "$SHARDS" \
+            --execution-mode "$EXECUTION_MODE" \
             --output results/full-ci --changed-server-files "$CHANGED_SERVER_FILES"
       - name: Upload execution, test outcomes and raw coverage
         if: always()
