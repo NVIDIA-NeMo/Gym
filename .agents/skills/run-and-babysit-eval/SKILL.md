@@ -1,17 +1,15 @@
 ---
 name: run-and-babysit-eval
 description: >
-  No eval config yet: compose it first with add-model-eval-config, or start from a config you
-  already have. Config in hand: this skill takes it and runs/babysits it, nothing else. Take a NeMo Gym evaluation from a ready config to a trusted
-  result: submit it, let the resumable Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
-  run from its saved evidence with `gym eval resubmit --recover`, check health and the acceptance
-  gates, and decide when to stop a chain or start a fresh run. Use when a working Gym config
-  (benchmark, model, compute) exists and the run has to finish with a result you can rely on. Not
-  for building a benchmark or harness (use add-benchmark or add-harness) or for setting up a
-  model's serving config (use add-model-eval-config). Triggered by: "run the eval", "run
-  evaluations on model Y on benchmark Z with serving params X", "submit this
-  benchmark", "the job timed out", "the chain stopped", "resume the run", "recover the run",
-  "is the run done", "inspect the run", "gate the score", "restart the evaluation".
+  Take a NeMo Gym evaluation from a ready config to a trusted result: submit it, let the resumable
+  Slurm chain continue through walltime limits, preemption and node loss, inspect and recover the
+  run with `gym eval resubmit --recover`, check health and the acceptance gates, and decide when to
+  stop a chain or start a fresh run. Use when a working Gym config exists; with no config yet,
+  compose it first with add-model-eval-config. Not for building a benchmark or harness (use
+  add-benchmark or add-harness). Triggered by: "run the eval", "run evaluations on model Y on
+  benchmark Z with serving params X", "submit this benchmark", "the job timed out", "the chain
+  stopped", "resume the run", "recover the run", "is the run done", "inspect the run", "gate the
+  score", "restart the evaluation".
 ---
 
 # Run a Gym Evaluation to Its Result

@@ -1,20 +1,15 @@
 ---
 name: add-model-eval-config
 description: >
-  Onboard a model's serving config for NeMo Gym evaluations: write the vLLM policy service
-  (model path, served name, tensor/pipeline/data/expert parallelism, max model length, max
-  sequences, tool-call and reasoning parsers, chat template, generation config, environment),
-  wire it as the policy with the right model type, set the reasoning toggle through chat-template
-  kwargs, compose the complete eval config by naming each benchmark's own config from Gym's
-  `benchmarks/<name>/` directory, validate the config without GPUs, smoke it with a small `--limit`,
-  and read the resolved config. Also says what must stay fixed for a fair comparison and what deployment tuning may
-  change. Use when a new model or checkpoint has to be evaluated in Gym. Not for running the
-  evaluation itself (use run-and-babysit-eval) or adding a benchmark (use add-benchmark). Triggered by:
-  "add a model", "new checkpoint", "serve this model in Gym", "model config", "vllm config",
-  "enable thinking", "reasoning parser", "tool call parser", "compare two models fairly",
-  "eval config", "where does the benchmark config come from", "run evaluations on model Y on
-  benchmark Z with serving params X". No eval config yet: this skill composes it. Config in hand:
-  run it with run-and-babysit-eval.
+  Onboard a model for NeMo Gym evaluations and compose the complete eval config: the vLLM policy
+  service, its wiring as the policy, the reasoning toggle, and each benchmark's own config from
+  Gym's `benchmarks/<name>/`, then validate and smoke it. Use when a new model or checkpoint has to
+  be evaluated in Gym and no eval config exists yet; once the config is in hand, run it with
+  run-and-babysit-eval. Not for adding a benchmark (use add-benchmark). Triggered by: "add a model",
+  "new checkpoint", "serve this model in Gym", "model config", "vllm config", "enable thinking",
+  "reasoning parser", "tool call parser", "compare two models fairly", "eval config", "where does
+  the benchmark config come from", "run evaluations on model Y on benchmark Z with serving params
+  X".
 ---
 
 # Add a Model Config to Gym
@@ -182,8 +177,8 @@ line: `+policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable
   item" when another model type is composed beside it: set `driver.policy_model_type: ""` for it.
 - Some benchmark configs set `chat_template_kwargs` (or `extra_body`) themselves. That is a
   benchmark setting: leave it as the benchmark sets it, because an override would replace it. The
-  shipped `vllm_model` configs leave these keys unset, and a benchmark's config merges after the
-  model type's, so a benchmark's value survives `--model-type vllm_model`.
+  shipped `vllm_model` configs leave these keys unset, so a benchmark's value survives in either
+  composition order (section 4).
 - A request's own `chat_template_kwargs` is used only with `forward_request_chat_template_kwargs:
   true` (see the vLLM model server page).
 
@@ -213,7 +208,7 @@ config points at it instead of restating it.
 | --- | --- | --- |
 | `services.<name>` | The vLLM deployment of the model. | Section 2. |
 | `driver.policy_model`, `driver.policy_model_type` | Which service is the policy, and the client Gym talks to it with. | Sections 2 and 3. Submit fills in `policy_base_url`, `policy_model_name` and `policy_api_key` in every benchmark's `run`. |
-| `driver.gym_install.ref` | The Gym commit the job installs, which holds the benchmark and scores the run. | A full commit on the public repository's `main` branch (or a release tag) that has the benchmark. |
+| `driver.gym_install.ref` | The Gym commit the job installs, which holds the benchmark and scores the run. | A full 40-character commit hash reachable from the public repository's `main` branch or a release tag, with the benchmark. A tag resolves to its commit: recovery and export read the saved hash. |
 | `driver.benchmarks.<benchmark>.prepare` | Overrides for `gym eval prepare`, which builds the benchmark's data in the job before it runs. | The benchmark's config path. |
 | `driver.benchmarks.<benchmark>.run` | Overrides for `gym eval run`: the benchmark's config, the dataset type to run, and the model settings of section 3. | The benchmark's config path and its dataset's `type`; your section 3 keys. |
 | `driver.benchmarks.<benchmark>.resumable` | Resuming across allocations (`max_retries`, `max_walltime`). | run-and-babysit-eval. |
@@ -253,6 +248,10 @@ Read them at the pinned commit, not on a newer branch: the benchmark's prompts, 
 code are part of what the run measures. The commit pins the prepare code, not data the prepare script
 downloads: check the URL in the prepare script, and compare runs' materialized inputs.
 
+The key under `driver.benchmarks` is the job's label for the benchmark, not the `--benchmark` selector,
+and has no slash: for `aalcr/config_v1_1` use a label such as `aalcr_v1_1`, with
+`benchmarks/aalcr/config_v1_1.yaml` in both `config_paths` lists.
+
 Do not copy the benchmark's config into the submit config; name it. Put the file that
 `gym eval run --benchmark <value>` resolves (`benchmarks/<benchmark>/config.yaml`, or the flavor or
 variant file) in `run.config_paths`, put the same path under `prepare.config_paths` to prepare its data,
@@ -260,9 +259,11 @@ and set `run.split` to the `type` of the dataset the config declares, `benchmark
 not copy `canonical_split` into `split`: `gym eval run` accepts only `train`, `validation` and
 `benchmark` there. `gym env validate --benchmark <value>` (section 5) exits 2 for a name that does
 not resolve; `--resolve-only` does not open the files in `run.config_paths`, so it passes either way.
-The job composes them as `gym eval run` does: the model type's config, then the benchmark's config
-(the later file wins a key both set), then the `run` keys as `+key=value` overrides, which win over
-both files. So the model's settings from section 3 go in the same `run` mapping as the benchmark keys,
+A submitted job loads the model type's config, then the benchmark's config, so the benchmark wins a
+key both set. `gym eval run --benchmark <value> --model-type <type>` loads them the other way round,
+so there the model type wins: the shipped `vllm_model` sets `uses_reasoning_parser: true`, which then
+replaces a benchmark's `false`. The `run` keys come last, as `+key=value` overrides, and win over both
+files. So the model's settings from section 3 go in the same `run` mapping as the benchmark keys,
 while the benchmark's own settings (prompts, sampling, `num_repeats`, grading) stay as Gym ships them.
 
 Override scalars only, such as a sampling value or `num_repeats`, and record each as part of the run;
@@ -276,11 +277,15 @@ A benchmark graded by a judge model, one that searches the web, and one whose ag
 need services and credentials of their own. The benchmark's config chains their configs itself (for
 example `benchmarks/simpleqa/` chains a judge config, `benchmarks/arxivmath_0526/` another,
 `benchmarks/swe_atlas_qa/` a sandbox provider, and `benchmarks/gdpval/` a sandbox provider, judges and a
-search tool), so naming the benchmark's file is still enough. What the submit config must add is their
-environment:
+search tool), so naming the benchmark's file is still enough. What the submit config must add is the
+environment and the config values they read:
 
-- Read the benchmark's README and every `${oc.env:NAME}` in its config and the files it chains to.
-- Give each one a value in the job: `driver.env` as `host:NAME` (read from your shell at submit) or
+- Read the benchmark's README, and every `${oc.env:NAME}` and bare `${name}` in its config and the
+  files it chains to.
+- A bare `${name}` is a config value the benchmark expects from you, which `driver.env` does not set:
+  `benchmarks/swe_atlas_qa/` needs `judge_base_url`, `judge_model_name` and `harness_bundle`, as its
+  README lists. Set each as a key under both `prepare` and `run`, since both load the config.
+- Give each `${oc.env:NAME}` a value in the job: `driver.env` as `host:NAME` (read from your shell at submit) or
   `runtime:NAME` together with `compute.cluster.forward_env`, as `HF_TOKEN` in section 2. A credential
   never goes in as a literal.
 - Do not rely on a default. Several judge keys default to `dummy`: the run starts, the judge calls fail
@@ -291,8 +296,8 @@ environment:
 Ask for what you do not know instead of inventing it: the cluster, its login host, the account and
 partition, the serving and driver images, the checkpoint path and the output directory. Write each as
 `${oc.env:VAR}` (section 2) and name the variables to export. Pin `driver.gym_install.ref` to a commit
-the job can clone: one on the public repository's `main` branch or a release tag that has
-`benchmarks/<name>/`. A commit that exists only in a pull request may not clone.
+the job can clone: the full 40-character hash of a commit reachable from the public repository's
+`main` branch or a release tag, that has `benchmarks/<name>/`. A commit that exists only in a pull request may not clone.
 
 ### Example: IFEval
 
@@ -385,8 +390,12 @@ gym eval submit --config submit.yaml --dry-run
 
 # Each Gym server block against its server's config class, composed as `gym eval run` composes it.
 gym env validate --server-types responses_api_models,responses_api_agents \
-  --benchmark <benchmark> --model-type vllm_model --allow-job-time-values
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  --config benchmarks/<benchmark>/config.yaml --allow-job-time-values
 ```
+
+The two `--config` files are in the submitted job's order (section 4), model type first;
+`--benchmark` with `--model-type` loads them the other way round.
 
 `--allow-job-time-values` stands in for values that only exist at job time, such as the policy URL
 that submit injects. `gym env validate` exits 0 with no invalid finding, 1 with one, and 2 when the
