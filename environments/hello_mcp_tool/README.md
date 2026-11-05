@@ -55,7 +55,7 @@ Each command writes its results to its own folder: `results/harbor/validation/he
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained directory task.
+- [Hello World](../hello_world/README.md): Define one self-contained task folder.
 - [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
 
 ### Python scoring

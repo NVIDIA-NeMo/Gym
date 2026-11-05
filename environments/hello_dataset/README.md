@@ -4,7 +4,7 @@ Hello Dataset helps you organize related tasks so they can be selected and run t
 
 ## Concept
 
-Harbor calls a runnable collection of tasks a dataset. In a local dataset, each immediate subdirectory is one complete task. Tasks can belong to the same dataset without sharing instructions, environments, assets, or scoring logic.
+A dataset is a folder of tasks that run together. Each immediate subfolder is one complete task. Tasks can belong to the same dataset without sharing instructions, environments, assets, or scoring logic.
 
 For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
 
@@ -53,7 +53,7 @@ Each command writes its results to its own folder: `results/harbor/validation/he
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained directory task.
+- [Hello World](../hello_world/README.md): Define one self-contained task folder.
 
 ### Add tools
 

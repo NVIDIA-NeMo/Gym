@@ -14,7 +14,7 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 
 ## In this example
 
-This example is one dataset with two complete task directories at its root:
+This example is one dataset with two complete task folders at its root:
 
 ```text
 hello_verifier_reuse/
@@ -75,7 +75,7 @@ Each command writes its results to its own folder: `results/harbor/validation/he
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained directory task.
+- [Hello World](../hello_world/README.md): Define one self-contained task folder.
 - [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
 
 ### Add tools
