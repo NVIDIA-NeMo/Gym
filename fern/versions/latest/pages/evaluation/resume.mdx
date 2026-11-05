@@ -398,7 +398,9 @@ Both paths must use the same controller rules:
 
 The following incomplete-run exit codes apply when `require_complete=true`, which `gym eval submit` enables by
 default. Local `gym eval run` and standalone collection default to `require_complete=false` and can return **0** with
-partial results; use `+require_complete=true` to require completion.
+partial results; use `+require_complete=true` to require completion. With completion required, an incomplete run saves its
+rollouts, failures and coverage but writes no `rollouts_aggregate_metrics.json` and exports no score: the aggregate
+appears when a resume completes the run.
 
 With completion required, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,
 and this invocation made progress. Saved successes, omissions, terminal failures and counted failures establish progress.

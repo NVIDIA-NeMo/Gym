@@ -2761,11 +2761,17 @@ class TestRolloutCollection:
         ]
         assert failures[0]["_ng_failure_type"]
 
-        # The failed rollout reaches neither the aggregator's input nor its denominator.
-        assert [r[TASK_INDEX_KEY_NAME] for r in aggregated["verify_responses"]] == [1]
         metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
             ".json"
         )
+        if require_complete:
+            # An incomplete strict run publishes no score: nothing was aggregated or written, only the rows stay.
+            assert "verify_responses" not in aggregated
+            assert not metrics_fpath.exists()
+            assert "Not computing aggregate metrics: the run is incomplete" in capsys.readouterr().out
+            return
+        # The failed rollout reaches neither the aggregator's input nor its denominator.
+        assert [r[TASK_INDEX_KEY_NAME] for r in aggregated["verify_responses"]] == [1]
         agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
         assert agent_metrics["mean/reward"] == 1.0
 
@@ -2776,6 +2782,93 @@ class TestRolloutCollection:
         assert "Rollouts missing from the score: 1 of 2 materialized" in printed
         assert "Metrics cover: 1 of 2 rollouts" in printed
         assert str(_failures_path_for(output_jsonl_fpath)) in printed
+
+    async def test_a_strict_run_withholds_its_aggregate_until_a_resume_completes_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        """Incomplete: no aggregate file and no exported score, rows kept. Resumed to complete: the aggregate appears."""
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        metrics_fpath = output_jsonl_fpath.with_stem("output_aggregate_metrics").with_suffix(".json")
+        exported: list[dict] = []
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "export_metrics", exported.append)
+        first_run = {"failing": True}
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                if json["x"] == 0 and first_run["failing"]:
+                    raise http_error(500, "unhandled tool-call json")
+                return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+            assert url_path == "/aggregate_metrics"
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+
+        def config(**extra: object) -> RolloutCollectionConfig:
+            return RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                route_failures_to_sidecar=True,
+                disable_health_check=True,
+                require_complete=True,
+                **extra,
+            )
+
+        # A stale aggregate from an earlier segment describes other rows: the rejected run removes it with the score.
+        metrics_fpath.write_text("[]")
+        with pytest.raises(RuntimeError, match="EVAL FAILED: 1/2 samples completed"):
+            await RolloutCollectionHelper().run_from_config(config())
+
+        assert not metrics_fpath.exists()
+        assert not any("mean/reward" in str(metrics) for metrics in exported)
+        assert [orjson.loads(line)[TASK_INDEX_KEY_NAME] for line in output_jsonl_fpath.read_bytes().splitlines()] == [
+            1
+        ]
+        assert len(_failures_path_for(output_jsonl_fpath).read_bytes().splitlines()) == 1
+
+        # The recovery that completes the run publishes the score as a complete run always has.
+        first_run["failing"] = False
+        await RolloutCollectionHelper().run_from_config(config(resume_from_cache=True))
+
+        agent_metrics = orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]
+        assert agent_metrics["mean/reward"] == 1.0
+        assert any("mean/reward" in str(metrics) for metrics in exported)
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert sorted(r[TASK_INDEX_KEY_NAME] for r in persisted) == [0, 1]
+
+    async def test_a_complete_strict_run_writes_its_aggregate(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": 0}) + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                return FakeResponse(200, {"reward": 1.0, "response": {"usage": {"total_tokens": 3}}})
+            return FakeResponse(200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        await RolloutCollectionHelper().run_from_config(
+            RolloutCollectionConfig(
+                input_jsonl_fpath=str(input_jsonl_fpath),
+                output_jsonl_fpath=str(output_jsonl_fpath),
+                disable_health_check=True,
+                require_complete=True,
+            )
+        )
+
+        metrics_fpath = output_jsonl_fpath.with_stem("output_aggregate_metrics").with_suffix(".json")
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == 1.0
 
     async def test_run_from_config_resume_retries_an_agent_failure_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
@@ -4389,9 +4482,10 @@ class TestRolloutCollection:
             await Helper().run_from_config(config)
 
         printed = capsys.readouterr().out
-        if count_failures_as_zero:
-            assert "Counting 1 failure row(s) as scored zeros" in printed
-        else:
+        # The run is rejected before it counts anything: no score, whatever would have been counted as zero.
+        assert "Not computing aggregate metrics: the run is incomplete" in printed
+        assert "Counting 1 failure row(s) as scored zeros" not in printed
+        if not count_failures_as_zero:
             assert "Rollouts missing from the score: 1 of 3 materialized" in printed
             assert "Metrics cover: 2 of 3 rollouts" in printed
 
@@ -13941,9 +14035,16 @@ class TestCompletionCountsFinalZeros:
             with pytest.raises(RuntimeError, match=f"EVAL FAILED: {outcome} samples completed"):
                 await RolloutCollectionHelper().run_from_config(config)
 
-        # The score is unchanged by the gate: the final zero and the metrics-only count enter it, a judge failure does not.
-        counted_zero = third.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True or third[NG_FAILURE_CLASS_KEY] in count_classes
-        assert len(aggregated["rows"]) == (3 if counted_zero else 2)
+        if outcome is None:
+            # The final zero and the metrics-only count enter the score, a judge failure does not.
+            counted_zero = (
+                third.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True or third[NG_FAILURE_CLASS_KEY] in count_classes
+            )
+            assert len(aggregated["rows"]) == (3 if counted_zero else 2)
+        else:
+            # A rejected strict run publishes no score.
+            assert "rows" not in aggregated
+            assert not (tmp_path / "output_aggregate_metrics.json").exists()
         [failure] = [
             orjson.loads(line)
             for line in _failures_path_for(Path(config.output_jsonl_fpath)).read_bytes().splitlines()

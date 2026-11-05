@@ -847,7 +847,7 @@ def _collect_and_rejudge(
     except IncompleteEvaluationError as rejected:
         if not config.require_complete or _terminated:
             raise
-        _rejudge_saved_judge_failures(global_config_dict, output, config)
+        _rejudge_saved_judge_failures(global_config_dict, output, config, complete_only=True)
         if not _saved_run_complete(output):
             raise _settled_rejection(output, rejected) from None
         return
@@ -906,7 +906,12 @@ def _saved_run_complete(output: Path) -> bool:
 
 
 def _rejudge_saved_judge_failures(
-    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any, *, aggregate: bool = True
+    global_config_dict: DictConfig | Mapping[str, Any],
+    output: Path,
+    collection_config: Any,
+    *,
+    aggregate: bool = True,
+    complete_only: bool = False,
 ) -> None:
     """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
 
@@ -914,6 +919,8 @@ def _rejudge_saved_judge_failures(
     start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
+    ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
+    incomplete publishes no score.
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -932,6 +939,8 @@ def _rejudge_saved_judge_failures(
         return
     print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
+        return
+    if complete_only and not _saved_run_complete(output):
         return
     try:
         aggregation = RolloutAggregationConfig.model_validate(
