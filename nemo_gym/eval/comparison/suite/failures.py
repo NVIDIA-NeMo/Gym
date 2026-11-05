@@ -12,6 +12,14 @@ from nemo_gym.eval.comparison.suite.schema import SuiteFailureCounts, SuiteFailu
 from nemo_gym.rollouts.rollout_records import coverage_path_for
 
 
+_COUNT_KEYS = {
+    "total": "failed",
+    "final": "failed_final",
+    "not_final": "failed_not_final",
+    "by_class": "failed_by_class",
+}
+
+
 def read_saved_failures(path: Path) -> SuiteFailureSummary | None:
     """Read this rollout file's existing coverage snapshot; absent accounting remains unknown.
 
@@ -26,20 +34,17 @@ def read_saved_failures(path: Path) -> SuiteFailureSummary | None:
         version = payload.get("schema_version")
         if type(version) is not int or version not in (1, 2):
             raise ValueError(f"unsupported coverage schema version {version!r}")
-        names = {
-            "total": "failed",
-            "final": "failed_final",
-            "not_final": "failed_not_final",
-            "by_class": "failed_by_class",
-        }
-        if any(payload.get(name) is None for name in names.values()):
+        if any(payload.get(name) is None for name in _COUNT_KEYS.values()):
             raise ValueError("failure counts were not recorded")
-        counts = SuiteFailureCounts.model_validate({field: payload[name] for field, name in names.items()})
+        counts = SuiteFailureCounts.model_validate({field: payload[name] for field, name in _COUNT_KEYS.items()})
     except FileNotFoundError:
         return None
     except ValidationError as error:
         detail = error.errors(include_url=False, include_input=False)[0]
-        location = ".".join(map(str, detail["loc"]))
+        parts = list(detail["loc"])
+        if parts:
+            parts[0] = _COUNT_KEYS.get(parts[0], parts[0])
+        location = ".".join(map(str, parts))
         reason = f"invalid failure counts{f' at {location}' if location else ''}: {detail['msg']}"
         return SuiteFailureSummary(source=source, unavailable_reason=reason)
     except (OSError, ValueError) as error:

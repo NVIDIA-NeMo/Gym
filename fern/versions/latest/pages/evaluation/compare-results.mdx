@@ -279,7 +279,7 @@ Recorded task sets must agree across repeats and sides. When materialized inputs
 
 ## Read saved failure counts
 
-Suite comparison automatically reads the rollout file's `*_coverage.json` companion when present. It uses the saved `failed`, `failed_final`, `failed_not_final`, and `failed_by_class` counts without scanning rollout records or reconstructing retries from failure logs. No additional flag is needed. Positive counts add a short warning, for example:
+Suite comparison automatically reads `<stem>_coverage.json` beside `<stem>.jsonl` when present; collection and aggregation with `merge_shards=true` write this companion. Metrics-only aggregation (`merge_shards=false`) writes `<stem>_aggregate_coverage.json`, which suite comparison does not read. The comparison uses the saved `failed`, `failed_final`, `failed_not_final`, and `failed_by_class` counts without scanning rollout records or reconstructing retries from failure logs. No additional flag is needed. Positive counts add a short warning, for example:
 
 ```text
 llama31-8b/birdbench candidate: Saved failures (entire rollout file): 2 (1 final, 1 not final; agent_run_error=2).

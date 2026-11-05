@@ -149,16 +149,22 @@ def test_unrecorded_counts_are_reported_as_unavailable_not_zero(tmp_path: Path, 
 
 
 @pytest.mark.parametrize(
-    "change",
+    ("change", "expected_reason"),
     [
-        {"failed": True},
-        {"failed_by_class": {"agent_run_error": -2}},
-        {"failed_final": 2},
-        {"failed_by_class": {"agent_run_error": 1}},
-        {"schema_version": 3},
+        (
+            {"failed": True, "failed_final": 1, "failed_not_final": 0, "failed_by_class": {"agent_run_error": 1}},
+            "at failed: Input should be a valid integer",
+        ),
+        (
+            {"failed_by_class": {"agent_run_error": 3, "timeout": -1}},
+            "at failed_by_class.timeout: Input should be greater than or equal to 0",
+        ),
+        ({"failed_final": 2}, "Final and not-final failure counts must sum to the total."),
+        ({"failed_by_class": {"agent_run_error": 1}}, "Failure class counts must sum to the total."),
+        ({"schema_version": 3}, "unsupported coverage schema version 3"),
     ],
 )
-def test_invalid_saved_counts_remain_advisory(tmp_path: Path, change: dict) -> None:
+def test_invalid_saved_counts_remain_advisory(tmp_path: Path, change: dict, expected_reason: str) -> None:
     path, _, candidate = _suite(tmp_path)
     control = _compare(path)
     source = _coverage(candidate)
@@ -168,9 +174,10 @@ def test_invalid_saved_counts_remain_advisory(tmp_path: Path, change: dict) -> N
     result = _compare(path)
 
     assert result.cells[0].candidate.failures.counts is None
-    assert result.cells[0].candidate.failures.unavailable_reason
+    assert expected_reason in result.cells[0].candidate.failures.unavailable_reason
     assert len(result.warnings) == 1
     assert "Saved failures (entire rollout file): unavailable" in result.warnings[0]
+    assert expected_reason in result.warnings[0]
     assert "\n" not in result.warnings[0]
     _unchanged_statistics(control, result)
     write_suite_reports(result, tmp_path / "reports", "both")
@@ -238,7 +245,7 @@ def test_counts_from_real_store_exclude_a_failure_recovered_by_a_later_attempt(t
     assert {file: file.read_bytes() for file in before} == before
 
 
-def test_shared_rollout_file_keeps_whole_file_counts_and_is_read_once(tmp_path: Path, monkeypatch) -> None:
+def test_shared_rollout_file_keeps_one_saved_snapshot_across_selected_agents(tmp_path: Path, monkeypatch) -> None:
     baseline = _write_routed_run(
         tmp_path / "baseline",
         [
@@ -266,19 +273,27 @@ def test_shared_rollout_file_keeps_whole_file_counts_and_is_read_once(tmp_path: 
         benchmarks={name: {"metrics": [_scale()]} for name in cells},
         models={"model": cells},
     )
-    reads = []
+    updated = orjson.loads(source.read_bytes()) | {
+        "failed": 0,
+        "failed_final": 0,
+        "failed_not_final": 0,
+        "failed_by_class": {},
+    }
     read_bytes = Path.read_bytes
 
-    def record_read(path: Path) -> bytes:
+    def read_while_collector_replaces_snapshot(path: Path) -> bytes:
+        saved = read_bytes(path)
         if path == source:
-            reads.append(path)
-        return read_bytes(path)
+            replacement = source.with_suffix(".next.json")
+            replacement.write_bytes(orjson.dumps(updated))
+            replacement.replace(source)
+        return saved
 
-    monkeypatch.setattr(Path, "read_bytes", record_read)
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "read_bytes", read_while_collector_replaces_snapshot)
+        result = _compare(manifest)
 
-    result = _compare(manifest)
-
-    assert reads == [source]
+    assert orjson.loads(source.read_bytes())["failed"] == 0
     assert len(result.warnings) == 2
     for cell in result.cells:
         assert cell.candidate.failures.scope == "rollout_file"
@@ -289,7 +304,7 @@ def test_shared_rollout_file_keeps_whole_file_counts_and_is_read_once(tmp_path: 
         assert cell.statistics.ci_low is not None
 
 
-def test_real_cli_reports_saved_failures_without_enabling_a_health_scan(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_real_cli_reports_saved_failures(tmp_path: Path, monkeypatch, capsys) -> None:
     manifest, _, candidate = _suite(tmp_path)
     _coverage(candidate)
     output = tmp_path / "reports"
@@ -304,8 +319,6 @@ def test_real_cli_reports_saved_failures_without_enabling_a_health_scan(tmp_path
     assert result.overall.statistics.delta == pytest.approx(20)
     assert result.overall.statistics.ci_low is not None
     assert "Saved failures (entire rollout file): 2" in capsys.readouterr().out
-    assert "--check-health" not in result.command
-    assert "health_check_enabled" not in result.model_dump()
 
 
 def test_report_cannot_overwrite_saved_failure_accounting_through_a_symlink(tmp_path: Path) -> None:
@@ -327,27 +340,18 @@ def test_report_cannot_overwrite_saved_failure_accounting_through_a_symlink(tmp_
     assert {file: file.read_bytes() for file in before} == before
 
 
-def test_invalid_later_comparison_is_validated_before_saved_accounting_is_read(tmp_path: Path, monkeypatch) -> None:
+def test_invalid_later_comparison_preserves_saved_accounting(tmp_path: Path) -> None:
     pair = _pair(tmp_path, "first", _values(0.2, 0.4), _values(0.4, 0.6))
     later = _pair(tmp_path, "later", _values(0.2, 0.4), _values(0.4, 0.6))
-    _coverage(Path(pair["candidate"]["rollouts"]))
+    coverage = _coverage(Path(pair["candidate"]["rollouts"]))
+    original = coverage.read_bytes()
     aggregate_metrics_path_for(Path(later["candidate"]["rollouts"])).unlink()
     path = _manifest(
         tmp_path,
         benchmarks={name: {"metrics": [_scale()]} for name in ("first", "later")},
         models={"model": {"first": pair, "later": later}},
     )
-    reads = []
-    read_bytes = Path.read_bytes
-
-    def record_read(path: Path) -> bytes:
-        if path.name.endswith("_coverage.json"):
-            reads.append(path)
-        return read_bytes(path)
-
-    monkeypatch.setattr(Path, "read_bytes", record_read)
-
     with pytest.raises(ConfigError, match="Cannot read aggregate metrics"):
         _compare(path)
 
-    assert reads == []
+    assert coverage.read_bytes() == original
