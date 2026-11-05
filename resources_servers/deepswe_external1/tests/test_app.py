@@ -138,7 +138,7 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
     invalid = failure in {"git", "head"}
     assert result.reward == 0 and not result.evaluation_completed
     assert result.mask_sample is not invalid
-    assert result.failure_kind == ("deepswe_external1:invalid_submission" if invalid else "verifier_error")
+    assert result.failure_kind == ("deepswe_external1:invalid_submission" if invalid else "environment_server_failed")
     assert result.failure_stage == "patch_collection"
     _, measured, masked, _ = select_measured([{}], [result.model_dump()])
     assert [row["reward"] for row in measured] == ([0] if invalid else [])
@@ -386,6 +386,7 @@ async def test_failures_are_masked_and_owned_sandboxes_are_released(task: Inline
         agent.stop.side_effect = RuntimeError("delete unavailable")
     result = await server.verify(request(), body(task))
     assert not result.evaluation_completed and result.mask_sample and result.reward == 0
+    # Golden mode collects the verifier's own solution, so even a collection failure stays a verifier error.
     assert result.failure_kind == "verifier_error" and result.verifier_error
     assert result.failure_stage
     agent.stop.assert_awaited_once()
@@ -416,6 +417,7 @@ async def test_agent_requires_matching_seeded_session(task: InlineTask, mismatch
         data.sandbox_handle = "wrong"
     result = await server.verify(request(), data)
     assert result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == "session_lost" and result.failure_reason
     assert agent.stop.await_count == (mismatch != "absent")
 
 
