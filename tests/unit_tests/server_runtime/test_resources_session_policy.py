@@ -15,19 +15,47 @@
 
 import logging
 from typing import Annotated
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import BeforeValidator, TypeAdapter, ValidationError
 
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.server_runtime.base_resources_server import (
+    BaseResourcesServerConfig,
     BaseSeedSessionRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    SimpleResourcesServer,
     reject_partial_typed_seed,
 )
+
+
+class PolicyServer(SimpleResourcesServer):
+    def has_session_state(self, session_id: str) -> bool:
+        return False
+
+    async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
+        pass
+
+    async def release_session_state(self, session_id: str) -> None:
+        pass
+
+    async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        raise NotImplementedError
+
+
+def _server() -> PolicyServer:
+    return PolicyServer(
+        config=BaseResourcesServerConfig(
+            host="", port=0, entrypoint="", name="policy", session_close_retry_window_seconds=10
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
 
 
 EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
@@ -40,7 +68,7 @@ SEED_BODY = TypeAdapter(
 
 
 @pytest.mark.parametrize("missing", ["resources_session_id", "episode_id", "task_id", "task_data"])
-def test_partial_typed_seed_cannot_fall_back_to_cookie_seed(missing: str) -> None:
+def test_partial_episode_seed_cannot_fall_back_to_agent_run_seed(missing: str) -> None:
     body = SEED.model_dump(mode="json")
     del body[missing]
     with pytest.raises(ValidationError):
@@ -48,8 +76,8 @@ def test_partial_typed_seed_cannot_fall_back_to_cookie_seed(missing: str) -> Non
 
 
 @pytest.mark.parametrize("field", ["episode_id", "task_id", "task_data"])
-def test_cookie_seed_keeps_dataset_fields_that_share_a_typed_seed_name(field: str) -> None:
-    # A /run seed posts the whole dataset row, whose own columns may be named like the typed seed's fields.
+def test_agent_run_seed_keeps_dataset_fields_that_share_a_episode_seed_name(field: str) -> None:
+    # A /run seed posts the whole dataset row, whose own columns may be named like the episode seed's fields.
     body = {"verifier_metadata": {"city": "Paris"}, field: "row-1"}
     assert isinstance(SEED_BODY.validate_python(body), BaseSeedSessionRequest)
 
@@ -59,83 +87,83 @@ def test_seed_union_accepts_both_complete_wire_formats() -> None:
     assert isinstance(SEED_BODY.validate_python({"verifier_metadata": {"city": "Paris"}}), BaseSeedSessionRequest)
 
 
-def test_typed_seed_initializes_once_and_keeps_the_existing_task_on_retry() -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
-    assert fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
+def test_episode_seed_initializes_once_and_keeps_the_existing_task_on_retry() -> None:
+    server = _server()
+    assert server._check_episode_seed(SEED, identity=None, has_state=False, verified=False)
     # The same episode/task must reuse its state even if a retry supplies different task data.
     retry = SEED.model_copy(update={"task_data": {"city": "London"}})
-    assert not fence.check_typed_seed(retry, identity=IDENTITY, has_state=True, verified=False)
+    assert not server._check_episode_seed(retry, identity=IDENTITY, has_state=True, verified=False)
 
 
 @pytest.mark.parametrize(
     ("identity", "has_state", "verified"),
     [
-        (None, True, False),  # A typed seed cannot claim a live cookie-seeded session.
+        (None, True, False),  # An episode seed cannot claim a live agent-run session.
         ((EpisodeId(rollout_id="other"), TASK), True, False),
         ((EPISODE, TaskId(taskset="tasks", task_id="other")), True, False),
-        (None, False, True),  # Neither cookie-seeded nor typed completed sessions can reopen.
+        (None, False, True),  # Neither agent-run nor episode completed sessions can reopen.
         (IDENTITY, False, True),
     ],
 )
-def test_typed_seed_refuses_conflicting_or_verified_sessions(
+def test_episode_seed_refuses_conflicting_or_verified_sessions(
     identity: tuple[EpisodeId, TaskId] | None, has_state: bool, verified: bool
 ) -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
+    server = _server()
     with pytest.raises(ResourcesSessionConflictError) as error:
-        fence.check_typed_seed(SEED, identity=identity, has_state=has_state, verified=verified)
+        server._check_episode_seed(SEED, identity=identity, has_state=has_state, verified=verified)
     assert error.value.status_code == 409
 
 
-def test_cookie_seed_deprecation_is_logged_once_and_names_the_migration(caplog) -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
+def test_agent_run_seed_deprecation_is_logged_once_and_names_the_migration(caplog) -> None:
+    server = _server()
     with caplog.at_level(logging.WARNING):
-        fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
+        server._check_episode_seed(SEED, identity=None, has_state=False, verified=False)
         assert not caplog.records
-        fence.check_cookie_seed("first", identity=None)
-        fence.check_cookie_seed("second", identity=None)
+        server._check_agent_run_seed("first", identity=None)
+        server._check_agent_run_seed("second", identity=None)
     assert len(caplog.records) == 1
     assert "deprecated" in caplog.records[0].message
     assert "ResourcesSeedSessionRequest" in caplog.records[0].message
 
 
-def test_cookie_seed_cannot_replace_a_typed_session() -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
+def test_agent_run_seed_cannot_replace_a_episode_session() -> None:
+    server = _server()
     with pytest.raises(ResourcesSessionConflictError):
-        fence.check_cookie_seed("session", identity=IDENTITY)
+        server._check_agent_run_seed("session", identity=IDENTITY)
 
 
 def test_close_checks_ownership_without_marking_a_failed_cleanup_closed() -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
+    server = _server()
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=EPISODE)
-    fence.check_close(close, identity=IDENTITY)
+    server._check_session_close(close, identity=IDENTITY)
     # Resource cleanup happens after this check. If it raises, a seed retry still finds the open session.
-    assert fence.closed_episode("session") is None
-    assert not fence.check_typed_seed(SEED, identity=IDENTITY, has_state=True, verified=False)
-    fence.mark_closed("session", EPISODE)
-    fence.check_close(close, identity=None)
+    assert server._resources_session_fences.get("session") is None
+    assert not server._check_episode_seed(SEED, identity=IDENTITY, has_state=True, verified=False)
+    server._resources_session_fences.fence("session", EPISODE)
+    server._check_session_close(close, identity=None)
 
 
 @pytest.mark.parametrize("closed", [False, True])
 def test_close_refuses_another_episode_before_and_after_release(closed: bool) -> None:
-    fence = ResourcesSessionFence(window_seconds=10)
+    server = _server()
     if closed:
-        fence.mark_closed("session", EPISODE)
+        server._resources_session_fences.fence("session", EPISODE)
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=EpisodeId(rollout_id="other"))
     with pytest.raises(ResourcesSessionConflictError):
-        fence.check_close(close, identity=None if closed else IDENTITY)
+        server._check_session_close(close, identity=None if closed else IDENTITY)
 
 
 def test_close_of_unknown_session_fences_both_seed_protocols_until_expiry(monkeypatch) -> None:
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
-    fence = ResourcesSessionFence(window_seconds=10)
+    server = _server()
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id=EPISODE)
-    fence.check_close(close, identity=None)
-    fence.mark_closed("session", EPISODE)
+    server._check_session_close(close, identity=None)
+    server._resources_session_fences.fence("session", EPISODE)
     with pytest.raises(ResourcesSessionConflictError):
-        fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
+        server._check_episode_seed(SEED, identity=None, has_state=False, verified=False)
     with pytest.raises(ResourcesSessionConflictError):
-        fence.check_cookie_seed("session", identity=None)
+        server._check_agent_run_seed("session", identity=None)
     clock[0] += 10
-    assert fence.check_typed_seed(SEED, identity=None, has_state=False, verified=False)
-    fence.check_cookie_seed("session", identity=None)
+    assert server._check_episode_seed(SEED, identity=None, has_state=False, verified=False)
+    server._check_agent_run_seed("session", identity=None)

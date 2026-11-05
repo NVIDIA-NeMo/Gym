@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Swappable profile for benchmarks whose Resources server supplies no sandbox, such as HLE.
+# The unset resources_server name makes Gym compose this agent onto the benchmark's own agent
+# instance; each session then creates its own sandbox through the `sandbox` provider, which must
+# reach the model server by address. Supply the sandbox image. A benchmark whose Environment Server
+# sends a direct_http grant, such as HLE, also needs `resources_tool_transports: []` (see README).
+use_absolute_ip: true
+# The head server's config endpoint is unauthenticated, so keep it off the address sandboxes reach.
+head_server:
+  host: 127.0.0.1
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+- responses_api_agents/hermes_agent/configs/hermes_agent.yaml
+hermes_agent:
+  responses_api_agents:
+    hermes_agent:
+      # An unseeded request runs the harness on the Gym host, so keep the agent off the address sandboxes reach.
+      host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: ???
+      sandbox_provider: sandbox
+      # Hermes derives the sandbox TTL from its install and runner timeouts.
+      sandbox_config:
+        image: ???
+        ready_timeout_s: 1200

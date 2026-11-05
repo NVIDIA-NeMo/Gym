@@ -285,7 +285,7 @@ class HaystackAgent(SimpleResponsesAPIAgent):
         model_response.output = output_items
         model_response.usage = chat_messages_usage(generated)
 
-        # Forward the Resources Server session so ``run()`` can verify against the same state after
+        # Forward the resources session so ``run()`` can verify against the same state after
         # this internal ``/v1/responses`` call. Preserve model-server cookies separately as well,
         # allowing a model server that uses sessions to continue them on a later request.
         for k, v in request.cookies.items():

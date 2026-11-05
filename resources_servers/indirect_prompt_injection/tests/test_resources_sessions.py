@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The IPI server serves the typed resources sessions API through its real routes, next to an Agent's /run seed."""
+"""The IPI server serves the resources sessions API through its real routes, next to an Agent's /run seed."""
 
 import asyncio
 import copy
@@ -129,7 +129,7 @@ def test_follows_the_session_contract() -> None:
     )
 
 
-def test_a_typed_verify_releases_the_environment_and_preserves_its_retry() -> None:
+def test_an_episode_verify_releases_the_environment_and_preserves_its_retry() -> None:
     server = make_server()
     client = make_client(server)
 
@@ -217,7 +217,7 @@ def test_an_agents_run_verify_without_a_seed_is_masked() -> None:
 
 
 @pytest.mark.parametrize("state", ["active", "verified", "closed"])
-def test_a_run_seed_cannot_overwrite_a_typed_session(state: str) -> None:
+def test_a_run_seed_cannot_overwrite_an_episode_session(state: str) -> None:
     server = make_server()
     client = make_client(server)
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -230,7 +230,7 @@ def test_a_run_seed_cannot_overwrite_a_typed_session(state: str) -> None:
     assert server.session_id_to_env.get("resources-session") is original
 
 
-def test_a_typed_seed_cannot_take_over_a_run_session() -> None:
+def test_an_episode_seed_cannot_take_over_a_run_session() -> None:
     server = make_server()
     client = make_client(server)
     assert client.post("/seed_session", json=ROW).status_code == 200
@@ -251,7 +251,7 @@ def test_a_failed_environment_copy_leaves_no_binding_and_can_be_retried() -> Non
     assert client.post("/send_message", json=MESSAGE).status_code == 200
 
 
-async def test_typed_sessions_seeded_from_one_task_data_object_share_no_environment() -> None:
+async def test_episode_sessions_seeded_from_one_task_data_object_share_no_environment() -> None:
     # Over HTTP every seed parses its own task_data. In process, seeds copied from one request share one task_data.
     server = make_server()
     seed_a = ResourcesSeedSessionRequest(
@@ -295,11 +295,11 @@ def test_checkpoint_wait_verify_leaves_no_untracked_environment() -> None:
     assert client.post("/ng-rollout/rollout/verify", json=verify_json()).json()["mask_sample"] is False
 
 
-@pytest.mark.parametrize("typed", [False, True])
-def test_checkpoint_retirement_releases_an_unverified_environment(typed: bool) -> None:
+@pytest.mark.parametrize("episode", [False, True])
+def test_checkpoint_retirement_releases_an_unverified_environment(episode: bool) -> None:
     server = make_server(checkpoint=True)
     client = make_client(server)
-    assert client.post("/ng-rollout/rollout/seed_session", json=seed_json() if typed else ROW).status_code == 200
+    assert client.post("/ng-rollout/rollout/seed_session", json=seed_json() if episode else ROW).status_code == 200
     retired = client.post(
         "/ng-control/v1/checkpoint/retire",
         json={"checkpoint_id": "retire", "deadline_ts": time.time() + 5, "episode_ids": [EPISODE.model_dump()]},
@@ -327,12 +327,12 @@ def test_verified_identity_expires_and_close_still_checks_the_episode() -> None:
 
 @pytest.mark.parametrize("field", ["resources_session_id", "episode_id", "task_id", "task_data"])
 @pytest.mark.parametrize("mcp", [False, True])
-def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str, mcp: bool) -> None:
+def test_a_malformed_episode_seed_cannot_fall_back_to_a_run_seed(field: str, mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     body = seed_json()
     body.pop(field)
-    # An extra top-level environment also must not let a malformed typed seed use the /run arm.
+    # An extra top-level environment also must not let a malformed episode seed use the /run arm.
     body["environment"] = {}
     assert client.post("/seed_session", json=body).status_code == 422
     assert server._session_episodes == {}
@@ -340,7 +340,7 @@ def test_a_malformed_typed_seed_cannot_fall_back_to_a_run_seed(field: str, mcp: 
 
 @pytest.mark.parametrize("mcp", [False, True])
 def test_a_run_seed_keeps_a_row_with_its_own_task_id(mcp: bool) -> None:
-    # Dataset task_id/task_data fields do not make a row a typed seed.
+    # Dataset task_id/task_data fields do not make a row an episode seed.
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     assert (
@@ -401,7 +401,7 @@ async def test_a_run_seed_racing_a_verify_waits_for_the_release_and_the_retry_re
 
 
 @pytest.mark.parametrize("mcp", [False, True])
-def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_injection(mcp: bool) -> None:
+def test_minimal_legacy_seed_remains_valid_but_episode_seed_requires_the_injection(mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     legacy = {"environment": ROW["environment"]}

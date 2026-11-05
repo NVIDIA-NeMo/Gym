@@ -114,7 +114,7 @@ class IPIVerifyResponse(BaseVerifyResponse):
 
 
 class IPITypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
-    """Validate complete typed task data while preserving the legacy environment-only seed."""
+    """Validate complete episode task data while preserving the legacy environment-only seed."""
 
 
 class IPIResourcesServer(SimpleResourcesServer):
@@ -133,7 +133,7 @@ class IPIResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[IPISeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Keep legacy environment-only inputs; the base validates typed tasks and owns the lifecycle."""
+        """Keep legacy environment-only inputs; the base validates episode tasks and owns the lifecycle."""
         return await super().seed_session(body, request=request)
 
     def has_session_state(self, session_id: str) -> bool:
@@ -172,8 +172,8 @@ class IPIResourcesServer(SimpleResourcesServer):
         # Scoring reads only the response, so holding the lock costs nothing. It keeps a cookie re-seed or a close from
         # landing between the check and the retry record, where this verify would release the next run's environment
         # and leave its own record to answer the next run's verify.
-        async with self._fence.locked(session_id):
-            if self._fence.closed_episode(session_id) is not None or (
+        async with self._resources_session_locks.locked(session_id):
+            if session_id in self._resources_session_fences or (
                 session_id not in self.session_id_to_env and session_id not in self._verified_sessions
             ):
                 # Never seeded, closed, or gone with a restart: the server no longer holds the environment the agent's
