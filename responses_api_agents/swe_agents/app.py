@@ -72,6 +72,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyResponse,
@@ -83,7 +84,7 @@ from responses_api_agents.swe_agents.opencode_replay import (
     parse_replay_subagent_manifest,
     parse_replay_subagent_payload,
 )
-from responses_api_models.vllm_model.app import VLLMConverter, split_responses_input_output_items
+from responses_api_models.vllm_model.app import split_responses_input_output_items
 
 
 OPENHANDS_CAPTURE_OVERLAY_DIR = Path(__file__).parent / "openhands_capture_overlay"
@@ -3073,7 +3074,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
     config: SWEBenchWrapperConfig
 
     _sem: Optional[Semaphore] = None
-    _vllm_converter: Optional[VLLMConverter] = None
+    _vllm_converter: Optional[ChatCompletionsConverter] = None
     _swe_bench_wrapper_server_config: Optional[SWEBenchWrapperServerConfig] = None
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -3123,7 +3124,7 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         )
 
         self._sem = Semaphore(self.config.concurrency)
-        self._vllm_converter = VLLMConverter(return_token_id_information=True)
+        self._vllm_converter = ChatCompletionsConverter(return_token_id_information=True)
 
         return super().model_post_init(context)
 

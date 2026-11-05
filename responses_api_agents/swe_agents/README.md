@@ -106,7 +106,7 @@ Implemented in `RunOpenHandsAgent.process_single_datapoint` (and `_run_golden_pa
 5. **Wait for the eval container** to finish or hit `swebench_tests_timeout` (default 30 min). It produces a `report.json` whose location is dataset-specific.
 6. **Postprocess** the report (per-dataset; e.g. SWE-rebench / NV-internal / SWE-bench-Ext do their parsing host-side because the eval images may not have python3).
 7. **Decide `mask_sample`** (GRPO) — see [GRPO masking and failure modes](#grpo-masking-and-failure-modes).
-8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `VLLMConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
+8. **Build the response** — convert the OpenHands chat-completions trajectory to Responses-API items via `ChatCompletionsConverter`, attach the tool list, return reward = `1.0 if resolved else 0.0` and metrics.
 
 If `verify_golden_patch=true`, step 2–4 are skipped: the dataset's golden patch (`instance_dict["patch"]`) is written directly as the prediction and the eval container is the only thing that runs. This is a sanity check that a dataset sample's golden patch actually resolves under our local eval. Supported for `swe-bench-ext`, the SWE-bench / SWE-bench_Multilingual families (e.g. `princeton-nlp/SWE-bench_Verified`, `SWE-bench/SWE-bench_Multilingual`), and `SWE-rebench`. See [Golden-patch validation](#golden-patch-validation).
 
@@ -320,7 +320,7 @@ The OpenHands harness supports resuming a partial trajectory: the request's `bod
 
 **How it's plumbed.** In `SWEBenchWrapper._setup_params`:
 
-1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `VLLMConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
+1. `_maybe_build_replay_messages(body)` scans `body.input` for any `function_call` / `function_call_output` items. If none are present, the request is treated as a normal seed and replay support is a no-op. If any are present, the input is converted to OpenAI chat-completion message format via the shared `ChatCompletionsConverter` and stashed on `problem_info["replay_messages"]` as a JSON string (metadata is typed `Dict[str, str]`).
 2. `OpenHandsHarnessProcessor.get_run_command` writes the JSON to `<persistent_dir>/replay_messages.json`, bind-mounts it into the agent container, and forwards the mounted path as positional arg #18 (`REPLAY_MESSAGES_PATH`) to `run_infer.sh`. Positional args 13..17 are emitted as empty-string placeholders so the right shift index lands.
 3. The replay's own system message is extracted and written to `<persistent_dir>/replay_system_prompt.j2`, then pinned as `resolved_system_prompt_template` so the standard mount logic bind-mounts it over OpenHands' `system_prompt.j2`. This is **unconditional** — it overrides any `agent_prompt_overrides` selection. Reason: OpenHands' `replay_utils.messages_to_replay_events()` drops system messages, so without this the resumed run would render OpenHands' own `system_prompt.j2` and drift from the recorded conversation.
 

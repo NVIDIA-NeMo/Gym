@@ -3631,7 +3631,7 @@ class TestEvaluatorLaunchFailure:
         )
         wrapper = _create_wrapper(monkeypatch)
         wrapper._sem = asyncio.Semaphore(1)
-        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        wrapper._vllm_converter = swe_app.ChatCompletionsConverter(return_token_id_information=True)
         processor = NVInternalDatasetProcessor(config=params)
         with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
             response = await wrapper._inner_responses(params, processor)

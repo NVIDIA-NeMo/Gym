@@ -204,7 +204,7 @@ If the loaded tokenizer has no `chat_template`, the server fails at startup — 
 
 **Tools in chat-template mode.** The chat template renders the tool definitions into the prompt (Hermes / Qwen / etc. all do this), but `/v1/completions` doesn't run vLLM's tool-call parser regardless of how the prompt is built — so any tool-call output text the model emits is **not** parsed by Gym. The caller is responsible for parsing tool calls out of the assistant text. If you need first-class tool-call routing, use `use_completions_api: false`.
 
-`<think>...</think>` blocks emitted inline by the model are extracted downstream by `VLLMConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
+`<think>...</think>` blocks emitted inline by the model are extracted downstream by `ChatCompletionsConverter._extract_reasoning_from_content` when results are converted back to a Response, exactly as on the chat path.
 
 ### Token-ID extraction (RL training)
 
