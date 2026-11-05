@@ -241,9 +241,11 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
     submissions = _load_jsonl(submissions_path)
     prior_responses = _load_jsonl(aa_responses_path)
 
+    # Only an accepted batch completes its submissions: one with grader errors stays pending.
     scored_ids = set()
     for rec in prior_responses:
-        scored_ids.update(rec["submission_ids"])
+        if not int(rec["response"].get("judge_error_count") or 0):
+            scored_ids.update(rec["submission_ids"])
 
     pending = [s for s in submissions if s["submission_id"] not in scored_ids]
     print(f"submissions on disk: {len(submissions)}")
@@ -277,6 +279,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
         )
 
     rejudged = 0
+    rejected = 0
     key_index = 0
     for batch in eligible:
         sub_ids = [b["submission_id"] for b in batch]
@@ -338,12 +341,15 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 )
                 + "\n"
             )
+        if int(response.get("judge_error_count") or 0):
+            rejected += 1
+            print(
+                f"  not scored: AA reported judge_errors={response.get('judge_error_count')}; "
+                "these submissions stay pending for another replay."
+            )
+            continue
         rejudged += 1
-        print(
-            f"  scored: accuracy={response.get('accuracy')}, "
-            f"judge_errors={response.get('judge_error_count')}, "
-            f"timeout_rate={response.get('timeout_rate')}"
-        )
+        print(f"  scored: accuracy={response.get('accuracy')}, timeout_rate={response.get('timeout_rate')}")
 
     print(f"Replay complete. Rejudged {rejudged} batches.")
     if skipped:
@@ -358,6 +364,9 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
             )
         )
     refresh_partial_metrics(args.cache_dir)
+    if rejected:
+        print(f"{rejected} batch(es) came back with grader errors and were not scored.", file=sys.stderr)
+        return 5
     return 0
 
 

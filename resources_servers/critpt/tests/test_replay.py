@@ -283,6 +283,42 @@ class TestReplayMainAsync:
         assert partial["mean_accuracy_over_scored"] == 0.25
 
     @pytest.mark.asyncio
+    async def test_grader_error_batches_stay_pending_until_a_clean_replay(self, tmp_path):
+        _write_jsonl(tmp_path / "submissions.jsonl", [_submission_row(0, "p1"), _submission_row(1, "p2")])
+        _write_jsonl(
+            tmp_path / "aa_responses.jsonl",
+            [
+                {
+                    "batch_id": 0,
+                    "submission_ids": [0, 1],
+                    "response": {"accuracy": 0.5, "judge_error_count": 1},
+                    "ts": 1.0,
+                }
+            ],
+        )
+        clean = {"accuracy": 0.75, "timeout_rate": 0.0, "judge_error_count": 0}
+        bad = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 2}
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.return_value = (bad, 0)
+            assert await main_async(_make_replay_args(tmp_path), api_keys=["k0"]) == 5
+            assert call_api.await_count == 1
+            partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+            assert partial["scored_submissions"] == 0 and partial["pending_submissions"] == 2
+            assert partial["mean_accuracy_over_scored"] is None
+
+            call_api.return_value = (clean, 0)
+            assert await main_async(_make_replay_args(tmp_path), api_keys=["k0"]) == 0
+            assert call_api.await_count == 2
+            assert [s["problem_id"] for s in call_api.await_args.kwargs["submissions"]] == ["p1", "p2"]
+            partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+            assert partial["scored_submissions"] == 2 and partial["pending_submissions"] == 0
+            assert partial["mean_accuracy_over_scored"] == 0.75
+
+            assert await main_async(_make_replay_args(tmp_path), api_keys=["k0"]) == 0
+            assert call_api.await_count == 2
+
+    @pytest.mark.asyncio
     async def test_nothing_pending_returns_zero(self, tmp_path):
         _write_jsonl(
             tmp_path / "submissions.jsonl",

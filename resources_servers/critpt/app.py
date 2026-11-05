@@ -96,8 +96,11 @@ def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
                 if not line:
                     continue
                 rec = json.loads(line)
-                n = len(rec["submission_ids"])
                 response = rec["response"]
+                # A batch with grader errors is rejected at verify time: it stays pending, never scored.
+                if int(response.get("judge_error_count") or 0):
+                    continue
+                n = len(rec["submission_ids"])
                 scored += n
                 accuracy_sum += float(response.get("accuracy", 0.0)) * n
                 timeout_rate_sum += float(response.get("timeout_rate", 0.0)) * n

@@ -790,6 +790,24 @@ class TestGraderFailureTyping:
             assert data["problem_id"] in {"p1", "p2"}
 
     @pytest.mark.asyncio
+    async def test_rejected_grader_error_batch_is_not_counted_as_scored_in_the_cache(self, tmp_path):
+        server = _make_server(_make_config(batch_size=2, cache_dir=tmp_path, unique_cache_per_run=False))
+        mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1})
+        try:
+            requests = [
+                _make_verify_request("```python\na=1\n```", problem_id="p1"),
+                _make_verify_request("```python\nb=2\n```", problem_id="p2"),
+            ]
+            results = await asyncio.gather(*(judge_failsafe(server.verify)(body=r) for r in requests))
+        finally:
+            _stop_patches(patches)
+        assert all(json.loads(r.body)["mask_sample"] is True for r in results)
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 0
+        assert partial["pending_submissions"] == 2
+        assert partial["mean_accuracy_over_scored"] is None
+
+    @pytest.mark.asyncio
     async def test_aa_http_failure_is_masked_by_judge_failsafe(self):
         server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
         mock_request, patches = _mock_api_sequence([{"status": 400, "body": "bad payload"}])
