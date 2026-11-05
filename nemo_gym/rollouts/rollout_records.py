@@ -983,6 +983,9 @@ class RolloutRecords:
         failed_final = sum(
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
+        # A failure record whose producer set mask_sample (a judge or verifier outage, for example) is excluded from
+        # the score rather than counted as a zero. It is a failure, so it is never in ``masked``: report it here.
+        failed_masked = sum(self.payloads[key].masked for key in failures)
         # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
         masked_retryable = sum(
             self.payloads[(identity, self.latest[identity])].masked_infrastructure
@@ -992,6 +995,9 @@ class RolloutRecords:
             if self.disposition(identity) == "success"
         )
         settled = counts["success"] - masked_retryable + final_zeros
+        # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
+        # (terminal or at their attempt cap) are not open, even when they are not settled.
+        open_rollouts = masked_retryable + (len(failures) - failed_final) + not_started + missing
         return {
             "schema_version": 2,
             "selection_policy": self.manifest.selection_policy,
@@ -1004,6 +1010,7 @@ class RolloutRecords:
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
+            "failed_masked": failed_masked,
             "final_zeros": final_zeros,
             "failed_not_final": len(failures) - failed_final,
             "failed_by_class": dict(sorted(Counter(self.payloads[key].failure_class for key in failures).items())),
@@ -1021,6 +1028,7 @@ class RolloutRecords:
             "retryable": sum(
                 self._retryable(identity) and self.failure_count(identity) < max_attempts for identity in self.expected
             ),
+            "open": open_rollouts,
             "max_rollout_attempts": max_attempts,
             "attempt_extension": self.attempt_extension,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,

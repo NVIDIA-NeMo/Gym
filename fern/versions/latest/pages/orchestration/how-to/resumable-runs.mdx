@@ -69,7 +69,7 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | `.gym_followup_sentinel.<job ID>` | The job ID of the sentinel queued for that job's successor. |
 | `.gym_driver_failure.<job ID>` | The failure kind that job's driver left when it failed in a way the next job would repeat. |
 | `.gym_fresh_restart.<job ID>` | Written by a job that restarted the run fresh after `server_start_failed`; the next job does not restart it again. |
-| `.gym_chain_incomplete` | Why the chain stopped before the run finished: no eligible retries, the walltime cap, a cancel, a typed driver failure, a refused follow-up submission (`follow_up_submission_refused`), unknown accounting, or a complete run without its required export receipt. A chain that continues removes it, and so does a segment that completes the run. |
+| `.gym_chain_incomplete` | Why the chain stopped before the run finished (the stopping job also logs how many rollouts are open, from the coverage report's `open` count): no eligible retries, the walltime cap, a cancel, a typed driver failure, a refused follow-up submission (`follow_up_submission_refused`), unknown accounting, or a complete run without its required export receipt. A chain that continues removes it, and so does a segment that completes the run. |
 
 ## Recover from saved evidence
 

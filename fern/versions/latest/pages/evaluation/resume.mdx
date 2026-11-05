@@ -140,17 +140,19 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `expected` | Number of logical rollouts in the materialized inputs. |
 | `successful` | Rollouts with a completed result, including wrong answers and completed masked results. |
 | `measured` | Completed results with a numeric reward whose producer did not set `mask_sample`, including valid reward-zero results. |
-| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. These remain saved and reusable on resume, except a result masked by an evaluation-side failure kind (see `masked_retryable`). |
+| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. A failure record whose producer set `mask_sample` is counted in `failed_masked`, never here. These remain saved and reusable on resume, except a result masked by an evaluation-side failure kind (see `masked_retryable`). |
 | `masked_retryable` | Completed results whose producer reported an evaluation-side failure kind (for example a lost session or a failed provider) and that resume runs again within the attempt cap. They count as one failed attempt and are not settled. |
 | `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `failed_final` / `failed_not_final` | Selected failures with no retry available (terminal or budget exhausted), versus selected failures still eligible for retry. |
 | `final_zeros` | Failed rollouts settled as final zeros: a terminal failure counted as zero. They count as complete and are still failures for health. |
+| `failed_masked` | Of `failed`: selected failure records whose producer set `mask_sample` (a judge or verifier outage, for example). They are excluded from the score, not counted as zeros. |
 | `failed_by_class` | Selected failure counts by failure class; excludes omissions. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
 | `not_started` | Rollouts with no reserved execution. |
 | `missing` | Rollouts whose newest reserved execution has no saved outcome. |
 | `retryable` | Rollouts eligible for another attempt under the active retry policy. Aggregate reports expose this per shard. |
+| `open` | Rollouts with no final result: `masked_retryable` plus `failed_not_final` plus `not_started` plus `missing`. A chain that stops with `open` above zero reports it as an incomplete run; final failures (terminal or at their attempt cap) are not open, even when they are not settled. |
 | `outcomes_recorded` | All outcomes saved during this collector invocation, including interruptions. |
 | `progress_outcomes_recorded` | Saved successes, omissions, terminal failures or counted failures; distinguishes productive continuation from infrastructure-only retries. |
 | `stopped_not_retried` | Failed rollouts that are neither final nor at their attempt cap and that resume still does not run again (a kept answer or a judge failure left to recovery, or an unclassified execution). |
@@ -162,6 +164,8 @@ The existing `successful` field remains the completed-result total. The measurem
 ```text
 successful = measured + masked + unscored
 expected = measured + masked + unscored + failed + intentionally_omitted + not_started + missing
+failed = failed_final + failed_not_final        # failed_masked and final_zeros are each a subset of failed
+open = masked_retryable + failed_not_final + not_started + missing
 ```
 
 Counts describe the selected attempt for each logical rollout. Older attempts cannot count again or change whether

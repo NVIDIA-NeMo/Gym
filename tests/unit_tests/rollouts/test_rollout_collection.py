@@ -9608,6 +9608,8 @@ class TestRolloutAggregationHelper:
         coverage = orjson.loads((merged_dir / "rollouts_coverage.json").read_bytes())
         assert coverage["retry_terminal_timeouts"] is retry_timeouts
         assert coverage["failed_final"] == int(not retry_timeouts)
+        # A timeout the policy retries has no final result yet; a terminal one is final, so not open.
+        assert (coverage["open"], coverage["failed_masked"]) == (int(retry_timeouts), 0)
         assert all(p.read_bytes() == data for p, data in before.items())
 
     def _landed_and_failed_runs(self, root: Path, *, same_indices: bool) -> tuple[Path, Path]:
