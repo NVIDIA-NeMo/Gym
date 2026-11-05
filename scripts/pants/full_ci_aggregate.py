@@ -2,17 +2,59 @@
 # SPDX-License-Identifier: Apache-2.0
 """Preserve full-suite evidence while accounting for native execution and reuse."""
 
+import argparse
 import hashlib
 import json
 import shutil
 import sqlite3
 import subprocess
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Literal, TypedDict
 from xml.etree import ElementTree
 
 from full_ci_junit import Case, Report, summarize_reports
+
+
+def normalize_coverage(raw: Path, checkout: Path, *, absolute: bool = False) -> None:
+    """Rebase verified source paths without losing contexts, arcs or line unions.
+
+    Import coverage only in the sampled interpreter, which owns its data format.
+    Native outputs use portable paths; legacy report configs require those paths
+    rebased to the final checkout after the temporary collection checkout is gone.
+    """
+    from coverage import CoverageData
+
+    root = checkout.resolve()
+    prefixes = {checkout.absolute(), root}
+
+    def map_path(name: str) -> str:
+        path = Path(name)
+        if absolute:
+            if path.is_absolute():
+                return name
+            source = root / path
+            if source.is_file() and source.resolve().is_relative_to(root):
+                return str(source.resolve())
+            # Generated helpers can be absent and intentionally omitted by the
+            # sampled report config. Keep unknown names for its normal rules.
+            return name
+        if path.is_absolute() and path.is_file() and path.resolve().is_relative_to(root):
+            for prefix in prefixes:
+                if path.is_relative_to(prefix):
+                    return path.relative_to(prefix).as_posix()
+        return name
+
+    original = CoverageData(basename=str(raw))
+    original.read()
+    # Resolve the mapping once before writing the replacement database.
+    mapped_paths = {name: map_path(name) for name in original.measured_files()}
+    with tempfile.TemporaryDirectory(prefix="coverage-relative-", dir=raw.parent) as temporary:
+        portable = CoverageData(basename=str(Path(temporary) / "data"))
+        portable.update(original, map_path=mapped_paths.__getitem__)
+        portable.write()
+        Path(portable.data_filename()).replace(raw)
 
 
 class Batch(TypedDict):
@@ -189,6 +231,26 @@ def merge_execution_outputs(
         text=True,
         check=True,
     )
+    # Older main revisions record absolute collection paths. The disposable
+    # checkout is removed before the final gate, so use the sampled coverage
+    # API to merge verified checkout paths into portable names, retaining every
+    # context/arc and leaving the original collection and batch evidence intact.
+    subprocess.run(
+        [
+            str(checkout / ".venv/bin/python"),
+            str(Path(__file__).resolve()),
+            "normalize-coverage",
+            "--coverage",
+            str(coverage.resolve()),
+            "--checkout",
+            str(checkout.absolute()),
+        ],
+        cwd=checkout,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
     report = summarize_reports(junit.parent, expected_reports=[junit.name])
     totals = {
         status: sum(r["testcase_count"] for r in records if r["status"] == status)
@@ -297,3 +359,13 @@ def verify_accounting(root: Path, *, report: Report, source_sha: str) -> dict:
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, ElementTree.ParseError) as error:
         errors.append(str(error))
     return {"valid": not errors, "errors": errors, "counts": counts}
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Rebase raw coverage using the sampled coverage version")
+    parser.add_argument("command", choices=["normalize-coverage"])
+    parser.add_argument("--coverage", type=Path, required=True)
+    parser.add_argument("--checkout", type=Path, required=True)
+    parser.add_argument("--absolute", action="store_true")
+    args = parser.parse_args()
+    normalize_coverage(args.coverage.resolve(), args.checkout, absolute=args.absolute)

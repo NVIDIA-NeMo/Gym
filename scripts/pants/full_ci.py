@@ -356,6 +356,8 @@ def run_legacy_native(*, output: Path, env: dict[str, str], execution_mode: str)
         "source .venv/bin/activate\n"
         f"export COVERAGE_FILE={coverage}\n"
         f"python3 -m coverage combine --keep {inputs}\n"
+        f"python3 {shlex.quote(str(HERE / 'full_ci_aggregate.py'))} normalize-coverage "
+        f'--coverage {coverage} --checkout "$PWD" --absolute\n'
         'python3 -m coverage report --show-missing --fail-under="$(python3 scripts/ci/cov_fail_under.py)"\n'
     )
     return run_logged(["bash", "-c", command], log=output / "coverage-gate.log", env=env)

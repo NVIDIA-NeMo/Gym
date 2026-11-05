@@ -115,13 +115,14 @@ class Driver:
             snapshots = self.plan["snapshots"]
             entries = [{"source_sha": s["source_sha"], "kind": "snapshot", "status": "pending"} for s in snapshots]
             entries.insert(1, {"source_sha": snapshots[0]["source_sha"], "kind": "warm-control", "status": "pending"})
+            resolved_controller = controller_sha or _git(self.repo, "rev-parse", "HEAD")
             self.state = {
                 "schema_version": 1,
                 "plan_id": digest,
                 "repository": REPOSITORY,
                 "branch": BRANCH,
-                "controller_sha": controller_sha or _git(self.repo, "rev-parse", "HEAD"),
-                "cache_namespace": "replay-" + digest[:12],
+                "controller_sha": resolved_controller,
+                "cache_namespace": f"replay-{digest[:12]}-{resolved_controller[:8]}",
                 "cutoff": CUTOFF,
                 "entries": entries,
                 "current": 0,

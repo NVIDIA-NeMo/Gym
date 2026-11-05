@@ -74,8 +74,8 @@ An unresolved dispatch intent stops after 15 minutes without a matching run.
 It is never resent automatically; resuming the same state can recover a late run.
 Do not rebase or push the controller while its replay driver is active.
 
-Each replay has an isolated cache namespace with no fallback to live or later
-source caches. Its baseline and Pants caches persist independently across the
+Each replay plan and frozen controller pair has an isolated cache namespace with
+no fallback to live, earlier-controller or later-source caches. Its baseline and Pants caches persist independently across the
 chronological sequence. Cache inventory, actual restore/save logs, full outcomes,
 raw coverage and timing artifacts remain attached to each run. Run evidence is
 retained under `<output>/hosted/<run-id>/`, alongside the replay's

@@ -405,3 +405,13 @@ def test_existing_intent_without_deadline_does_not_restart_reconciliation_clock(
     assert not driver.transition()
     assert driver.state["entries"][0]["reconcile_until"] == "2026-11-05T12:15:00Z"
     assert len(github.posts) == 1
+
+
+def test_new_controller_generation_has_isolated_caches(setup, tmp_path):
+    driver, github, plan = setup
+    replacement = Driver(
+        repo=driver.repo, plan=plan, output=tmp_path / "replacement", controller_sha="e" * 40, github=github
+    )
+    assert replacement.state["plan_id"] == driver.state["plan_id"]
+    assert replacement.state["cache_namespace"] != driver.state["cache_namespace"]
+    assert resume(driver, github, plan).state["cache_namespace"] == driver.state["cache_namespace"]
