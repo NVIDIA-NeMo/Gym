@@ -47,17 +47,17 @@ from typing import Any, Dict, List, Optional
 
 import editdistance
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
-)
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
 )
 
 
@@ -262,7 +262,6 @@ def extract_mcq_letter(text: str) -> Optional[str]:
 
 
 class Ruler2ResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: Ruler2ResourcesServerConfig
 
     async def verify(self, body: Ruler2VerifyRequest) -> Ruler2VerifyResponse:

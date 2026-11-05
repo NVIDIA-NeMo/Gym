@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -57,7 +57,6 @@ class TerminalMultiHarnessVerifyResponse(BaseVerifyResponse):
 
 
 class TerminalMultiHarnessResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: TerminalMultiHarnessResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

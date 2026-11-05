@@ -22,8 +22,8 @@ import gymnasium as gym
 from fastapi import HTTPException
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
@@ -50,7 +50,6 @@ class TALESSessionState:
 
 
 class TALESResourcesServer(GymnasiumServer):
-    ray_enabled = False
     config: TALESResourcesServerConfig
     session_id_to_state: Dict[str, TALESSessionState] = Field(default_factory=dict)
 

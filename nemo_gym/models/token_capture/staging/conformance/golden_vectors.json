@@ -1,0 +1,29 @@
+{
+  "extras": {
+    "routed_experts": [
+      [[1, 2]],
+      [[3, 4]]
+    ]
+  },
+  "extras_digest": "032024e899456be6e9a78c6d0399c5112d2ca7fa18d4ea9cf0d8cb7d0094f3a3",
+  "staged_call": {
+    "schema_version": 3,
+    "digest_version": 2,
+    "extras_digest_version": 1,
+    "capture_key": "rollout-1",
+    "model_call_id": "call-1",
+    "parent_call_id": "parent-1",
+    "mode": "token_in",
+    "prev_len": 3,
+    "delta_len": 2,
+    "cum_len": 5,
+    "weight_version": 7,
+    "token_ids_delta": [10, 11],
+    "token_mask_delta": [0.0, 1.0],
+    "generation_log_probs_delta": [0.0, -0.25],
+    "extras_digest": "032024e899456be6e9a78c6d0399c5112d2ca7fa18d4ea9cf0d8cb7d0094f3a3",
+    "chain_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "cumulative_hash": "2222222222222222222222222222222222222222222222222222222222222222"
+  },
+  "staged_call_digest": "cdd62002cf93637646f8501ae816eada76e315885219455f53a09dd5a86580f2"
+}

@@ -15,16 +15,17 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.omniscience.app import (
     OmniscienceConfig,
     OmniscienceServer,
@@ -497,3 +498,27 @@ class TestExtractTextNoStrip:
     def test_strip_true_removes_reasoning(self) -> None:
         response = self._make_response("reasoning here</think>answer")
         assert extract_text_from_response(response, strip_thinking=True) == "answer"
+
+
+@pytest.mark.parametrize(
+    "text, expected, parsed",
+    [
+        ("A", "A", True),
+        ("B", "B", True),
+        ("explanation\nD", "D", True),
+        ("The grade is A based on analysis", "A", False),
+        ("no clear grade", "B", False),
+    ],
+)
+def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):
+    from nemo_gym.trajectory import ModelCallRef
+    from nemo_gym.verification import JudgeGrading
+    from nemo_gym.verification.judge import _judge_grading
+
+    grading = JudgeGrading(dependencies=[ModelCallRef(model_call_id="judge-response")])
+    token = _judge_grading.set(grading)
+    try:
+        assert parse_judge_grade(text) == expected
+        assert bool(grading.parsed_dependencies) is parsed
+    finally:
+        _judge_grading.reset(token)

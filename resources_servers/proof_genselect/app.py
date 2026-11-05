@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -56,7 +56,6 @@ class ProofGenSelectVerifyRequest(BaseVerifyRequest):
 
 
 class ProofGenSelectResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ProofGenSelectResourcesServerConfig
 
     _log_lock: Optional[Any] = PrivateAttr(default=None)

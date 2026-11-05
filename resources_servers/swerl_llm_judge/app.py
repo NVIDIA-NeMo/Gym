@@ -17,7 +17,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -167,7 +167,6 @@ def _extract_llm_choice_from_solution_block_strict(llm_output: str, allowed_lett
 
 
 class SWEJudgeResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: SWEJudgeResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

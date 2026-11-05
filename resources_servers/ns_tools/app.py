@@ -39,15 +39,15 @@ from nemo_skills.mcp.tool_manager import ToolManager
 from nemo_skills.mcp.utils import locate
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ResourcesServerRef
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,6 @@ class NSToolsVerifyResponse(BaseVerifyResponse):
 
 
 class NSToolsResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: NSToolsConfig
     tool_manager: Optional[Any] = None
     _tool_name_map: Dict[str, str] = {}  # Maps tool names to qualified names

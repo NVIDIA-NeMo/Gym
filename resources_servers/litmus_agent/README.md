@@ -16,6 +16,13 @@ It does three things:
 Reward is `1.0` on match, `0.0` otherwise (including when no value can be
 extracted).
 
+The [Litmus-Bench benchmark](../../benchmarks/litmus-bench/README.md) selects
+the released evaluation data and documents its licenses. Its rows use
+`output_regex`, `answer_type`, and optional `match` rules; the verifier keeps
+release selection in the benchmark configuration and preparation code.
+Both server configs register the full training split under
+`data/litmus-bench/train.jsonl` with its combined dataset license.
+
 ### What it deliberately is *not*
 
 - **Not tied to any domain.** Domain-context fields ride along as *pass-through*
@@ -85,24 +92,6 @@ Register a custom rule by adding an entry to `REWARD_RULES` (name → callable
 taking `(predicted, expected, **params)` and returning a float in `[0.0, 1.0]`).
 Rows then reference it by name in `match`.
 
-### Numeric `property_type` compatibility
-
-Rows without an explicit `answer_type` may carry `property_type` instead. These
-values are mapped to the answer-type taxonomy for reporting:
-
-| `property_type` | → `answer_type` |
-|---|---|
-| `float`, `count`, `fragment` | `float` |
-| `bool`, `presence` | `bool` |
-
-Compatibility rows retain their numeric scoring policy: `count`, `fragment`,
-`bool`, and `presence` are parsed as numbers and default to rounded `exact`
-matching, while `float` defaults to `isclose`. An explicit `answer_type` selects
-the modern parsing policy, and an explicit `match` overrides either default.
-
-A row with neither a supported `answer_type` nor a mappable `property_type`
-fails loudly rather than silently scoring `0.0`.
-
 ## Answer Extraction
 
 When present, `output_regex` is the preferred extractor and must contain exactly
@@ -112,9 +101,7 @@ registered regex used to locate the final answer (e.g. `fmt_00` → `((answer))`
 `<final_answer>answer</final_answer>`). The last match in the text wins, so a
 self-correcting model's final value is the one scored.
 
-Legacy rows without `answer_format` fall back to `use_box_format`:
-`use_box_format: true` → boxed (`fmt_07`), `use_box_format: false` → double
-parentheses (`fmt_00`). When `answer_format` is present it takes precedence.
+When neither extractor is specified, double parentheses (`fmt_00`) are used.
 
 > **Prefer delimited formats for numeric answers.** When the captured text is
 > not a clean float, extraction falls back to the *last* number-like token in the
@@ -138,14 +125,12 @@ Each JSONL row:
 - `responses_create_params.tools`: `[]` for direct answering; a tool spec when
   the optional code-execution route is enabled
 - `expected_answer`: ground-truth value (string, int, or float)
-- `answer_type`: one of `float`, `bool`, `string` (optional if a mappable legacy
-  `property_type` is present)
+- `answer_type`: required; one of `float`, `bool`, `string`
 - `output_regex`: optional row-specific regex with exactly one capture group;
   takes precedence over `answer_format`
 - `answer_format`: optional key `fmt_00`–`fmt_30` selecting the extraction regex
 - `match`: optional reward-rule override `{"rule": <name>, **params}`; defaults
   to the rule for the resolved `answer_type`
-- `use_box_format`: optional legacy fallback when `answer_format` is absent
 - any number of **pass-through** domain fields (e.g. `method`, `source_id`,
   `smiles`, `property`) — preserved and echoed back, never interpreted
 

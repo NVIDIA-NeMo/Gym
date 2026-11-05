@@ -43,7 +43,7 @@ from typing import Any, Optional
 from fastapi import FastAPI
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -443,7 +443,6 @@ def _strip_ignored(args: dict) -> dict:
 
 
 class ImageToolsPivotResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: ImageToolsPivotResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

@@ -16,7 +16,7 @@
 import re
 from typing import ClassVar, Optional
 
-from nemo_gym.base_resources_server import ReverifyMode
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.mcqa.app import (
     MCQAResourcesServer,
     MCQAResourcesServerConfig,
@@ -54,8 +54,6 @@ class GPQADiamondResourcesServerConfig(MCQAResourcesServerConfig):
 
 class GPQADiamondResourcesServer(MCQAResourcesServer):
     """GPQA-Diamond verifier with GPQA-specific answer extraction."""
-
-    ray_enabled = False
 
     config: GPQADiamondResourcesServerConfig
 

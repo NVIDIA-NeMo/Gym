@@ -39,7 +39,7 @@ import math
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
-from nemo_gym.reward_profile import (
+from nemo_gym.metrics import (
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
@@ -71,8 +71,6 @@ class PolyMathVerifyResponse(LibraryJudgeMathVerifyResponse):
 
 class PolyMathResourcesServer(LibraryJudgeMathResourcesServer):
     """math_with_judge + difficulty-weighted aggregation + per-language metrics."""
-
-    ray_enabled = False
 
     config: PolyMathResourcesServerConfig
 

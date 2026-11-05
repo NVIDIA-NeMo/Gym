@@ -21,14 +21,14 @@ from typing import Any, Optional
 
 from metrics import score_pathway
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_subset_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_subset_metrics
 
 
 logger = logging.getLogger(__name__)
@@ -68,7 +68,6 @@ class FukuyamaBenchVerifyResponse(BaseVerifyResponse):
 
 
 class FukuyamaBenchResourcesServer(SimpleResourcesServer):
-    ray_enabled = False
     config: BaseResourcesServerConfig
 
     def compute_metrics(self, tasks: list[list[dict]]) -> dict:

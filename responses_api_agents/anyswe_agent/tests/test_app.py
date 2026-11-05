@@ -19,16 +19,25 @@ These exercise runner generation, image resolution, and configuration.
 import asyncio
 import base64
 import json
+import os
+import shutil
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from nemo_gym.openai_utils import NeMoGymResponse
+import pytest
+
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, RequestFailureLog
+from responses_api_agents.anyswe_agent import agent_runner
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
     AnySweAgent,
     AnySweAgentConfig,
     AnySweRunRequest,
+    AnySweServerConfig,
     SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
@@ -67,7 +76,7 @@ class TestAgentRunner:
         compile(source, "<runner>", "exec")
         assert 'os.environ["NGSWE_AGENT_MODULE"]' in source
         assert '["git", "add", "-A"]' in source
-        assert '["git", "diff", "--no-color", "--cached", baseline_tree]' in source
+        assert '["git", "diff", "--no-color", "--cached", baseline_tree, "--", ".", *excludes]' in source
 
     def test_patch_extraction_excludes_image_dirt_and_includes_agent_files(self, tmp_path) -> None:
         repo = tmp_path / "repo"
@@ -88,7 +97,7 @@ class TestAgentRunner:
 
         (repo / "agent-edited.txt").write_text("agent change\n")
         (repo / "agent-new.txt").write_text("new from agent\n")
-        patch_text = _extract_patch(repo, index_path, baseline_tree)
+        patch_text = _extract_patch(repo, index_path, baseline_tree).decode()
 
         assert "agent-edited.txt" in patch_text
         assert "agent change" in patch_text
@@ -96,6 +105,50 @@ class TestAgentRunner:
         assert "new from agent" in patch_text
         assert "image-dirty.txt" not in patch_text
         assert "image-untracked.txt" not in patch_text
+
+    def test_patch_is_written_when_the_harness_raises(self, tmp_path, monkeypatch) -> None:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "i"],
+            cwd=repo,
+            check=True,
+        )
+        mount = tmp_path / "mount"
+        mount.mkdir()
+        (mount / "instruction.txt").write_text("Fix it")
+
+        class FailingAgent:
+            def __init__(self, config, server_client) -> None:
+                pass
+
+            async def responses(self, request, body):
+                (repo / "fix.py").write_text("partial fix\n")
+                raise RuntimeError("max_turns reached")
+
+        class Config:
+            model_fields = {}
+
+            def __init__(self, **kwargs) -> None:
+                pass
+
+        module = SimpleNamespace(FailingAgent=FailingAgent, Config=Config)
+        monkeypatch.setitem(sys.modules, "fake_harness", module)
+        monkeypatch.setenv("NGSWE_MODEL_NAME", "policy")
+        monkeypatch.setenv("NGSWE_AGENT_MODULE", "fake_harness")
+        monkeypatch.setenv("NGSWE_AGENT_CLASS", "FailingAgent")
+        monkeypatch.setenv("NGSWE_AGENT_CONFIG_CLASS", "Config")
+        monkeypatch.setattr(agent_runner, "_find_repo", lambda: repo)
+        monkeypatch.setattr(
+            agent_runner, "Path", lambda path: Path(str(path).replace("/trajectories_mount", str(mount)))
+        )
+
+        with pytest.raises(RuntimeError, match="max_turns"):
+            agent_runner.main()
+
+        assert "partial fix" in (mount / "patch.diff").read_text()
+        assert not (mount / "response.json").exists()
 
     def test_sampling_is_forwarded(self) -> None:
         source = self._source()
@@ -120,7 +173,43 @@ class TestSandboxAPI:
 
     def test_model_url_carries_rollout_correlation(self) -> None:
         assert _model_url_for_rollout("http://model-host:8000", "3-1") == "http://model-host:8000/ng-rollout/3-1"
+        # No rollout id and no exported traces: byte-for-byte unchanged.
         assert _model_url_for_rollout("http://model-host:8000", None) == "http://model-host:8000"
+        assert _model_url_for_rollout("", None) == ""
+
+    def test_sandbox_model_url_keeps_the_rollout_path(self, tmp_path) -> None:
+        # The relay reaches the same model server, which attributes the in-box calls by this path.
+        with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
+            agent = AnySweAgent(
+                config=_config(sandbox_model_base_url="http://relay:9000"), server_client=MagicMock(spec=ServerClient)
+            )
+        agent._server = AnySweServerConfig(
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://relay:9000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+        )
+        body = NeMoGymResponseCreateParamsNonStreaming(input=[], metadata={"instance_id": "repo__repo-1"})
+
+        assert agent._setup_params(body, "3-1").model_server_url == "http://relay:9000/ng-rollout/3-1"
+
+    def test_model_url_carries_trace_context_without_a_rollout_id(self, monkeypatch) -> None:
+        # Capture off, traces on: the harness still gets the current span in the URL.
+        from nemo_gym.client import server_client
+
+        monkeypatch.setattr(
+            server_client, "trace_context_path_segment", lambda: "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", None)
+            == "http://model-host:8000/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert (
+            _model_url_for_rollout("http://model-host:8000", "3-1")
+            == "http://model-host:8000/ng-rollout/3-1/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+        )
+        assert _model_url_for_rollout("", None) == ""
 
     def test_default_provider_is_named_sandbox(self) -> None:
         config = AnySweAgentConfig(
@@ -167,6 +256,28 @@ class TestSandboxAPI:
         assert spec.provider_options == {"platform": {"arch": "amd64"}}
         assert spec.files == {"/tmp/input": "data"}
 
+    def test_agent_network_policy_applies_to_agent_box_only(self) -> None:
+        policy = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/16"}]}
+        params = SimpleNamespace(
+            sandbox_spec={"provider_options": {"platform": {"arch": "amd64"}}},
+            sandbox_default_metadata={},
+            swebench_agent_timeout=100,
+            swebench_tests_timeout=200,
+            instance_id="astropy__astropy-12907",
+            container="image:tag",
+            resolved_sandbox_provider={"opensandbox": {}},
+            agent_network_policy=policy,
+        )
+        agent_spec = AnySweAgent._sandbox_spec(params, agent=True)
+        grading_spec = AnySweAgent._sandbox_spec(params)
+        assert agent_spec.provider_options == {"platform": {"arch": "amd64"}, "network_policy": policy}
+        assert grading_spec.provider_options == {"platform": {"arch": "amd64"}}
+
+        params.agent_network_policy = policy
+        params.resolved_sandbox_provider = {"docker": {}}
+        with pytest.raises(ValueError, match="opensandbox"):
+            AnySweAgent._sandbox_spec(params, agent=True)
+
     def test_agent_config_is_forwarded_without_harness_specific_changes(self) -> None:
         params = SimpleNamespace(
             body=SimpleNamespace(model="model", temperature=1.0, top_p=0.95, max_output_tokens=None),
@@ -202,7 +313,8 @@ class TestSandboxAPI:
         assert _dataset_family("SWE-bench_Multilingual") == "swebench_multilingual"
         assert _dataset_family("R2E-Gym/R2E-Gym-Subset") == "r2e"
 
-    def test_r2e_required_tests(self) -> None:
+    @pytest.mark.parametrize("colored", [False, True])
+    def test_r2e_required_tests(self, colored: bool) -> None:
         instance = {
             "FAIL_TO_PASS": ["tests/test_a.py::test_fix"],
             "PASS_TO_PASS": ["tests/test_b.py::test_stays_green"],
@@ -213,11 +325,16 @@ class TestSandboxAPI:
                 "PASSED tests/test_b.py::test_stays_green",
             ]
         )
-        failing = passing.replace("PASSED tests/test_a.py", "FAILED tests/test_a.py")
-        skipped = passing.replace("PASSED tests/test_a.py", "SKIPPED tests/test_a.py")
+        if colored:
+            passing = passing.replace("PASSED", "\x1b[32mPASSED\x1b[0m")
+            passing = passing.replace("::test_fix", "::\x1b[1mtest_fix\x1b[0m")
+            passing = passing.replace("::test_stays_green", "::\x1b[1mtest_stays_green\x1b[0m")
         assert _r2e_resolved(instance, passing)
-        assert not _r2e_resolved(instance, failing)
-        assert not _r2e_resolved(instance, skipped)
+        for status in ("FAILED", "ERROR", "SKIPPED"):
+            nonpassing = passing.replace("PASSED", status, 1)
+            assert not _r2e_resolved(instance, nonpassing)
+        assert _r2e_resolved(instance, passing.replace("PASSED", "XFAIL", 1))
+        assert not _r2e_resolved(instance, passing.splitlines()[0])
 
     def test_safe_config_redacts_provider_key(self) -> None:
         class Params:
@@ -251,6 +368,90 @@ class TestSetupScriptsExist:
         script = (Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh").read_text()
         assert 'PYTHON_VERSION="${PYTHON_VERSION:-3.13.14}"' in script
         assert 'PBS_RELEASE="${PBS_RELEASE:-20260805}"' in script
+
+
+def _fake_bin(tmp_path: Path, machine: str) -> Path:
+    """A PATH dir whose `uname -m` reports ``machine`` and whose `curl` logs the URL and fails."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uname").write_text(f'#!/bin/sh\necho "{machine}"\n')
+    (bin_dir / "curl").write_text(f'#!/bin/sh\nfor a; do url="$a"; done\necho "$url" >> "{tmp_path}/urls"\nexit 1\n')
+    for tool in ("uname", "curl"):
+        (bin_dir / tool).chmod(0o755)
+    return bin_dir
+
+
+def _portable_python_arch(
+    tmp_path: Path, machine: str, arch_override: str | None = None
+) -> subprocess.CompletedProcess:
+    script = Path(__file__).parent.parent / "setup_scripts" / "_portable_python.sh"
+    env = {**os.environ, "PATH": f"{_fake_bin(tmp_path, machine)}:{os.environ['PATH']}"}
+    env.pop("ARCH", None)
+    if arch_override:
+        env["ARCH"] = arch_override
+    return subprocess.run(
+        ["bash", "-c", f'source "{script}" && echo "$ARCH"'], env=env, capture_output=True, text=True
+    )
+
+
+class TestSetupScriptsHostArch:
+    @pytest.mark.parametrize(
+        "machine,expected",
+        [
+            ("x86_64", "x86_64-unknown-linux-gnu"),
+            ("aarch64", "aarch64-unknown-linux-gnu"),
+            ("arm64", "aarch64-unknown-linux-gnu"),
+        ],
+    )
+    def test_portable_python_arch_follows_host(self, tmp_path: Path, machine: str, expected: str) -> None:
+        result = _portable_python_arch(tmp_path, machine)
+        assert result.returncode == 0, result.stderr
+        assert result.stdout.strip() == expected
+
+    def test_portable_python_arch_override_wins(self, tmp_path: Path) -> None:
+        result = _portable_python_arch(tmp_path, "aarch64", arch_override="x86_64-unknown-linux-gnu")
+        assert result.stdout.strip() == "x86_64-unknown-linux-gnu"
+
+    def test_portable_python_rejects_unknown_arch(self, tmp_path: Path) -> None:
+        result = _portable_python_arch(tmp_path, "riscv64")
+        assert result.returncode != 0
+        assert "unsupported portable python architecture" in result.stderr
+
+    @pytest.mark.parametrize(
+        "deps_script",
+        [
+            "claude_code_agent_deps.sh",
+            "cline_agent_deps.sh",
+            "opencode_agent_deps.sh",
+            "openclaw_agent_deps.sh",
+            "pi_agent_deps.sh",
+        ],
+    )
+    @pytest.mark.parametrize("machine,node_arch", [("x86_64", "linux-x64"), ("aarch64", "linux-arm64")])
+    def test_node_download_follows_host(self, tmp_path: Path, deps_script: str, machine: str, node_arch: str) -> None:
+        # Run the deps script with the portable-python helpers stubbed out; the fake curl records the Node URL.
+        scripts = tmp_path / "scripts"
+        scripts.mkdir()
+        shutil.copy(Path(__file__).parent.parent / "setup_scripts" / deps_script, scripts / deps_script)
+        (scripts / "_portable_python.sh").write_text(
+            "install_portable_python() { :; }\ninstall_nemo_gym_deps() { :; }\n"
+        )
+        deps_dir = tmp_path / "deps"
+        deps_dir.mkdir()
+        env = {
+            **os.environ,
+            "PATH": f"{_fake_bin(tmp_path, machine)}:{os.environ['PATH']}",
+            "DEPS_DIR": str(deps_dir),
+            "NEMO_GYM_ROOT": str(tmp_path),
+        }
+        env.pop("NODE_ARCH", None)
+
+        result = subprocess.run(["bash", str(scripts / deps_script)], env=env, capture_output=True, text=True)
+
+        assert result.returncode != 0  # the fake curl fails right after recording the URL
+        urls = (tmp_path / "urls").read_text().split()
+        assert len(urls) == 1 and urls[0].startswith("https://nodejs.org/dist/")
+        assert urls[0].endswith(f"-{node_arch}.tar.xz")
 
 
 class TestExampleData:
@@ -327,3 +528,93 @@ class TestRunReportsMaskSample:
 
         assert dumped["mask_sample"] is False
         assert dumped["instance_config"]["mask_sample"] is False
+
+
+class TestSandboxGradingFailures:
+    @pytest.mark.parametrize(
+        "failure_kind,phase",
+        [
+            ("provider_unavailable", "grading"),
+            ("provider_command_outcome_unknown", "grading"),
+            ("model_transport_error", "grading"),
+            (None, "grading"),
+            ("provider_unavailable", "agent"),
+            ("provider_command_outcome_unknown", "agent"),
+        ],
+    )
+    async def test_grading_failure_is_excluded_and_preserves_evidence(
+        self, tmp_path, monkeypatch, failure_kind, phase
+    ) -> None:
+        with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
+            agent = AnySweAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        agent._server = AnySweServerConfig(
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://model:9000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+        )
+        agent._sem = asyncio.Semaphore(1)
+        monkeypatch.setattr(AnySweAgent, "rollout_id_from_run", lambda self, body: None)
+
+        class Sandbox:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def exec(self, command, **kwargs):
+                if phase == "agent" and "agent_runner.py" in command:
+                    raise error
+                return SimpleNamespace(
+                    return_code=1 if command == "test -f /trajectories_mount/response.json" else 0,
+                    error_type=None,
+                    stdout="",
+                    stderr="",
+                )
+
+            async def download(self, remote, local):
+                local.write_bytes(b"diff --git a/test.py b/test.py\n")
+
+        monkeypatch.setattr("responses_api_agents.anyswe_agent.app.AsyncSandbox", lambda *args: Sandbox())
+        error = None
+        if failure_kind is not None:
+            cause = ConnectionError("grading sandbox disappeared")
+            error = NgFailureEvent(
+                boundary="model" if failure_kind == "model_transport_error" else "sandbox",
+                failure_kind=failure_kind,
+                operation="exec",
+                failure_reason="Grading failed",
+            )
+            error.__cause__ = cause
+        grade = AsyncMock(side_effect=error if phase == "grading" else None, return_value=(False, None))
+        monkeypatch.setattr(AnySweAgent, "_grade_sandbox_patch", grade)
+        body = AnySweRunRequest(
+            responses_create_params={
+                "input": "fix it",
+                "metadata": {"instance_id": "repo__repo-1"},
+            }
+        )
+        if failure_kind == "model_transport_error":
+            with pytest.raises(NgFailureEvent) as caught:
+                await agent.run(body)
+            assert caught.value is error
+            return
+        with RequestFailureLog.capture() as log:
+            response = await agent.run(body)
+        if phase == "agent":
+            grade.assert_not_awaited()
+        else:
+            grade.assert_awaited_once()
+        assert response.reward == 0.0
+        assert response.mask_sample is (error is not None)
+        assert response.error_kind == ("sandbox" if error is not None else None)
+        assert response.instance_config["mask_sample"] is response.mask_sample
+        if error is not None:
+            event = log.report.events[error.event_id]
+            assert event.failure_kind == failure_kind
+            assert event.foreign_error.exception_type == "ConnectionError"
+            assert error.__cause__ is cause
+        else:
+            assert not log.report.events

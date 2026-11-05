@@ -4,7 +4,18 @@
 """Shared model-request adaptation for host and sandbox Hermes runtimes (stdlib only)."""
 
 import json
+from types import SimpleNamespace
 from typing import Any
+
+
+class _SummaryCompatChildren(list):
+    """Install Gym's summary adapter before a delegated child starts running."""
+
+    _gym_child_hook_supported = True
+
+    def append(self, child: Any) -> None:
+        self._gym_prepare_child(child)
+        super().append(child)
 
 
 def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: bool) -> dict[str, Any]:
@@ -29,3 +40,59 @@ def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: boo
     else:
         kwargs.pop("metadata", None)
     return kwargs
+
+
+def install_summary_compat(agent: Any, *, preserve_reasoning_history: bool) -> None:
+    """Route pinned Hermes's iteration-limit summary through Gym's observed model path."""
+    if getattr(agent, "_gym_summary_compat_installed", False):
+        return
+    original_ensure_client = getattr(agent, "_ensure_primary_openai_client", None)
+    original_handle_max_iterations = getattr(agent, "_handle_max_iterations", None)
+    if not callable(original_ensure_client) or not callable(original_handle_max_iterations):
+        return
+
+    def create_summary(**kwargs: Any) -> Any:
+        # Hermes's summary bypasses _build_api_kwargs and replays its internal history.
+        # Copy before stripping fields so the recorded trajectory retains its full evidence.
+        api_messages = []
+        for message in kwargs["messages"]:
+            api_message = {
+                key: value
+                for key, value in message.items()
+                if key not in {"codex_reasoning_items", "reasoning", "finish_reason"}
+            }
+            api_messages.append(agent._sanitize_tool_calls_for_strict_api(api_message))
+        request = _model_api_kwargs(
+            {**kwargs, "messages": api_messages},
+            preserve_reasoning_history=preserve_reasoning_history,
+        )
+        return agent._interruptible_api_call(request)
+
+    summary_client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create_summary)))
+
+    def ensure_client(*, reason: str) -> Any:
+        if reason in {"iteration_limit_summary", "iteration_limit_summary_retry"}:
+            return summary_client
+        return original_ensure_client(reason=reason)
+
+    def handle_max_iterations(messages: list[dict[str, Any]], api_call_count: int) -> str:
+        if not getattr(agent, "_gym_iteration_limit_reached", False):
+            agent._gym_iteration_limit_reached = True
+            callback = getattr(agent, "_gym_on_iteration_limit_reached", None)
+            invocation_id = getattr(agent, "_gym_invocation_id", None)
+            if callable(callback) and isinstance(invocation_id, str):
+                callback(invocation_id=invocation_id)
+        return original_handle_max_iterations(messages, api_call_count)
+
+    agent._ensure_primary_openai_client = ensure_client
+    agent._handle_max_iterations = handle_max_iterations
+    agent._gym_summary_compat_installed = True
+
+    children = getattr(agent, "_active_children", None)
+    if isinstance(children, list):
+        if not getattr(children, "_gym_child_hook_supported", False):
+            children = _SummaryCompatChildren(children)
+            agent._active_children = children
+        children._gym_prepare_child = lambda child: install_summary_compat(
+            child, preserve_reasoning_history=preserve_reasoning_history
+        )

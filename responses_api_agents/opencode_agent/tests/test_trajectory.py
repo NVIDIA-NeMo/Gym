@@ -7,10 +7,10 @@ from functools import partial
 
 import pytest
 
-from nemo_gym.base_responses_api_model import ModelCallRecord
-from nemo_gym.rollout_collection import _build_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord, join_model_call_observations
+from nemo_gym.config import ModelServerRef
+from nemo_gym.rollouts import run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+from nemo_gym.trajectory import AgentInvocation, ModelCallRecord, TrajectoryRecord, join_agent_model_calls
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
 
@@ -49,7 +49,7 @@ def _health(tmp_path, trajectory, observations, **call_updates):
         )
         | call_updates
     )
-    observations = join_model_call_observations(observations, [call])
+    observations = join_agent_model_calls(observations, [call])
     row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
     result = {
         "ng_agent_observations": observations.model_dump(mode="json"),
@@ -228,3 +228,165 @@ def test_invalid_json_and_tool_state_are_partial_evidence(tmp_path, parse):
     assert len(trajectory.turns) == 1
     assert trajectory.turns[0].answer == []
     assert trajectory.gaps[0].code == "turns_unavailable"
+
+
+def test_activation_scoping_keeps_child_ownership_and_cross_activation_compaction(tmp_path):
+    from nemo_gym.trajectory import ContextCompactionObservation
+    from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+
+    db = _session_db(
+        tmp_path,
+        [
+            ("user", [{"type": "text", "text": "initial"}]),
+            _policy(
+                {
+                    "type": "tool",
+                    "tool": "task",
+                    "callID": "spawn-child",
+                    "state": {
+                        "status": "completed",
+                        "input": {"prompt": "inspect"},
+                        "output": "done",
+                        "metadata": {"sessionId": "child"},
+                        "time": {"start": 1000, "end": 1500},
+                    },
+                },
+                finish="stop",
+            ),
+            ("child", *_policy({"type": "text", "text": "child answer"}, finish="stop")),
+            ("user", [{"type": "compaction", "auto": True, "tail_start_id": "m1"}]),
+            _policy({"type": "text", "text": "summary"}, summary=True, parentID="m3", finish="stop"),
+            _policy({"type": "text", "text": "correction"}, finish="stop"),
+        ],
+        sessions=[("root", None), ("child", "root")],
+    )
+    projected = []
+    for index, ids in enumerate(({"m0", "m1", "m2"}, {"m3", "m4", "m5"}), 1):
+        trajectory = TrajectoryRecord(task_id="task", rollout_id="episode")
+        bundle = _parse_opencode_session(db, "fallback", trajectory, require_terminal_finish=True, message_ids=ids)
+        scope_opencode_activation(
+            bundle, trajectory, invocation_prefix=f"session:activation-{index}", activation_id=index
+        )
+        projected.append((bundle, trajectory))
+    first, first_trajectory = projected[0]
+    invocations = [r for r in first.records if isinstance(r, AgentInvocation)]
+    child = next(r for r in invocations if r.harness_session_id == "child")
+    assert child.parent_invocation_id == "session:activation-1:root"
+    assert child.invocation_id == "session:activation-1:child" and child.activation_id == 1
+    assert child.spawned_by_tool_call_id == "spawn-child"
+    assert {turn.activation_id for turn in first_trajectory.turns} == {1}
+    second, second_trajectory = projected[1]
+    assert [r.harness_session_id for r in second.records if isinstance(r, AgentInvocation)] == ["root"]
+    [compaction] = [r for r in second.records if isinstance(r, ContextCompactionObservation)]
+    assert compaction.invocation_id == "session:activation-2:root"
+    assert compaction.first_kept_item_id == "spawn-child"
+    assert compaction.summary == "summary" and compaction.source_message_ids == ["m4"]
+    assert all(gap.code != "compaction_first_kept_item_unavailable" for gap in second.gaps)
+    assert [(turn.activation_id, turn.turn_no, turn.step_count) for turn in second_trajectory.turns] == [(2, 1, 1)]
+
+
+@pytest.mark.parametrize("current", [False, True])
+@pytest.mark.parametrize("role", ["assistant", "user"])
+@pytest.mark.parametrize(
+    ("kept", "model_ref", "first_kept"),
+    [
+        ("kept", None, "p2"),
+        # A Gym reply's reasoning block is emitted first, as its own item, whichever activation parses it.
+        ("<think>r</think>", ModelServerRef(type="responses_api_models", name="policy"), "p2-reasoning"),
+        ("<think>r</think>\n\nkept", ModelServerRef(type="responses_api_models", name="policy"), "p2-reasoning"),
+        ("<think>r</think>", None, "p2"),
+    ],
+    ids=["plain", "gym_reasoning_only", "gym_reply", "literal_think_text"],
+)
+def test_compaction_boundary_uses_only_emitted_assistant_items(tmp_path, current, role, kept, model_ref, first_kept):
+    from nemo_gym.trajectory import ContextCompactionObservation
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                role,
+                [{"type": "reasoning", "text": " "}, {"type": "text", "text": ""}, {"type": "text", "text": kept}],
+            ),
+            ("user", [{"type": "compaction", "tail_start_id": "m0"}]),
+            _policy({"type": "text", "text": "summary"}, summary=True, parentID="m1", finish="stop"),
+        ],
+    )
+    ids = {"m1", "m2"} | ({"m0"} if current else set())
+    bundle = _parse_opencode_session(db, "fallback", model_ref=model_ref, message_ids=ids)
+    compaction = next(r for r in bundle.records if isinstance(r, ContextCompactionObservation))
+    assert compaction.first_kept_item_id == (first_kept if role == "assistant" else None)
+    if role == "assistant":
+        assert all(gap.code != "compaction_first_kept_item_unavailable" for gap in bundle.gaps)
+
+
+@pytest.mark.parametrize("persisted_step", [False, True])
+def test_final_activation_preserves_native_step_or_explicit_gap(tmp_path, persisted_step):
+    from nemo_gym.agents import AgentCloseSessionResponse
+    from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+    from responses_api_agents.opencode_agent.tests.test_model_call_correlation import (
+        POLICY,
+        CaptureStore,
+        _capture,
+        _merge,
+    )
+
+    parts = [{"type": "text", "text": "private answer"}]
+    if persisted_step:
+        parts = [{"type": "step-start"}, *parts, {"type": "step-finish"}]
+    db = _session_db(tmp_path, [({"role": "assistant", "time": {"created": 1000}}, parts)])
+    trajectory, observations = _trajectory(
+        partial(_parse_opencode_session, require_terminal_finish=True, message_ids={"m0"}, model_ref=POLICY), db
+    )
+    scope_opencode_activation(observations, trajectory, invocation_prefix="session:activation-8", activation_id=8)
+    # Close serialization must retain evidence even when the invocation itself was interrupted.
+    for invocation in observations.records:
+        if isinstance(invocation, AgentInvocation):
+            invocation.status = "incomplete"
+            invocation.stop_reason = "session_budget_exhausted"
+    close = AgentCloseSessionResponse(
+        agent_session_id="session", agent_observations=observations, trajectory=trajectory, cleanup_confirmed=True
+    )
+    result = json.loads(close.model_dump_json())
+    canonical = _build_trajectory_record(
+        {"_ng_task_index": 0, "_ng_rollout_index": 0},
+        {"ng_agent_observations": result["agent_observations"], "ng_trajectory": result["trajectory"]},
+    )
+    assert len(canonical.turns) == int(persisted_step)
+    # A successful captured response is joined only when its native provider step exists.
+    restored = AgentCloseSessionResponse.model_validate(result)
+    store = CaptureStore(tmp_path / "capture")
+    _capture(store, "final-call", "m0", session="session:activation-8:root")
+    _, bundle, joined = _merge(store, restored.agent_observations, restored.trajectory)
+    assert len(joined.turns) == int(persisted_step)
+    if persisted_step:
+        assert [call.model_call_id for call in joined.turns[0].model_calls] == ["final-call"]
+    else:
+        assert any(gap.code == "assistant_message_call_unmatched" for gap in bundle.gaps)
+    if persisted_step:
+        assert canonical.turns[0].source_message_id == "m0"
+        assert canonical.turns[0].activation_id == 8
+        assert all(gap.code != "turns_unavailable" for gap in canonical.gaps)
+    else:
+        gap = next(gap for gap in canonical.gaps if gap.code == "turns_unavailable")
+        diagnostic = json.loads(gap.detail.split("native_capture_diagnostics=", 1)[1])
+        assert diagnostic["messages"][0]["time"] == {"created": 1000}
+        assert [part["type"] for part in diagnostic["parts"]] == ["text"]
+        assert "private answer" not in gap.detail
+
+
+def test_native_gap_diagnostics_are_bounded_and_content_free(tmp_path):
+    db = _session_db(
+        tmp_path,
+        [({"role": "assistant", "time": {"created": 1000}}, [{"type": "text", "text": "secret"}] * 5)] * 40,
+    )
+    trajectory, _ = _trajectory(_parse_opencode_session, db)
+    assert trajectory.turns == []
+    gap = next(gap for gap in trajectory.gaps if gap.code == "turns_unavailable")
+    diagnostic = json.loads(gap.detail.split("native_capture_diagnostics=", 1)[1])
+    assert diagnostic["message_count"] == 40
+    assert len(diagnostic["messages"]) == 32
+    assert diagnostic["part_count"] == 160
+    assert len(diagnostic["parts"]) == 128
+    assert diagnostic["truncated"] is True
+    assert "secret" not in gap.detail

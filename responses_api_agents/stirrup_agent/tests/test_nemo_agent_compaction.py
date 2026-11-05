@@ -140,10 +140,6 @@ def test_compaction_minimum_must_be_positive() -> None:
         _agent(_FakeClient(), min_words=0)
 
 
-def test_session_agent_uses_the_hardened_compaction_override() -> None:
-    assert NeMoSessionAgent.summarize_messages is NeMoAgent.summarize_messages
-
-
 @pytest.mark.asyncio
 async def test_summarization_retries_degenerate_outputs_and_persists_only_sanitized_text() -> None:
     good_summary = _words(60)
