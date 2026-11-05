@@ -6,7 +6,7 @@ import json
 from copy import deepcopy
 from pathlib import Path
 
-from nemo_gym.task_data import TaskDataValidator, load_task_data_schema, validate_jsonl_rows
+from nemo_gym.data import TaskDataValidator, load_task_data_schema, validate_jsonl_rows
 
 
 def test_task_data_preserves_legacy_bindings_and_rejects_bad_rows():

@@ -13,11 +13,11 @@ from pydantic import ValidationError
 from benchmarks.agentic_if_realworld.rollout_driver import write_aggregate_metrics, write_reports
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.rollout_collection import E2ERolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollout_reverification import RolloutReverificationConfig
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.rollouts import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import E2ERolloutCollectionConfig
 from resources_servers.agentic_if_realworld.app import FixtureVerifier, ResourcesConfig, ResourcesServer, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark.core import Dataset, digest, judge, read, unscored, write
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, delivery

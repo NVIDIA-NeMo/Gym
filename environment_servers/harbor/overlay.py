@@ -23,9 +23,8 @@ from environment_servers.harbor.users import (
     _is_root,
     _user_group,
 )
+from nemo_gym.data.tasks.harbor import HarborTask, OverlayRun
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 
 
 # How much of a failed overlay RUN line's output the seed error carries.
@@ -97,7 +96,8 @@ def _check_overlay_result(result: SandboxExecResult, label: str, what: str | Non
         raise HarborOverlayError(f"{subject} exited {result.return_code}; output tail: {_output_tail(result)}")
 
 
-# The separate verifier's sandbox could not take the task's Dockerfile overlay after the rollout ran.
+# The separate verifier's sandbox could not take the task's Dockerfile overlay after the rollout ran (a shared-mode
+# task the server verifies separately, see `separate_verifier_for_artifacts`).
 OVERLAY_FAILED_KIND = "harbor:overlay_failed"
 
 

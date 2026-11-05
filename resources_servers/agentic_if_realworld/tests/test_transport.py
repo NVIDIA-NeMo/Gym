@@ -30,7 +30,7 @@ from resources_servers.agentic_if_realworld.benchmark.transport import (
 )
 
 
-server_utils = pytest.importorskip("nemo_gym.server_utils")
+http_client = pytest.importorskip("nemo_gym.client.http_client")
 SYNTHETIC_PROMPT = (ROOT / "synthetic-judge-prompt.md").read_text()
 
 
@@ -84,7 +84,7 @@ def test_interrupted_judge_http_retry_blocks_resume(judge_payload, tmp_path, mon
             raise asyncio.CancelledError
         return Response(status, {"error": "synthetic temporary outage"})
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.transport.asyncio.sleep", no_sleep)
     monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
     kwargs = {
@@ -127,7 +127,7 @@ def test_judge_http_retries_remain_bounded_and_completed_review_is_reused(
             },
         )
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.transport.asyncio.sleep", no_sleep)
     monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
     kwargs = {
@@ -164,7 +164,7 @@ def test_concurrent_identical_reviews_share_one_judge_call(judge_payload, tmp_pa
             },
         )
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
 
     async def run():
@@ -204,7 +204,7 @@ def test_changing_judge_model_preserves_and_separates_cached_grades(judge_payloa
             },
         )
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
     kwargs = {
         "directory": tmp_path / "receipts",
@@ -242,7 +242,7 @@ def test_cached_judge_grade_revalidates_authoritative_receipts(judge_payload, tm
             {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(judge_payload))}}]},
         )
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
     kwargs = {
         "directory": tmp_path / "receipts",
@@ -307,7 +307,7 @@ def test_provider_grammar_compatibility_preserves_strict_local_support_quotes(
                 jsonschema.validate(checked, local_schema)
         return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(checked)}}]})
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     kwargs = {
         "directory": tmp_path / "receipts",
@@ -330,7 +330,7 @@ def test_provider_grammar_compatibility_preserves_strict_local_support_quotes(
 def test_judge_receipts_reject_git_checkout_before_writing(judge_payload, tmp_path, monkeypatch):
     checkout = tmp_path / "checkout"
     (checkout / ".git").mkdir(parents=True)
-    monkeypatch.setattr(server_utils, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
     with pytest.raises(ValueError, match="outside Git"):
         asyncio.run(
             score(
@@ -345,7 +345,7 @@ def test_judge_receipts_reject_git_checkout_before_writing(judge_payload, tmp_pa
 
 def test_missing_key_fails_before_any_receipt(tmp_path, monkeypatch):
     monkeypatch.delenv("SYNTHETIC_MISSING_KEY", raising=False)
-    monkeypatch.setattr(server_utils, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
     path = tmp_path / "receipt.json"
     with pytest.raises(ValueError, match="SYNTHETIC_MISSING_KEY is not set"):
         asyncio.run(
@@ -373,7 +373,7 @@ def test_transport_only_marks_proven_connect_failures_as_not_dispatched(tmp_path
         calls.append(1)
         raise errors[failure]
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     path = tmp_path / "receipt.json"
     args = {"endpoint": "http://synthetic.invalid", "key_env": "SYNTHETIC", "path": path}
@@ -404,7 +404,7 @@ def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeyp
     async def request(*args, **kwargs):
         return response
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     receipt = asyncio.run(
         wire_call({}, endpoint="http://synthetic.invalid", key_env="SYNTHETIC", path=tmp_path / "receipt.json")
@@ -441,7 +441,7 @@ def test_judge_transport_failure_recovery_preserves_receipts_and_review_budget(
         content = json.dumps(review(judge_payload))
         return Response(200, {"choices": [{"finish_reason": "stop", "message": {"content": content}}]})
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.transport.asyncio.sleep", no_sleep)
     monkeypatch.setenv("SYNTHETIC", "bad-key")
     kwargs = {
@@ -482,7 +482,7 @@ def test_valid_cached_grade_after_legacy_ambiguous_attempt_remains_readable(judg
             200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(judge_payload))}}]}
         )
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     kwargs = {
         "directory": tmp_path / "receipts",
@@ -511,7 +511,7 @@ def test_valid_cached_grade_after_legacy_ambiguous_attempt_remains_readable(judg
     cached.update(receipt_name="attempt1.json", receipt_sha256=digest(work / "attempt1.json"))
     write(work / "result.json", cached)
     saved = {path: path.read_bytes() for path in work.iterdir() if path.is_file()}
-    monkeypatch.setattr(server_utils, "request", lambda *args, **kwargs: pytest.fail("Cache replay cannot dispatch"))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: pytest.fail("Cache replay cannot dispatch"))
     assert asyncio.run(score(judge_payload, **kwargs, cached_only=True)) == result
     assert all(path.read_bytes() == content for path, content in saved.items())
 
@@ -525,7 +525,7 @@ def test_two_delivered_judge_reviews_remain_exhausted_after_http_recovery(judge_
         status = next(outcomes)
         return Response(status, {"choices": [{"finish_reason": "stop", "message": {"content": "not JSON"}}]})
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setattr("resources_servers.agentic_if_realworld.benchmark.transport.asyncio.sleep", no_sleep)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     kwargs = {
@@ -567,7 +567,7 @@ def test_judge_only_spends_review_budget_on_completed_http_bodies(
         response.headers = {"content-type": content_type}
         return response
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     kwargs = {
         "directory": tmp_path / "receipts",
@@ -617,7 +617,7 @@ def test_cached_transport_rejects_changed_request_body(tmp_path, monkeypatch):
             "raw_attempts": [],
         },
     )
-    monkeypatch.setattr(server_utils, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
+    monkeypatch.setattr(http_client, "request", lambda *args, **kwargs: pytest.fail("No network call allowed"))
     with pytest.raises(ValueError, match="fingerprint"):
         asyncio.run(wire_call(body, endpoint=endpoint, key_env="SYNTHETIC", path=path))
 
@@ -643,7 +643,7 @@ def _score_in_worker(payload, directory, start, ready, calls, results):
 
     with (
         patch.dict(os.environ, {"SYNTHETIC_JUDGE_KEY": "synthetic"}),
-        patch.object(server_utils, "request", request),
+        patch.object(http_client, "request", request),
     ):
         ready.put(True)
         if not start.wait(20):
@@ -722,7 +722,7 @@ def test_different_responses_can_be_judged_concurrently(judge_payload, tmp_path,
                 },
             )
 
-        monkeypatch.setattr(server_utils, "request", request)
+        monkeypatch.setattr(http_client, "request", request)
         return await asyncio.wait_for(
             asyncio.gather(
                 *(
@@ -775,7 +775,7 @@ def test_evidence_ids_preserve_canonical_grade_and_cache(judge_payload, tmp_path
             },
         )
 
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC_JUDGE_KEY", "synthetic")
     kwargs = dict(
         directory=tmp_path / "receipts",

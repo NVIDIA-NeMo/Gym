@@ -7,9 +7,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from omegaconf import OmegaConf
 
 from resources_servers.genrm_eval.preferences import validate_metadata
 from resources_servers.genrm_eval.prepare import download_prepared_dataset, make_task
+
+
+def test_sampling_defaults() -> None:
+    row = make_task("task", [{"role": "user", "content": "Q"}], "A", "B", {})
+    params = row["responses_create_params"]
+    assert params["temperature"] == 1.0
+    assert params["top_p"] == 0.95
+    assert params["max_output_tokens"] == 16384
+    config = OmegaConf.load(Path(__file__).parents[1] / "configs/genrm_eval.yaml")
+    assert dict(config.responses_create_params) == {"temperature": 1.0, "top_p": 0.95}
 
 
 @pytest.mark.parametrize("valid", [True, False])
@@ -25,7 +36,7 @@ def test_download_validates_before_replacing_output(tmp_path: Path, valid: bool)
         assert config.artifact_fpath == "tasks.jsonl"
         Path(config.output_fpath).write_text(data)
 
-    with patch("nemo_gym.gitlab_utils.download_jsonl_dataset", side_effect=fetch):
+    with patch("nemo_gym.data.gitlab_utils.download_jsonl_dataset", side_effect=fetch):
         if valid:
             assert download_prepared_dataset("test_dataset", "0.1.0", "tasks.jsonl", str(output)) == output
             assert output.read_text() == data
@@ -81,7 +92,7 @@ def test_invalid_download_preserves_output(tmp_path: Path, defect: str) -> None:
     def fetch(config):
         Path(config.output_fpath).write_text(data)
 
-    with patch("nemo_gym.gitlab_utils.download_jsonl_dataset", side_effect=fetch), pytest.raises(ValueError):
+    with patch("nemo_gym.data.gitlab_utils.download_jsonl_dataset", side_effect=fetch), pytest.raises(ValueError):
         download_prepared_dataset("test", "0.1.0", "tasks.jsonl", output, validate_metadata=validate_metadata)
     assert output.read_text() == "existing dataset"
     assert list(tmp_path.iterdir()) == [output]
@@ -94,6 +105,6 @@ def test_blank_lines_are_removed(tmp_path: Path) -> None:
     def fetch(config):
         Path(config.output_fpath).write_text("\n" + json.dumps(row) + "\n  \n")
 
-    with patch("nemo_gym.gitlab_utils.download_jsonl_dataset", side_effect=fetch):
+    with patch("nemo_gym.data.gitlab_utils.download_jsonl_dataset", side_effect=fetch):
         download_prepared_dataset("test", "0.1.0", "tasks.jsonl", output, validate_metadata=validate_metadata)
     assert [json.loads(line) for line in output.read_text().splitlines()] == [row]

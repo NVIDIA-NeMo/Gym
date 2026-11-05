@@ -257,7 +257,7 @@ def test_terminal_delivery_stops_profile(dataset, tmp_path):
 def test_connect_failure_stops_and_explicit_resume_retries_same_phase(dataset, tmp_path, monkeypatch):
     from aiohttp import ClientConnectorError
 
-    import nemo_gym.server_utils
+    from nemo_gym.client import http_client
     from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError, wire_call
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
 
@@ -289,7 +289,7 @@ def test_connect_failure_stops_and_explicit_resume_retries_same_phase(dataset, t
         p = payload(dataset)
         return judge.validate_review(review(p), p)
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     args = {"directory": tmp_path / "run", "settings": {}, "generate": generate, "verify": verify}
     with pytest.raises(RetryableTransportError):
@@ -314,7 +314,7 @@ def test_connect_failure_stops_and_explicit_resume_retries_same_phase(dataset, t
 
 
 def test_judge_transport_recovery_never_regenerates_selected_answer(dataset, tmp_path, monkeypatch):
-    import nemo_gym.server_utils
+    from nemo_gym.client import http_client
     from resources_servers.agentic_if_realworld.benchmark.scoring import score
     from resources_servers.agentic_if_realworld.benchmark.transport import RetryableTransportError
     from resources_servers.agentic_if_realworld.tests.test_transport import Response
@@ -343,7 +343,7 @@ def test_judge_transport_recovery_never_regenerates_selected_answer(dataset, tmp
             **kwargs,
         )
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "bad")
     args = {"directory": tmp_path / "run", "settings": {}, "generate": generate, "verify": verify}
     with pytest.raises(RetryableTransportError):

@@ -9,17 +9,17 @@ from typing import Literal
 
 from fastapi import FastAPI
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    SimpleResponsesAPIModel,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.models import (
+    BaseResponsesAPIModelConfig,
+    SimpleResponsesAPIModel,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_if_realworld.benchmark.core import PHASES, captured_context, judge, write
 from resources_servers.agentic_if_realworld.benchmark.transport import delivered, validate_endpoint, wire_call
 

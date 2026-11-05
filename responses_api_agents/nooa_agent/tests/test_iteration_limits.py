@@ -14,15 +14,15 @@ from nooa import Agent, CodeActStrategy, strategy
 from nooa.config import CodeActConfig
 from nooa.errors import GenerationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.rollouts.rollout_collection import _episode_record
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import NOOARunFailure
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -189,6 +189,7 @@ async def test_real_codeact_response_retains_partial_evidence_without_verificati
     try:
         response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         assert_partial_evidence(response, scenario=scenario)
+        assert instance._require_agent_session("session").result.trajectory.invocations[0].status == "incomplete"
         assert "_ng_failure_class" not in response.model_dump(mode="json")
         assert len(model_calls) == 1
         assert not sentinel.exists()
@@ -262,6 +263,7 @@ async def test_other_codeact_limits_and_unrecovered_outage_fail_agent_activation
             await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
         assert len(model_calls) == (2 if scenario == "model_outage" else 1)
         assert instance._require_agent_session("session").result.episode.response.output
+        assert instance._require_agent_session("session").result.trajectory.invocations[0].status == "failed"
     finally:
         receipt = await close(instance)
     gaps = {gap.code for gap in receipt.agent_observations.gaps}

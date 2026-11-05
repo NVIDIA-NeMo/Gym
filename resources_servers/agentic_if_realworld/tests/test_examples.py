@@ -7,7 +7,7 @@ from pathlib import Path
 
 from nemo_gym.cli.env import TestConfig as GymTestConfig
 from nemo_gym.cli.env import _validate_data_single
-from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
+from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
 from resources_servers.agentic_if_realworld.benchmark.core import Dataset, judge
 from resources_servers.agentic_if_realworld.benchmark.synthetic import EXAMPLE_LITERALS, create, review
 

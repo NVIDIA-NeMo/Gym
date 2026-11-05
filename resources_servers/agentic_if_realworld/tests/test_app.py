@@ -10,9 +10,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-import nemo_gym.server_utils
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.client import ServerClient, http_client
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.agentic_if_realworld.app import (
     VERIFIER_FIXTURE,
     FixtureVerifier,
@@ -95,7 +94,7 @@ def test_http_verify_outage_is_an_error_then_recovers_saved_answer(verifier, mon
             200, {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}]}
         )
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "bad-key")
     config = ResourcesConfig(
         host="",
@@ -252,7 +251,7 @@ def test_ambiguous_judge_dispatch_stays_blocked_on_resume(verifier, monkeypatch,
         choice = {"finish_reason": "stop", "message": {"content": content}}
         return JudgeResponse(json.dumps({"id": "judge", "choices": [choice]}).encode())
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
     production = Verifier(
         dataset=verifier.dataset, receipt_dir=verifier.receipt_dir, endpoint="http://synthetic.invalid"
@@ -284,7 +283,7 @@ def test_pending_judge_cache_validation_is_readonly(verifier, monkeypatch, respo
         response.status = 401
         return response
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
     production = Verifier(
         dataset=verifier.dataset,
@@ -354,7 +353,7 @@ def test_judge_cache_validation_rechecks_successful_review(verifier, monkeypatch
         choice = {"finish_reason": "stop", "message": {"content": json.dumps(review(payload))}}
         return JudgeResponse(json.dumps({"choices": [choice]}).encode())
 
-    monkeypatch.setattr(nemo_gym.server_utils, "request", request)
+    monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("AGENTIC_IF_JUDGE_API_KEY", "synthetic")
     production = Verifier(
         dataset=verifier.dataset, receipt_dir=verifier.receipt_dir, endpoint="http://synthetic.invalid"

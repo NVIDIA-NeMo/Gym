@@ -9,9 +9,9 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig, MLFlowConfig
-from nemo_gym.gitlab_utils import download_jsonl_dataset
-from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.config import DownloadJsonlDatasetGitlabConfig, get_global_config_dict
+from nemo_gym.config.config_types import MLFlowConfig
+from nemo_gym.data import download_jsonl_dataset
 
 from .core import DEFAULT_DATA_DIR, ROOT, digest, read
 

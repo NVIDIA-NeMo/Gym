@@ -18,7 +18,8 @@ from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -26,8 +27,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_programmatic_grading,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 
 
 class MCQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -73,6 +74,8 @@ class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
 class MCQAVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
+    # Every verify path grades the row (an unparsed answer scores 0), so none is incomplete: gym-p0/v1 TE-6.
+    evaluation_completed: bool = True
 
 
 class MCQADualVerifyResponse(MCQAVerifyResponse, BaseMultiRewardVerifyResponse):
@@ -438,6 +441,9 @@ class MCQAResourcesServer(SimpleResourcesServer):
         return key
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
+        return observe_programmatic_grading(lambda: self._programmatic_score(body))
+
+    def _programmatic_score(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
         gold = (expected_answer or "").strip().upper()

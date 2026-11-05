@@ -136,7 +136,7 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
     """Save before dispatch. Existing started receipts require explicit reconciliation."""
     from aiohttp import ClientConnectorError, ClientTimeout, ConnectionTimeoutError
 
-    from nemo_gym.server_utils import request
+    from nemo_gym.client import request
 
     validate_endpoint(endpoint)
     if path.exists():

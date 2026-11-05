@@ -1,0 +1,38 @@
+name: enterpriseops_gym
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: ServiceNow EnterpriseOps-Gym oracle-mode tasks across eight enterprise
+  domains, run with the Stirrup agent against live MCP gym servers in per-task sandboxes
+  and scored by SQL checks on the final database state.
+modality: text
+licensing: Apache-2.0
+authors:
+- Khushi Bhardwaj
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+agent_server: stirrup_agent
+datasets:
+- name: enterpriseops_gym
+  type: benchmark
+  jsonl_fpath: benchmarks/enterpriseops_gym/data/enterpriseops_gym_benchmark.jsonl
+  prepare_script: benchmarks/enterpriseops_gym/prepare.py
+  num_repeats: 3
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/enterpriseops_gym/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+session_model: episode
+state: per_session
+sandbox: opensandbox
+canonical_split: oracle
+prompt_source: prepared
+lifecycle: active
+resources_server: enterpriseops_gym

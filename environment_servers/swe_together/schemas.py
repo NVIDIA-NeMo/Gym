@@ -2,18 +2,21 @@
 # SPDX-License-Identifier: Apache-2.0
 """SWE-Together episode inputs and retained evidence."""
 
-from collections.abc import Mapping
 from time import time
-from typing import Literal, Self
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ModelWrapValidatorHandler, PrivateAttr, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import TrajectoryRecord
-from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
+from nemo_gym.agents import AgentCloseSessionResponse
+from nemo_gym.core import (
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+)
+from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResult
 
 
 class CandidateTurn(BaseModel):
@@ -110,6 +113,9 @@ class UserTurn(BaseModel):
 
 
 class SWETResult(SingleAgentTurnResult):
+    # Required, so a result path that does not say whether the judge measured the patch fails to serialize
+    # instead of defaulting to a completed measurement.
+    evaluation_completed: bool
     judge_score: float | None = None
     task_id: str
     ng_activations: list[CandidateTurn] = Field(default_factory=list)
@@ -128,35 +134,7 @@ class SWETFailure(SingleAgentTurnFailure):
 
 
 class SWETRequest(BaseEpisodeRequest[SWETTaskInput]):
-    _collector_task_id: str | None = PrivateAttr(default=None)
-
-    @model_validator(mode="wrap")
-    @classmethod
-    def _capture_collector_task_id(cls, value: object, handler: ModelWrapValidatorHandler[Self]) -> Self:
-        # The collector stringifies the input mapping, including its key order. Capture it before
-        # TaskId validation normalizes the order; the logical ID still seeds the candidate session.
-        task = value.get("task") if isinstance(value, Mapping) else None
-        task_id = task.get("task_id") if isinstance(task, Mapping) else None
-        collector_task_id = str(dict(task_id)) if isinstance(task_id, Mapping) else None
-        request = handler(value)
-        if collector_task_id is not None:
-            request._collector_task_id = collector_task_id
-        elif request._collector_task_id is None:
-            request._collector_task_id = str(request.task.task_id.model_dump(mode="json"))
-        return request
-
-    def trajectory_for_collection(self, trajectory: TrajectoryRecord | None) -> TrajectoryRecord | None:
-        """Adapt forwarded identity while retaining the original harness close evidence."""
-        logical_task_id = self.task.task_id.task_id
-        if trajectory is None or trajectory.task_id != logical_task_id:
-            return trajectory
-        task_id = self._collector_task_id or str(self.task.task_id.model_dump(mode="json"))
-        return trajectory.model_copy(
-            update={
-                "task_id": task_id,
-                "turns": [turn.model_copy(update={"task_id": task_id}) for turn in trajectory.turns],
-            }
-        )
+    pass
 
 
 class SWETResponse(BaseEpisodeResponse[SWETResult]):

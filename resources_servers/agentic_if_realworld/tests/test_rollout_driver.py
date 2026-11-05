@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from benchmarks.agentic_if_realworld import rollout_driver
-from nemo_gym.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionHelper
 from resources_servers.agentic_if_realworld.benchmark.core import judge, write
 
 

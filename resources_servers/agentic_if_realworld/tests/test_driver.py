@@ -14,15 +14,14 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.agentic_if_realworld import rollout_driver
-from nemo_gym import rollout_collection, server_utils
-from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.path_utils import materialized_path_for
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.secret_utils import recursively_hide_secrets
+from nemo_gym.client import ServerClient, http_client
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.config.secret_utils import recursively_hide_secrets
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, maybe_rollout_id_from_run_body
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import rollout_collection, run_health_checks
+from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+from nemo_gym.utils import materialized_path_for
 from resources_servers.agentic_if_realworld.app import ResourcesConfig, ResourcesServer, Verifier, VerifyRequest
 from resources_servers.agentic_if_realworld.benchmark import core
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create, review
@@ -89,7 +88,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
                     receipt_dir=str(verifier.receipt_dir),
                     judge_endpoint="http://synthetic.invalid",
                 ),
-                server_client=MagicMock(spec=server_utils.ServerClient),
+                server_client=MagicMock(spec=ServerClient),
             )
             result = await resources.aggregate_metrics(body)
             return SimpleNamespace(value=result.model_dump(), release=lambda: None)
@@ -223,9 +222,9 @@ def test_adaptive_capture_selected_parameters_and_resume(
     monkeypatch.setattr(
         rollout_collection.RolloutCollectionHelper, "setup_server_client", lambda self: SimpleNamespace(post=post)
     )
-    monkeypatch.setattr(server_utils, "raise_for_status", status)
-    monkeypatch.setattr(server_utils, "get_response_json", response_json)
-    monkeypatch.setattr(server_utils, "request", judge_request)
+    monkeypatch.setattr(http_client, "raise_for_status", status)
+    monkeypatch.setattr(http_client, "get_response_json", response_json)
+    monkeypatch.setattr(http_client, "request", judge_request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     config = SimpleNamespace(
         num_repeats=1,
@@ -328,7 +327,7 @@ def test_adaptive_capture_selected_parameters_and_resume(
         finally:
             preserved_journal.rename(first_journal)
 
-        from nemo_gym.observability import model_calls
+        from nemo_gym.rollouts import model_calls
 
         merge = model_calls.merge_model_call_capture_into_record
         assembled = []

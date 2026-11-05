@@ -10,8 +10,9 @@ import pytest
 from omegaconf import DictConfig
 
 from benchmarks.agentic_if_realworld import prepare
-from nemo_gym.config_types import ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.train_data_utils import TrainDataProcessor, TrainDataProcessorConfig
+from nemo_gym.config.config_types import ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.data import TrainDataProcessor
+from nemo_gym.data.dataset_preparation import TrainDataProcessorConfig
 from resources_servers.agentic_if_realworld.benchmark.core import Dataset
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create
 

@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.agentic_if_realworld.benchmark.core import Dataset
 from resources_servers.agentic_if_realworld.benchmark.synthetic import create
 from responses_api_models.agentic_if_text import app

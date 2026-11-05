@@ -12,10 +12,9 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.global_config import ATTEMPT_INDEX_KEY_NAME
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ATTEMPT_INDEX_KEY_NAME, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY
 from resources_servers.agentic_if_realworld.benchmark.core import (
     PHASES,
     Dataset,
@@ -40,16 +39,17 @@ LOGGER = logging.getLogger(__name__)
 async def run_rollout_collection(rollout_collection_config, global_config_dict) -> None:
     from omegaconf import OmegaConf
 
-    from nemo_gym.observability.model_calls import (
+    from nemo_gym.client import get_response_json, raise_for_status
+    from nemo_gym.config.secret_utils import recursively_hide_secrets
+    from nemo_gym.core import maybe_rollout_id_from_run_body
+    from nemo_gym.rollouts import (
+        RolloutCollectionHelper,
         await_model_call_capture_quiescence,
         merge_model_call_capture_into_record,
         model_call_capture_dirs_from_config,
     )
-    from nemo_gym.path_utils import materialized_path_for
-    from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_trajectory_record
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-    from nemo_gym.secret_utils import recursively_hide_secrets
-    from nemo_gym.server_utils import get_response_json, raise_for_status
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
+    from nemo_gym.utils import materialized_path_for
 
     config = rollout_collection_config
     if config.num_repeats != 1 or config.fan_out or config.responses_create_params:
@@ -332,7 +332,7 @@ def write_reports(output: Path, results: list[dict], dataset: Dataset) -> None:
 
 async def write_aggregate_metrics(output: Path, records: list[dict], client: ServerClient) -> None:
     """Aggregate settled full records through the resource server and save Gym's artifact shape."""
-    from nemo_gym.server_utils import get_response_json, raise_for_status
+    from nemo_gym.client import get_response_json, raise_for_status
 
     stripped = []
     for record in records:

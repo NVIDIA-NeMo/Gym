@@ -210,6 +210,9 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
   transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
+- Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
+  command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
+  exits, so a backgrounded command would hold the run open after the final answer.
 
 ## Sandbox execution
 
@@ -231,8 +234,9 @@ sandbox_install_timeout_seconds: 600
 session_close_timeout_seconds: 60
 ```
 
-The image must include Linux Python **3.8+**, `tar`, and libraries required by the
-native Claude binary. Seed probes the sandbox's architecture and libc, downloads
+The image must include coreutils, `gzip`, `tar`, and the libraries the Claude binary
+requires; it needs no Python. Seed installs a missing `bash` on a root image with `apk` or
+`apt-get`, and otherwise fails with a message that names it. Seed probes the sandbox's architecture and libc, downloads
 and caches the matching Linux x64/arm64 release on the **Gym host**, then compresses
 and uploads it in bounded pieces through the sandbox provider's file transfer API.
 The sandbox needs no internet access for runtime setup. The Gym host needs HTTPS
@@ -306,3 +310,26 @@ harness execution; setup and close use the limits above. The close response's
 `cleanup_confirmed` reports whether harness termination was witnessed or an owned
 sandbox was stopped. A false value can accompany successful borrowed-connection
 release; the owner must destroy that sandbox and leave the activation ungraded.
+
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. It also points the CLI at the `policy_model` Gym model server, which serves the Anthropic
+Messages API, with an empty `anthropic_api_key`, and pins `claude_code_version`, which sandbox sessions require. The
+profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after 10 minutes. Supply the image
+in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
+`claude_code_agent.responses_api_agents.claude_code_agent.sandbox_config`.
+
+The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
+APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
+fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
+model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+
+```yaml
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports: []
+```

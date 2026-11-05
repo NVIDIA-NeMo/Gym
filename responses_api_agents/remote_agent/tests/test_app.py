@@ -24,11 +24,12 @@ from fastapi import Response
 from pydantic import BaseModel, ValidationError
 
 import responses_api_agents.remote_agent.app as remote_agent_app
-from nemo_gym import server_utils
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ResourcesServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.rollouts import NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_recovery import has_saved_generation
 from nemo_gym.telemetry import connection_pool
 from responses_api_agents.remote_agent.app import (
     REMOTE_AGENT_FAILURE_CLASS,
@@ -123,6 +124,15 @@ def make_row(tools=None, **extras) -> dict:
     return row
 
 
+def test_failure_placeholder_is_marked_as_no_generation() -> None:
+    """The empty assistant message the failure path returns is a placeholder, never a saved answer."""
+    agent = RemoteAgent(config=make_config(), server_client=MagicMock(spec=ServerClient))
+    result = agent._failure_response(make_row(), "remote service unreachable").model_dump(mode="json")
+    assert result["response"]["metadata"] == NG_NO_GENERATION_METADATA
+    assert not has_saved_generation(result)
+    assert not has_saved_generation({"_ng_failure_response": result["response"]})
+
+
 def make_request(cookies=None) -> MagicMock:
     request = MagicMock()
     request.cookies = cookies or {}
@@ -186,8 +196,8 @@ class FakeServerClientResponse:
 def mock_remote(monkeypatch: pytest.MonkeyPatch, request_mock: AsyncMock) -> MagicMock:
     client = MagicMock()
     client.request = request_mock
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: client)
-    monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: client)
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(remote_agent_app, "_REMOTE_RETRY_SLEEP_SECS", 0)
     return client
 
@@ -348,7 +358,7 @@ class TestRunHappyPath:
             return await service(*args, **kwargs)
 
         agent, _, _ = make_wired_agent(monkeypatch, AsyncMock(side_effect=labelled))
-        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", True)
 
         result = await agent.run(make_request(), RemoteAgentRunRequest.model_validate(make_row()))
 
@@ -873,12 +883,12 @@ class TestCollectorRoundTrip:
     async def test_success_and_failure_routing(self, monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
         from fastapi.testclient import TestClient
 
-        import nemo_gym.rollout_collection
-        from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+        import nemo_gym.rollouts.rollout_collection
+        from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 
         # The collector reads the global config for model-call capture dirs; neutralize the
         # Hydra CLI parse it would otherwise attempt under pytest (same as the core tests).
-        monkeypatch.setattr(nemo_gym.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
+        monkeypatch.setattr(nemo_gym.rollouts.rollout_collection, "get_global_config_dict", MagicMock(return_value={}))
 
         async def remote_service(method, url, data=None, headers=None, cookies=None, **kwargs):
             params = orjson.loads(data)
@@ -936,6 +946,9 @@ class TestCollectorRoundTrip:
         assert len(sidecar_rows) == 1
         assert sidecar_rows[0][NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert "HTTP 500" in sidecar_rows[0]["error"]
+        assert sidecar_rows[0]["failure_reason"] == sidecar_rows[0]["error"]
+        assert sidecar_rows[0]["_ng_failure_record"]["failure"]["failure_reason"] == sidecar_rows[0]["error"]
+        assert "reward" not in sidecar_rows[0]
 
 
 class TestReviewFindingPins:
@@ -945,6 +958,7 @@ class TestReviewFindingPins:
         "reward": 0.75,
         "response": {"stale": True},
         "error": "stale error",
+        "failure_reason": "stale failure reason",
         NG_FAILURE_CLASS_KEY: "stale_class",
         NG_NO_PERSIST_KEY: True,
         NG_TERMINAL_KEY: True,
@@ -962,6 +976,7 @@ class TestReviewFindingPins:
         assert result["reward"] == 0.0
         assert result["response"]["output"][0]["type"] == "message"
         assert "remote exploded" in result["error"]
+        assert result["failure_reason"] == result["error"]
         # Stale no-persist/terminal flags from the input row must not survive
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
@@ -986,6 +1001,7 @@ class TestReviewFindingPins:
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))).model_dump()
 
         assert result["reward"] == 1.0
+        assert result["failure_reason"] is None
         assert NG_FAILURE_CLASS_KEY not in result
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
@@ -1018,7 +1034,7 @@ class TestReviewFindingPins:
         server_client.post = AsyncMock(side_effect=_post)
         agent = make_agent(server_client=server_client)
 
-        from nemo_gym.base_resources_server import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         result = await agent.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
         assert result.key_metrics == {"mean/reward": 1.0}
@@ -1037,6 +1053,6 @@ class TestReviewFindingPins:
         with pytest.raises(asyncio.TimeoutError):
             await agent.aggregate_metrics(
                 __import__(
-                    "nemo_gym.base_resources_server", fromlist=["AggregateMetricsRequest"]
+                    "nemo_gym.server_runtime.base_resources_server", fromlist=["AggregateMetricsRequest"]
                 ).AggregateMetricsRequest(verify_responses=[])
             )

@@ -8,9 +8,9 @@ from typing import ClassVar, Literal
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_runtime import BaseResourcesServerConfig, ReverifyMode, SimpleResourcesServer
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.agentic_if_realworld.benchmark.core import (
     DEFAULT_JUDGE_MODEL,
     judge,

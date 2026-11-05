@@ -33,21 +33,24 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    stage_skills,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
+from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -57,17 +60,25 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import (
+    await_model_call_capture_quiescence,
+    model_call_capture_dirs_from_config,
+    read_available_model_call_records,
+)
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ObservationGap,
     SandboxObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
-from nemo_gym.skills import stage_skills
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.observability import (
+    associate_claude_code_compaction_calls,
+    extract_claude_code_observations,
+)
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
@@ -78,6 +89,25 @@ from responses_api_agents.claude_code_agent.setup_claude_code import ensure_clau
 
 
 LOG = logging.getLogger(__name__)
+# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
+_BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
+    [ "$(id -u)" = 0 ] || { echo "Claude Code sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
+    if command -v apk >/dev/null 2>&1; then
+        apk add --no-cache bash || exit 1
+    elif command -v apt-get >/dev/null 2>&1; then
+        apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash || exit 1
+    else
+        echo "Claude Code sandbox sessions require bash: preinstall it (automatic installation requires apt-get or apk)." >&2
+        exit 1
+    fi
+fi
+"""
+
+
+# A headless run ends when the CLI exits, and the CLI first waits for every background task. A Bash command the model
+# moves to the background (`run_in_background`) can therefore hold the run open long after the final answer, up to
+# the agent timeout. Keep commands in the foreground, where the Bash tool's own timeout bounds them.
+_HEADLESS_RUN_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -313,6 +343,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
+                **_HEADLESS_RUN_ENV,
             }
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
@@ -601,13 +632,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     result = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                     self._check_sandbox_setup(result)
                 result = await sandbox.exec(
-                    f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
+                    _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/config",
                     cwd="/",
-                    timeout_s=30,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
                 self._check_sandbox_setup(result)
-                for name in ("sandbox_runner.py", "install_claude_runtime.py"):
-                    await sandbox.upload(Path(__file__).with_name(name), f"{directory}/{name}")
+                await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+                installer = "install_claude_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
                 await install_sandbox_runtime(
                     sandbox,
                     version=version,
@@ -698,6 +730,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            **_HEADLESS_RUN_ENV,
         }
         if base_url:
             env.update(
@@ -717,7 +750,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 command[0] = state.runtime + "/claude"
                 artifacts = await state.execute(
                     {
-                        "directory": directory,
                         "command": command,
                         "cwd": state.session.workdir,
                         "env": env,
@@ -760,6 +792,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
+        state.observations = await self._associate_compaction_calls(
+            state.observations, rollout_id=state.request.episode_id.capture_key
+        )
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup:
@@ -810,6 +845,36 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
+    async def _associate_compaction_calls(
+        self, observations: AgentObservationBundle, *, rollout_id: str | None
+    ) -> AgentObservationBundle:
+        """Resolve Claude's hidden helpers before handing its bundle to the collector."""
+        if (
+            rollout_id is None
+            or self.config.model_server is None
+            or not any(
+                isinstance(record, ContextCompactionObservation) and not record.model_calls
+                for record in observations.records
+            )
+        ):
+            return observations
+        try:
+            capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
+            if not capture_dirs:
+                return observations
+            await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+            # The agent host reads the run's shared capture; the sandbox needs no access.
+            calls, _ = await asyncio.to_thread(
+                read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
+            )
+            return associate_claude_code_compaction_calls(
+                observations, [call for call in calls if call.model_ref == self.config.model_server]
+            )
+        except Exception:
+            LOG.warning("Could not associate Claude Code compaction calls for rollout %s.", rollout_id, exc_info=True)
+            observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
+            return observations
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -852,6 +917,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
+        observations = await self._associate_compaction_calls(observations, rollout_id=rollout_id)
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 

@@ -10,9 +10,9 @@ from typing import Literal
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.verification import VerifierFixture
 from resources_servers.agentic_if_realworld.benchmark.core import (
     DEFAULT_JUDGE_MODEL,
     Dataset,

@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from .feedback import failure_details, reproduction
@@ -24,13 +25,12 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("nemo_gym/cli/", "nemo_gym/tasks/")) and path not in (
+        elif path.startswith(("nemo_gym/cli/", "nemo_gym/data/tasks/")) and path not in (
             "nemo_gym/cli/__init__.py",
-            "nemo_gym/cli/_compat.py",
             "nemo_gym/cli/utils.py",
         ):
             # Probes construct their own rows and call the collector directly.
-            # Core modules still import the shared CLI compatibility helpers.
+            # A change to either of these two still runs every harness.
             continue
         elif path.startswith(
             (
@@ -40,8 +40,8 @@ def select_harnesses(paths: list[str]) -> list[str]:
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
                 "scripts/harness_conformance/",
-                "tests/unit_tests/harness_capabilities/",
-                "tests/unit_tests/test_harness_conformance",
+                "tests/unit_tests/rollouts/harness_capabilities/",
+                "tests/unit_tests/tooling/test_harness_conformance",
             )
         ):
             return list(HARNESSES)
@@ -98,10 +98,15 @@ def install_runtime(harness: str) -> None:
     import yaml
 
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
-    override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
-    subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
-    if harness in ("hermes", "stirrup"):
-        return  # Hermes' pinned runtime is in its requirements; Stirrup installs its runtime in the task sandbox.
+    subprocess.run(
+        ["uv", "sync", "--locked", "--inexact", "--no-dev", "--project", str(adapter)],
+        env=os.environ | {"UV_PROJECT_ENVIRONMENT": sys.prefix},
+        cwd=adapter,
+        check=True,
+    )
+    if harness in ("hermes", "stirrup", "simple", "openclaw"):
+        # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
+        return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":
@@ -139,7 +144,7 @@ def report(harness: str, *, output: Path, exit_code: int) -> str:
         warning_title = "Harness conformance"
     else:
         status = "passed"
-        message = f"{harness}: all selected conformance requirements are fulfilled."
+        message = f"{harness}: P0 conformance requirements are fulfilled; additional checks are reported below."
     output.mkdir(parents=True, exist_ok=True)
     (output / "ci-result.json").write_text(
         json.dumps({"harness": harness, "sha": os.environ.get("GITHUB_SHA", "local"), "status": status}) + "\n"
