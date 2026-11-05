@@ -75,8 +75,13 @@ actual=$(CLINE_NO_AUTO_UPDATE=1 "$staging/cline" --version)
 rm -rf "$staging/package" "$archive"
 touch "$staging/ready"
 # Publish the runtime with one rename, so a concurrent session never sees a partial directory. A runtime
-# that another installer published meanwhile is kept; only a stale or partial one is replaced.
+# that another installer published meanwhile is kept; only a stale or partial one is replaced, under a lock
+# so that two installers replacing it cannot remove the runtime the first one published.
 if ! mv -T -- "$staging" "$runtime" 2>/dev/null; then
+  if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$runtime.lock"
+    flock 9
+  fi
   if ! ready; then
     rm -rf -- "$runtime"
     mv -T -- "$staging" "$runtime"
