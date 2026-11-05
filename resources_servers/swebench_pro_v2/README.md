@@ -27,6 +27,15 @@ Upstream runs the agent with no network except the model endpoint. With the Open
 only, and the verifier sandbox keeps network access (a few Go tasks fetch modules at test time). The agent must
 already have its tooling in the image or mounted, since it cannot download anything.
 
+The OpenCode harness installs itself online by default, which the policy blocks. If the image already has an OpenCode
+binary matching `opencode_version`, select the preinstalled branch:
+
+```text
+++swebench_pro_v2_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.preinstalled_opencode=true
+```
+
+For a runtime mounted into the sandbox, use the network-free `remote_opencode_*` installer settings instead.
+
 ## Golden-patch smoke test
 
 ```bash
