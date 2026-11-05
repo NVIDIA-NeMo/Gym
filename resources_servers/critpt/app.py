@@ -35,6 +35,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.verification import reraise_judge_errors
+from nemo_gym.verification.judge import judge_call_failed
 
 
 # Repo root: resources_servers/critpt/app.py -> nemo-gym/
@@ -288,6 +290,18 @@ class CritPtResourcesServer(SimpleResourcesServer):
             "batch_size": self.config.batch_size,
         }
 
+    async def _await_batch(self, future: "asyncio.Future", problem_id: str) -> Dict:
+        try:
+            return await asyncio.wait_for(future, timeout=self.config.verify_timeout_seconds)
+        except asyncio.TimeoutError:
+            LOG.error(
+                "CritPt verify timed out after %ss waiting for batch to fire (problem_id=%s). "
+                "Likely a sibling rollout failed before reaching verify().",
+                self.config.verify_timeout_seconds,
+                problem_id,
+            )
+            raise
+
     async def verify(self, body: CritPtVerifyRequest) -> CritPtVerifyResponse:
         code = _extract_code(_extract_output_text(body))
         submission = {
@@ -407,16 +421,16 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
 
-        try:
-            result = await asyncio.wait_for(future, timeout=self.config.verify_timeout_seconds)
-        except asyncio.TimeoutError:
-            LOG.error(
-                "CritPt verify timed out after %ss waiting for batch to fire (problem_id=%s). "
-                "Likely a sibling rollout failed before reaching verify().",
-                self.config.verify_timeout_seconds,
-                body.problem_id,
+        # A failed AA call (quota, access, 4xx/5xx, timeouts) is a grader failure, not a model failure: type it
+        # as judge_failed so judge_failsafe masks the row instead of returning an anonymous 500.
+        result = await reraise_judge_errors(self._await_batch(future, body.problem_id))
+        judge_error_count = int(result.get("judge_error_count") or 0)
+        if judge_error_count:
+            # AA could not grade some items; the aggregate accuracy then undercounts, so it is not a score.
+            raise judge_call_failed(
+                f"CritPt grader reported judge_error_count={judge_error_count} for the batch",
+                operation="critpt.grade",
             )
-            raise
 
         accuracy = result["accuracy"]
         timeout_rate = result.get("timeout_rate", 0.0)

@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -26,7 +27,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
+from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.critpt.app import (
     _REPO_ROOT,
     CritPtAccessDenied,
@@ -83,6 +86,21 @@ def _make_verify_request(output_text: str, problem_id: str = "1") -> CritPtVerif
         response=response,
         problem_id=problem_id,
     )
+
+
+class _Cause:
+    value: BaseException
+
+
+@contextmanager
+def grader_failed(cause_type):
+    """Expect verify() to raise a typed judge_failed event caused by ``cause_type``; ``.value`` is that cause."""
+    holder = _Cause()
+    with pytest.raises(NgFailureEvent) as info:
+        yield holder
+    assert is_judge_failure(info.value)
+    assert isinstance(info.value.__cause__, cause_type)
+    holder.value = info.value.__cause__
 
 
 class TestResolveCacheDir:
@@ -352,7 +370,7 @@ class TestApp:
         mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0})
         try:
             # Only 1 verify arrives; batch needs 3 → never fires.
-            with pytest.raises(asyncio.TimeoutError):
+            with grader_failed(asyncio.TimeoutError):
                 await server.verify(_make_verify_request("```python\nx=1\n```", problem_id="p1"))
             mock_request.assert_not_called()
         finally:
@@ -526,7 +544,7 @@ class TestKeyRotation:
             ]
         )
         try:
-            with pytest.raises(CritPtRateLimitExceeded) as exc_info:
+            with grader_failed(CritPtRateLimitExceeded) as exc_info:
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -545,7 +563,7 @@ class TestKeyRotation:
 
         mock_request, patches = _mock_api_sequence([{"status": 429, "headers": {"Retry-After": "60"}, "body": "rl"}])
         try:
-            with pytest.raises(CritPtRateLimitExceeded):
+            with grader_failed(CritPtRateLimitExceeded):
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -605,7 +623,7 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([{"status": 403, "body": self._DENIED_BODY}])
         try:
-            with pytest.raises(CritPtAccessDenied) as exc_info:
+            with grader_failed(CritPtAccessDenied) as exc_info:
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -625,7 +643,7 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([{"status": 403, "body": self._DENIED_BODY}])
         try:
-            with pytest.raises(CritPtAccessDenied):
+            with grader_failed(CritPtAccessDenied):
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -679,7 +697,7 @@ class TestAccessDenied:
             ]
         )
         try:
-            with pytest.raises(CritPtAccessDenied):
+            with grader_failed(CritPtAccessDenied):
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -699,7 +717,7 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([denied, limited] if denied_first else [limited, denied])
         try:
-            with pytest.raises(CritPtRateLimitExceeded) as exc_info:
+            with grader_failed(CritPtRateLimitExceeded) as exc_info:
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -717,7 +735,7 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([{"status": 400, "body": "bad payload"}])
         try:
-            with pytest.raises(RuntimeError) as exc_info:
+            with grader_failed(RuntimeError) as exc_info:
                 await asyncio.gather(
                     server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
                     server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
@@ -748,3 +766,57 @@ class TestKeyFingerprint:
         fp = _key_fingerprint(secret)
         assert secret not in fp
         assert fp not in secret
+
+
+class TestGraderFailureTyping:
+    @pytest.mark.asyncio
+    async def test_judge_error_count_is_judge_failed_not_a_score(self):
+        """AA reporting judge_error_count > 0 makes the batch accuracy unusable: masked, never a scored reward."""
+        server = _make_server(_make_config(batch_size=2))
+        mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1})
+        try:
+            requests = [
+                _make_verify_request("```python\na=1\n```", problem_id="p1"),
+                _make_verify_request("```python\nb=2\n```", problem_id="p2"),
+            ]
+            results = await asyncio.gather(*(judge_failsafe(server.verify)(body=r) for r in requests))
+        finally:
+            _stop_patches(patches)
+        for resp in results:
+            data = json.loads(resp.body)
+            assert data["mask_sample"] is True
+            assert data["failure_kind"] == "judge_failed"
+            assert "judge_error_count=1" in data["failure_reason"]
+            assert data["problem_id"] in {"p1", "p2"}
+
+    @pytest.mark.asyncio
+    async def test_aa_http_failure_is_masked_by_judge_failsafe(self):
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+        mock_request, patches = _mock_api_sequence([{"status": 400, "body": "bad payload"}])
+        try:
+            requests = [
+                _make_verify_request("```python\na=1\n```", problem_id="p1"),
+                _make_verify_request("```python\nb=2\n```", problem_id="p2"),
+            ]
+            results = await asyncio.gather(*(judge_failsafe(server.verify)(body=r) for r in requests))
+        finally:
+            _stop_patches(patches)
+        for resp in results:
+            data = json.loads(resp.body)
+            assert data["mask_sample"] is True and data["failure_kind"] == "judge_failed"
+            assert data["reward"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_clean_batch_and_model_timeouts_are_still_scored(self):
+        """judge_error_count == 0 keeps the AA accuracy as reward, including a high timeout_rate."""
+        server = _make_server(_make_config(batch_size=2))
+        mock_request, patches = _mock_api({"accuracy": 0.25, "timeout_rate": 0.5, "judge_error_count": 0})
+        try:
+            results = await asyncio.gather(
+                server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+            )
+        finally:
+            _stop_patches(patches)
+        for r in results:
+            assert r.reward == 0.25 and r.timeout_rate == 0.5
