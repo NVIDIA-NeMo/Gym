@@ -83,6 +83,8 @@ def test_resources_servers_close_through_the_base_route() -> None:
                 seed is not None
                 and "ResourcesSeedSessionRequest" in ast.unparse(seed)
                 and "close_resources_session" not in methods
+                # A server that implements the state hooks closes through the inherited close_resources_session.
+                and "release_session_state" not in methods
                 and not any(isinstance(base, ast.Name) and base.id in closing_bases for base in cls.bases)
             ):
                 violations.append(

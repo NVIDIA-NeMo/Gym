@@ -70,10 +70,10 @@ def test_typed_seed_initializes_once_and_keeps_the_existing_task_on_retry() -> N
 @pytest.mark.parametrize(
     ("identity", "has_state", "verified"),
     [
-        (None, True, False),  # A typed seed cannot claim a live legacy session.
+        (None, True, False),  # A typed seed cannot claim a live cookie-seeded session.
         ((EpisodeId(rollout_id="other"), TASK), True, False),
         ((EPISODE, TaskId(taskset="tasks", task_id="other")), True, False),
-        (None, False, True),  # Neither legacy nor typed completed sessions can reopen.
+        (None, False, True),  # Neither cookie-seeded nor typed completed sessions can reopen.
         (IDENTITY, False, True),
     ],
 )
