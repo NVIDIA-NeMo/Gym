@@ -42,6 +42,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ConnectionTimeoutError,
     ServerDisconnectedError,
 )
 from anyio import CancelScope
@@ -14477,6 +14478,31 @@ def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
     assert _missing_rollout_rows_counted_as_zero([materialized_path_for(output)], [sidecar], {(0, 0)}) == []
     assert RolloutStore.read(output).pending() == []
     assert RolloutStore.read(output).coverage()["counted_failures"] == 1
+
+
+class TestCollectorTransportDeadline:
+    """Collection sets no deadline of its own on /run (the shared client is unbounded), so no transport failure it
+    sees is attributed to one: a timeout from a connect sub-limit or elsewhere on the dispatch path, a status and a
+    refused connection carry no deadline evidence."""
+
+    @pytest.mark.parametrize(
+        "post",
+        [
+            AsyncMock(return_value=FakeResponse(504)),
+            AsyncMock(side_effect=ClientConnectorError(MagicMock(), OSError("connection refused"))),
+            AsyncMock(side_effect=asyncio.TimeoutError()),
+            AsyncMock(side_effect=ConnectionTimeoutError()),
+        ],
+        ids=["gateway-timeout-status", "refused", "timeout", "connect-timeout"],
+    )
+    async def test_a_transport_failure_is_not_a_collector_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, post
+    ) -> None:
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        install_fake_server_client(monkeypatch, post)
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+        assert "timeouts" not in result and classify_timeout(result) is None
 
 
 class TestEnrichRunResult:
