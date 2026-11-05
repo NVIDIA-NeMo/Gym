@@ -19,8 +19,8 @@ import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.cli.eval import _check_saved_completion
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.episode import EpisodeId
-from nemo_gym.core.episode_types import EpisodeFailure
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
     coverage_path_for,
@@ -707,7 +707,7 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
     from scripts.harness_conformance.runner import inspect_episode
     from scripts.harness_conformance.scenarios import SCENARIOS
 
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
 
     output, prepare = prepared_run
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
@@ -735,8 +735,8 @@ def test_health_only_accepts_already_selected_rows(prepared_run, newer):
         report = inspect_episode(SCENARIOS[0], output.parent, {})
         assert report is not None
     else:
-        with pytest.raises(JournalHealthUnavailable, match="superseded outcomes"):
-            run_health_checks(output, workers=1)
+        result = run_health_checks(output, workers=1)
+        assert len(result.rollouts) == int(newer == "succeeded")
     assert before == (output.read_bytes(), failures_path_for(output).read_bytes())
 
 
@@ -1054,7 +1054,7 @@ def test_incomplete_legacy_cache_never_erases_nonempty_outcomes(prepared_run, ar
 
 
 def test_output_named_failures_checks_its_own_history(prepared_run):
-    from nemo_gym.rollouts.rollout_health import JournalHealthUnavailable, run_health_checks
+    from nemo_gym.rollouts.rollout_health import run_health_checks
     from nemo_gym.rollouts.rollout_store import raw_outcomes_are_selected
 
     original, prepare = prepared_run
@@ -1067,16 +1067,19 @@ def test_output_named_failures_checks_its_own_history(prepared_run):
         store.record_outcome(row | {"reward": 0.0, "response": {}})
     assert collection._expand_input_glob(str(output)) == [str(output)]
     assert not raw_outcomes_are_selected(output)
-    with pytest.raises(JournalHealthUnavailable, match="superseded"):
-        run_health_checks(output, workers=1)
+    result = run_health_checks(output, workers=1)
+    assert len(result.rollouts) == 1
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
 
 
 async def test_no_progress_resume_uses_bounded_infrastructure_retries(runner_config, monkeypatch, tmp_path):
     from nemo_gym.cli.eval import _check_saved_completion
     from nemo_gym.orchestration.api import ResumeConfig
-    from tests.unit_tests.test_resume_script import _run_prologue
+    from tests.unit_tests.orchestration.test_resume_script import _run_prologue
 
     client = install_fake_server_client(monkeypatch, AsyncMock())
+    (tmp_path / "artifacts").mkdir()
+    runner_config.output_jsonl_fpath = str(tmp_path / "artifacts" / "rollouts.jsonl")
     runner_config.dispatch_budget_s = 0
     runner_config.num_samples_in_parallel = 1
     for attempt in range(3):

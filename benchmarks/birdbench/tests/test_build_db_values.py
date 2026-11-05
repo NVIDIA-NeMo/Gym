@@ -19,7 +19,7 @@ _BM25S_INSTALLED = importlib.util.find_spec("bm25s") is not None
 _NLTK_INSTALLED = importlib.util.find_spec("nltk") is not None
 requires_birdbench_extra = pytest.mark.skipif(
     not (_BM25S_INSTALLED and _NLTK_INSTALLED),
-    reason="requires `bm25s` and `nltk` (`uv pip install bm25s nltk`, see benchmarks/birdbench/README.md)",
+    reason="requires `bm25s` and `nltk` (`uv sync --locked --project benchmarks/birdbench`, see benchmarks/birdbench/README.md)",
 )
 
 

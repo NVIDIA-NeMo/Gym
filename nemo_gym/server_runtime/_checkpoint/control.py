@@ -59,7 +59,7 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.errors import (
     CheckpointConflictError,
     CheckpointStateError,
