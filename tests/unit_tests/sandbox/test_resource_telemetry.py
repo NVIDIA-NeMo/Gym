@@ -10,9 +10,9 @@ import pytest
 
 from nemo_gym.sandbox import resource_telemetry as telemetry
 from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxResourceAmounts, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
-from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import allocation_attributes
+from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import parse_allocation, resource_amounts
 from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
 
 
@@ -33,19 +33,23 @@ Resources:
 
 def test_effective_resources_are_separate_from_declarations():
     requested = telemetry.requested_attributes(SandboxSpec(resources={"cpu": 2, "memory_mib": 512}))
-    actual = allocation_attributes(INSPECT)
+    actual = telemetry.allocation_attributes(parse_allocation(INSPECT, scope="cluster-a"))
+    assert actual[P + "allocation.designator.kind"] == "kubernetes"
+    assert actual[P + "allocation.designator.scope"] == "cluster-a"
+    assert actual[P + "allocation.designator.id"] == "namespaces/test/pods/pod-1"
+    assert actual[P + "allocation.component.1.name"] == "sandbox"
     assert requested[P + "requested.cpu"] == 2
     assert P + "requested.gpu" not in requested
-    assert actual[P + "allocation.sandbox.requests.cpu"] == "100m"
-    assert actual[P + "allocation.sandbox.limits.cpu"] == "2"
-    assert actual[P + "allocation.helper.requests.cpu"] == "50m"
-    assert actual[P + "allocation.node"] == "node-1"
+    assert actual[P + "allocation.component.1.requests.cpu"] == 0.1
+    assert actual[P + "allocation.component.1.limits.cpu"] == 2
+    assert actual[P + "allocation.component.0.requests.cpu"] == 0.05
+    assert actual[P + "allocation.host.id"] == "node-1"
 
 
 @pytest.mark.parametrize("body", ["not supported", "Resources:\n", "\nResources:\n  sandbox:\n    Requests: {}"])
 def test_missing_allocation_does_not_become_zero(body):
     with pytest.raises(ValueError):
-        allocation_attributes(body)
+        parse_allocation(body)
 
 
 def test_sidecar_shapes_remain_separate():
@@ -80,7 +84,7 @@ async def test_sampler_preserves_identity_and_finishes_before_delete(records, mo
     class Provider(FakeSandboxProvider):
         async def resource_allocation(self, handle):
             events.append("allocation")
-            return allocation_attributes(INSPECT)
+            return parse_allocation(INSPECT)
 
         async def resource_sample(self, handle):
             events.append("sample")
@@ -135,7 +139,9 @@ async def test_stopping_cancels_inflight_sampling(records):
             await asyncio.Event().wait()
         return {P + "sample.memory_used_mib": 1}
 
-    provider = SimpleNamespace(resource_allocation=AsyncMock(return_value={}), resource_sample=sample)
+    provider = SimpleNamespace(
+        resource_allocation=AsyncMock(return_value=telemetry.ResourceAllocation(source="test")), resource_sample=sample
+    )
     sampler = telemetry.ResourceSampler(provider, SandboxHandle("id", "test", None), {}, 100)
     sampler.start()
     await entered.wait()
@@ -198,8 +204,10 @@ async def test_inspection_uses_authenticated_control_plane_and_bounded_body(monk
             "tls_verify": True,
         }
     )
-    attrs = await provider.resource_allocation(SandboxHandle("id/one", "opensandbox", None))
-    assert attrs[P + "allocation.sandbox.requests.cpu"] == "100m"
+    attrs = telemetry.allocation_attributes(
+        await provider.resource_allocation(SandboxHandle("id/one", "opensandbox", None))
+    )
+    assert attrs[P + "allocation.component.1.requests.cpu"] == 0.1
     args, kwargs = request.call_args
     assert args == ("GET", "https://example.test/prefix/v1/sandboxes/id%2Fone/diagnostics/inspect")
     assert kwargs["headers"]["OPEN-SANDBOX-API-KEY"] == "test-key"
@@ -207,3 +215,74 @@ async def test_inspection_uses_authenticated_control_plane_and_bounded_body(monk
     assert kwargs["_max_num_tries"] == 1
     assert released == [True]
     await provider.aclose()
+
+
+@pytest.mark.parametrize(
+    "cpu, memory, disk, expected",
+    [
+        ("100m", "1536Ki", "512Mi", (0.1, 1.5, 0.5)),
+        ("1e-3", "1M", "1G", (0.001, 1_000_000 / 2**20, 1_000_000_000 / 2**30)),
+        ("1000000n", "1.5Gi", "2Gi", (0.001, 1536, 2)),
+    ],
+)
+def test_resource_units_preserve_fractional_quantities(cpu, memory, disk, expected):
+    amounts = resource_amounts({"cpu": cpu, "memory": memory, "ephemeral-storage": disk, "nvidia.com/gpu": "2"})
+    assert (amounts.cpu, amounts.memory_mib, amounts.disk_gib) == expected
+    assert amounts.gpu == 2
+    assert amounts.gpu_type is None
+
+
+@pytest.mark.parametrize("value", ["bad", "nan", "inf", "-1", True, "1e9999"])
+def test_invalid_quantities_are_not_exported(value):
+    with pytest.raises(ValueError):
+        resource_amounts({"cpu": value})
+
+
+def test_gpu_aliases_and_missing_resources():
+    assert resource_amounts({"gpu": "0", "gpu_type": "a100"}).gpu == 0
+    assert resource_amounts({"vendor.example/thing": "3"}) == SandboxResourceAmounts()
+    for values in ({"gpu": "0.5"}, {"gpu": "1", "nvidia.com/gpu": "2"}):
+        with pytest.raises(ValueError):
+            resource_amounts(values)
+
+
+def test_request_type_and_clamping_remain_compatible():
+    from nemo_gym.sandbox.providers.base import clamp_resource_requests
+
+    request = SandboxResources.from_mapping({"cpu": "0.5", "memory_mib": "512", "disk_gib": "1"})
+    assert isinstance(request, SandboxResourceAmounts)
+    assert request.memory_mib == 512 and isinstance(request.memory_mib, int)
+    assert clamp_resource_requests(request, SandboxResources(cpu=0.25))[0]["cpu"] == 0.25
+
+
+@pytest.mark.parametrize(
+    "kind, scope, identity",
+    [
+        ("kubernetes", "cluster-a", "namespaces/ns/pods/pod"),
+        ("docker-container", "daemon-a", "container-1"),
+        ("ecs-task", "cluster-arn", "task-arn"),
+        ("provider-sandbox", "deployment-a", "sandbox-1"),
+    ],
+)
+def test_allocation_schema_is_identical_for_different_designators(kind, scope, identity):
+    allocation = telemetry.ResourceAllocation(
+        source="test",
+        designator=telemetry.ResourceDesignator(kind=kind, scope=scope, id=identity),
+        components=(telemetry.ComponentAllocation(name="main", limits=SandboxResourceAmounts(cpu=2)),),
+    )
+    attrs = telemetry.allocation_attributes(allocation)
+    assert attrs == {
+        P + "allocation.source": "test",
+        P + "allocation.designator.kind": kind,
+        P + "allocation.designator.scope": scope,
+        P + "allocation.designator.id": identity,
+        P + "allocation.component_count": 1,
+        P + "allocation.component.0.name": "main",
+        P + "allocation.component.0.limits.cpu": 2,
+    }
+
+
+def test_missing_placement_is_not_fabricated():
+    allocation = parse_allocation(INSPECT[INSPECT.index("\nResources:") :])
+    assert allocation.designator is None and allocation.host is None
+    assert allocation.components[1].requests.cpu == 0.1

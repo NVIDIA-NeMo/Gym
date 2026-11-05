@@ -58,6 +58,7 @@ from nemo_gym.sandbox.providers.base import (
     clamp_resource_requests,
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.resource_telemetry import ResourceAllocation
 from nemo_gym.sandbox.utils import rewrite_image
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
@@ -1816,6 +1817,8 @@ class OpenSandboxProvider:
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             from opentelemetry.trace import get_current_span
 
+            from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import resource_amounts
+            from nemo_gym.sandbox.resource_telemetry import amount_attributes
             from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
 
             submitted = {}
@@ -1823,8 +1826,7 @@ class OpenSandboxProvider:
                 ("limits", kwargs["resource"]),
                 ("requests", kwargs.get("resource_requests", {})),
             ):
-                for resource, quantity in resource_map.items():
-                    submitted[f"nemo.gym.sandbox.submitted.{kind}.{resource}"] = quantity
+                submitted.update(amount_attributes(resource_amounts(resource_map), f"submitted.{kind}."))
             safe_set_span_attributes(get_current_span(), submitted)
 
         sandbox_id: str | None = None
@@ -2058,14 +2060,14 @@ class OpenSandboxProvider:
             PREFIX + "sample.memory_used_mib": sample.memory_used_in_mib,
         }
 
-    async def resource_allocation(self, handle: SandboxHandle) -> dict[str, str | int | float | bool]:
+    async def resource_allocation(self, handle: SandboxHandle) -> ResourceAllocation:
         """Read effective requests and limits from the deployment's inspection endpoint."""
         from urllib.parse import quote
 
         import aiohttp
 
         from nemo_gym.client.http_client import request
-        from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import allocation_attributes
+        from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import parse_allocation
 
         connection = self._connection_config()
         headers = dict(connection.headers)
@@ -2087,7 +2089,11 @@ class OpenSandboxProvider:
                 body = exc.partial
             else:
                 raise ValueError("Inspection response exceeded 64 KiB")
-            return allocation_attributes(body.decode("utf-8"))
+            # Keep credentials and query parameters out of exported identity.
+            url = urlsplit(connection.get_base_url())
+            authority = url.netloc.rsplit("@", 1)[-1]
+            scope = f"{url.scheme}://{authority}{url.path.rstrip('/')}"
+            return parse_allocation(body.decode("utf-8"), scope=scope)
         finally:
             response.release()
 

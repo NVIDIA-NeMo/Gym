@@ -92,8 +92,36 @@ Count distinct request IDs per rollout, rather than counting provider retries.
 the OpenSandbox submission under `submitted.requests.*` and `submitted.limits.*`
 after provider clamping. Unspecified submission values are left to SDK defaults. OpenSandbox
 adds `gym.sandbox.resource.allocation` with the inspection endpoint's effective
-per-container requests and limits, preserving Kubernetes quantity strings and node
-identity. Declared shape, effective scheduling requests, and effective limits are
+per-component requests and limits. All three stages use Gym's shared resource
+vocabulary: `cpu` (cores), `memory_mib`, `disk_gib`, `gpu` (count), and `gpu_type`
+(selector). Submitted and allocated quantities are numeric; fractional MiB/GiB are
+preserved. For example, Kubernetes `100m`, `1536Ki`, and `8Gi` become CPU `0.1`,
+memory `1.5` MiB, and memory `8192` MiB. Creation requests retain their existing
+integer memory/disk inputs through `SandboxResources`, which shares the
+`SandboxResourceAmounts` base with observations.
+
+Allocation components use `allocation.component_count` and indexed
+`allocation.component.<i>.name`, `.requests.<resource>` and `.limits.<resource>`.
+Names are values, not attribute keys. Missing resources remain absent; unknown
+vendor resource names are not mapped to a guessed generic resource. An inspection
+with no supported resource quantities is unavailable.
+
+Optional placement uses `allocation.designator.kind`, `.scope`, `.id` and an
+independent `allocation.host.kind`, `.scope`, `.id`. These are opaque diagnostic
+identities, not network endpoints or reconnect credentials. The existing sandbox
+`provider` selects the Gym adapter; designator `kind` selects the infrastructure
+identity format. For OSB's Kubernetes inspection, the designator kind is
+`kubernetes`, ID is `namespaces/<namespace>/pods/<pod>`, and host kind is
+`kubernetes-node` with the node name as ID. Scope is the OSB control-plane URL
+without user information, query or fragment (a deployment scope, not a claimed
+cluster ID). Missing namespace/pod or host information is omitted.
+
+The same shape can represent `docker-container` with a daemon scope/container ID,
+`ecs-task` with a cluster scope/task ARN, or `provider-sandbox` with a deployment
+scope/sandbox ID. These illustrate the contract; this PR implements allocation
+reads only for OSB. Provider-specific source strings remain provenance values.
+
+Declared shape, effective scheduling requests, and effective limits are
 separate quantities. The inspection endpoint is deployment-dependent; unavailable
 or unrecognized responses produce `resource.status=unavailable` and an error type.
 They never fall back to declared resources.

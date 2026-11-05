@@ -8,10 +8,10 @@ import math
 import os
 import uuid
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import asdict, dataclass, field
 from typing import Protocol, runtime_checkable
 
-from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxResourceAmounts, SandboxSpec
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -21,11 +21,66 @@ PREFIX = "nemo.gym.sandbox."
 Attribute = str | int | float | bool
 
 
+@dataclass(frozen=True)
+class ResourceDesignator:
+    """Opaque infrastructure identity interpreted by kind, within an optional scope.
+
+    This is not a network endpoint or reconnect descriptor and contains no credentials.
+    Scope identifies the deployment/cluster/daemon in which the ID is meaningful.
+    """
+
+    kind: str
+    id: str
+    scope: str | None = None
+
+
+@dataclass(frozen=True)
+class ComponentAllocation:
+    """Observed reservations and limits for one explicitly named component."""
+
+    name: str
+    requests: SandboxResourceAmounts = field(default_factory=SandboxResourceAmounts)
+    limits: SandboxResourceAmounts = field(default_factory=SandboxResourceAmounts)
+
+
+@dataclass(frozen=True)
+class ResourceAllocation:
+    """Provider-independent allocation record; placement is optional."""
+
+    source: str
+    components: tuple[ComponentAllocation, ...] = ()
+    designator: ResourceDesignator | None = None
+    host: ResourceDesignator | None = None
+
+
+def amount_attributes(amounts: SandboxResourceAmounts, prefix: str) -> dict[str, Attribute]:
+    """Serialize shared resource quantities without losing unspecified values."""
+    return {PREFIX + prefix + name: value for name, value in asdict(amounts).items() if value is not None}
+
+
+def allocation_attributes(allocation: ResourceAllocation) -> dict[str, Attribute]:
+    """Use identical OTEL keys for every provider's typed allocation."""
+    attributes: dict[str, Attribute] = {PREFIX + "allocation.source": allocation.source}
+    for key in ("designator", "host"):
+        reference = getattr(allocation, key)
+        if reference is not None:
+            for name, value in asdict(reference).items():
+                if value is not None:
+                    attributes[PREFIX + f"allocation.{key}.{name}"] = value
+    attributes[PREFIX + "allocation.component_count"] = len(allocation.components)
+    for index, component in enumerate(allocation.components):
+        prefix = f"allocation.component.{index}."
+        attributes[PREFIX + prefix + "name"] = component.name
+        attributes.update(amount_attributes(component.requests, prefix + "requests."))
+        attributes.update(amount_attributes(component.limits, prefix + "limits."))
+    return attributes
+
+
 @runtime_checkable
 class ResourceProvider(Protocol):
     """Optional read-only capability; values carry explicit provider/source semantics."""
 
-    async def resource_allocation(self, handle: SandboxHandle) -> dict[str, Attribute]: ...
+    async def resource_allocation(self, handle: SandboxHandle) -> ResourceAllocation: ...
 
     async def resource_sample(self, handle: SandboxHandle) -> dict[str, Attribute]: ...
 
@@ -33,16 +88,12 @@ class ResourceProvider(Protocol):
 def requested_attributes(spec: SandboxSpec) -> dict[str, Attribute]:
     """Declared shape only. Absent values are unknown, never zero or effective allocation."""
     attributes: dict[str, Attribute] = {PREFIX + "requested.count": 1}
-    for name, value in asdict(spec.resources).items():
-        if value is not None:
-            attributes[PREFIX + "requested." + name] = value
+    attributes.update(amount_attributes(spec.resources, "requested."))
     attributes[PREFIX + "requested.sidecar_count"] = len(spec.sidecars)
     for index, sidecar in enumerate(spec.sidecars):
         key = PREFIX + f"requested.sidecar.{index}."
         attributes[key + "name"] = sidecar.name
-        for name, value in asdict(sidecar.resources).items():
-            if value is not None:
-                attributes[key + name] = value
+        attributes.update(amount_attributes(sidecar.resources, f"requested.sidecar.{index}."))
     return attributes
 
 
@@ -93,11 +144,11 @@ class ResourceSampler:
             ) as span:
                 try:
                     async with asyncio.timeout(2):
-                        values = await (
-                            self.provider.resource_allocation(self.handle)
-                            if kind == "allocation"
-                            else self.provider.resource_sample(self.handle)
-                        )
+                        if kind == "allocation":
+                            allocation = await self.provider.resource_allocation(self.handle)
+                            values = allocation_attributes(allocation)
+                        else:
+                            values = await self.provider.resource_sample(self.handle)
                     safe_set_span_attributes(span, {PREFIX + "resource.status": "ok", **values})
                     if kind == "allocation":
                         self.allocation_recorded = True

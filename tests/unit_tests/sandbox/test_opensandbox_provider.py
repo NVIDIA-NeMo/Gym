@@ -3480,8 +3480,13 @@ async def test_a_cancelled_create_still_cleans_up_the_new_sandbox(
 
 
 async def test_direct_create_clamps_requests_above_the_sandbox_limits(
-    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture
+    fake_opensandbox_sdk: None, caplog: pytest.LogCaptureFixture, monkeypatch
 ) -> None:
+    from nemo_gym.telemetry import _fallbacks
+
+    submitted = {}
+    monkeypatch.setattr(opensandbox_provider, "is_span_group_enabled", lambda group: True)
+    monkeypatch.setattr(_fallbacks, "safe_set_span_attributes", lambda span, values: submitted.update(values))
     provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
     with caplog.at_level(logging.WARNING, logger=opensandbox_provider.LOGGER.name):
         await provider.create(
@@ -3496,6 +3501,14 @@ async def test_direct_create_clamps_requests_above_the_sandbox_limits(
         "cpu": "0.5",
         "memory": "512Mi",
         "ephemeral-storage": "4Gi",
+    }
+    assert submitted == {
+        "nemo.gym.sandbox.submitted.requests.cpu": 0.5,
+        "nemo.gym.sandbox.submitted.requests.memory_mib": 512,
+        "nemo.gym.sandbox.submitted.requests.disk_gib": 4,
+        "nemo.gym.sandbox.submitted.limits.cpu": 1,
+        "nemo.gym.sandbox.submitted.limits.memory_mib": 2048,
+        "nemo.gym.sandbox.submitted.limits.disk_gib": 4,
     }
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1 and "disk_gib=10" in warnings[0] and "limit 4" in warnings[0]
