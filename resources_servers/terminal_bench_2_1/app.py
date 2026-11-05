@@ -114,7 +114,7 @@ class _VerifierInfraError(RuntimeError):
 
 
 class _VerifierDirError(RuntimeError):
-    """/logs/verifier could not be created, which is the task state the model left behind."""
+    """/logs/verifier or an upload directory could not be created: the task state the model left behind."""
 
 
 class TerminalBench21VerifyResponse(BaseVerifyResponse):
@@ -524,7 +524,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
             target_fpath = f"{target_dirpath}/{file}"
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
-            assert mkdir_result.return_code == 0, mkdir_result
+            if getattr(mkdir_result, "error_type", None) is not None:
+                raise _VerifierInfraError(f"Could not prepare upload directory: {mkdir_result}")
+            if mkdir_result.return_code != 0:
+                raise _VerifierDirError(f"Could not prepare upload directory: {mkdir_result}")
 
             with self._patch_golden_patch_solve_sh(task_name, local_fpath, patches, unmatched) as new_local_fpath:
                 await sandbox.upload(local_path=new_local_fpath, remote_path=target_fpath)
@@ -634,20 +637,16 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 raise _VerifierInfraError(f"mkdir /logs/verifier failed: {setup_result.error_type}")
             if setup_result.return_code != 0:
                 raise _VerifierDirError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
-            try:
-                eval_result = await eval_sandbox.exec(
-                    "bash /tests/test.sh",
-                    timeout_s=self.config.evaluation_timeout,
-                )
-            except TimeoutError:
-                # test.sh outran the evaluation timeout: scored 0 like a result reporting error_type="timeout".
-                eval_result = None
-                test_output = ""
-            else:
-                error_type = getattr(eval_result, "error_type", None)
-                if error_type not in (None, "timeout"):
-                    raise _VerifierInfraError(f"test.sh could not run: sandbox error {error_type}")
-                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+            # A raised TimeoutError is ambiguous (a status poll can time out too): only a result reporting
+            # error_type="timeout" is the test script outrunning its deadline.
+            eval_result = await eval_sandbox.exec(
+                "bash /tests/test.sh",
+                timeout_s=self.config.evaluation_timeout,
+            )
+            error_type = getattr(eval_result, "error_type", None)
+            if error_type not in (None, "timeout"):
+                raise _VerifierInfraError(f"test.sh could not run: sandbox error {error_type}")
+            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
         except _VerifierDirError:
             print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
             eval_result = None
@@ -670,10 +669,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     try:
                         await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
                     except Exception as download_exc:
-                        # A missing reward.txt is a failed grade; any other download failure is the sandbox's.
-                        if not isinstance(download_exc, FileNotFoundError) and await self._reward_file_exists(
-                            eval_sandbox
-                        ):
+                        # Only a sandbox that confirms reward.txt is absent makes this a failed grade.
+                        if await self._reward_file_exists(eval_sandbox):
                             failure_reason = f"Verifier sandbox error: reward download failed: {download_exc!r}"
                         raise
                     # Providers such as Docker can replace the destination file during download.
@@ -712,12 +709,12 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         )
 
     async def _reward_file_exists(self, eval_sandbox: AsyncSandbox) -> bool:
-        """After a failed reward download: True unless the sandbox answers that the file is absent."""
+        """After a failed reward download: True unless `test -f` answers (exit 1) that the file is absent."""
         try:
             probe = await eval_sandbox.exec("test -f /logs/verifier/reward.txt", timeout_s=30)
         except Exception:
             return True
-        return getattr(probe, "error_type", None) is not None or probe.return_code == 0
+        return getattr(probe, "error_type", None) is not None or probe.return_code != 1
 
 
 if __name__ == "__main__":

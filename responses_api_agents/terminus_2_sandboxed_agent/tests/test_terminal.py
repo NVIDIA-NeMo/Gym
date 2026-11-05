@@ -263,7 +263,7 @@ async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["alive", "inspect", "drain"])
-async def test_terminal_control_failures_are_sandbox_lost(stage):
+async def test_terminal_control_failures_are_sandbox_lost_only_when_the_exec_layer_says_so(stage):
     from responses_api_agents.terminus_2_sandboxed_agent.terminal import SandboxLostError
 
     async def execute(command, **kwargs):
@@ -280,8 +280,11 @@ async def test_terminal_control_failures_are_sandbox_lost(stage):
         call = terminal.get_incremental_output()
     else:
         call = terminal.send_keys("C-c\n")
-    with pytest.raises(SandboxLostError):
+    # An ordinary nonzero exit from a live sandbox (for example the model ran tmux kill-server) is a
+    # terminal failure that stays verifiable; only the drain failure is attributed to the sandbox.
+    with pytest.raises(SandboxLostError if stage == "drain" else RuntimeError) as error:
         await call
+    assert isinstance(error.value, SandboxLostError) is (stage == "drain")
 
 
 @pytest.mark.asyncio
