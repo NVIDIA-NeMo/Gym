@@ -95,7 +95,7 @@ gym eval run --no-serve \
 
 ## Adding a New Environment
 
-Adding a new OpenEnv environment requires **no Python code** -- only a YAML config, JSONL data, and the environment's package in `requirements.txt`.
+Adding a new OpenEnv environment requires **no Python code** -- only a YAML config, JSONL data, and the environment's package in `pyproject.toml`.
 
 ### Step 1: Create a YAML Config
 
@@ -173,13 +173,21 @@ Create `resources_servers/openenv/data/<name>/example.jsonl` with 5+ examples:
 
 ### Step 3: Add Dependencies and Run
 
-Add the environment's package to `resources_servers/openenv/requirements.txt`:
+Add the environment's package to the `project.dependencies` array in
+`resources_servers/openenv/pyproject.toml`, pinning its reviewed Git commit:
 
-```
-openenv-my-env @ git+https://github.com/meta-pytorch/OpenEnv.git#subdirectory=envs/my_env
+```toml
+"openenv-my-env @ git+https://github.com/meta-pytorch/OpenEnv.git@<reviewed-commit>#subdirectory=envs/my_env",
 ```
 
-Then start servers and collect rollouts:
+Regenerate and commit the project and lock together before setup:
+
+```bash
+uv lock --project resources_servers/openenv
+uv lock --check --project resources_servers/openenv
+```
+
+Then start servers and collect rollouts; setup uses `uv sync --locked`:
 
 ```bash
 # Terminal 1: Start servers

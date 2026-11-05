@@ -1,5 +1,18 @@
 # TB4 resources server
 
+Each episode automatically uses one `nemo.nvidia.com/placement-group` value for its
+agent, verifier, EFS logs helper, and Compose services, seeds, and volume helpers.
+Point the CPU provider at the cell router to distribute episodes while keeping
+their storage and networking on one cell. Compose collections retain separate
+volume directories and cleanup ownership.
+
+With `environment.sandbox_split_endpoints: true`, any task whose agent or verifier
+requires a GPU sends every role and helper directly to `OPENSANDBOX_DOMAIN_GPU`
+using `OPENSANDBOX_API_KEY_GPU`; CPU tasks use the corresponding `_CPU` variables.
+Set the GPU domain to the direct GPU deployment, rather than the CPU router.
+Placement metadata is still sent to direct deployments, where it requires no
+special routing behavior.
+
 ## Contract
 
 `/seed_session` provisions the pinned task and returns its sandbox descriptor,
@@ -88,6 +101,17 @@ resume after resources-process restart. Shutdown drains active verification for
 the configured grace period, then interrupts grading and awaits cleanup, including
 provisioned sessions that never reached verification. Abrupt resources-process
 death stops renewal; provider TTL is the sandbox cleanup fallback.
+
+An attempt cut short is marked `interrupted` in its `result.json` and state
+record, with the reason (`agent_killed` or `resources_shutdown`), so no later
+reader takes it for a graded outcome. Each state record also keeps the Gym run id,
+task, rollout and attempt indices the request carried (`gym_identity`). When a
+resumed run sends a rollout again, as a new request, the server answers with the
+recorded attempt of the same run, task and rollout instead of running it again,
+marked `replayed_from`. It does so only when the agent finished normally and the
+verifier ran after it: a completed termination, no exception, no `interrupted`
+mark, and a completed, unmasked evaluation. Any other record runs the rollout as
+before.
 
 Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial

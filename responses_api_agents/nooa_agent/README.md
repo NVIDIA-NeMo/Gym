@@ -14,7 +14,7 @@ Install the agent's requirements from its directory:
 
 ```bash
 cd responses_api_agents/nooa_agent
-uv pip install -r requirements.txt
+uv sync --locked
 ```
 
 The requirements pin all three NOOA packages: `nooa`, `nooa-cli`, and `nooa-bench`. The CLI supplies executor
@@ -33,6 +33,10 @@ the outer `execute_python` call from nested resource calls.
 
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.
 NOOA stages its own runtime and closes its worker before disconnecting; Resources owns sandbox creation and teardown.
+The runtime packages the launching Gym checkout with its unchanged root `pyproject.toml` and full core dependency set.
+Tracked package source and assets are copied with their current contents; untracked files, Git metadata, and caches are excluded.
+The controller therefore needs a Git checkout and Git installed. The package is installed into NOOA's private Python,
+leaving the task's Python environment unchanged. Offline wheelhouses must be rebuilt whenever these packaged bytes change.
 Agent and resource sessions use Gym's existing `single_agent_turn` environment. Agent close returns the evidence and final
 Resources cookies before verification; Resources closes its sandbox afterward.
 

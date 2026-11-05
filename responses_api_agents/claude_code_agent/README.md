@@ -210,6 +210,9 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   The served id is not a declared terminal id on `/run`; capture still corroborates it against the
   transcript. Without capture, thinking stays folded and unmatched tool calls remain omitted.
 - `turns_used` counts assistant messages, not tool calls.
+- Runs set `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`, so Bash has no `run_in_background` option and every
+  command runs in the foreground under the Bash tool's timeout. The CLI waits for background tasks before it
+  exits, so a backgrounded command would hold the run open after the final answer.
 
 ## Sandbox execution
 
