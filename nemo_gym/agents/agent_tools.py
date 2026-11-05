@@ -66,7 +66,8 @@ def restricted_network_policy(provider_name: str, urls: list[str]) -> dict[str, 
         raise ValueError("Restricted network access requires the OpenSandbox network-policy provider")
     targets = set()
     for url in urls:
-        targets.add(_reachable_host(url))
+        # The egress sidecar strips a query name's trailing dot, so a rule written with one would never match.
+        targets.add(_reachable_host(url).rstrip("."))
     return {"defaultAction": "deny", "egress": [{"action": "allow", "target": t} for t in sorted(targets)]}
 
 
