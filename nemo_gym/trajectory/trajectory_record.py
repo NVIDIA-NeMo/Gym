@@ -36,6 +36,7 @@ if TYPE_CHECKING:
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+NG_AGENT_SANDBOX_OBSERVATION_KEY = "ng_agent_sandbox_observation"
 # The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
 # collector's canonical projection.
 NG_TRAJECTORY_KEY = "ng_trajectory"
@@ -372,6 +373,10 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    failure_id: Optional[str] = Field(
+        default=None, description="Canonical failure event in the request failure report."
+    )
     observed_client_interval_s: Optional[float] = Field(
         default=None,
         ge=0,

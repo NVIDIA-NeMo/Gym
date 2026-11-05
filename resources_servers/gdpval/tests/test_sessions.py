@@ -409,11 +409,11 @@ def test_task_data_that_is_not_a_task_is_refused_as_final(server, root, tmp_path
 def _app(server: GDPValResourcesServer, *, routed: bool):
     app = server.setup_webserver()
     if routed:
-        # As run_webserver does, even for one worker: the router names a typed seed's session by its
+        # As run_webserver does, even for one worker: the router names an episode seed's session by its
         # resources_session_id before the handler runs.
         key = server.get_session_middleware_key()
         install_session_routing(
-            app, socket_dir=None, session_cookie=key, secret_key=key, **server.claimed_session_routing()
+            app, socket_dir=None, session_cookie=key, secret_key=key, **server.owned_session_routing()
         )
     return app
 
