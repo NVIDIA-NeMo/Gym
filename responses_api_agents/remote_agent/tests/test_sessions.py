@@ -21,7 +21,7 @@ from environment_servers.single_agent_turn.app import (
 from nemo_gym.agents import AGENT_ACTIVATION_HEADER, AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
-from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     DirectHTTPToolAccess,
@@ -34,6 +34,7 @@ from resources_servers.example_single_tool_call.app import (
     SimpleWeatherResourcesServer,
     SimpleWeatherResourcesServerConfig,
 )
+from responses_api_agents.remote_agent.app import RemoteAgentError
 from responses_api_agents.remote_agent.tests.test_app import (
     FakeRemoteResponse,
     fn_call,
@@ -216,6 +217,19 @@ class TestSessionActivation:
 
         assert reply.status_code == 500
         assert time.monotonic() - started < 5
+
+    async def test_only_the_activation_deadline_is_reported_as_run_timeout_secs(self, monkeypatch) -> None:
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(ROW)
+        agent = make_agent()
+        monkeypatch.setattr(agent, "_run_tool_loop", AsyncMock(side_effect=TimeoutError("inner timeout")))
+
+        with pytest.raises(TimeoutError, match="inner timeout"):
+            await agent._activate_session(await agent._seed_agent_session_state(seed_request()), body)
+
+        mock_remote(monkeypatch, scripted(lambda: asyncio.sleep(5)))
+        slow = make_agent(run_timeout_secs=0.05)
+        with pytest.raises(RemoteAgentError, match="run_timeout_secs=0.05"):
+            await slow._activate_session(await slow._seed_agent_session_state(seed_request()), body)
 
 
 @pytest.mark.parametrize(

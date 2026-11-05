@@ -269,12 +269,16 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         self-posts to /v1/responses.
         """
         async with self.sem:
+            deadline = asyncio.timeout(self.config.run_timeout_secs)
             try:
-                async with asyncio.timeout(self.config.run_timeout_secs):
+                async with deadline:
                     agent_response, resources_cookies = await self._run_tool_loop(
                         body, state.resources_cookies or {}, tool_access=state.tool_access, in_session=True
                     )
             except TimeoutError:
+                # A timeout raised inside the loop, such as a tool call's, keeps its own message.
+                if not deadline.expired():
+                    raise
                 raise RemoteAgentError(
                     f"the agent/tool loop exceeded run_timeout_secs={self.config.run_timeout_secs}s"
                 ) from None
