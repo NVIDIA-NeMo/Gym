@@ -103,7 +103,9 @@ second after its interrupt unless `server_shutdown_timeout_seconds` is raised to
 The example pairing uses `single_agent_turn_legacy`: existing flat dataset rows still work, while the environment
 server owns resources/agent session setup, verification, and close. The agent loop runs in its own sandbox and
 receives the resources session through the `direct_http` transport; its `resources_server` config is `null`.
-The config includes the Docker provider and `use_absolute_ip: true` so the sandbox can reach the Gym servers.
+The config includes the Docker provider and `use_absolute_ip: true` so the sandbox can reach the Gym servers;
+`absolute_ip_server_types` limits that to the model, resources and agent servers, so the head server, whose config
+endpoint returns the merged config, stays on loopback.
 Replace the included Docker provider config to run on a different backend, and set both sandbox image fields for that provider. Do not merge two provider blocks under `sandbox`.
 
 The example dataset exposes only `search` and `browse`, so the example config keeps `workspace: none` and inline

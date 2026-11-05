@@ -29,6 +29,7 @@ from nemo_gym.config import BaseServerConfig
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.browsecomp_agent.app import (
+    _SANDBOX_LOOP_CONNECTION_RETRIES,
     BrowsecompAgent,
     BrowsecompAgentConfig,
     BrowsecompAgentSessionState,
@@ -47,7 +48,13 @@ class ScopedModelClient(ServerClient):
         body = kwargs.get("json")
         if isinstance(body, NeMoGymResponseCreateParamsNonStreaming):
             kwargs["json"] = body.model_dump(mode="json", exclude_unset=True)
-        return await request("POST", f"{self.model_url}/responses", _internal=True, **kwargs)
+        return await request(
+            "POST",
+            f"{self.model_url}/responses",
+            _internal=True,
+            _max_connection_retries=_SANDBOX_LOOP_CONNECTION_RETRIES,
+            **kwargs,
+        )
 
 
 class SandboxBrowsecompAgent(BrowsecompAgent):
@@ -60,7 +67,12 @@ class SandboxBrowsecompAgent(BrowsecompAgent):
         if self.token_count_url is None:
             raise ValueError("BrowseComp token counting was not granted")
         reply = await request(
-            "POST", self.token_count_url, json=body.model_dump(mode="json"), cookies=self.agent_cookies, _internal=True
+            "POST",
+            self.token_count_url,
+            json=body.model_dump(mode="json"),
+            cookies=self.agent_cookies,
+            _internal=True,
+            _max_connection_retries=_SANDBOX_LOOP_CONNECTION_RETRIES,
         )
         await raise_for_status(reply)
         return int((await get_response_json(reply))["count"])
@@ -69,8 +81,8 @@ class SandboxBrowsecompAgent(BrowsecompAgent):
 async def check_reachable(urls: list[str | None], *, attempts: int = 3, timeout_s: float = 10.0) -> None:
     """Fail the activation when the sandbox cannot open a connection to a granted endpoint.
 
-    Gym's client resends a refused internal request without limit, so an endpoint the sandbox cannot reach would
-    otherwise spin until the loop deadline and come back as a scored, timed-out zero.
+    The loop's calls resend a refused connection for about 90 seconds before they fail the activation, so checking
+    first fails an endpoint the sandbox cannot reach at all without spending the rollout's budget.
     """
     for url in filter(None, urls):
         parsed = urlsplit(url)

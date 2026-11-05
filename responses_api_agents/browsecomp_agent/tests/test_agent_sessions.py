@@ -2,15 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agent sessions an Environment Server (single_agent_turn) seeds, activates once, and closes."""
 
+import asyncio
 import json as jsonlib
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from aiohttp import ClientResponseError
+from fastapi import Request, Response
 from fastapi.testclient import TestClient
 
 from nemo_gym.agents import (
+    AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     OutcomeAction,
@@ -23,6 +26,7 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     EpisodeId,
     NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
@@ -266,3 +270,75 @@ def test_a_model_http_error_is_a_failed_response_for_the_outcome_policy(
     assert response.output == []
     assert f"Model HTTP {status}: model refused the request" in response.error.message
     assert agent_outcome_policy(response) == action
+
+
+def _agent_of(client: TestClient) -> BrowsecompAgent:
+    return next(route.endpoint.__self__ for route in client.app.routes if route.path == "/v1/browsecomp/token_count")
+
+
+def test_a_model_http_error_keeps_only_the_start_of_a_long_upstream_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, _, _ = _agent([], monkeypatch)
+    request_info = SimpleNamespace(url="http://model", method="POST", headers={}, real_url="http://model")
+    error = ClientResponseError(request_info, (), status=502, message="Bad Gateway")
+    error.response_content = b"<html>" + b"x" * 10_000
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(QUESTION)
+    response = _agent_of(client)._model_request_failure(body, error)
+    # The rollout row carries this message, so an upstream error page cannot bloat it.
+    assert response.error.message == "Model HTTP 502: <html>" + "x" * 3994
+
+
+async def test_a_cancelled_waiter_leaves_the_activation_running_for_its_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A disconnected HTTP request must not cancel the shared activation; the identical retry gets its result."""
+    client, _, _ = _agent([], monkeypatch)
+    agent = _agent_of(client)
+    seed_scope = {"type": "http", "headers": [], "session": {}}
+    await agent.seed_agent_session(Request(seed_scope), _seed(), Response())
+    started, finish = asyncio.Event(), asyncio.Event()
+    runs = []
+
+    async def activation(self, request, body, state):
+        runs.append(body)
+        started.set()
+        await finish.wait()
+        return NeMoGymResponse.model_validate(_model_response(_message("Paris")))
+
+    monkeypatch.setattr(BrowsecompAgent, "_sandbox_responses", activation)
+    scope = {
+        "type": "http",
+        "headers": [],
+        "session": {AGENT_SESSION_COOKIE_KEY: "agent-session"},
+        "path_params": {"rollout_id": EPISODE.capture_key},
+    }
+    body = NeMoGymResponseCreateParamsNonStreaming.model_validate(QUESTION)
+    waiter = asyncio.create_task(agent.responses(Request(scope), Response(), body))
+    await asyncio.wait_for(started.wait(), 1)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    state = agent._require_agent_session("agent-session")
+    assert state.task is not None and not state.task.done()
+    finish.set()
+    retried = await asyncio.wait_for(agent.responses(Request(scope), Response(), body), 1)
+    assert retried.output[0].content[0].text == "Paris"
+    assert len(runs) == 1
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_the_token_count_endpoint_serves_only_a_seeded_session(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    """The sandbox's only path to token counting: refused without the session cookie, and when disabled."""
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.get_first_server_config_dict",
+        lambda *args: {"base_url": "http://10.0.0.5:9001/v1", "api_key": "unused"},
+    )
+    client, _, _ = _agent([], monkeypatch, save_model_call_using_vllm_tokenize_endpoint=enabled)
+    counted = AsyncMock(return_value=1234)
+    monkeypatch.setattr(BrowsecompAgent, "_count_prompt_tokens", counted)
+    assert client.post("/v1/browsecomp/token_count", json=QUESTION).status_code == 409
+    assert client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json")).status_code == 200
+    reply = client.post("/v1/browsecomp/token_count", json=QUESTION)
+    if enabled:
+        assert reply.status_code == 200 and reply.json() == {"count": 1234}
+        counted.assert_awaited_once()
+    else:
+        assert reply.status_code == 422
+        counted.assert_not_awaited()

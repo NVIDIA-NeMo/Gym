@@ -2,6 +2,8 @@ config_paths:
 - nemo_gym/sandbox/providers/docker/configs/docker.yaml
 
 use_absolute_ip: true
+# Only the servers the sandboxes call get the host address; the head server's config endpoint stays on loopback.
+absolute_ip_server_types: [responses_api_models, resources_servers, responses_api_agents]
 
 browsecomp_advanced_harness_resources_server:
   resources_servers:

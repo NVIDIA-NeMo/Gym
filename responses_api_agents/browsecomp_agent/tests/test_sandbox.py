@@ -30,17 +30,37 @@ from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
 
 
 @pytest.mark.parametrize(
-    ("stdout", "return_code", "error_type"),
-    [
-        ("pid:[100]\n", 0, None),  # Same namespace as the host.
-        ("", 1, None),  # Includes a different /proc/1 namespace: the in-container assertion fails.
-        ("", 0, None),
-        ("not a namespace", 0, None),
-    ],
+    "stdout",
+    ["pid:[100]\npid:[100]\n", "pid:[200]\npid:[100]\n"],
+    ids=["the host's namespace", "a /proc mount of another namespace"],
 )
-async def test_enroot_rejects_missing_process_isolation(
-    monkeypatch: pytest.MonkeyPatch, stdout: str, return_code: int, error_type: str | None
+async def test_enroot_rejects_missing_process_isolation(monkeypatch: pytest.MonkeyPatch, stdout: str) -> None:
+    from responses_api_agents.browsecomp_agent.sandbox import SandboxIsolationError
+
+    session = MagicMock()
+    session.sandbox.provider_name = "enroot"
+    session.sandbox.exec = AsyncMock(return_value=MagicMock(stdout=stdout, return_code=0, error_type=None))
+    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
+    with pytest.raises(SandboxIsolationError, match="isolated PID namespace"):
+        await state._check_process_isolation(python="/private/python")
+
+
+@pytest.mark.parametrize(
+    ("stdout", "return_code", "error_type", "message"),
+    [
+        ("", None, "timeout", "could not finish its process isolation probe: timeout"),
+        ("", 137, None, "could not finish its process isolation probe: exit code 137"),
+        ("", 0, None, "did not name a PID namespace"),
+        ("not a namespace\nnot a namespace\n", 0, None, "did not name a PID namespace"),
+    ],
+    ids=["timeout", "killed", "no output", "no namespace"],
+)
+async def test_an_unfinished_isolation_probe_is_retryable_not_a_refusal(
+    monkeypatch: pytest.MonkeyPatch, stdout: str, return_code: int | None, error_type: str | None, message: str
 ) -> None:
+    from responses_api_agents.browsecomp_agent.sandbox import SandboxIsolationError
+
     session = MagicMock()
     session.sandbox.provider_name = "enroot"
     session.sandbox.exec = AsyncMock(
@@ -48,28 +68,18 @@ async def test_enroot_rejects_missing_process_isolation(
     )
     state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
     monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
-    with pytest.raises(RuntimeError, match="isolated PID namespace"):
+    with pytest.raises(RuntimeError, match=message) as error:
         await state._check_process_isolation(python="/private/python")
-
-
-async def test_an_unfinished_isolation_probe_is_retryable_not_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
-    from responses_api_agents.browsecomp_agent.sandbox import SandboxIsolationError
-
-    session = MagicMock()
-    session.sandbox.provider_name = "enroot"
-    session.sandbox.exec = AsyncMock(return_value=MagicMock(stdout="", return_code=None, error_type="timeout"))
-    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
-    monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
-    with pytest.raises(RuntimeError, match="could not finish its process isolation probe: timeout") as error:
-        await state._check_process_isolation(python="/private/python")
-    # SandboxIsolationError refuses the seed for good (422); a probe that timed out may pass on a retry.
+    # SandboxIsolationError refuses the seed for good (422); a probe that gave no answer may pass on a retry.
     assert not isinstance(error.value, SandboxIsolationError)
 
 
 async def test_enroot_accepts_a_distinct_process_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
     session = MagicMock()
     session.sandbox.provider_name = "enroot"
-    session.sandbox.exec = AsyncMock(return_value=MagicMock(stdout="pid:[200]\n", return_code=0, error_type=None))
+    session.sandbox.exec = AsyncMock(
+        return_value=MagicMock(stdout="pid:[200]\npid:[200]\n", return_code=0, error_type=None)
+    )
     state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
     monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
     await state._check_process_isolation(python="/private/python")
@@ -431,6 +441,25 @@ def test_a_loopback_token_count_url_refuses_the_seed(monkeypatch: pytest.MonkeyP
     assert "127.0.0.1:8080/v1/browsecomp/token_count" in reply.text
 
 
+@pytest.mark.parametrize(("provider", "status"), [("e2b", 422), ("docker", 200)])
+def test_a_loopback_tool_grant_url_refuses_the_seed_except_under_docker(
+    monkeypatch: pytest.MonkeyPatch, provider: str, status: int
+) -> None:
+    # A Docker container on the host network reaches the host's loopback, so the shared check only warns there.
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
+
+    client, _, _ = _agent([], monkeypatch)
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.resolve_provider_config", lambda *args: {provider: {}}
+    )
+    monkeypatch.setattr(BrowsecompAgent, "resolve_model_base_url", lambda *args: "http://10.0.0.5:9001/v1")
+    grant = GRANT.model_copy(update={"base_url": "http://127.0.0.1:9000"})
+    reply = client.post("/v1/agent_sessions", json=_seed(tool_accesses=[grant]).model_dump(mode="json"))
+    assert reply.status_code == status, reply.text
+    if status == 422:
+        assert "127.0.0.1:9000" in reply.text
+
+
 def _unknown_provider(*args):
     raise ValueError("Unknown sandbox provider 'dokcer'")
 
@@ -494,6 +523,77 @@ async def test_the_loop_deadline_counts_from_the_runners_start(
     assert "response" in json.loads(output_path.read_text())
 
 
+@pytest.mark.parametrize("lost", ["model", "tool", "token count"])
+async def test_an_endpoint_lost_mid_episode_fails_the_activation_instead_of_timing_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, lost: str
+) -> None:
+    """The loop's calls stop resending a refused connection, so an outage leaves an error receipt (retryable)
+    instead of spinning until the rollout deadline and scoring as a timed-out zero."""
+    from responses_api_agents.browsecomp_agent import app, sandbox_runner
+
+    # Production rides out about 90 s of outage; two resends keep this test fast.
+    monkeypatch.setattr(app, "_SANDBOX_LOOP_CONNECTION_RETRIES", 2)
+    monkeypatch.setattr(sandbox_runner, "_SANDBOX_LOOP_CONNECTION_RETRIES", 2)
+    runners: dict[str, web.AppRunner] = {}
+    origins: dict[str, str] = {}
+
+    async def model(request: web.Request) -> web.Response:
+        if lost == "tool":
+            await runners["tool"].cleanup()
+        return web.json_response(_model_response(_tool_call("ls")))
+
+    async def tool(request: web.Request) -> web.Response:
+        if lost != "tool":
+            await runners[lost].cleanup()
+        return web.json_response({"results_string": "pages"})
+
+    async def token_count(request: web.Request) -> web.Response:
+        return web.json_response({"count": 1})
+
+    for name, path, handler in (
+        ("model", ROUTE, model),
+        ("tool", "/tools/bash_command", tool),
+        ("token count", "/token_count", token_count),
+    ):
+        application = web.Application()
+        application.router.add_post(path, handler)
+        runners[name] = web.AppRunner(application)
+        await runners[name].setup()
+        site = web.TCPSite(runners[name], "127.0.0.1", 0)
+        await site.start()
+        origins[name] = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
+    monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *args: None)
+    monkeypatch.setattr(sandbox_runner, "get_global_aiohttp_client", lambda: MagicMock(close=AsyncMock()))
+    monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
+    payload = {
+        "config": {
+            "name": "browsecomp",
+            "host": "0.0.0.0",
+            "port": 1,
+            "entrypoint": "app.py",
+            "model_server": {"type": "responses_api_models", "name": "policy"},
+            "nudge_steps": False,
+            "rollout_timeout_s": 60,
+            "save_model_call_using_vllm_tokenize_endpoint": True,
+        },
+        "seed": _seed().model_dump(mode="json"),
+        "tool_access": GRANT.model_copy(update={"base_url": f"{origins['tool']}/tools"}).model_dump(mode="json"),
+        "body": QUESTION,
+        "model_url": f"{origins['model']}/ng-rollout/{EPISODE.capture_key}/v1",
+        "token_count_url": f"{origins['token count']}/token_count",
+    }
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(payload))
+    try:
+        await asyncio.wait_for(sandbox_runner.run(input_path, output_path), timeout=30)
+    finally:
+        for runner in runners.values():
+            await runner.cleanup()
+    receipt = json.loads(output_path.read_text())
+    assert "response" not in receipt
+    assert receipt["error"].startswith(("ClientConnectorError", "ServerDisconnectedError")), receipt["error"]
+
+
 def test_the_sandbox_activation_clamps_its_deadline_and_fails_on_an_error_receipt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -552,3 +652,60 @@ def test_missing_process_isolation_refuses_the_seed_after_stopping_the_sandbox(
     assert reply.status_code == 422
     assert "isolated PID namespace" in reply.text
     SandboxSession.close.assert_awaited_once()
+
+
+def _receipt_session(downloaded: bytes | Exception, log: str = "runner log tail") -> BrowsecompSandboxSession:
+    async def download(remote_path: str, local_path: Path) -> None:
+        if isinstance(downloaded, Exception):
+            raise downloaded
+        Path(local_path).write_bytes(downloaded)
+
+    session = MagicMock(session_dir="/private/session")
+    session.sandbox.download = download
+    session.read_output_log = AsyncMock(return_value=log)
+    return BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+
+
+@pytest.mark.parametrize(
+    ("downloaded", "raised", "message"),
+    [
+        (FileNotFoundError("output.json"), RuntimeError, "did not produce a receipt: runner log tail"),
+        (b'{"response": {"id": "resp", "out', RuntimeError, "did not produce a receipt: runner log tail"),
+        (b"\xff\xfe not json", RuntimeError, "did not produce a receipt: runner log tail"),
+        (b'["not", "an", "object"]', TypeError, "must be an object"),
+    ],
+    ids=["missing", "truncated", "garbled", "not an object"],
+)
+async def test_an_unusable_receipt_fails_the_collection_with_the_runner_log(downloaded, raised, message) -> None:
+    with pytest.raises(raised, match=message):
+        await _receipt_session(downloaded).collect()
+
+
+async def test_a_well_formed_receipt_is_returned_as_is() -> None:
+    receipt = {"response": {"id": "resp"}, "resources_cookies": {"harness": "c"}}
+    assert await _receipt_session(json.dumps(receipt).encode()).collect() == receipt
+
+
+async def test_a_missing_receipt_reports_only_the_end_of_a_long_runner_log() -> None:
+    log = "early step\n" * 1000 + "Traceback: the runner's last words"
+    with pytest.raises(RuntimeError) as failed:
+        await _receipt_session(FileNotFoundError("output.json"), log=log).collect()
+    assert str(failed.value) == f"BrowseComp runner did not produce a receipt: {log[-4000:]}"
+    assert str(failed.value).endswith("the runner's last words")
+
+
+@pytest.mark.parametrize("field", ["sandbox_install_timeout_seconds", "sandbox_runner_timeout_seconds"])
+def test_sandbox_timeouts_must_be_finite(field: str) -> None:
+    from pydantic import ValidationError
+
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgentConfig
+
+    with pytest.raises(ValidationError, match="finite number"):
+        BrowsecompAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="browsecomp_agent",
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            **{field: float("inf")},
+        )

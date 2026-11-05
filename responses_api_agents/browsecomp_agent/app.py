@@ -80,7 +80,17 @@ from nemo_gym.server_runtime import (
     MCPToolAccess,
 )
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
-from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession, SandboxIsolationError
+from responses_api_agents.browsecomp_agent.sandbox import (
+    _ERROR_DETAIL_CHARS,
+    BrowsecompSandboxSession,
+    SandboxIsolationError,
+)
+
+
+# Connection retries for the sandboxed loop's model, tool and token-count calls. Gym's client waits 0.5 s between
+# resends, so this rides out about 90 s of outage; a longer one ends in an error receipt, a retryable activation
+# failure, instead of running into the rollout deadline and scoring as a timed-out zero.
+_SANDBOX_LOOP_CONNECTION_RETRIES = 180
 
 
 def _qid(text: str) -> str:
@@ -176,8 +186,8 @@ class BrowsecompAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_config: dict[str, JsonValue] = Field(
         default_factory=lambda: {"image": "python:3.13-slim", "workdir": "/sandbox"}
     )
-    sandbox_install_timeout_seconds: float = Field(default=900, gt=0)
-    sandbox_runner_timeout_seconds: float = Field(default=3600, gt=0)
+    sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
+    sandbox_runner_timeout_seconds: float = Field(default=3600, gt=0, allow_inf_nan=False)
     max_steps: int = 400
     # Wall-clock budget per rollout, measured from the start of the rollout loop. Past it the loop
     # stops, the response carries `timed_out`, and the harness scores the sample 0 without
@@ -331,6 +341,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        """Serve an agent session's single activation in its sandbox, or the host loop when explicitly allowed.
+
+        A session request must use the seeded attempt-qualified rollout path (else 409). The first activation starts
+        the sandboxed loop; an identical retry waits for and replays its result, and a different request answers 409.
+        Disconnecting does not cancel the loop; close does. A request without a session answers 422 unless
+        ``allow_host_execution`` is true.
+        """
         # Thin diagnostic wrapper around the real implementation. A full-400 eval lost 6
         # samples to a 500 out of THIS endpoint with NO traceback anywhere in the log — not
         # even the `🚨` marker that exception_handling_middleware prints for ordinary app
@@ -568,15 +585,9 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         if started_at is None:
             started_at = time.monotonic()
         for attempt in range(attempts):
-            attempt_body = body
-            if self.config.snap_dir:
-                # The keys run() sets: the rollout's capture key is unique across tasks, repeats and attempts.
-                metadata = dict(body.metadata or {})
-                metadata.update(task_index=state.request.episode_id.capture_key, attempt=str(attempt))
-                attempt_body = body.model_copy(update={"metadata": metadata})
             try:
                 model_response = await self._responses_impl(
-                    request, response, attempt_body, session=state, started_at=started_at
+                    request, response, body, session=state, started_at=started_at
                 )
             except aiohttp.ClientResponseError as error:
                 return self._model_request_failure(body, error)
@@ -600,6 +611,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         """
         content = getattr(error, "response_content", b"")
         detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+        # The rollout row carries this message, so an upstream error page stays bounded.
+        detail = detail[:_ERROR_DETAIL_CHARS]
         return NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=time.time(),
@@ -915,6 +928,21 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                         f"Invalid JSON in the arguments of your '{output_function_call.name}' tool "
                         f"call: {tool_args_error}. Re-issue the call with valid JSON arguments."
                     )
+                elif (
+                    self.config.progress
+                    and output_function_call.name == "update_progress"
+                    and not isinstance(tool_args, dict)
+                ):
+                    # Valid JSON that is not an object (a list, a string, null) is the model's mistake, like
+                    # invalid JSON above: it reads the error and may retry, so the rollout keeps its score.
+                    print(
+                        f"[browsecomp][tool_fail][{qid}] step={step} tool=update_progress status=bad_arguments_type",
+                        flush=True,
+                    )
+                    tool_output = (
+                        "Arguments of 'update_progress' must be a JSON object with a 'board' string; "
+                        "re-issue the call."
+                    )
                 elif self.config.progress and output_function_call.name == "update_progress":
                     # Board writes are handled by the agent itself — the board is
                     # per-trajectory agent state, not a resources-server tool.
@@ -955,6 +983,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                                 cookies=resources_server_cookies,
                                 headers=dict(session.tool_access.headers),
                                 _internal=True,
+                                _max_connection_retries=_SANDBOX_LOOP_CONNECTION_RETRIES,
                             )
                         return response, (await response.content.read()).decode()
 
@@ -1178,6 +1207,13 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         return model_response
 
     async def run(self, request: Request, body: BrowsecompAgentRunRequest) -> BrowsecompAgentVerifyResponse:
+        """Seed, answer and verify one row on the host; a development-only path.
+
+        Answers 422 unless ``allow_host_execution`` is true and ``resources_server`` is set. Benchmark configs use
+        agent sessions through ``single_agent_turn_legacy`` instead. An empty answer is retried up to
+        ``max_run_retries`` times, and a timed-out rollout scores 0 without the judge. Any error scores 0 with
+        ``agent_error``; an infrastructure error is also marked ``kill_shaped`` for resume.
+        """
         if not self.config.allow_host_execution or self.config.resources_server is None:
             raise HTTPException(
                 422, "Legacy /run requires allow_host_execution=true and resources_server; use agent sessions"

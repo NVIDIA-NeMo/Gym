@@ -38,12 +38,7 @@ ng_e2e_collect_rollouts \
 
 ## Run through the Environment Server
 
-`config.yaml` now runs the benchmark through `single_agent_turn_legacy` with sandboxed agent and resources tool execution. It requires a Docker daemon by default. Replace the included Docker provider config and both sandbox images when selecting another provider; do not merge two provider blocks under `sandbox`. `config_single_agent_turn.yaml` is a compatibility alias. BrowseComp sessions are not exported to checkpoints, so after a crash an episode starts over from its input. Use it in place of `config.yaml` in step 3:
-
-```bash
-config_paths="responses_api_models/vllm_model/configs/vllm_model.yaml,\
-benchmarks/browsecomp/config_single_agent_turn.yaml"
-```
+`config.yaml` now runs the benchmark through `single_agent_turn_legacy` with sandboxed agent and resources tool execution. It requires a Docker daemon by default. Replace the included Docker provider config and both sandbox images when selecting another provider; do not merge two provider blocks under `sandbox`. The sandboxes reach the model, resources and agent servers at the host's address (`use_absolute_ip: true`); `absolute_ip_server_types` keeps the head server, whose config endpoint returns the merged config, on loopback. BrowseComp sessions are not exported to checkpoints, so after a crash an episode starts over from its input.
 
 Tasks, prompts and correct-answer grading are unchanged. The sandbox path adds a 3600-second activation cap by default (`sandbox_runner_timeout_seconds`); when `rollout_timeout_s` is unset, that cap also bounds the loop. Account for this limit when comparing with previous step-only runs. Compared with the previous host `/run` recipe, failure handling changes the scored denominator:
 
@@ -51,12 +46,12 @@ Tasks, prompts and correct-answer grading are unchanged. The sandbox path adds a
 | --- | --- | --- |
 | Rollout reaches `rollout_timeout_s` | Reward 0 without a judge call, `timed_out: 1` | The same |
 | Model call returns 400, 413 or 422 | Reward 0, with `agent_error` | Verified with an empty answer, which scores 0 |
-| Model call returns 5xx after the client's retries, or the sandbox cannot connect to the model or tools when the activation starts | Set aside unscored (`kill_shaped`) for resume | A non-terminal failure row (`_ng_failure_*`), unscored, which `gym eval run --resume` retries |
+| Model call returns 5xx after the client's retries, or the sandbox cannot connect to the model or tools, at the activation's start or for about 90 seconds later | Set aside unscored (`kill_shaped`) for resume | A non-terminal failure row (`_ng_failure_*`), unscored, which `gym eval run --resume` retries |
 | Model call returns 408, 425 or 429 after the client's retries | Reward 0, with `agent_error` | A non-terminal failure row, which a resume retries |
 | Model call returns any other 4xx | Reward 0, with `agent_error` | A terminal failure row, not scored and not retried |
 | Any other error in the agent turn | Reward 0, with `agent_error` | A non-terminal failure row, which a resume retries |
 
-The sandbox checks that it can connect to the model, tool and token-count endpoints before the loop starts. A connection lost later is resent until it recovers or the activation cap ends the loop, which scores as a timeout.
+The sandbox checks that it can connect to the model, tool and token-count endpoints before the loop starts. A connection lost later is resent for about 90 seconds; if the endpoint does not come back, the activation fails with a non-terminal failure row instead of scoring as a timeout.
 
 So an error that the previous recipe scored 0 now leaves the scored set instead of counting as a wrong answer. Check the failure rows and the coverage file alongside the accuracy.
 

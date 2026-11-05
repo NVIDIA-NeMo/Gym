@@ -24,6 +24,10 @@ from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 
 
+# Most characters of upstream error text that an error message keeps; failure rows carry these messages.
+_ERROR_DETAIL_CHARS = 4000
+
+
 @functools.cache
 def _runtime() -> SandboxPythonRuntime:
     # Upload the exact installed Gym sources separately. Resolve their external dependencies using the
@@ -103,21 +107,27 @@ class BrowsecompSandboxSession(AgentSessionState):
 
     async def _check_process_isolation(self, *, python: str) -> None:
         # Older Enroot silently ignores ENROOT_UNSHARE_PID. Check the actual exec
-        # namespace and its proc mount before delivering any rollout input.
+        # namespace and its proc mount before delivering any rollout input. The resources server's shell sandbox
+        # (resources_servers/browsecomp_advanced_harness/sandbox.py) applies the same rule: only a finished probe
+        # that names the host's namespace, or a /proc mount of another one, is final.
         sandbox = self.session.sandbox
         if sandbox.provider_name != "enroot":
             return
         host_namespace = os.readlink("/proc/self/ns/pid")
-        probe = (
-            "import os; namespace = os.readlink('/proc/self/ns/pid'); "
-            "assert namespace == os.readlink('/proc/1/ns/pid'); print(namespace)"
-        )
+        probe = "import os; print(os.readlink('/proc/self/ns/pid')); print(os.readlink('/proc/1/ns/pid'))"
         result = await sandbox.exec(f"{quote(python)} -I -c {quote(probe)}", cwd="/", timeout_s=30)
-        if result.error_type is not None:
+        if result.return_code != 0 or result.error_type is not None:
             # The probe did not run to an answer, which says nothing about isolation; a retry may get one.
-            raise RuntimeError(f"BrowseComp could not finish its process isolation probe: {result.error_type}")
-        namespace = (result.stdout or "").strip()
-        if result.return_code != 0 or re.fullmatch(r"pid:\[\d+\]", namespace) is None or namespace == host_namespace:
+            outcome = result.error_type or f"exit code {result.return_code}"
+            raise RuntimeError(f"BrowseComp could not finish its process isolation probe: {outcome}")
+        namespaces = (result.stdout or "").splitlines()
+        if (
+            re.fullmatch(r"pid:\[\d+\]", host_namespace) is None
+            or len(namespaces) != 2
+            or any(re.fullmatch(r"pid:\[\d+\]", namespace) is None for namespace in namespaces)
+        ):
+            raise RuntimeError("BrowseComp's process isolation probe did not name a PID namespace")
+        if namespaces[0] != namespaces[1] or namespaces[0] == host_namespace:
             raise SandboxIsolationError(
                 "BrowseComp requires an isolated PID namespace and matching /proc mount. "
                 "Install a complete Enroot distribution with PID isolation support (4.2 or newer)."
@@ -142,7 +152,8 @@ class BrowsecompSandboxSession(AgentSessionState):
         try:
             output = json.loads(await read_text(self.session.sandbox, path=f"{self.session.session_dir}/output.json"))
         except Exception as error:
-            log = await self.session.read_output_log()
+            # The tail holds the runner's last words; the whole log of a long run would bloat failure rows.
+            log = (await self.session.read_output_log())[-_ERROR_DETAIL_CHARS:]
             raise RuntimeError(f"BrowseComp runner did not produce a receipt: {log}") from error
         if not isinstance(output, dict):
             raise TypeError("BrowseComp runner receipt must be an object")

@@ -1,3 +1,0 @@
-# Compatibility name: BrowseComp now uses sandboxed agent sessions by default.
-config_paths:
-- benchmarks/browsecomp/config.yaml
