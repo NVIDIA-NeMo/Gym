@@ -35,8 +35,7 @@ from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedRejectedError, Ag
 from nemo_gym.client import ServerClient
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest, seed_restarts
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY
 from resources_servers.critpt.app import CritPtResourcesServer, CritPtResourcesServerConfig, CritPtVerifyRequest
 from responses_api_agents.critpt_agent.app import (
@@ -606,7 +605,7 @@ class TestSuffixValidationAndSeeds:
             seeded = await http.post("/v1/agent_sessions", json=seed)
             status = await http.get("/ng-control/v1/checkpoint/status")
         assert seeded.status_code == 200
-        assert seeded.headers[CHECKPOINT_RESTART_HEADER] == "1"
+        assert seed_restarts(seeded.headers)
         assert status.json()["mode"] == "restart_only"
 
 

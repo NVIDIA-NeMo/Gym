@@ -27,7 +27,7 @@ from pathlib import Path
 from pydantic import JsonValue
 
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 
 
 BENCHMARK_DIR = Path(__file__).parent
