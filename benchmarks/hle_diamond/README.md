@@ -393,6 +393,16 @@ multipleChoice):
   agent and `compaction.auto: false`. `declare_model_limits: false` keeps the model's size unknown to
   OpenCode, so it compacts only when the endpoint reports a context overflow; the run budget
   (`timeout`, 14,400 s) bounds the episode instead of the step cap.
+- The OpenCode session presets start without network access to npm. With any plugin configured
+  (the adapter always loads its own), OpenCode 1.17.11 installs `@opencode-ai/plugin` into each
+  session's fresh config directory at every start unless the bundle is staged
+  (`sandbox_plugin_dependencies_path`, opencode_agent README, Owner extensions); offline, the start
+  stalls about 70 s before that install fails. Neither science image ships the bundle yet, so expect
+  that delay on every row of `opencode`, `opencode_search` and `opencode_reference`.
+- OpenCode's permissions on the session presets are opencode_agent's `permissions/default.yaml`:
+  everything is allowed except listed bash commands (process killing, `rm -rf` of system paths, raw
+  disk writes, git network commands and others). The sandboxed presets allowed every command and
+  denied only web fetch, web search and subagents.
 - The search presets' leakage policy binds only the Tavily tools: under the Docker provider (open
   egress) the agent can search and fetch from bash around it, and Tavily pre-filters at most 150 of
   the 220 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
@@ -645,8 +655,9 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
 - `ng_trajectory`, `ng_perf` and `ng_model_call_capture` are attached only with
   `++observability_enabled=true ++model_call_capture_dir=<absolute dir>`; without them every
   trajectory health check reports "unobserved". Use a distinct capture directory per run.
-- Confirm tool use: at least one pilot row must show `ng_perf.num_tool_calls > 0` (or a `tool` part
-  in the harness transcript under the artifacts directory). Otherwise the sandbox was never
+- Confirm tool use: at least one pilot row must show `ng_perf.num_tool_calls > 0` (or, on the full
+  presets, a `tool` part in the harness transcript under the artifacts directory; session presets
+  write none there). Otherwise the sandbox was never
   exercised and the run is a no-tools run through a different prompt path, not a with-tools result.
 - Confirm effort: the captured OpenCode and Pi request bodies carry `reasoning_effort: high` (all 15
   requests of the 5-row `hle_diamond/opencode` pilot capture on `opencode_sandboxed_agent`; on the
@@ -799,9 +810,13 @@ verifies. The agent composes its benchmark profile (`configs/profiles/benchmark.
   grants none of its own.
 - Environment note: the session agents carry it as `system_prompt`, which OpenCode reads as its
   instructions file and Pi appends to its system prompt.
+- Failed runs: `verify_after_agent_error: true` grades a run that fails after the harness started (a
+  crash, a nonzero exit, the deadline) on what it produced, so the row stays in the denominator,
+  normally at 0. The relay presets' `execution_failure_reward_zero` set such a row to 0 outright. A transient model-endpoint failure, unconfirmed
+  cleanup or a sandbox that no longer answers stays an execution error and the episode is retried.
 
-What changes against the sandboxed presets is listed under Known limitations (OpenCode's step cap and
-compaction setting).
+What changes against the sandboxed presets is listed under Known limitations (OpenCode's step cap,
+compaction setting, permissions and offline plugin install).
 
 **First run of the search presets.** A 10-row `hle_diamond/opencode_search` pilot on 2026-10-16
 (GPT-6 Astra, judge o3-mini, local Docker with host networking, egress unrestricted) was the first

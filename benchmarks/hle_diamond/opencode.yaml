@@ -29,6 +29,10 @@ hle_diamond_opencode_agent:
       # As the sandboxed benchmark profile: no max_tokens, and OpenCode compacts only on a context-overflow error.
       output_token_policy: remaining_context
       declare_model_limits: false
+      # As the relay presets' execution_failure_reward_zero: a run that fails once OpenCode started (a crash, a
+      # nonzero exit, the deadline) is judged on what it produced, so the row stays in the denominator (normally
+      # at 0) instead of leaving it. Endpoint outages and unconfirmed cleanup stay execution errors and are retried.
+      verify_after_agent_error: true
       # Subagents off, as the sandboxed profile's `task: deny`; web tools are already off in opencode_agent.yaml.
       opencode_config:
         tools:

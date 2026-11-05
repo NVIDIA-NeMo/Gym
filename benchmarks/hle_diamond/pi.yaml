@@ -33,6 +33,10 @@ hle_diamond_pi_agent:
       max_output_tokens: 262144
       output_token_policy: remaining_context
       auto_compaction: false
+      # As the relay presets' execution_failure_reward_zero: a run that fails once Pi started (a crash, a
+      # nonzero exit, the deadline) is judged on what it produced, so the row stays in the denominator (normally
+      # at 0) instead of leaving it. Endpoint outages and unconfirmed cleanup stay execution errors and are retried.
+      verify_after_agent_error: true
       # The sandbox reaches only the model server, so it cannot install Pi: run the science image's runtime
       # (pi_sandboxed_agent/offline_science_image: Node in /opt/node, this Pi release in /opt/pi).
       network_access: model_only

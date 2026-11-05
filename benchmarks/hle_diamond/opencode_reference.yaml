@@ -42,6 +42,7 @@ hle_diamond_opencode_reference_agent:
       timeout: 14400
       output_token_policy: remaining_context
       declare_model_limits: false
+      verify_after_agent_error: true  # a failed run stays in the denominator, as in opencode.yaml
       opencode_config:
         tools:
           task: false

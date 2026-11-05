@@ -656,6 +656,9 @@ class TestAgentSessions:
         )
         assert agent["system_prompt"].startswith(note)
         assert agent["timeout"] == agent["sandbox_config"]["ttl_s"] == 14400
+        # The relay presets scored a failed harness run 0 (execution_failure_reward_zero); a session agent drops it
+        # from the denominator unless it grades the failure.
+        assert agent["verify_after_agent_error"] is True
 
     @pytest.mark.parametrize(("config_file", "agent_name", "harness", "network_access", "note"), SESSION_PRESETS)
     def test_session_agents_validate_against_their_harness_config(
@@ -670,6 +673,7 @@ class TestAgentSessions:
         config_class = {"opencode_agent": OpenCodeAgentConfig, "pi_agent": PiAgentConfig}[harness]
         config = config_class.model_validate(agent | {"name": agent_name})
         assert config.network_access == network_access
+        assert config.verify_after_agent_error is True
 
     @pytest.mark.parametrize("config_file", ["opencode.yaml", "opencode_reference.yaml"])
     def test_restricted_opencode_sandboxes_run_the_images_pinned_binary(self, config_file):
