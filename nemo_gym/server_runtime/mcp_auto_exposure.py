@@ -75,7 +75,7 @@ from collections.abc import Awaitable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from types import UnionType
-from typing import Any, Callable, Optional, Union, get_args, get_origin, get_type_hints
+from typing import Annotated, Any, Callable, Optional, Union, get_args, get_origin, get_type_hints
 from uuid import uuid4
 
 import jsonschema
@@ -579,6 +579,11 @@ async def _seed_body(request: Request) -> dict:
     return seed_body if isinstance(seed_body, dict) else {}
 
 
+def _strip_annotated(annotation: Any) -> Any:
+    """Return the type an ``Annotated[...]`` hint wraps, or the hint itself."""
+    return get_args(annotation)[0] if get_origin(annotation) is Annotated else annotation
+
+
 def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], dict]) -> None:
     """Replace the /seed_session route with a wrapper that appends the MCP session token to its response.
 
@@ -600,7 +605,8 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     # Does the original handler already declare a Request param? If so, reuse it; the wrapper reads
     # the Request out of that same name instead of injecting a second one.
     request_param_name = next(
-        (n for n, p in signature.parameters.items() if hints.get(n, p.annotation) is Request), None
+        (n for n, p in signature.parameters.items() if _strip_annotated(hints.get(n, p.annotation)) is Request),
+        None,
     )
     # The handler's own params, with deferred string annotations resolved so FastAPI sees real types.
     params = [p.replace(annotation=hints.get(n, p.annotation)) for n, p in signature.parameters.items()]
