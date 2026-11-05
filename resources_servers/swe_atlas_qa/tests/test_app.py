@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSessionConflictError
 from resources_servers.swe_atlas_qa import app as module
 
 
@@ -404,8 +404,9 @@ async def test_explicit_close_is_idempotent_and_blocks_late_seed(server, body, s
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id={"rollout_id": "test"})
     for _ in range(2):
         assert (await server.close_resources_session(_request(cookie), close)).resources_session_id == "session"
-    with pytest.raises(ValueError, match="closed"):
+    with pytest.raises(ResourcesSessionConflictError, match="closed") as refused:
         await server.seed_session(_request(), body)
+    assert refused.value.status_code == 409
     assert server._provider.create.await_count == int(seeded)
     assert server._provider.close.await_count == int(seeded)
     assert not server._sessions and not server._sandboxes
@@ -465,8 +466,9 @@ async def test_failed_verify_cleanup_keeps_the_session_refused_until_a_close_del
 
     # The sandbox outlives the window, so the ID is never handed back to a new episode or graded again.
     clock[0] += window + 1
-    with pytest.raises(ValueError, match="closed"):
+    with pytest.raises(ResourcesSessionConflictError, match="closed") as refused:
         await server.seed_session(_request(), body)
+    assert refused.value.status_code == 409
     calls = list(provider.mock_calls)
     duplicate = await server.verify(_request(), body)
     assert duplicate.mask_sample and duplicate.failure_kind == SESSION_LOST

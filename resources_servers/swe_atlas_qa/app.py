@@ -35,6 +35,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSessionConflictError,
     ResourcesSessionFences,
     ResourcesSessionLocks,
     ReverifyMode,
@@ -163,8 +164,9 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
         task = load_task(self.config.tasks_dir, body.task_id)
         session_id = request.session[SESSION_ID_KEY]
         async with self._locks.locked(session_id):
-            if session_id in self._fences or session_id in self._cleanup_pending:
-                raise ValueError("This SWE Atlas Q&A session has already closed")
+            self._fences.raise_if_fenced(session_id)
+            if session_id in self._cleanup_pending:
+                raise ResourcesSessionConflictError(f"Resources session is already closed: {session_id}")
             if session_id in self._sessions:
                 task_id, handle = self._sessions[session_id]
                 if task_id != body.task_id:
