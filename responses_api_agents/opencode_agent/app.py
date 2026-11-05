@@ -92,6 +92,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     parse_opencode_session,
 )
 from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
+from responses_api_agents.opencode_agent.images import IMAGE_LIMITS, ImageAttachment, decode_image_part
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
@@ -648,11 +649,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return await self.activate_agent_session(request, body)
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system = self._session_input(body)
+            prompt, system, images = self._session_input(body)
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._session_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._session_response(
+                        state, state.activation_request, prompt=prompt, system=system, images=images
+                    )
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
@@ -958,7 +961,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
 
-    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _session_input(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> tuple[str, str, tuple[ImageAttachment, ...]]:
         supported = {"input", "instructions", "model"}
         for key, field in type(body).model_fields.items():
             if key in supported:
@@ -981,22 +986,29 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "OpenCode sandbox execution accepts one user text prompt and optional system/developer message"
+                422, "OpenCode sandbox execution accepts one user prompt and optional system/developer text"
             )
         texts = []
+        images = []
         for item in items:
             if isinstance(item.content, str):
                 texts.append(item.content)
             else:
                 parts = [part if isinstance(part, dict) else part.model_dump() for part in item.content]
-                if any(part.get("type") != "input_text" for part in parts):
-                    raise HTTPException(422, "OpenCode sandbox execution supports text input only")
-                texts.append("\n".join(part["text"] for part in parts))
+                for part in parts:
+                    if part.get("type") == "input_text":
+                        continue
+                    if part.get("type") != "input_image" or item.role != "user":
+                        raise HTTPException(422, "OpenCode supports text and inline images in the user message only")
+                    try:
+                        images.append(decode_image_part(part, index=len(images) + 1))
+                    except ValueError as error:
+                        raise HTTPException(422, str(error)) from error
+                texts.append("\n".join(part["text"] for part in parts if part.get("type") == "input_text"))
         if not texts[-1].strip():
             raise HTTPException(422, "OpenCode sandbox execution requires a nonempty user prompt")
-        return texts[-1], "\n\n".join(
-            text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text
-        )
+        system = "\n\n".join(text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text)
+        return texts[-1], system, tuple(images)
 
     def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle
@@ -1086,7 +1098,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        _, system = self._session_input(body)
+        _, system, _ = self._session_input(body)
         supplied_instructions = body.instructions is not None or (
             not isinstance(body.input, str)
             and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
@@ -1099,7 +1111,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run a delta under one budget, including preparation and the concurrency queue."""
         assert isinstance(state, OpenCodeSandboxSession)
-        prompt, system = self._session_input(body)
+        prompt, system, images = self._session_input(body)
         if state.system_instructions is None:
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -1116,6 +1128,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 body,
                 prompt=prompt,
                 system=state.system_instructions,
+                images=images,
                 timeout=timeout,
                 deadline=deadline,
             )
@@ -1233,6 +1246,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        images: tuple[ImageAttachment, ...] = (),
         timeout: float | None = None,
         deadline: float | None = None,
     ) -> NeMoGymResponse:
@@ -1273,6 +1287,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             },
             **self.config.opencode_config,
         }
+        # A later text-only activation still replays images from the retained OpenCode history.
+        state.has_image_input = state.has_image_input or bool(images)
+        if state.has_image_input:
+            config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["modalities"] = {
+                "input": ["text", "image"],
+                "output": ["text"],
+            }
+            config["attachment"] = {"image": dict(IMAGE_LIMITS)}
         mcp_servers, mcp_grants = self._granted_mcp_servers(state.request)
         if mcp_servers:
             config["mcp"] = mcp_servers
@@ -1342,6 +1364,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             try:
                 await state.execute(
                     payload,
+                    images=images,
                     timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                     deadline=deadline,
