@@ -30,14 +30,14 @@ from typing import Literal
 from aiohttp import ClientResponse
 from pydantic import AnyHttpUrl, BaseModel, ConfigDict, Field
 
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
-from nemo_gym.server_utils import (
+from nemo_gym.client import (
     GlobalAIOHTTPAsyncClientConfig,
     request,
     set_global_aiohttp_client,
 )
-from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, ObservationGap, TrajectoryRecord
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunRequest, NOOARunResult
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
@@ -55,6 +55,7 @@ class SandboxInput(BaseModel):
     model_base_url: AnyHttpUrl
     model_server_name: str
     max_policy_calls: int | None = Field(default=None, gt=0)
+    context_window: int | None = Field(default=None, gt=0)
 
 
 class RunnerError(BaseModel):
@@ -222,6 +223,7 @@ async def execute(
             model_server_name=payload.model_server_name,
             max_policy_calls=payload.max_policy_calls,
             on_progress=on_progress,
+            context_window=payload.context_window,
         )
         with rollout_context(payload.request.rollout_id):
             result = await runner.run(payload.request)

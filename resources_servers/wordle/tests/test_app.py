@@ -18,8 +18,8 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 from resources_servers.wordle import app
 from resources_servers.wordle.app import (
     PENALTY_IGNORE_GREEN,

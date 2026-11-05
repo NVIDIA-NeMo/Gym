@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.server_utils import ServerClient
 from resources_servers.instruction_following.app import (
     InstructionFollowingResourcesServer,
     InstructionFollowingResourcesServerConfig,

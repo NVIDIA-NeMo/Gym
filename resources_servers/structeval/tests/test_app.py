@@ -16,8 +16,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from resources_servers.structeval.app import (
     StructEvalResourcesServer,
     StructEvalResourcesServerConfig,

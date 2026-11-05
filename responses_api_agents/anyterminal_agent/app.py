@@ -32,8 +32,8 @@ import ray
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
@@ -45,7 +45,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -227,7 +227,7 @@ if openclaw_defaults.get("workspace") == ".":
 try:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
     from nemo_gym.config import ModelServerRef, ResourcesServerRef
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
 except ModuleNotFoundError as exc:
     # This runs against the nemo-gym the sandbox image installed, which can predate the package
     # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
@@ -299,9 +299,17 @@ class GymAgentHarnessProcessor(BaseModel):
         sentinel = deps_dir / ".installed"
         script = agent_dir / "scripts" / f"{self._agent_key}_deps.sh"
         shared = self._parent / "setup_scripts" / "_portable_python.sh"
-        reqs = agent_dir / "requirements.txt"
-
-        recipe_src = b"".join(p.read_bytes() for p in (script, shared, reqs) if p.exists()) or b"no-script"
+        sources = (
+            script,
+            shared,
+            agent_dir / "pyproject.toml",
+            agent_dir / "uv.lock",
+            # The portable helper installs Gym and its dependencies from this checkout.
+            PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "uv.lock",
+            PARENT_DIR / "setup.py",
+        )
+        recipe_src = b"".join(p.read_bytes() for p in sources if p.exists()) or b"no-script"
         recipe = hashlib.sha256(recipe_src).hexdigest()
         if sentinel.exists() and sentinel.read_text().strip() == recipe:
             print(f"Agent deps already at {deps_dir}", flush=True)

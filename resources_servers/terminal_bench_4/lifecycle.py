@@ -69,6 +69,14 @@ def exception(session, error, error_type=None):
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
 
 
+def interrupted(session, reason):
+    """Mark the attempt's result as cut short, in result.json and the state record, so that no later reader (an
+    audit, a resumed run) takes what it recorded for a graded outcome. The first reason stands."""
+    session.result.setdefault(
+        "interrupted", {"reason": reason, "phase": session.phase, "subphase": session.subphase, "at": now()}
+    )
+
+
 def released(session):
     """Whether every sandbox this session allocated (task, verifier, EFS helper) has stopped."""
     return all(
@@ -135,6 +143,7 @@ async def prepare_session(session, loader):
         session.session_id + "__verifier__trial",
         session.directory,
         verifier=True,
+        placement_group=session.environment.placement_group,
     )
     if session.config.environment.efs_logs_host_path:
         session.shared_logs = SharedLogs(session.environment)
@@ -195,6 +204,13 @@ async def finalize_session(session, *, grade):
         if session.termination.reason == "infrastructure_error" and _grade_resource_limit(
             session, session.termination.detail
         ):
+            return
+        if session.termination.reason == "killed":
+            # A self-kill and a per-process OOM kill look the same afterwards, and either ends the attempt.
+            exception(session, session.termination.detail or "Agent was killed", "NonZeroAgentExitCodeError")
+            session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "agent_killed"}
+            # The zero stands for this attempt, but the agent did not finish: it is never a result to reuse.
+            interrupted(session, "agent_killed")
             return
         session.subphase = "quiesce"
         session.persist()
@@ -275,6 +291,7 @@ async def finalize_session(session, *, grade):
             session.result["verifier"]["finished_at"] = now()
     except asyncio.CancelledError:
         exception(session, "Resources shutdown interrupted evaluation", "CancelledError")
+        interrupted(session, "resources_shutdown")
     except Exception as exc:
         exception(session, exc)
         if grade and session.subphase in ("quiesce", "collect"):
@@ -307,7 +324,8 @@ async def shutdown(sessions: list[Session], timeout: float) -> None:
             if session.finalization in pending and session.subphase != "cleanup":
                 session.finalization.cancel()
         await asyncio.gather(*finalizers, return_exceptions=True)
-    # Includes provisioned sessions whose agent disconnected or died before verification.
+    # Includes provisioned sessions whose agent disconnected or died before verification. Their attempt was in flight.
     for session in sessions:
         if session.phase != "closed":
+            interrupted(session, "resources_shutdown")
             await cleanup(session)

@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
+from nemo_gym.client import ServerClient
 from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef
 from nemo_gym.config.config_types import OmegaConf
 from nemo_gym.core import (
@@ -33,7 +34,6 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     rollout_context,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
     ActiveContainerCommand,
     AgentPromptOverride,
@@ -3097,7 +3097,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3141,7 +3141,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3624,7 +3624,7 @@ class TestEvaluatorLaunchFailure:
         )
         wrapper = _create_wrapper(monkeypatch)
         wrapper._sem = asyncio.Semaphore(1)
-        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        wrapper._vllm_converter = swe_app.ChatCompletionsConverter(return_token_id_information=True)
         processor = NVInternalDatasetProcessor(config=params)
         with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
             response = await wrapper._inner_responses(params, processor)

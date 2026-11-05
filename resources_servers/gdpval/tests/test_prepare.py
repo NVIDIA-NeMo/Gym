@@ -9,7 +9,7 @@ import pytest
 from benchmarks.gdpval import prepare as prepare_module
 from benchmarks.gdpval import prepare_harness_neutral
 from benchmarks.gdpval.prepare import reference_files_str
-from nemo_gym.prompt import fill_prompt, load_prompt_config
+from nemo_gym.data import fill_prompt, load_prompt_config
 
 
 _BENCHMARK = Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval"

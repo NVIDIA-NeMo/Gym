@@ -34,20 +34,29 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    RUNNER_FILE,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    stage_skills,
 )
-from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
+    SKILLS_REF_KEY_NAME,
+    ModelServerRef,
+    ResourcesServerRef,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -63,7 +72,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -72,11 +80,11 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
-from nemo_gym.skills import stage_skills
-from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
+    associate_codex_compaction_calls,
     parse_codex_observations,
     parse_codex_usage,
     read_codex_observations,
@@ -655,7 +663,6 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @field_validator("sandbox_logs_dir")
     @classmethod
@@ -754,6 +761,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             agent_observations=state.observations
             or AgentObservationBundle(source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]),
         )
+
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, CodexSandboxSession) else None
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
@@ -1130,7 +1140,6 @@ class CodexAgent(SimpleResponsesAPIAgent):
             conversation.insert(0, NeMoGymEasyInputMessage(role="system", content=system))
         gaps = [
             ObservationGap(code="subagent_hierarchy_unavailable"),
-            ObservationGap(code="compaction_observations_unavailable"),
             *(ObservationGap(code="model_metadata_fallback", detail=warning) for warning in startup_warnings),
             *(ObservationGap(code="compaction_accuracy_advisory", detail=warning) for warning in compaction_warnings),
             *(
@@ -1184,7 +1193,11 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 error_type=invocation_error,
                 gaps=gaps,
             )
+            state.observations = associate_codex_compaction_calls(
+                state.observations, state.model_attempts or [], model_ref=self.config.model_server
+            )
         else:
+            gaps.append(ObservationGap(code="compaction_observations_unavailable"))
             gaps.append(ObservationGap(code=_MODEL_CALL_JOIN_GAP, detail="CLI events omit model response IDs"))
             tools = []
             starts = {}
@@ -1302,6 +1315,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             },
         )
 
+        response = self.report_rollout_stop(response, state.session)
         if graded_error:
             # Unclassified, so the Environment Server's outcome policy verifies it, as the setting asks.
             return response

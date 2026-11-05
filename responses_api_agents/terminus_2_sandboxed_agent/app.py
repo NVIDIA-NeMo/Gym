@@ -28,14 +28,14 @@ from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import SESSION_ID_KEY, NeMoGymAsyncOpenAI, get_response_json, get_server_url, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -49,18 +49,16 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
-    TaskId,
 )
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.rollout_observability import (
+from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
-from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
@@ -176,17 +174,6 @@ class Terminus2SessionState(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task | None = None
     metrics: Dict[str, Any] | None = None
-
-
-def _collector_task_identity(task_id: TaskId) -> str:
-    """The task identity rollout collection expects on a session run's trajectory.
-
-    A materialized row carries ``task_id`` as the ``TaskId`` mapping, and the collector's canonical
-    identity for it is that mapping's ``str`` (``_trajectory_identity`` in ``rollout_collection``).
-    The environment server posts only the task's ``responses_create_params`` on the turn, so the
-    seeded session request is the harness's only copy of that identity.
-    """
-    return str(task_id.model_dump(mode="json"))
 
 
 class Terminus2AgentRunRequest(BaseRunRequest):
@@ -926,7 +913,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                             request,
                             body,
                             state.sandbox,
-                            task_id=_collector_task_identity(state.request.task_id),
+                            task_id=state.request.task_id.task_id,
                         )
                     except Terminus2InfrastructureError as exc:
                         state.metrics = exc.metrics

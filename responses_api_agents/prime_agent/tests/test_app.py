@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 import pytest
 import yaml
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -32,7 +33,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.prime_agent.app import (
     PrimeAgent,
     PrimeAgentConfig,
