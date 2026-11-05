@@ -1,5 +1,5 @@
 # The SWE adapter (swe_app.py): OpenCode (opencode_agent) works in the row's Scale-SWE sandbox, which this server
-# starts and hands to the agent through an Environment Server session, and the shared IF judge grades the trajectory.
+# starts and hands to the agent through an episode session, and the shared IF judge grades the trajectory.
 # Each row's pre_commands set up the agent's harness, and its grading contract carries the judge's copies of the
 # actor's system prompt and tool-description additions. It validates without services, but it runs only with a
 # sandbox provider and such rows, and Gym ships neither.

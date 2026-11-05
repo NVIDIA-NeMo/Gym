@@ -51,7 +51,9 @@ Enroot must provide a PID namespace separate from the resources-server host, wit
 namespace. Setup checks the running sandbox's namespace IDs before permitting model commands; a version string
 or `ENROOT_UNSHARE_PID` setting alone is insufficient because older Enroot builds may ignore that setting. If the
 check fails, upgrade or configure Enroot with working PID isolation, or select another isolating provider. The
-failed session follows the usual sandbox cleanup and close-retry path. Only Enroot is probed. Choose any other
+failed session follows the usual sandbox cleanup and close-retry path. A probe that shows the host's namespace or a
+mismatched `/proc` mount refuses the seed with 422 once the sandbox is stopped, since no retry can pass it; a probe
+that does not finish fails the seed with a retryable error. Only Enroot is probed. Choose any other
 provider for sandboxes that cannot see the host filesystem: Apptainer, for example, bind-mounts the host's home
 directory and `/tmp` unless configured otherwise.
 
@@ -66,11 +68,14 @@ version pinned into its isolated Python runtime. The first seed builds that runt
 reuse its host-side artifact cache. Setup failures surface to the caller and retain ownership when cleanup fails,
 so a later close can retry. Commands are supervised inside the sandbox; their guard, supported commands, output
 truncation, and exit-code envelope are unchanged. A command that outlives the supervisor deadline answers
-`[exit_code=-1]` and a sandbox failure answers `[exit_code=-2]`, as on the host. There is no fallback to host
-execution after a sandbox failure. A sandbox that cannot start or cannot run a command marks its session, and
-`/verify` keeps the judged reward but masks the sample (`mask_sample: true`, `failure_kind:
-provider_unavailable`), since the model lost its tool to the infrastructure. A blocked command answers without
-starting a sandbox. A missing provider block or an unknown `sandbox_config` key refuses the seed with 422.
+`[exit_code=-1]` and a sandbox failure answers `[exit_code=-2]`, as on the host. Only the supervisor's deadline
+reads as the command's timeout; a provider timeout (an upload, the exec itself, or reading the output) is a sandbox
+failure. There is no fallback to host execution after a sandbox failure. A sandbox that cannot start or cannot run a
+command marks its session, and `/verify` keeps the judged reward but masks the sample (`mask_sample: true`,
+`failure_kind: provider_unavailable`), since the model lost its tool to the infrastructure. A masked sample is
+returned even when the judge cannot be reached. After a failed start, later commands answer `[exit_code=-2]` without
+starting another sandbox. A blocked command answers without starting a sandbox. A missing provider block, an
+unknown provider, or an unknown `sandbox_config` key refuses the seed with 422.
 
 `allow_host_execution: true` explicitly enables the former host interpreter for development when no provider is
 configured, or permits the non-isolating `local` provider. It defaults to `false`; production and benchmark configs
@@ -83,20 +88,39 @@ Each rollout has its own session: the provider-call metrics that `/verify` repor
 - **Environment Server.** `/seed_session` takes a `ResourcesSeedSessionRequest` and keys the session by its `resources_session_id`. The seed is refused with 422 when `task_data` lacks the `question` and `ground_truth` that `/verify` needs, or, with a workspace, when the ID is not a plain directory name. `/close_session` removes the workspace and the metrics, and is idempotent. A close that cannot remove the workspace fails and keeps the session, so the caller can retry it. After a close, a seed for the same ID is refused with 409, and a tool call for it gets 404 (`session_lost`) instead of recreating the workspace. `/verify` of a closed session returns a masked sample (`reward: 0`, `mask_sample: true`, `failure_kind: session_lost`). The reward depends only on the response and the task, so the mask is kept on purpose: a closed session reads the same on every server under the resources session contract. `single_agent_turn` verifies before it closes, so only an out-of-order verify gets the mask.
 - **An agent's `/run`.** `/seed_session` takes the flat row and keys the session by the cookie. `/verify` releases the sandbox and removes the workspace, since this path sends no close. The sandbox starts with the first `bash_command`, not at the seed. A run whose agent never sends `/verify`, as `browsecomp_agent` does after a timeout or an aborted run, keeps its sandbox until the provider's `ttl_s` reclaims it or the server shuts down; Enroot ignores `ttl_s`. Sandboxed runs should use the Environment Server path, which always closes.
 
-`/verify` and `/close_session` stop the owned sandbox before deleting its workspace and metrics. A failed stop leaves
-the session available for a close retry. Shutdown also stops any remaining tool sandboxes. Tool calls, verification,
-and close are serialized per session, so cleanup cannot delete files while a tool is running. `/verify` drops the
-session's metrics after reporting them, unless `dump_session_id_to_metrics_on_exit` keeps them for the dump at shutdown.
+`/close_session`, and `/verify` on the `/run` path, stop the owned sandbox before deleting its workspace and metrics.
+A failed stop leaves the session available for a retry. `/verify` of an episode session releases nothing,
+so a re-sent verify still finds the session's metrics and its sandbox failure; its close releases them. Tool calls,
+verification, and close are serialized per session, so cleanup cannot delete files while a tool is running. Releasing
+a session drops its metrics, unless `dump_session_id_to_metrics_on_exit` keeps them for the dump at shutdown.
+
+Shutdown tries to stop any remaining tool sandboxes, but only on a best-effort basis. `gym env` kills the server one
+second after its interrupt unless `server_shutdown_timeout_seconds` is raised to cover the closes, and Enroot ignores
+`ttl_s`, so an Enroot sandbox left behind stays until `enroot remove` deletes it.
 
 ## Running
 
+The example pairing uses `single_agent_turn_legacy`: existing flat dataset rows still work, while the environment
+server owns resources/agent session setup, verification, and close. The agent loop runs in its own sandbox and
+receives the resources session through the `direct_http` transport; its `resources_server` config is `null`.
+The config includes the Docker provider and `use_absolute_ip: true` so the sandbox can reach the Gym servers;
+`absolute_ip_server_types` limits that to the model, resources and agent servers, so the head server, whose config
+endpoint returns the merged config, stays on loopback.
+Replace the included Docker provider config to run on a different backend, and set both sandbox image fields for that provider. Do not merge two provider blocks under `sandbox`.
+
+The example dataset exposes only `search` and `browse`, so the example config keeps `workspace: none` and inline
+page content. To enable the resources-owned tool sandbox, use `workspace: per_session` with dataset rows exposing
+`bash_command`, as the BrowseComp benchmark does. This preserves the example prompts and tool schemas.
+
 ```bash
-# If you want to run with browsecomp benchmark instead of the example samples, need to change the datasets part to the one like `benchmarks/browsecomp/config.yaml` in `resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml`
 config_paths="resources_servers/browsecomp_advanced_harness/configs/browsecomp_advanced_harness.yaml,\
 responses_api_models/vllm_model/configs/vllm_model.yaml"
 
 ng_run "+config_paths=[${config_paths}]"
 ```
+
+To run the benchmark instead, use `benchmarks/browsecomp/config.yaml` as the first config path. Its dataset,
+workspace, and tool schemas are configured together.
 
 
 # Licensing information

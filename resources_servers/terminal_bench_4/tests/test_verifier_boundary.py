@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Actual verifier/lifecycle/typed verify, environment HTTP and Collection/Store boundaries; no services."""
+"""Actual verifier/lifecycle/episode-session verify, environment HTTP and Collection/Store boundaries; no services."""
 
 import asyncio
 import io
@@ -148,7 +148,7 @@ async def produce(tmp_path, monkeypatch, case, reward):
             {"operation": "original", "event_id": "fixture-existing-id", "cause_id": "fixture-existing-cause"}
         )
         sdk.case = "preparation"
-    resource = NS(_session=lambda *_: session, _check_expiry=lambda _: None, _remember_close=lambda *_: None)
+    resource = NS(_session=lambda *_: session, _check_expiry=lambda _: None, _start_fence_expiry=lambda *_: None)
     resource._verified_response = lambda s, extra: TerminalBench4ResourcesServer._verified_response(resource, s, extra)
     resource._finalize_session = lambda s: TerminalBench4ResourcesServer._finalize_session(resource, s)
     body = SandboxedVerifyRequest(
