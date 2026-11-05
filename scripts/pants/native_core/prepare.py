@@ -75,10 +75,10 @@ def snapshot_distribution(repo: Path) -> None:
     snapshot_editable(candidates[0], source=repo, destination=destination)
 
 
-def require_uv_version(uv: str) -> None:
+def require_uv_version(uv: str, expected: str = UV_VERSION) -> None:
     actual = subprocess.check_output([uv, "--version"], text=True).split()[1]
-    if actual != UV_VERSION:
-        raise ValueError(f"The baseline pins uv {UV_VERSION}; pass --uv with that executable (got {actual})")
+    if actual != expected:
+        raise ValueError(f"The baseline pins uv {expected}; pass --uv with that executable (got {actual})")
 
 
 def normalize(name: str) -> str:
@@ -135,7 +135,9 @@ def validate_lock(requirements: Path, lock: Path) -> dict[str, object]:
 
 
 def export_requirements(repo: Path, destination: Path, *, uv: str = "uv") -> None:
-    require_uv_version(uv)
+    from lock_assets import source_uv_version
+
+    require_uv_version(uv, source_uv_version(repo))
     destination.mkdir(parents=True, exist_ok=True)
     for resolve, extras in EXTRAS.items():
         command = [uv, "export", "--locked", "--no-emit-project", "--no-hashes", "--no-annotate"]
@@ -178,7 +180,8 @@ def write_build_configuration(repo: Path, *, incremental: bool = False) -> dict[
         if incremental and resolve == "core":
             from incremental import MIGRATION_TEST
 
-            overrides = f", overrides={{{MIGRATION_TEST!r}: {{'dependencies': [':incremental-assets'], 'batch_compatibility_tag': 'incremental-migration'}}}}"
+            candidate = json.loads((native / "incremental-policy.json").read_text()).get("candidate", MIGRATION_TEST)
+            overrides = f", overrides={{{candidate!r}: {{'dependencies': [':incremental-assets'], 'batch_compatibility_tag': 'incremental-migration'}}}}"
         lines.append(f"python_sources(name={resolve + '-sources'!r}, sources={sources!r}, resolve={resolve!r})\n")
         lines.append(
             f"python_tests(name={resolve + '-tests'!r}, sources={tests!r}, resolve={resolve!r}, "

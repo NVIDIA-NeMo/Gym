@@ -21,7 +21,7 @@ from xml.etree import ElementTree
 from batching import validate_plan
 from collect import targets
 from incremental import ENVIRONMENT as INCREMENTAL_ENVIRONMENT
-from incremental import MIGRATION_TEST, eligibility
+from incremental import select_policy
 from prepare import BATCH_SIZE, requirement_pins, snapshot_distribution, validate_lock, write_build_configuration
 
 
@@ -252,9 +252,14 @@ def run(args: argparse.Namespace) -> int:
         },
     }
     try:
-        verify_inputs(source, assets)
-        if args.group == "core" and (args.shards != 4 or not 0 <= args.shard < 4):
-            raise ValueError("Core native execution preserves exactly four baseline shards")
+        from lock_assets import lock_assets
+
+        dependencies = lock_assets(source, assets)
+        verify_inputs(source, dependencies)
+        sampled_shards = 4 if (source / "scripts/ci/core_test_shards.py").is_file() else 1
+        if args.group == "core" and (args.shards != sampled_shards or not 0 <= args.shard < sampled_shards):
+            raise ValueError("Core native execution must preserve the sampled baseline shard count")
+        metadata["dependency_bundle"] = str(dependencies.relative_to(assets))
         with tempfile.TemporaryDirectory(prefix="gym-pants-native-", dir="/var/tmp") as temporary:
             checkout = Path(temporary) / "checkout"
             with (output / "prepare.log").open("w") as log:
@@ -279,10 +284,10 @@ def run(args: argparse.Namespace) -> int:
             for resolve in ("core", "sandbox"):
                 exported = native / f"{resolve}.requirements.txt"
                 if requirement_pins(exported.read_text()) != requirement_pins(
-                    (assets / f"{resolve}.requirements.txt").read_text()
+                    (dependencies / f"{resolve}.requirements.txt").read_text()
                 ):
                     raise ValueError(f"Fresh uv export differs from native {resolve} requirements")
-                shutil.copy2(assets / f"{resolve}.lock", native / f"{resolve}.lock")
+                shutil.copy2(dependencies / f"{resolve}.lock", native / f"{resolve}.lock")
                 validate_lock(exported, native / f"{resolve}.lock")
             manifest_path = output / "collection.json"
             with (output / "collection.log").open("w") as log:
@@ -309,9 +314,10 @@ def run(args: argparse.Namespace) -> int:
             snapshot_distribution(checkout)
             if manifest["source_sha"] != metadata["source_sha"]:
                 raise ValueError("Source changed while preparing native execution")
-            expected_durations = hashlib.sha256(
-                (checkout / "scripts/ci/core_test_durations.json").read_bytes()
-            ).hexdigest()
+            duration_file = checkout / "scripts/ci/core_test_durations.json"
+            expected_durations = (
+                hashlib.sha256(duration_file.read_bytes()).hexdigest() if sampled_shards == 4 else None
+            )
             if manifest["durations_sha256"] != expected_durations:
                 raise ValueError("Shard duration weights changed after collection")
             selected = targets(manifest, resolve=args.group, shard=args.shard if args.group == "core" else None)
@@ -319,13 +325,15 @@ def run(args: argparse.Namespace) -> int:
                 raise ValueError("Native collection selected no test files")
             (output / "targets.json").write_text(json.dumps(selected, indent=2) + "\n")
             incremental = False
-            policy = assets / "incremental-policy.json"
+            policy = None
+            candidate = None
             decision = {"eligible": False, "forced_reasons": ["forced execution requested"]}
-            if mode == "incremental" and args.group == "core" and policy.is_file():
-                decision = eligibility(checkout, policy)
+            if mode == "incremental" and args.group == "core":
+                policy, decision = select_policy(checkout, assets)
+                candidate = decision.get("candidate")
                 if sys.platform != "linux":
                     decision = {"eligible": False, "forced_reasons": ["runtime verification supports Linux only"]}
-                if decision["eligible"] and any(MIGRATION_TEST in target for target in selected):
+                if decision["eligible"] and any(candidate in target for target in selected):
                     captured_at = time.monotonic()
                     with (output / "runtime-fingerprint.log").open("w") as log:
                         capture = subprocess.run(
@@ -347,16 +355,18 @@ def run(args: argparse.Namespace) -> int:
                             ],
                         }
                     else:
-                        shutil.copy2(policy, native / policy.name)
+                        shutil.copy2(policy, native / "incremental-policy.json")
                         shutil.copy2(native / "runtime-inputs.json", output / "runtime-inputs.json")
                         incremental = True
             metadata["incremental_eligibility"] = decision
             write_build_configuration(checkout, incremental=incremental)
             interpreter = subprocess.check_output(
-                [args.uv, "python", "find", (checkout / ".python-version").read_text().strip()], text=True
+                [args.uv, "python", "find", (checkout / ".python-version").read_text().strip()],
+                cwd=checkout,
+                text=True,
             ).strip()
             environment["PATH"] = str(Path(interpreter).parent) + os.pathsep + environment.get("PATH", "")
-            reusable = [target for target in selected if incremental and MIGRATION_TEST in target]
+            reusable = [target for target in selected if incremental and candidate in target]
             forced = [target for target in selected if target not in reusable]
             batches = []
             for identifier, addresses, cacheable in (("migration", reusable, True), ("forced", forced, False)):

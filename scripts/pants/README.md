@@ -9,8 +9,8 @@ instrumentation lives in a separate controller checkout. The branch is
 
 The baseline uses the source revision's CI commands. Both arms preserve its test scope, routing and gates:
 
-- Four duration-balanced core shards on independent runners, each with the sampled main's pytest worker count.
-- A separate sandbox job and the combined coverage gate.
+- For recent source, four duration-balanced core shards, a separate sandbox job and a combined coverage gate.
+- For historical source before that split, its single combined core/sandbox job and in-job coverage gate.
 - Eight server shards for a full run, including main's four component workers per shard and their logs,
   or the native changed-server selection.
 - Session-routing end-to-end tests when selected, and lint.
@@ -44,10 +44,44 @@ gh run watch <run-id> -R NVIDIA-NeMo/Gym --interval 30 --exit-status
 gh run download <run-id> -R NVIDIA-NeMo/Gym --dir /absolute/results/hosted/<run-id>
 ```
 
-The authorized three-hour monitor refreshes the clean experiment branch against
-main, selects fresh main commits, dispatches these comparisons, and collects the
-results. It must avoid duplicate active runs, abort conflicting rebases, use
-verified force-with-lease for updates, and retain signed DCO commits.
+Regular PR checks validate the experiment branch separately. A draft PR does not
+automatically launch Gym's authorized CPU pipeline, and those checks do not
+replace comparisons of historical source revisions. Keep the experiment PR in
+draft during validation.
+
+## Historical replay
+
+Select a fixed week of first-parent main history at six-hour source-time
+intervals. Empty intervals share a snapshot; the anchor is included last. Run
+the first snapshot as a cache seed, repeat it as an explicit warm control, then
+advance through the remaining snapshots immediately after each comparison.
+Six hours describes historical sampling, not a delay between workflow runs.
+
+```bash
+python3 scripts/pants/replay_plan.py --repo "$PWD" \
+  --main-anchor <fetched-main-sha> --end-utc <UTC-timestamp> \
+  --output /absolute/results/replay/plan.json
+python3 scripts/pants/replay.py --plan /absolute/results/replay/plan.json \
+  --output /absolute/results/replay
+```
+
+The immutable plan records source SHAs and dependency inputs. The driver freezes
+the controller commit, records dispatch intent before contacting GitHub, and
+resumes the same run after interruption. It verifies the returned source,
+controller, replay token and cache namespace before advancing. Failed comparisons
+stop progression until diagnosed and explicitly recorded; they remain evidence.
+An unresolved dispatch intent stops after 15 minutes without a matching run.
+It is never resent automatically; resuming the same state can recover a late run.
+Do not rebase or push the controller while its replay driver is active.
+
+Each replay has an isolated cache namespace with no fallback to live or later
+source caches. Its baseline and Pants caches persist independently across the
+chronological sequence. Cache inventory, actual restore/save logs, full outcomes,
+raw coverage and timing artifacts remain attached to each run. Run evidence is
+retained under `<output>/hosted/<run-id>/`, alongside the replay's
+immutable `plan.json`, durable `state.json` and per-entry preflight/cache snapshots.
+Missing historical lock bundles or unsupported CI layouts fail before dispatch. Unverified historical
+test inputs remain forced and are reported as such, never counted as reuse.
 
 ## Refresh dependency locks
 
@@ -58,13 +92,17 @@ When the sampled main commit changes `uv.lock`, `pyproject.toml` or
 python3 scripts/pants/native_core/refresh_locks.py \
   --source /absolute/clean-sampled-main-checkout \
   --pants /absolute/pants-launcher \
-  --uv /absolute/uv-0.13.4
+  --uv /absolute/uv-version-pinned-by-sampled-setup-dev
 ```
 
 The command exports both CI extras sets from uv, generates both Pants resolves,
 and validates exact package pins and VCS integrity before publishing the files
 together. It leaves the sampled checkout unchanged. Commit the validated
 controller assets before dispatch; stale locks fail the comparison explicitly.
+Historical bundles live under `native_core/lock-bundles/<input-digest>/` and are
+selected by exact project, lockfile, Python and uv inputs. A fresh export and both
+resolve validations are required even when an existing resolve payload can be
+reused. Publish the needed bundles before freezing a replay controller.
 
 ## Full scope and incremental execution
 
@@ -123,7 +161,8 @@ part of measured CI time. Forced controls neither restore nor save result stores
 Workspace jobs retain the `pants-full-engine-v4-` dependency archives with shard
 zero as writer. The launcher's `~/.cache/nce` has a separate exact-key ARC archive
 keyed by platform, launcher checksum and Pants version; successful core shard
-three is its sole writer. Routed runs without that shard do not refresh it.
+three is its sole writer for the sharded layout; the combined core job writes
+it for older snapshots. Routed runs without a writer do not refresh it.
 Hosted lint and session-routing jobs bootstrap independently. Bootstrap retries
 are limited to setup; test and lint commands execute once.
 

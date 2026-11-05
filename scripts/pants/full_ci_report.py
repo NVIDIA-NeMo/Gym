@@ -17,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from full_ci_aggregate import verify_accounting
+from full_ci_history import NATIVE_JOBS, ci_contract
 from full_ci_junit import compare_reports, summarize_reports
 
 
@@ -74,16 +75,30 @@ def routing(source: Path, parent: str, force_full: bool) -> dict:
         changed_server_files=" ".join(servers),
         session_routing=force_full or any(matches(p, session_patterns) for p in changed),
     )
-    items = [{"job": "lint", "shard": 0, "shards": 1, "runner": "ubuntu-latest"}]
-    if result["run_full"] == "true" or result["run_servers"] == "true":
-        items += [{"job": "core", "shard": i, "shards": 4, "runner": CPU} for i in range(4)]
-        items += [{"job": "sandbox", "shard": 0, "shards": 1, "runner": CPU}]
+    contract = ci_contract(source)
+    legacy = contract["layout"] == "legacy-combined"
+
+    def item(job: str, shard: int = 0, count: int = 1) -> dict:
+        return {"job": job, "shard": shard, "shards": count, **contract["jobs"][job]}
+
+    items = [item("lint")]
+    run_core = result["run_full"] == "true" or result["run_servers"] == "true"
+    if run_core:
+        if legacy:
+            if result["run_servers"] == "true":
+                raise ValueError("Historical combined changed-server routing requires full-scope replay")
+            items.append(item("legacy-core"))
+        else:
+            items += [item("core", i, contract["core_shards"]) for i in range(contract["core_shards"])]
+            items.append(item("sandbox"))
     if result["run_full"] == "true":
-        items += [{"job": "servers", "shard": i, "shards": 8, "runner": CPU} for i in range(8)]
+        items += [item("servers", i, contract["server_shards"]) for i in range(contract["server_shards"])]
     elif result["run_servers"] == "true":
-        items += [{"job": "changed-servers", "shard": 0, "shards": 1, "runner": CPU}]
+        items.append(item("changed-servers"))
     if result["session_routing"]:
-        items += [{"job": "session-routing", "shard": 0, "shards": 1, "runner": "ubuntu-latest"}]
+        items.append(item("session-routing"))
+    result["ci_contract"] = contract
+    result["separate_coverage"] = run_core and not legacy
     result["matrix"] = {"include": [dict(item, engine=engine) for engine in ("baseline", "pants") for item in items]}
     result["source_contracts"] = {
         p: hashlib.sha256((source / p).read_bytes()).hexdigest()
@@ -104,6 +119,8 @@ def prepare(args: argparse.Namespace) -> None:
         experiment_sha=args.experiment_sha,
         force_full=args.force_full,
         execution_mode=args.execution_mode,
+        cache_namespace=args.cache_namespace,
+        replay_token=args.replay_token,
         exclusions=EXCLUSIONS,
     )
     args.output.write_text(json.dumps(result, indent=2) + "\n")
@@ -112,10 +129,15 @@ def prepare(args: argparse.Namespace) -> None:
             selected = [
                 {key: value for key, value in item.items() if key != "engine"}
                 for item in result["matrix"]["include"]
-                if item["engine"] == "baseline" and (item["job"] in ("core", "sandbox")) == core
+                if item["engine"] == "baseline" and (item["job"] in NATIVE_JOBS) == core
             ]
             print(group + "=" + json.dumps({"include": selected}), file=stream)
         print("coverage=" + str(result["run_full"] == "true" or result["run_servers"] == "true").lower(), file=stream)
+        print("separate_coverage=" + str(result["separate_coverage"]).lower(), file=stream)
+        print("uv_version=" + result["ci_contract"]["uv_version"], file=stream)
+        coverage = result["ci_contract"]["coverage"] or {"runner": "ubuntu-latest", "timeout": 360}
+        print("coverage_runner=" + coverage["runner"], file=stream)
+        print("coverage_timeout=" + str(coverage["timeout"]), file=stream)
         print("changed_server_files=" + result["changed_server_files"], file=stream)
 
 
@@ -280,6 +302,8 @@ def report(args: argparse.Namespace) -> None:
                     expected_reports = [server.replace("/", "__") + ".xml" for server in manifests[engine]["servers"]]
                 elif item["job"] == "lint":
                     expected_reports = []
+                elif item["job"] == "legacy-core":
+                    expected_reports = ["core.xml", "sandbox.xml"]
                 else:
                     expected_reports = [item["job"] + ".xml"]
             else:
@@ -300,11 +324,50 @@ def report(args: argparse.Namespace) -> None:
                     execution.get("execution_mode") == "incremental"
                     or execution.get("pants_result_cache") == "incremental-native-tests"
                     or (directory / "native/test-accounting.json").exists()
+                    or item["job"] == "legacy-core"
                 )
             ):
-                accounting = verify_accounting(
-                    directory / "native", report=pair[engine], source_sha=route["source_sha"]
-                )
+                if item["job"] == "legacy-core":
+                    from collections import Counter
+
+                    groups = {}
+                    for group in ("core", "sandbox"):
+                        group_root = directory / "native" / group
+                        group_report = summarize_reports(group_root / "junit", expected_reports=[group + ".xml"])
+                        groups[group] = verify_accounting(
+                            group_root, report=group_report, source_sha=route["source_sha"]
+                        )
+                    # Nested accounting also retains per-batch XML, so select
+                    # only the two canonical reports when checking copied cases.
+                    group_cases = Counter()
+                    for group in ("core", "sandbox"):
+                        for case in summarize_reports(directory / "native" / group / "junit")["cases"]:
+                            group_cases[(case["file"], case["classname"], case["name"], case["outcome"])] += case[
+                                "count"
+                            ]
+                    copied_cases = Counter(
+                        {
+                            (case["file"], case["classname"], case["name"], case["outcome"]): case["count"]
+                            for case in pair[engine]["cases"]
+                        }
+                    )
+                    accounting = {
+                        "valid": all(value["valid"] for value in groups.values()) and group_cases == copied_cases,
+                        "errors": [
+                            f"{group}: {error}" for group, value in groups.items() for error in value["errors"]
+                        ],
+                        "groups": groups,
+                        "counts": {
+                            key: sum(value["counts"][key] for value in groups.values())
+                            for key in ("forced", "executed", "cached", "collection_skips", "total")
+                        },
+                    }
+                    if group_cases != copied_cases:
+                        accounting["errors"].append("Marker group cases do not partition the complete copied JUnit")
+                else:
+                    accounting = verify_accounting(
+                        directory / "native", report=pair[engine], source_sha=route["source_sha"]
+                    )
                 if not accounting["valid"]:
                     errors.append(f"Invalid execution/cache accounting for {label}: {accounting['errors']}")
                 elif execution.get("execution_mode") == "forced" and (
@@ -329,8 +392,14 @@ def report(args: argparse.Namespace) -> None:
                     },
                 }
             result.setdefault("test_accounting", {})[f"{engine}/{label}"] = accounting
-        if item["job"] in ("core", "sandbox"):
-            coverage_name = f".coverage.core-{item['shard']}" if item["job"] == "core" else ".coverage.sandbox"
+        if item["job"] in ("core", "sandbox", "legacy-core"):
+            coverage_name = (
+                f".coverage.core-{item['shard']}"
+                if item["job"] == "core"
+                else ".coverage.legacy-core"
+                if item["job"] == "legacy-core"
+                else ".coverage.sandbox"
+            )
             measured = {}
             for engine in ("baseline", "pants"):
                 coverage = coverage_summary(args.artifacts / f"full-ci-{engine}-{label}" / coverage_name)
@@ -340,10 +409,25 @@ def report(args: argparse.Namespace) -> None:
                     errors.append(f"Invalid raw coverage for {engine}/{label}: {coverage['errors']}")
             if measured["baseline"] != measured["pants"]:
                 errors.append(f"Measured nemo_gym coverage scope differs: {label}")
+            if item["job"] == "legacy-core":
+                from full_ci_aggregate import _coverage_lines
+
+                native = args.artifacts / f"full-ci-pants-{label}" / "native"
+                try:
+                    expected_lines = {}
+                    for group in ("core", "sandbox"):
+                        proof = json.loads((native / group / "test-accounting.json").read_text())
+                        raw_name = f".coverage.core-{proof['shard']}" if group == "core" else ".coverage.sandbox"
+                        for name, bitmap in _coverage_lines(native / group / raw_name).items():
+                            expected_lines[name] = expected_lines.get(name, 0) | bitmap
+                    if _coverage_lines(native.parent / coverage_name) != expected_lines:
+                        errors.append(f"Combined legacy coverage omitted or added marker-group lines: {label}")
+                except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:
+                    errors.append(f"Invalid legacy coverage union for {label}: {error}")
     result["outcomes"] = comparisons
     for engine in ("baseline", "pants"):
         expected = len([item for item in route["matrix"]["include"] if item["engine"] == engine])
-        expected += int(route["run_full"] == "true" or route["run_servers"] == "true")
+        expected += int(route.get("separate_coverage", route["run_full"] == "true" or route["run_servers"] == "true"))
         if result["timing"][engine]["job_count"] != expected:
             errors.append(f"Missing or additional measured jobs for {engine}")
     result["errors"] = errors
@@ -355,7 +439,7 @@ def report(args: argparse.Namespace) -> None:
         "",
         f"Source: `{route['source_sha']}`; experiment: `{route['experiment_sha']}`.",
         "",
-        "Both arms use the same source diff and runner labels, four core shards and up to eight server shards.",
+        "Both arms use the same source diff, runner labels and the sampled main revision's test/job partition.",
         "Feedback time runs from shared workflow creation to each arm's last required job completion, including shared preparation and initial queue delay. Execution span starts at that arm's first job. Both include cache/setup overhead and subsequent queue gaps; runner-minutes sum occupied job time.",
         execution_description(result.get("execution", {})),
         "",
@@ -404,6 +488,8 @@ def main() -> None:
     prep.add_argument("--experiment-sha", required=True)
     prep.add_argument("--force-full", action="store_true")
     prep.add_argument("--execution-mode", choices=("incremental", "forced"), default="incremental")
+    prep.add_argument("--cache-namespace", default="live")
+    prep.add_argument("--replay-token", default="")
     prep.add_argument("--output", type=Path, required=True)
     summary = sub.add_parser("report")
     for name in ("route", "jobs", "run", "artifacts", "output"):

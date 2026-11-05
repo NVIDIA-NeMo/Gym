@@ -52,11 +52,14 @@ def generation_fixture(tmp_path, monkeypatch):
     source.mkdir()
     for name in refresh_locks.INPUTS:
         (source / name).write_text("source input")
+    setup = source / "scripts/ci/setup_dev.sh"
+    setup.parent.mkdir(parents=True)
+    setup.write_text(f"https://astral.sh/uv/{UV_VERSION}/install.sh")
     destination = tmp_path / "assets"
     destination.mkdir()
     (destination / "core.lock").write_text("existing core")
     monkeypatch.setattr(refresh_locks, "clean_source", lambda source: "source-sha")
-    monkeypatch.setattr(refresh_locks, "require_uv_version", lambda uv: None)
+    monkeypatch.setattr(refresh_locks, "require_uv_version", lambda uv, expected: None)
     monkeypatch.setattr(refresh_locks, "interpreter_environment", lambda *args: {})
 
     def prepare(source, checkout, *, uv):
@@ -117,3 +120,18 @@ def test_source_change_during_generation_blocks_publication(tmp_path, monkeypatc
         refresh_locks.refresh(source=source, pants="pants", uv="uv", destination=destination)
     assert (destination / "core.lock").read_text() == "existing core"
     assert not (destination / "lock-inputs.json").exists()
+
+
+def test_interpreter_setup_uses_sampled_checkout_not_controller(tmp_path, monkeypatch):
+    (tmp_path / ".python-version").write_text("3.13.14")
+    calls = []
+    monkeypatch.setattr(refresh_locks.subprocess, "run", lambda command, **kw: calls.append((command, kw)))
+    monkeypatch.setattr(
+        refresh_locks.subprocess,
+        "check_output",
+        lambda command, **kw: (calls.append((command, kw)) or "/runtime/bin/python\n"),
+    )
+    environment = refresh_locks.interpreter_environment(tmp_path, "historical-uv")
+    assert len(calls) == 2
+    assert all(options["cwd"] == tmp_path for _, options in calls)
+    assert environment["PATH"].startswith("/runtime/bin:")

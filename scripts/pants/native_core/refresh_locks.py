@@ -14,7 +14,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from prepare import EXTRAS, UV_VERSION, prepare, require_uv_version, validate_lock
+from lock_assets import source_uv_version
+from prepare import EXTRAS, prepare, require_uv_version, validate_lock
 
 
 HERE = Path(__file__).resolve().parent
@@ -41,8 +42,8 @@ def clean_source(source: Path) -> str:
 
 def interpreter_environment(source: Path, uv: str) -> dict[str, str]:
     version = (source / ".python-version").read_text().strip()
-    subprocess.run([uv, "python", "install", version], check=True, timeout=300)
-    interpreter = subprocess.check_output([uv, "python", "find", version], text=True).strip()
+    subprocess.run([uv, "python", "install", version], cwd=source, check=True, timeout=300)
+    interpreter = subprocess.check_output([uv, "python", "find", version], cwd=source, text=True).strip()
     env = dict(os.environ)
     env["PATH"] = str(Path(interpreter).parent) + os.pathsep + env.get("PATH", "")
     return env
@@ -76,7 +77,8 @@ def refresh(*, source: Path, pants: str, uv: str, destination: Path) -> dict[str
     source = source.resolve()
     revision = clean_source(source)
     initial = fingerprint(source)
-    require_uv_version(uv)
+    uv_version = source_uv_version(source)
+    require_uv_version(uv, uv_version)
     destination.mkdir(parents=True, exist_ok=True)
     mutex = destination / ".refresh-locks.lock"
     with mutex.open("x"):
@@ -104,7 +106,7 @@ def refresh(*, source: Path, pants: str, uv: str, destination: Path) -> dict[str
             manifest = {
                 "inputs": initial,
                 "resolves": resolves,
-                "uv_version": UV_VERSION,
+                "uv_version": uv_version,
                 "pants_version": config["GLOBAL"]["pants_version"],
                 "pex_version": pex_version,
                 "pex_release": f"https://github.com/pex-tool/pex/releases/tag/v{pex_version}",

@@ -1,0 +1,21 @@
+{
+  "inputs": {
+    ".python-version": "f8faecf2505680716c6279bf2cdec3d5a5ba2ba852f0d7df45d51ac1ce8d9ade",
+    "pyproject.toml": "6fac623013c26a97defecaf487da887dafa7a184e24beb8d0985480d179fe117",
+    "uv.lock": "1c8de9080bc115609cd64d803c9044a97be8b7675e9a775a664b96c3c747edf2"
+  },
+  "pants_version": "2.30.2",
+  "pex_release": "https://github.com/pex-tool/pex/releases/tag/v2.101.6",
+  "pex_version": "2.101.6",
+  "resolves": {
+    "core": {
+      "distributions": 164,
+      "uv_export_sha256": "ff270b98ca53af51556f387acc313345eca65e1f7b137f5d1983b1960e80a563"
+    },
+    "sandbox": {
+      "distributions": 190,
+      "uv_export_sha256": "66283b2c9b67c8aee37ddb81956185626d4643781640a335e75371810a7f3220"
+    }
+  },
+  "uv_version": "0.11.29"
+}

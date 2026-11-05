@@ -25,9 +25,11 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from full_ci_history import legacy_command
+
 
 HERE = Path(__file__).resolve().parent
-JOBS = ("core", "sandbox", "servers", "changed-servers", "session-routing", "lint", "smoke")
+JOBS = ("legacy-core", "core", "sandbox", "servers", "changed-servers", "session-routing", "lint", "smoke")
 # Values are passed to Pants's process environment, never serialized into reports.
 # GITHUB_TOKEN and other credentials are intentionally absent.
 ENVIRONMENT = (
@@ -121,7 +123,11 @@ def write_json(path: Path, value: object) -> None:
 
 def server_types() -> tuple[str, ...]:
     """Read the sampled commit's discovery constants without importing Gym."""
-    module = ast.parse(Path("nemo_gym/config/global_config.py").read_text())
+    candidates = [Path("nemo_gym/config/global_config.py"), Path("nemo_gym/global_config.py")]
+    existing = [path for path in candidates if path.is_file()]
+    if len(existing) != 1:
+        raise ValueError("Ambiguous or missing sampled global configuration module")
+    module = ast.parse(existing[0].read_text())
     strings = {}
     for node in module.body:
         if isinstance(node, ast.Assign):
@@ -188,6 +194,12 @@ def command_for(job: str, *, shard: int, shards: int, servers: list[str], output
     junit = shlex.quote(str(output / "junit"))
     coverage = shlex.quote(str(output / (f".coverage.core-{shard}" if job == "core" else ".coverage.sandbox")))
     prefix = f"export GYM_CI_JUNIT_DIR={junit}\n"
+    if job == "legacy-core":
+        return prefix + (
+            f"export COVERAGE_FILE={shlex.quote(str(output / '.coverage.legacy-core'))}\n"
+            f"export PYTEST_ADDOPTS={shlex.quote('--junitxml=' + str(output / 'junit/sandbox.xml'))}\n"
+            + legacy_command(Path.cwd())
+        )
     if job == "core":
         return prefix + f"export COVERAGE_FILE={coverage}\n./scripts/ci/core_unit_tests.sh {shard} {shards}\n"
     if job == "servers":
@@ -255,10 +267,17 @@ def pants_environment(env: dict[str, str]) -> dict[str, str]:
 
 
 def run_native(
-    *, job: str, shard: int, shards: int, output: Path, env: dict[str, str], execution_mode: str = "incremental"
+    *,
+    job: str,
+    shard: int,
+    shards: int,
+    output: Path,
+    env: dict[str, str],
+    execution_mode: str = "incremental",
+    native_output: Path | None = None,
 ) -> int:
     """Run the entire native core shard or sandbox suite, with no fallback."""
-    native = output / "native"
+    native = native_output or output / "native"
     runner = HERE / "native_core/run.py"
     if not runner.is_file():
         raise FileNotFoundError(f"Native {job} runner is required: {runner}")
@@ -286,8 +305,13 @@ def run_native(
         "--uv",
         uv,
     ]
-    write_json(output / "execution.json", {"engine": "pants-native", "command": command})
-    code = run_logged(command, log=output / "runner.log", env=pants_environment(env))
+    write_json(
+        output / (f"{job}-execution.json" if native_output else "execution.json"),
+        {"engine": "pants-native", "command": command},
+    )
+    code = run_logged(
+        command, log=output / (f"{job}-runner.log" if native_output else "runner.log"), env=pants_environment(env)
+    )
     junit = native / "junit" / f"{job}.xml"
     coverage_name = f".coverage.core-{shard}" if job == "core" else ".coverage.sandbox"
     coverage = native / coverage_name
@@ -305,6 +329,36 @@ def run_native(
     if metadata.get("execution_mode") != execution_mode:
         raise ValueError("Native CI execution mode disagrees with the requested mode")
     return 0
+
+
+def run_legacy_native(*, output: Path, env: dict[str, str], execution_mode: str) -> int:
+    """Keep historical core, sandbox and coverage in one sequential runner job."""
+    for group in ("core", "sandbox"):
+        code = run_native(
+            job=group,
+            shard=0,
+            shards=1,
+            output=output,
+            env=env,
+            execution_mode=execution_mode,
+            native_output=output / "native" / group,
+        )
+        if code:
+            return code
+    # The historical gate runs in the sandbox extras environment and applies the
+    # sampled threshold to the core+sandbox union. Native outputs are already
+    # path-normalized; retain both inputs and the combined database.
+    coverage = shlex.quote(str(output / ".coverage.legacy-core"))
+    inputs = " ".join(shlex.quote(str(output / name)) for name in (".coverage.core-0", ".coverage.sandbox"))
+    command = (
+        "set -euo pipefail\nsource ./scripts/ci/setup_dev.sh\n"
+        "uv sync --extra dev --extra ray --extra sandbox --extra openshell --extra mlflow --extra wandb\n"
+        "source .venv/bin/activate\n"
+        f"export COVERAGE_FILE={coverage}\n"
+        f"python3 -m coverage combine --keep {inputs}\n"
+        'python3 -m coverage report --show-missing --fail-under="$(python3 scripts/ci/cov_fail_under.py)"\n'
+    )
+    return run_logged(["bash", "-c", command], log=output / "coverage-gate.log", env=env)
 
 
 def run_pants(*, script: Path, output: Path, env: dict[str, str]) -> int:
@@ -429,9 +483,11 @@ def main() -> int:
     code = 1
     command_code = 1
     source_changed = False
-    native = args.engine == "pants" and args.job in ("core", "sandbox")
+    native = args.engine == "pants" and args.job in ("core", "sandbox", "legacy-core")
     try:
-        if native:
+        if native and args.job == "legacy-core":
+            command_code = run_legacy_native(output=output, env=env, execution_mode=args.execution_mode)
+        elif native:
             command_code = run_native(
                 job=args.job,
                 shard=args.shard,
@@ -477,7 +533,13 @@ def main() -> int:
                 else "whole-job workspace execution"
                 if args.engine == "pants"
                 else "unchanged CI commands",
-                "execution_provenance": "native/metadata.json" if native else None,
+                "execution_provenance": (
+                    ["native/core/metadata.json", "native/sandbox/metadata.json"]
+                    if args.job == "legacy-core"
+                    else "native/metadata.json"
+                )
+                if native
+                else None,
             },
         )
     return code

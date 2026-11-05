@@ -177,5 +177,6 @@
     "tests/unit_tests/data/tasks/harbor/harbor_registry_fakes.py": "317b57ef384bc4bcff459e68cc25b6990f11b6d745a3eae6e976e92086aae3bf",
     "tests/unit_tests/tooling/__init__.py": "c4dc0cf54a15db963e684ed996a7ceb38a3737390327929f05930ac903f33514",
     "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py": "10b54dc725680418469e8df127c5727fd8003e111f6dda231a211d8ec7fded52"
-  }
+  },
+  "uv_lock_sha256": "8f91890c293cbaadb9fb616277841a0ed85fdf41a6a5677ae3257a99a184ac37"
 }

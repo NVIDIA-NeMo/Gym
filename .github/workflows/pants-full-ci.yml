@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 name: Pants full CPU CI comparison
+run-name: Pants CPU ${{ inputs.replay_token || github.run_number }} source ${{ inputs.source_sha || github.sha }}
 
 on:
   push:
@@ -14,6 +15,14 @@ on:
       - BUILD
   workflow_dispatch:
     inputs:
+      replay_token:
+        description: Unique replay dispatch identifier
+        type: string
+        default: ''
+      cache_namespace:
+        description: Isolated forward-only cache namespace
+        type: string
+        default: live
       source_sha:
         description: Main commit to compare (empty selects branch merge-base with main)
         type: string
@@ -55,6 +64,10 @@ jobs:
       coverage: ${{ steps.route.outputs.coverage }}
       changed_server_files: ${{ steps.route.outputs.changed_server_files }}
       cache_contract: ${{ steps.source.outputs.cache_contract }}
+      separate_coverage: ${{ steps.route.outputs.separate_coverage }}
+      uv_version: ${{ steps.route.outputs.uv_version }}
+      coverage_runner: ${{ steps.route.outputs.coverage_runner }}
+      coverage_timeout: ${{ steps.route.outputs.coverage_timeout }}
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
         with:
@@ -66,8 +79,12 @@ jobs:
         working-directory: controller
         env:
           REQUESTED_SOURCE: ${{ inputs.source_sha }}
+          REPLAY_TOKEN: ${{ inputs.replay_token }}
+          CACHE_NAMESPACE: ${{ inputs.cache_namespace }}
         run: |
           set -euo pipefail
+          [[ "$REPLAY_TOKEN" =~ ^[A-Za-z0-9_-]{0,80}$ ]] || { echo 'Invalid replay token'; exit 1; }
+          [[ "$CACHE_NAMESPACE" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'Invalid cache namespace'; exit 1; }
           overlay_base=$(git merge-base HEAD origin/main)
           source_sha=${REQUESTED_SOURCE:-$overlay_base}
           [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]] || { echo 'Expected a full commit SHA'; exit 1; }
@@ -87,12 +104,14 @@ jobs:
           PARENT: ${{ steps.source.outputs.parent_sha }}
           FORCE_FULL: ${{ inputs.force_full }}
           EXECUTION_MODE: ${{ inputs.execution_mode }}
+          CACHE_NAMESPACE: ${{ inputs.cache_namespace }}
+          REPLAY_TOKEN: ${{ inputs.replay_token }}
         run: |
           flags=()
           if [[ "$FORCE_FULL" == true ]]; then flags+=(--force-full); fi
           python3 controller/scripts/pants/full_ci_report.py prepare \
             --source sample --parent "$PARENT" --experiment-sha "$GITHUB_SHA" \
-            --execution-mode "$EXECUTION_MODE" \
+            --execution-mode "$EXECUTION_MODE" --cache-namespace "$CACHE_NAMESPACE" --replay-token "$REPLAY_TOKEN" \
             --output "$RUNNER_TEMP/routing.json" "${flags[@]}"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -115,6 +134,11 @@ jobs:
       changed_server_files: ${{ needs.prepare.outputs.changed_server_files }}
       cache_contract: ${{ needs.prepare.outputs.cache_contract }}
       execution_mode: ${{ inputs.execution_mode }}
+      cache_namespace: ${{ inputs.cache_namespace }}
+      separate_coverage: ${{ needs.prepare.outputs.separate_coverage == 'true' }}
+      uv_version: ${{ needs.prepare.outputs.uv_version }}
+      coverage_runner: ${{ needs.prepare.outputs.coverage_runner }}
+      coverage_timeout: ${{ fromJSON(needs.prepare.outputs.coverage_timeout) }}
 
   pants:
     name: pants
@@ -129,6 +153,11 @@ jobs:
       changed_server_files: ${{ needs.prepare.outputs.changed_server_files }}
       cache_contract: ${{ needs.prepare.outputs.cache_contract }}
       execution_mode: ${{ inputs.execution_mode }}
+      cache_namespace: ${{ inputs.cache_namespace }}
+      separate_coverage: ${{ needs.prepare.outputs.separate_coverage == 'true' }}
+      uv_version: ${{ needs.prepare.outputs.uv_version }}
+      coverage_runner: ${{ needs.prepare.outputs.coverage_runner }}
+      coverage_timeout: ${{ fromJSON(needs.prepare.outputs.coverage_timeout) }}
 
   report:
     name: Compare outcomes and complete CI timing

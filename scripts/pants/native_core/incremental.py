@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 MIGRATION_TEST = "tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py"
+LEGACY_MIGRATION_TEST = "tests/unit_tests/test_add_legacy_agent_environment_servers.py"
 SCANNED_ROOTS = (
     "benchmarks/",
     "environments/",
@@ -41,16 +42,25 @@ ENVIRONMENT = {
 def eligibility(source: Path, policy: Path) -> dict[str, object]:
     """A changed external-read boundary returns to forced execution for inspection."""
     expected = json.loads(policy.read_text())
-    if not set(AUDITED_FILES) <= expected.get("audited_sha256", {}).keys():
+    candidate = expected.get("candidate", MIGRATION_TEST)
+    if candidate not in {MIGRATION_TEST, LEGACY_MIGRATION_TEST}:
+        raise ValueError("Incremental policy names an unsupported test workload")
+    required = {candidate, *AUDITED_FILES[1:]}
+    if not required <= expected.get("audited_sha256", {}).keys():
         raise ValueError("Incremental audit omits required test/script/conftest inputs")
     failures = [
         name
         for name, digest in expected["audited_sha256"].items()
         if not (source / name).is_file() or hashlib.sha256((source / name).read_bytes()).hexdigest() != digest
     ]
+    if expected.get("uv_lock_sha256") and (
+        not (source / "uv.lock").is_file()
+        or hashlib.sha256((source / "uv.lock").read_bytes()).hexdigest() != expected["uv_lock_sha256"]
+    ):
+        failures.append("audited dependency lock changed")
     conftests = {
         str(path.relative_to(source))
-        for parent in (source / MIGRATION_TEST).parents
+        for parent in (source / candidate).parents
         if parent.is_relative_to(source)
         for path in [parent / "conftest.py"]
         if path.exists()
@@ -61,24 +71,41 @@ def eligibility(source: Path, policy: Path) -> dict[str, object]:
         declared_files(source)
     except ValueError as error:
         failures.append(str(error))
-    return {"eligible": not failures, "forced_reasons": failures, "candidate": MIGRATION_TEST}
+    return {"eligible": not failures, "forced_reasons": failures, "candidate": candidate}
+
+
+def select_policy(source: Path, controller: Path) -> tuple[Path | None, dict[str, object]]:
+    """Reuse an audit only while its exact observed code and inherited fixtures match."""
+    policies = [controller / "incremental-policy.json", *sorted((controller / "incremental-policies").glob("*.json"))]
+    best = {"eligible": False, "forced_reasons": ["No audited policy for sampled code"]}
+    best_count = float("inf")
+    for policy in policies:
+        if not policy.is_file():
+            continue
+        decision = eligibility(source, policy)
+        if decision["eligible"]:
+            return policy, decision
+        if len(decision["forced_reasons"]) < best_count:
+            best = decision
+            best_count = len(decision["forced_reasons"])
+    return None, best
 
 
 def declared_files(source: Path) -> list[str]:
-    """Inventory scanner trees, explicit dynamic imports and non-Python fixtures.
+    """Inventory YAML scans, resource AST inputs, imports and non-Python fixtures.
 
     Names as well as contents enter the generated target, so additions/deletions
     invalidate a scanner. Ordinary Python imports retain Pants inference.
     """
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=source).decode().split("\0")
-    explicit = {*AUDITED_FILES, "pyproject.toml", "uv.lock", ".python-version"}
+    explicit = {*AUDITED_FILES, LEGACY_MIGRATION_TEST, "pyproject.toml", "uv.lock", ".python-version"}
     selected = sorted(
         name
         for name in tracked
         if name
         and (
             name in explicit
-            or name.startswith(SCANNED_ROOTS)
+            or name.startswith("resources_servers/")
             or name.endswith((".yaml", ".yml"))
             or (name.startswith(("tests/", "nemo_gym/")) and not name.endswith(".py"))
             or name.startswith("tests/helpers/")

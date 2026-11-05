@@ -16,15 +16,21 @@ def pytest_sessionfinish(session, exitstatus):
     output = os.environ.get("GYM_NATIVE_COLLECTION_OUTPUT")
     if output is None:
         return
-    from scripts.ci.core_test_shards import DURATIONS_PATH, partition_files
-
     root = Path(session.config.rootpath)
     files: dict[str, list[str]] = {}
     for item in session.items:
         path = item.path.relative_to(root).as_posix()
         files.setdefault(path, []).append(item.nodeid)
-    durations = json.loads(DURATIONS_PATH.read_text())["files"]
-    assignments = partition_files(list(files), durations, 4)
+    sharded = (root / "scripts/ci/core_test_shards.py").is_file()
+    if sharded:
+        from scripts.ci.core_test_shards import DURATIONS_PATH, partition_files
+
+        durations = json.loads(DURATIONS_PATH.read_text())["files"]
+        assignments = partition_files(list(files), durations, 4)
+        durations_hash = hashlib.sha256(DURATIONS_PATH.read_bytes()).hexdigest()
+    else:
+        assignments = dict.fromkeys(files, 0)
+        durations_hash = None
     Path(output).write_text(
         json.dumps(
             {
@@ -32,7 +38,8 @@ def pytest_sessionfinish(session, exitstatus):
                 "exit_code": int(exitstatus),
                 "source_sha": subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(),
                 "marker": os.environ["GYM_NATIVE_COLLECTION_MARKER"],
-                "durations_sha256": hashlib.sha256(DURATIONS_PATH.read_bytes()).hexdigest(),
+                "durations_sha256": durations_hash,
+                "shards": 4 if sharded else 1,
                 "files": files,
                 "assignments": assignments,
                 "testcase_count": sum(len(items) for items in files.values()),
@@ -49,8 +56,8 @@ def targets(manifest: dict[str, object], *, resolve: str, shard: int | None) -> 
         raise ValueError("Collection failed; refusing partial native execution")
     if resolve not in {"core", "sandbox"}:
         raise ValueError("Unknown resolve")
-    if resolve == "core" and (shard is None or not 0 <= shard < 4):
-        raise ValueError("Core requires a shard in [0, 4)")
+    if resolve == "core" and (shard is None or not 0 <= shard < manifest.get("shards", 4)):
+        raise ValueError("Core requires a valid sampled shard")
     if resolve == "sandbox" and shard is not None:
         raise ValueError("Sandbox runs once, without core sharding")
     marker = "not sandbox" if resolve == "core" else "sandbox"
@@ -79,9 +86,10 @@ def main() -> None:
     if args.command == "targets":
         print("\n".join(targets(json.loads(args.manifest.read_text()), resolve=args.resolve, shard=args.shard)))
         return
+    from lock_assets import source_uv_version
     from prepare import EXTRAS, require_uv_version
 
-    require_uv_version(args.uv)
+    require_uv_version(args.uv, source_uv_version(args.repo))
     marker = "not sandbox" if args.resolve == "core" else "sandbox"
     command = [args.uv, "run", "--locked"]
     for extra in EXTRAS[args.resolve]:

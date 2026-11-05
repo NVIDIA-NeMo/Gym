@@ -174,12 +174,39 @@ def external_configuration(source: Path, *, inventory_output: Path | None = None
             for item in value:
                 yield from strings(item)
 
+    def check_resource_entrypoints(value):
+        if isinstance(value, dict):
+            resources = value.get("resources_servers")
+            if isinstance(resources, dict):
+                for implementation, config in resources.items():
+                    if not isinstance(config, dict):
+                        continue
+                    entrypoint = config.get("entrypoint") or "app.py"
+                    if not isinstance(implementation, str) or not isinstance(entrypoint, str):
+                        raise ValueError("Unsupported resource entrypoint syntax")
+                    root = source / "resources_servers"
+                    candidate = root / implementation / entrypoint
+                    if (
+                        Path(implementation).is_absolute()
+                        or Path(entrypoint).is_absolute()
+                        or not candidate.resolve().is_relative_to(root.resolve())
+                    ):
+                        raise ValueError("Resource AST entrypoint escapes declared resources_servers inputs")
+                    if candidate.is_file() and candidate.relative_to(source).as_posix() not in tracked:
+                        raise ValueError("Resource AST entrypoint is not a tracked source input")
+            for item in value.values():
+                check_resource_entrypoints(item)
+        elif isinstance(value, list):
+            for item in value:
+                check_resource_entrypoints(item)
+
     while pending:
         path = pending.pop()
         if path in visited or not path.is_file():
             continue
         visited.add(path)
         for document in yaml.safe_load_all(path.read_text()):
+            check_resource_entrypoints(document)
             if isinstance(document, dict):
                 references = document.get("config_paths") or []
                 if not isinstance(references, list) or not all(isinstance(value, str) for value in references):

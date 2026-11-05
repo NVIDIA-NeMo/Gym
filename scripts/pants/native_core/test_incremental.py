@@ -13,7 +13,7 @@ from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
-from incremental import AUDITED_FILES, declared_files, eligibility
+from incremental import AUDITED_FILES, LEGACY_MIGRATION_TEST, declared_files, eligibility, select_policy
 from runtime_fingerprint import external_configuration, fingerprint
 
 
@@ -55,6 +55,78 @@ class IncrementalTest(unittest.TestCase):
         script.write_text(before)
         self.write("tests/unit_tests/tooling/conftest.py", "# New fixture\n")
         self.assertFalse(eligibility(self.root, self.policy)["eligible"])
+
+    def test_historical_policy_requires_its_own_audited_code_and_candidate(self):
+        historical = json.loads(self.policy.read_text())
+        old = AUDITED_FILES[0]
+        self.write(LEGACY_MIGRATION_TEST, (self.root / old).read_text())
+        (self.root / old).unlink()
+        historical["candidate"] = LEGACY_MIGRATION_TEST
+        historical["audited_sha256"][LEGACY_MIGRATION_TEST] = historical["audited_sha256"].pop(old)
+        controller = self.root / "controller"
+        variant = controller / "incremental-policies" / "historical.json"
+        variant.parent.mkdir(parents=True)
+        (controller / "incremental-policy.json").write_bytes(self.policy.read_bytes())
+        variant.write_text(json.dumps(historical))
+        self.stage()
+        selected, decision = select_policy(self.root, controller)
+        self.assertEqual(selected, variant)
+        self.assertEqual(decision["candidate"], LEGACY_MIGRATION_TEST)
+        self.assertTrue(decision["eligible"])
+        self.assertIn(LEGACY_MIGRATION_TEST, declared_files(self.root))
+        (self.root / LEGACY_MIGRATION_TEST).write_text("# Changed actual test code\n")
+        selected, decision = select_policy(self.root, controller)
+        self.assertIsNone(selected)
+        self.assertFalse(decision["eligible"])
+
+    def test_dependency_change_requires_fresh_external_read_audit(self):
+        self.write("uv.lock", "audited dependencies")
+        policy = json.loads(self.policy.read_text())
+        policy["uv_lock_sha256"] = hashlib.sha256((self.root / "uv.lock").read_bytes()).hexdigest()
+        self.policy.write_text(json.dumps(policy))
+        self.assertTrue(eligibility(self.root, self.policy)["eligible"])
+        self.write("uv.lock", "new dependency implementation")
+        self.assertFalse(eligibility(self.root, self.policy)["eligible"])
+
+    def test_unread_agent_code_and_docs_do_not_invalidate_yaml_scanner(self):
+        self.write("responses_api_agents/example/app.py", "# Not imported by this audited test\n")
+        self.write("responses_api_agents/example/tests/test_app.py", "# Not this workload\n")
+        self.write("responses_api_models/example/README.md", "Unobserved documentation\n")
+        self.write("responses_api_agents/example/config.yaml", "value: 1\n")
+        self.write("resources_servers/example/custom.entrypoint", "class Example: pass\n")
+        self.stage()
+        before = declared_files(self.root)
+        self.assertNotIn("responses_api_agents/example/app.py", before)
+        self.assertNotIn("responses_api_agents/example/tests/test_app.py", before)
+        self.assertNotIn("responses_api_models/example/README.md", before)
+        self.assertIn("responses_api_agents/example/config.yaml", before)
+        self.assertIn("resources_servers/example/custom.entrypoint", before)
+        self.write("responses_api_agents/example/new_module.py", "# Also unobserved\n")
+        self.stage()
+        self.assertEqual(before, declared_files(self.root))
+        self.write("responses_api_agents/example/added.yaml", "value: 2\n")
+        self.stage()
+        self.assertNotEqual(before, declared_files(self.root))
+
+    def test_resource_ast_entrypoint_cannot_escape_declared_tree(self):
+        config = "resources_servers/example/config.yaml"
+        for entrypoint in ("/outside/implementation.py", "../../outside.py"):
+            with self.subTest(entrypoint=entrypoint):
+                self.write(config, f"example:\n  resources_servers:\n    example:\n      entrypoint: {entrypoint}\n")
+                self.stage()
+                with self.assertRaisesRegex(ValueError, "entrypoint escapes"):
+                    external_configuration(self.root)
+        self.write(config, "example:\n  resources_servers:\n    ../../outside: {}\n")
+        self.stage()
+        with self.assertRaisesRegex(ValueError, "entrypoint escapes"):
+            external_configuration(self.root)
+        self.write(config, "example:\n  resources_servers:\n    example:\n      entrypoint: custom.entrypoint\n")
+        self.write("resources_servers/example/custom.entrypoint", "class Example: pass\n")
+        with self.assertRaisesRegex(ValueError, "not a tracked"):
+            external_configuration(self.root)
+        self.stage()
+        self.assertEqual(external_configuration(self.root), set())
+        self.assertIn("resources_servers/example/custom.entrypoint", declared_files(self.root))
 
     def test_scanner_membership_and_internal_link_target_are_declared(self):
         first = self.write("resources_servers/a/config.yaml", "value: 1\n")

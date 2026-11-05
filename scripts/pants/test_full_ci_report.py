@@ -42,6 +42,7 @@ def repository(tmp_path):
         ".github/actions/classify-changes/action.yml",
         ".github/workflows/unit-tests.yml",
         ".github/workflows/code-linting.yml",
+        "scripts/ci/setup_dev.sh",
     ):
         target = tmp_path / name
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -273,3 +274,28 @@ def test_execution_description_does_not_relabel_historical_wrapper_runs():
     assert "0 native Python test jobs" in description
     assert "1 whole-job workspace jobs" in description
     assert "Result-cache modes: session-only." in description
+
+
+def test_historical_full_run_keeps_combined_job_without_phantom_coverage(tmp_path):
+    from full_ci_history import job_blocks
+    from test_full_ci_history import LEGACY
+
+    root = repository(tmp_path)
+    path = root / ".github/workflows/unit-tests.yml"
+    text = path.read_text()
+    prefix = text.split("\njobs:\n", 1)[0]
+    blocks = job_blocks(text)
+    blocks["test"] = job_blocks(LEGACY)["test"]
+    for name in ("sandbox-tests", "core-coverage", "changed-server-tests"):
+        blocks.pop(name)
+    path.write_text(
+        prefix + "\njobs:\n" + "".join(f"  {name}:\n{block.lstrip(chr(10))}" for name, block in blocks.items())
+    )
+    commit(root, "historical.txt")
+    result = routing(root, "HEAD^", True)
+    jobs = [item["job"] for item in result["matrix"]["include"] if item["engine"] == "baseline"]
+    assert jobs.count("legacy-core") == 1
+    assert jobs.count("servers") == 8
+    assert "core" not in jobs and "sandbox" not in jobs
+    assert result["separate_coverage"] is False
+    assert result["ci_contract"]["core_shards"] == 1
