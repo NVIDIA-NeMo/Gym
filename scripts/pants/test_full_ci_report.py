@@ -6,7 +6,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from full_ci_report import routing, timing
+from full_ci_report import routing, timing, timing_scorecard
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -299,3 +299,105 @@ def test_historical_full_run_keeps_combined_job_without_phantom_coverage(tmp_pat
     assert "core" not in jobs and "sandbox" not in jobs
     assert result["separate_coverage"] is False
     assert result["ci_contract"]["core_shards"] == 1
+
+
+def scorecard_fixture():
+    jobs = []
+    accounting = {}
+    for engine, end in (("baseline", "02"), ("pants", "01")):
+        for kind in ("core", "sandbox", "servers", "lint"):
+            jobs.append(
+                {
+                    "name": f"{engine} / {kind} / 0",
+                    "started_at": "2026-11-05T10:00:00Z",
+                    "completed_at": f"2026-11-05T10:{end}:00Z",
+                    "conclusion": "success",
+                    "runner_id": 1,
+                }
+            )
+            accounting[f"{engine}/{kind}-0"] = {
+                "valid": True,
+                "counts": {"forced": 6, "executed": 2, "cached": 1, "collection_skips": 1, "total": 10},
+            }
+    result = {
+        "valid": True,
+        "routing": {"source_sha": "sample", "replay_token": "warm-looking-token"},
+        "test_accounting": accounting,
+    }
+    return result, jobs
+
+
+def test_scorecard_separates_unit_server_and_full_job_costs_without_inventing_warmth():
+    result, jobs = scorecard_fixture()
+    card = timing_scorecard(result, jobs)
+    assert card["source_sha"] == "sample"
+    assert card["cache_warmth"] == "unknown"
+    assert card["replay_phase"] == "unknown"
+    unit = card["scopes"]["native_unit_tests"]
+    assert unit["valid"]
+    assert unit["arms"]["baseline"]["elapsed_seconds"] == 120
+    assert unit["arms"]["baseline"]["runner_minutes"] == 4
+    assert unit["arms"]["pants"]["runner_minutes"] == 2
+    assert unit["arms"]["pants"]["test_counts"] == {
+        "forced": 12,
+        "executed": 4,
+        "cached": 2,
+        "collection_skips": 2,
+        "total": 20,
+    }
+    assert unit["paired_job_seconds"]["core / 0"] == {"baseline": 120, "pants": 60}
+    assert card["scopes"]["server_tests"]["arms"]["baseline"]["job_count"] == 1
+    assert card["scopes"]["full_ci"]["arms"]["baseline"]["runner_minutes"] == 8
+    assert all(value is None for value in unit["baseline_over_pants"].values())
+    assert unit["ratio_unavailable_reason"] == "Cache controls not assessed"
+
+
+@pytest.mark.parametrize(
+    "failure", ["whole-comparison", "missing-timestamp", "unassigned", "missing-runner", "null-runner", "accounting"]
+)
+def test_scorecard_does_not_label_invalid_or_unassigned_costs_as_comparable(failure):
+    result, jobs = scorecard_fixture()
+    if failure == "whole-comparison":
+        result["valid"] = False
+    elif failure == "missing-timestamp":
+        jobs[0].pop("completed_at")
+    elif failure == "unassigned":
+        jobs[0]["runner_id"] = 0
+    elif failure == "missing-runner":
+        jobs[0].pop("runner_id")
+    elif failure == "null-runner":
+        jobs[0]["runner_id"] = None
+    else:
+        result["test_accounting"]["pants/core-0"]["valid"] = False
+    unit = timing_scorecard(result, jobs)["scopes"]["native_unit_tests"]
+    assert not unit["valid"]
+    assert all(value is None for value in unit["baseline_over_pants"].values())
+    if failure in {"unassigned", "missing-runner", "null-runner"}:
+        assert unit["arms"]["baseline"]["runner_minutes"] == 2
+
+
+def test_scorecard_legacy_unit_job_is_not_double_counted_as_server_work():
+    result, jobs = scorecard_fixture()
+    for job in jobs:
+        job["name"] = job["name"].replace(" / core / ", " / legacy-core / ")
+    for engine in ("baseline", "pants"):
+        result["test_accounting"][f"{engine}/legacy-core-0"] = result["test_accounting"].pop(f"{engine}/core-0")
+    unit = timing_scorecard(result, jobs)["scopes"]["native_unit_tests"]
+    assert unit["arms"]["baseline"]["job_count"] == 2
+    assert "legacy-core / 0" in unit["paired_job_seconds"]
+
+
+def test_scorecard_ignores_legitimately_skipped_unassigned_routes():
+    result, jobs = scorecard_fixture()
+    original = timing_scorecard(result, jobs)
+    for engine in ("baseline", "pants"):
+        jobs.extend(
+            [
+                {"name": f"{engine} / combined coverage", "conclusion": "skipped", "runner_id": 0},
+                {"name": f"{engine} / legacy-core / 0", "conclusion": "skipped"},
+            ]
+        )
+    card = timing_scorecard(result, jobs)
+    assert card == original
+    assert all(scope["valid"] for scope in card["scopes"].values())
+    assert all(arm["timing_complete"] for scope in card["scopes"].values() for arm in scope["arms"].values())

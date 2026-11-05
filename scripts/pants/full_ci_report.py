@@ -182,6 +182,70 @@ def timing(jobs: list[dict], engine: str, created_at: str | None = None) -> dict
     }
 
 
+def timing_scorecard(result: dict, jobs: list[dict]) -> dict:
+    """Compare complete occupied job times only after whole-workload validation."""
+    route = result["routing"]
+    scopes = {
+        "native_unit_tests": {"core", "sandbox", "legacy-core"},
+        "server_tests": {"servers", "changed-servers"},
+        "full_ci": None,
+    }
+    scorecard = {
+        "source_sha": route["source_sha"],
+        "cache_warmth": "unknown",
+        "replay_phase": "unknown",
+        "valid": result["valid"],
+        "scope_note": "Native unit tests include core and sandbox jobs; legacy jobs also include their embedded coverage gate. Separate coverage, lint and session-routing jobs belong to full CI.",
+        "timing_note": "Complete GitHub job times include setup, cache restore/save and cleanup. Execution span includes gaps between selected jobs; runner-minutes sum assigned job durations. Cache restore/save conditions are not assessed by this reporter, so speed ratios are withheld.",
+        "scopes": {},
+    }
+    for scope, kinds in scopes.items():
+        selected = [
+            job
+            for job in jobs
+            if job.get("conclusion") != "skipped"
+            and len(job["name"].split(" / ")) >= 2
+            and (kinds is None or job["name"].split(" / ")[1] in kinds)
+        ]
+        arms = {}
+        for engine in ("baseline", "pants"):
+            required = [job for job in selected if job["name"].startswith(engine + " / ")]
+            assigned = [job for job in required if type(job.get("runner_id")) is int and job["runner_id"] > 0]
+            value = timing(assigned, engine)
+            accounting = [
+                proof
+                for key, proof in result.get("test_accounting", {}).items()
+                if key.startswith(engine + "/") and (kinds is None or key.split("/", 1)[1].rsplit("-", 1)[0] in kinds)
+            ]
+            value["runner_minutes"] = value["job_seconds"] / 60
+            value["test_counts"] = {
+                key: sum(proof["counts"][key] for proof in accounting)
+                for key in ("forced", "executed", "cached", "collection_skips", "total")
+            }
+            value["accounting_valid"] = bool(accounting) and all(proof["valid"] for proof in accounting)
+            value["timing_complete"] = (
+                bool(value["jobs"])
+                and all(job["job_seconds"] is not None and job["job_seconds"] >= 0 for job in value["jobs"])
+                and len(assigned) == len(required)
+            )
+            arms[engine] = value
+        valid = result["valid"] and all(
+            value["successful"] and value["accounting_valid"] and value["timing_complete"] for value in arms.values()
+        )
+        pairs = {}
+        for engine, value in arms.items():
+            for job in value["jobs"]:
+                pairs.setdefault(job["name"].removeprefix(engine + " / "), {})[engine] = job["job_seconds"]
+        scorecard["scopes"][scope] = {
+            "valid": valid,
+            "arms": arms,
+            "paired_job_seconds": pairs,
+            "baseline_over_pants": {"elapsed_seconds": None, "runner_minutes": None},
+            "ratio_unavailable_reason": "Comparison failed validation" if not valid else "Cache controls not assessed",
+        }
+    return scorecard
+
+
 def coverage_summary(path: Path) -> dict:
     """Audit portable raw coverage without installing a second coverage version.
 
@@ -432,6 +496,7 @@ def report(args: argparse.Namespace) -> None:
             errors.append(f"Missing or additional measured jobs for {engine}")
     result["errors"] = errors
     result["valid"] = not errors and all(value["successful"] for value in result["timing"].values())
+    result["timing_scorecard"] = timing_scorecard(result, jobs)
     args.output.mkdir(parents=True, exist_ok=True)
     (args.output / "results.json").write_text(json.dumps(result, indent=2) + "\n")
     lines = [
@@ -450,6 +515,23 @@ def report(args: argparse.Namespace) -> None:
         lines.append(
             f"| {engine} | {value['feedback_seconds']} | {value['elapsed_seconds']} | {value['job_seconds'] / 60:.2f} | {value['job_count']} |"
         )
+    scorecard = result["timing_scorecard"]
+    lines += [
+        "",
+        "Unit-test timing scorecard (cache warmth: unknown).",
+        scorecard["scope_note"],
+        "Speed ratios are withheld: the reporter does not assess cache restore/save controls. Failed validation also prevents a speed claim.",
+        "",
+        "| Scope | Arm | Execution span seconds | Runner-minutes | Forced | Executed cacheable | Reused | Valid |",
+        "|---|---|---:|---:|---:|---:|---:|---|",
+    ]
+    for scope, card in scorecard["scopes"].items():
+        for engine, value in card["arms"].items():
+            counts = value["test_counts"]
+            lines.append(
+                f"| {scope} | {engine} | {value['elapsed_seconds']} | {value['runner_minutes']:.2f} | "
+                f"{counts['forced']} | {counts['executed']} | {counts['cached']} | {card['valid']} |"
+            )
     lines += ["", "| Arm / required job | Result | Job seconds | Feedback seconds |", "|---|---|---:|---:|"]
     for value in result["timing"].values():
         for job in value["jobs"]:
