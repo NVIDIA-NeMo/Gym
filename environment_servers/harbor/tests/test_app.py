@@ -2418,7 +2418,8 @@ class TestComposeAndRouting:
         verifier = FakeSandbox()
 
         async def start_compose(task, episode_key):
-            documents.append(server._compose_document(task))
+            compose.document = server._compose_document(task)
+            documents.append(compose.document)
             return compose
 
         async def create_verifier(task, *, episode_key=None):
@@ -3315,6 +3316,29 @@ class TestComposeAndRouting:
         # Everything above happened before the harness got its session.
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
+
+    @pytest.mark.parametrize("compose_user,expected_user", [("nobody", "nobody"), ("1000", 1000)])
+    async def test_task_healthcheck_uses_own_compose_user_without_job_overlay(
+        self, tmp_path, monkeypatch, compose_user, expected_user
+    ):
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        path = task.path / "environment" / "docker-compose.yaml"
+        document = yaml.safe_load(path.read_text())
+        document["services"]["main"]["user"] = compose_user
+        path.write_text(yaml.safe_dump(document))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.needs_compose and server.config.compose_overlay is None
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert documents[0]["services"]["main"]["user"] == compose_user
+        checks = [record for record in compose.services["main"].execs if record["command"] == "test -f /tmp/ready"]
+        assert len(checks) == 3
+        assert all(record["user"] == expected_user for record in checks)
+        assert response.result.reward == 1.0
+        assert compose.stopped and not server._sandboxes
 
     async def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
         server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
@@ -4731,6 +4755,7 @@ class TestGeneralization:
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = False
 
             async def start(self):
@@ -4833,6 +4858,7 @@ class TestGeneralization:
             ):
                 groups.append(self)
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = 0
 
             async def start(self):
