@@ -172,6 +172,8 @@ and trial runtime are not used. See [Harbor Environment Server](/main/agent-inte
 - Multi-container tasks with Compose. See [Multi-Container Tasks](/main/data/task-folders/compose-tasks).
 - Shared and separate verification, with `reward.txt` or `reward.json`.
 - Collect hooks and artifacts.
+- Task MCP servers and skills, with a harness that supports them. See
+  [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool).
 - `[environment.healthcheck]`, and the image's `ENTRYPOINT` and `HEALTHCHECK` when its configuration is on record.
 
 ### What Gym adds
@@ -194,9 +196,6 @@ publishing refuses Python verifiers that read `response` or grade in separate mo
 - Windows and TPU tasks are not supported.
 - Network restrictions apply only to a verifier in separate mode, on OpenSandbox.
 - Compose tasks run only on OpenSandbox.
-- A task with MCP servers or a `skills_dir` needs a harness that can start task tools, unless
-  `task_mcp_grants: required` grants every server and there is no `skills_dir`. Only `streamable-http` MCP servers
-  with a `url` can be granted.
 - A multi-step task that seeds the agent with a transcript (`steps/<first step>/trajectory.json`) runs only with the
   oracle.
 
