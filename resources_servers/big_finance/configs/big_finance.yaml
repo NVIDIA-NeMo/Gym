@@ -79,3 +79,11 @@ big_finance_judge_model:
         backoff_multiplier: 1.0
         backoff_jitter_fraction: 0.0
         terminal_http_status_codes: [400, 401, 402, 403, 405, 409, 410, 413, 415, 422]
+
+big_finance_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: big_finance

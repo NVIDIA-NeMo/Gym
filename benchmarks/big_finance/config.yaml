@@ -33,3 +33,10 @@ big_finance_benchmark_agent:
           prepare_script: benchmarks/big_finance/prepare.py
           num_repeats: 1
           license: CC BY 4.0
+
+big_finance_benchmark_environment_server:
+  _inherit_from: big_finance_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: big_finance_benchmark_agent

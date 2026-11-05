@@ -15,6 +15,7 @@
 
 import json
 import os
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -33,12 +34,11 @@ from big_finance_harness.tools import (
 from fastapi.testclient import TestClient
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, PermanentEndpointError
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import PermanentEndpointError, ServerClient
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.big_finance.app import (
     BigFinanceResourcesServer,
     BigFinanceResourcesServerConfig,
@@ -172,7 +172,10 @@ def test_big_finance_model_overlay_preserves_mixed_vals_policy(extra_body: dict)
     judge = _configured_model(mixed, "big_finance_judge_model")
     assert policy.config.upstream_retry_policy.max_attempts == 1
     assert policy.config.upstream_max_num_tries is None
-    assert policy.config.upstream_request_timeout_seconds is None
+    assert (
+        policy.config.upstream_request_timeout_seconds
+        == type(policy.config).model_fields["upstream_request_timeout_seconds"].default
+    )
     assert big_finance_policy.config.extra_body == OmegaConf.to_container(OmegaConf.merge(policy_body, extra_body))
     assert big_finance_policy.config.openai_base_url == policy.config.openai_base_url
     assert big_finance_policy.config.openai_api_key == policy.config.openai_api_key
@@ -493,12 +496,11 @@ def test_packaged_tool_surface_matches_pinned_snapshot() -> None:
 
 def test_tools_package_dependency_is_commit_pinned() -> None:
     spec = json.loads((_REPO_ROOT / "benchmarks/big_finance/upstream_spec.json").read_text(encoding="utf-8"))
+    project = tomllib.loads((_REPO_ROOT / "resources_servers/big_finance/pyproject.toml").read_text(encoding="utf-8"))
     requirement = next(
-        line.strip()
-        for line in (_REPO_ROOT / "resources_servers/big_finance/requirements.txt")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if line.startswith("big-finance-harness ")
+        dependency
+        for dependency in project["project"]["dependencies"]
+        if dependency.startswith("big-finance-harness ")
     )
     url, sha = requirement.rsplit("@", 1)
     assert url.endswith(f"git+{spec['tools_package_repository']}.git")

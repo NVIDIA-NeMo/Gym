@@ -38,7 +38,14 @@ from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from starlette.requests import Request
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionRequest,
@@ -48,14 +55,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, reraise_judge_errors
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, reraise_judge_errors
 from resources_servers.big_finance.as_of_tools import AsOfEdgarSearchTool, AsOfFetchUrlTool, parse_as_of
 from resources_servers.big_finance.local_corpus import LocalSecCorpus
 from resources_servers.big_finance.sec_cache import CachedEdgarSearchTool, CachedFetchUrlTool, SecHttpCache
@@ -653,7 +653,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 final_answer_correct=correct,
                 judge_text=judge_text,
             )
-        except JudgeError:
+        except JUDGE_FAILURES:
             raise
         except Exception as exc:  # noqa: BLE001 - preserve rollout and expose scoring failure
             error = f"{type(exc).__name__}: {exc}"
@@ -713,7 +713,7 @@ class BigFinanceResourcesServer(SimpleResourcesServer):
                 rubric_lines_possible=len(verdicts),
                 judge_text=judge_text,
             )
-        except JudgeError:
+        except JUDGE_FAILURES:
             # The shared verify endpoint routes this to the failures sidecar and
             # excludes it from valid scores while preserving the whole rollout.
             raise
