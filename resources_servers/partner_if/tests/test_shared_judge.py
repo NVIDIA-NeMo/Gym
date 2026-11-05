@@ -191,13 +191,13 @@ def test_judge_supplied_quotes_are_rejected():
 
 def test_judge_requests_object_mode_through_the_real_gym_converter():
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.models import ResponsesConverter
+    from nemo_gym.models import ChatCompletionsConverter
 
     configured = NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=2048, temperature=0, top_p=0.5)
     payload = llm.request_payload(rubric(), EvidenceBundle(answer="HELLO"), configured)
     assert (payload["max_output_tokens"], payload["temperature"], payload["top_p"]) == (2048, 0, 0.5)
     request = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
-    converted = ResponsesConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+    converted = ChatCompletionsConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
         request
     )
     assert converted.response_format == {"type": "json_object"}

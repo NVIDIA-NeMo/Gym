@@ -248,6 +248,19 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
     return "\n".join(lines)
 
 
+# `uv sync` errors on an extra the checkout does not define. A pin from before `ray` and `mlflow` became extras defines
+# neither, so each requested `--extra NAME` is kept only when the checkout's pyproject.toml declares NAME.
+_DECLARED_EXTRAS_FILTER = (
+    "import sys, tomllib\n"
+    'declared = set(tomllib.load(open("pyproject.toml", "rb")).get("project", {}).get("optional-dependencies", {}))\n'
+    "requested = sys.argv[2::2]\n"
+    'print(*(f"--extra {name}" for name in requested if name in declared))\n'
+    "for name in requested:\n"
+    "    if name not in declared:\n"
+    '        print(f"gym: the checkout defines no {name!r} extra, installing without it", file=sys.stderr)\n'
+)
+
+
 def render_driver_entrypoint(
     repo: str | None,
     ref: str | None,
@@ -272,8 +285,8 @@ def render_driver_entrypoint(
     `extras` are optional-dependency groups installed with the checkout; the server
     venvs Gym builds copy their telemetry packages from this process, so the driver
     is where `telemetry` has to be installed for any server to have it. `ray` is
-    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
-    and an extra the checkout does not define only makes uv warn.
+    always added: `gym` needs Ray to start a server that declares `ray_enabled = True`.
+    An extra the checkout does not define is dropped with a notice, since uv errors on it.
 
     `record_install_failure` writes `driver_install_failed` to the file named by `$GYM_DRIVER_FAILURE_FILE` when
     the install exits with a failure status (1 to 128; a signal is not an install failure), for the guard of the
@@ -354,7 +367,9 @@ def render_driver_entrypoint(
             # EXTERNALLY-MANAGED (PEP 668), so no --break-system-packages override needed either.
             "uv venv --seed .venv",
             "source .venv/bin/activate",
-            f'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked{sync_extras}',
+            f'_gym_declared_extras() {{ python -c {shlex.quote(_DECLARED_EXTRAS_FILTER)} "$@"; }}',
+            f'_gym_sync_extras="$(_gym_declared_extras{sync_extras})"',
+            'UV_PROJECT_ENVIRONMENT="$VIRTUAL_ENV" uv sync --locked $_gym_sync_extras',
             *(["trap - EXIT"] if record_failure else []),
         ]
 
