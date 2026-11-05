@@ -45,7 +45,8 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
         if harness == "nooa":
             adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
             runtime.update(
-                requirements_sha256=digest_file(adapter / "requirements.txt"),
+                pyproject_sha256=digest_file(adapter / "pyproject.toml"),
+                lock_sha256=digest_file(adapter / "uv.lock"),
                 bootstrap_sha256=digest_file(adapter / "sandbox_runtime.py"),
                 sandbox_ownership="resources",
                 execution_mode="sandboxed",

@@ -7,17 +7,19 @@ import ast
 import io
 import json
 from contextlib import redirect_stdout
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import _config
+from scripts.harness_conformance.episode import _config, check_runtime
 from scripts.harness_conformance.nooa import BorrowedSandboxProbe, observer_module_name
 from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.rollouts.harness_capabilities import digest_file
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_runtime import ResourcesSeedSessionResponse
@@ -29,6 +31,18 @@ PYTHON_CELL = {
     "name": "python_cell",
     "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
 }
+
+
+def test_nooa_runtime_records_locked_dependencies():
+    adapter = Path(__file__).resolve().parents[3] / "responses_api_agents/nooa_agent"
+    assert not (adapter / "requirements.txt").exists()
+
+    runtime = check_runtime("nooa", use_agent_sessions=True)
+
+    assert runtime["pyproject_sha256"] == digest_file(adapter / "pyproject.toml")
+    assert runtime["lock_sha256"] == digest_file(adapter / "uv.lock")
+    assert runtime["bootstrap_sha256"] == digest_file(adapter / "sandbox_runtime.py")
+    assert runtime["installation"] == "agent_session"
 
 
 @pytest.fixture
