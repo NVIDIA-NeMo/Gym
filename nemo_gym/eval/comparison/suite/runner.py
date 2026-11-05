@@ -57,7 +57,7 @@ def _health_report_directories(
     if output_root is None:
         return {}
     from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
-    from nemo_gym.rollouts.rollout_records import coverage_path_for, journal_path_for
+    from nemo_gym.rollouts.rollout_records import coverage_path_for, journal_path_for, resolve_rollout_path
     from nemo_gym.rollouts.rollout_recovery import manifest_path_for
 
     sources = {manifest_path}
@@ -65,11 +65,11 @@ def _health_report_directories(
     for benchmarks in manifest.models.values():
         for pair in benchmarks.values():
             for run in (pair.baseline, pair.candidate):
-                path = (manifest_path.parent / run.rollouts).resolve()
+                path = resolve_rollout_path(manifest_path.parent / run.rollouts, read_only=True)
                 rollouts.add(path)
                 sources.update(
                     (
-                        path,
+                        path.resolve(),
                         (manifest_path.parent / run.aggregate_metrics).resolve()
                         if run.aggregate_metrics is not None
                         else aggregate_metrics_path_for(path).resolve(),

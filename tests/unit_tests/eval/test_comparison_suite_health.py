@@ -139,6 +139,16 @@ def _suite(tmp_path: Path, *, candidate_state: str = "healthy") -> tuple[Path, P
     return path, baseline, candidate
 
 
+@pytest.fixture
+def suite_with_rollout_alias(tmp_path: Path) -> tuple[Path, Path, Path]:
+    path, alias, _ = _suite(tmp_path)
+    physical = tmp_path / "raw" / "records.jsonl"
+    physical.parent.mkdir()
+    alias.rename(physical)
+    alias.symlink_to(physical)
+    return path, alias, physical
+
+
 def _compare(
     path: Path, *, check_health: bool = False, health_output_dir: Path | None = None
 ) -> SuiteComparisonResult:
@@ -789,6 +799,65 @@ def test_full_health_reports_persist_per_source_without_changing_inputs(tmp_path
     assert all(str(run.health.verdicts_path) in markdown for run in (cell.baseline, cell.candidate))
     restored = SuiteComparisonResult.model_validate_json(result.model_dump_json())
     assert restored == result
+
+
+def test_alias_inventory_is_used_and_health_reports_persist_in_the_requested_directory(
+    tmp_path: Path, suite_with_rollout_alias: tuple[Path, Path, Path]
+) -> None:
+    path, alias, physical = suite_with_rollout_alias
+    before = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    without = _compare(path)
+    output = tmp_path / "health-reports"
+
+    result = _compare(path, check_health=True, health_output_dir=output)
+
+    baseline = result.cells[0].baseline
+    assert baseline.rollouts == alias
+    assert baseline.rollouts.resolve() == physical
+    assert baseline.materialized_inputs == materialized_path_for(alias)
+    assert baseline.health.record_count == baseline.health.healthy == 2
+    assert baseline.health.run_healthy is True
+    assert result.warnings == []
+    for run in (baseline, result.cells[0].candidate):
+        summary = run.health
+        assert summary.summary_path.is_file()
+        assert summary.verdicts_path.is_file()
+        assert summary.summary_path.parent.parent == output
+        assert summary.verdicts_path.parent == summary.summary_path.parent
+        saved = orjson.loads(summary.summary_path.read_bytes())["run"]
+        assert saved["artifacts"]["expected"] == 2
+        assert saved["artifacts"]["records"] == 2
+        assert saved["artifacts"]["healthy"] is True
+        verdicts = [orjson.loads(line)["verdict"] for line in summary.verdicts_path.read_bytes().splitlines()]
+        assert verdicts == ["healthy", "healthy"]
+    assert result.overall == without.overall
+    assert result.per_model == without.per_model
+    assert result.cells[0].statistics == without.cells[0].statistics
+    assert {file: file.read_bytes() for file in before} == before
+
+
+@pytest.mark.parametrize("collision", ["alias-inventory", "physical-rollouts"])
+def test_alias_health_reports_cannot_overwrite_inventory_or_physical_rollouts(
+    tmp_path: Path,
+    suite_with_rollout_alias: tuple[Path, Path, Path],
+    health_scans: list[Path],
+    collision: str,
+) -> None:
+    path, alias, physical = suite_with_rollout_alias
+    output = tmp_path / "health-reports"
+    result = _compare(path, check_health=True, health_output_dir=output)
+    summary = result.cells[0].baseline.health.summary_path
+    assert summary.is_file()
+    summary.unlink()
+    summary.symlink_to(materialized_path_for(alias) if collision == "alias-inventory" else physical)
+    before = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    health_scans.clear()
+
+    with pytest.raises(ConfigError, match="would overwrite source artifacts"):
+        _compare(path, check_health=True, health_output_dir=output)
+
+    assert health_scans == []
+    assert {file: file.read_bytes() for file in before} == before
 
 
 def test_omitted_health_output_directory_cleans_up_temporary_reports(tmp_path: Path, monkeypatch) -> None:
