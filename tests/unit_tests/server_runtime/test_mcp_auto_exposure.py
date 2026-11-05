@@ -62,6 +62,8 @@ from nemo_gym.server_runtime.mcp_auto_exposure import (  # noqa: E402
     maybe_auto_expose,
 )
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware  # noqa: E402
+from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware  # noqa: E402
+from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware  # noqa: E402
 
 
 RPC_HEADERS = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
@@ -630,8 +632,9 @@ def test_accepts_the_exception_and_cancellation_middleware():
     app = server.setup_webserver()
     server.setup_exception_middleware(app)
     server.setup_cancellation_middleware(app)
-    installed = [m.kwargs.get("dispatch", m.cls) for m in app.user_middleware]
-    assert any(getattr(m, "__name__", "") == "exception_handling_middleware" for m in installed)
+    installed = [m.cls for m in app.user_middleware]
+    assert ExceptionHandlingMiddleware in installed
+    assert SessionIDMiddleware in installed
     assert ClientDisconnectCancellationMiddleware in installed
     install_auto_exposure(server, app)
 
@@ -641,12 +644,6 @@ def test_middleware_marked_as_skipped_on_direct_dispatch_is_accepted_wherever_it
     # Moving it to another module keeps it accepted.
     server = _server()
     app = server.setup_webserver()
-
-    async def relocated(request, call_next):
-        return await call_next(request)
-
-    relocated.skipped_on_direct_mcp_dispatch = True
-    app.middleware("http")(relocated)
 
     class RelocatedMiddleware:
         skipped_on_direct_mcp_dispatch = True
