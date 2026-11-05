@@ -262,6 +262,7 @@ The current adapters support the following tool sources:
 
 | Adapter | Built-in tools | Resources Server tool grants | Model API |
 | --- | --- | --- | --- |
+| BrowseComp | `update_progress` when configured. | At most one `direct_http` grant; required MCP grants are rejected. The research tools remain on the Resources Server, which isolates `bash_command` in its own sandbox. | Responses |
 | LangGraph | Reflection, orchestration, parallel thinking and ReWOO run in the Agent Server and call only the Model Server. | No environment tools or sandbox access; required tool grants and sandbox grants are rejected. Keep `resources_tool_transports: []`. Evaluation sessions report missing native invocation and turn evidence. | Responses |
 | Hermes | Hermes toolsets, selected with `enabled_toolsets` and `disabled_toolsets`, for example `[terminal]`. | `mcp` only. Each granted MCP server becomes a Hermes toolset with the same name. Required `direct_http` grants are rejected. | Chat Completions |
 | Pi | Pi's built-in sandbox tools. `sandbox_bash_timeout_seconds` limits each bash call. | None in agent sessions. Required grants are rejected; keep `resources_tool_transports: []`. | Chat Completions |
