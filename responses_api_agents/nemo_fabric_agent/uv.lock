@@ -1798,7 +1798,7 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "hermes-agent", git = "https://github.com/NousResearch/hermes-agent?rev=0ee05d72f2b30385d4861fd8e30511c6d51100e4" },
-    { name = "litellm", specifier = "<1.103" },
+    { name = "litellm", specifier = ">=1.83.0,<1.103" },
     { name = "nemo-fabric", extras = ["claude", "codex", "deepagents", "hermes-agent", "mini-swe-agent", "nooa", "openclaw", "openhands", "relay"], specifier = "==0.6.0" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },

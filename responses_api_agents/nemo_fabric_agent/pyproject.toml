@@ -12,7 +12,7 @@ dependencies = [
     "openhands-sdk==1.50.0",
     "openhands-tools==1.50.0",
     # LiteLLM 1.103 and later import mcp 2 types, while nemo-gym pins mcp<2.
-    "litellm<1.103",
+    "litellm>=1.83.0,<1.103",
     "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4",
     "tokenizers>=0.22.2",
 ]
