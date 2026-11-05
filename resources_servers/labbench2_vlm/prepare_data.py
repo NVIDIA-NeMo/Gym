@@ -183,6 +183,15 @@ def _files_to_text(files_dir: Path) -> str:
     return "\n\n".join(parts)
 
 
+def _agent_context(verifier_metadata: dict) -> dict:
+    """The row's ``agent_context``: what an agent session needs to embed the media, as ``run()`` reads it from
+    ``verifier_metadata`` on the legacy path."""
+    return {
+        "values": {"tag": verifier_metadata["tag"]},
+        "artifacts": {"media": {"path": verifier_metadata["media_dir"]}},
+    }
+
+
 def embed_media_into_row(
     row: dict,
     media_base_dir: Path,
@@ -298,6 +307,7 @@ def prepare_tag(tag: str, output_path: Path, media_dir: Path, limit: int | None 
                     "reference_passage": row.get("key_passage") or "",
                 },
             }
+            gym_row["agent_context"] = _agent_context(gym_row["verifier_metadata"])
 
             line = orjson.dumps(gym_row) + b"\n"
             f.write(line)
@@ -367,6 +377,7 @@ if __name__ == "__main__":
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copytree(src, dst, dirs_exist_ok=True)
             row["verifier_metadata"]["media_dir"] = f"{TEST_MEDIA_DIR_NAME}/{rel}"
+            row["agent_context"] = _agent_context(row["verifier_metadata"])
             test_rows.append(row)
 
         example_path = args.output_dir / "example.jsonl"
