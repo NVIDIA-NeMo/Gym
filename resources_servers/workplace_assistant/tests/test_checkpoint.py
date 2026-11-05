@@ -453,3 +453,30 @@ async def test_a_restored_cookie_session_in_use_cannot_be_adopted(tmp_path: Path
         verified = (await cookie_run.post("/ng-rollout/r-a1/verify", json=verify_body())).json()
         assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
     assert restored.session_id_to_tool_env == {}
+
+
+async def test_an_undone_restore_can_be_installed_again() -> None:
+    # A restore that failed on another worker is undone here with delete_restored, then retried in this process.
+    seed = typed_seed()
+    continuation = seed.model_copy(update={"episode_id": EpisodeId(rollout_id="r", attempt=1)})
+    source, source_app = make_server()
+    async with client_for(source_app) as client:
+        assert (await client.post("/ng-rollout/r/seed_session", json=seed.model_dump(mode="json"))).status_code == 200
+        await call_tools(client, BEFORE, "r")
+        cookies = dict(client.cookies)
+    records = await source.checkpoint_participant.export([seed.episode_id])
+
+    restored, restored_app = make_server()
+    participant = restored.checkpoint_participant
+    await participant.install(records, [seed.episode_id])
+    await participant.delete_restored(continuation.episode_id)
+    assert restored.session_id_to_tool_env == {} and restored._session_episodes == {}
+    await participant.install(records, [seed.episode_id])
+    async with client_for(restored_app, cookies) as client:
+        # Undoing the restore refused nothing: the continuation reuses its session and the checkpoint's tables.
+        reused = await client.post("/ng-rollout/r-a1/seed_session", json=continuation.model_dump(mode="json"))
+        assert reused.status_code == 200, reused.text
+        assert await call_tools(client, AFTER[:1], "r-a1") == ["00000301"]
+        verified = (await client.post("/ng-rollout/r-a1/verify", json=verify_body())).json()
+        assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
+    assert restored.session_id_to_tool_env == {} and restored._session_episodes == {}
