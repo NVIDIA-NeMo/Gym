@@ -132,6 +132,61 @@ class TestOpenAIUtils:
         assert sent[2]["X-Session"] == "own"
         assert sent[2]["X-Other-Session"] == "trial-2"
 
+    async def test_an_explicit_header_of_another_case_replaces_the_rollout_header(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", rollout_id_headers=["X-Session"]
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses", headers={"x-session": "own"})
+
+        assert [value for name, value in sent[0].items() if name.lower() == "x-session"] == ["own"]
+
+    async def test_a_default_header_of_another_case_is_replaced_by_the_rollout_header_only_inside_a_rollout(
+        self, monkeypatch
+    ) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://example.test/v1",
+            default_headers={"x-session": "static"},
+            rollout_id_headers=["X-Session"],
+        )
+
+        with rollout_context("trial-1"):
+            await client._request(method="POST", url="https://example.test/v1/responses")
+        await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert [value for name, value in sent[0].items() if name.lower() == "x-session"] == ["trial-1"]
+        assert [value for name, value in sent[1].items() if name.lower() == "x-session"] == ["static"]
+
+    async def test_authorization_wins_over_a_header_of_another_case(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(api_key="abc", base_url="https://example.test/v1")
+
+        await client._request(method="POST", url="https://example.test/v1/responses", headers={"authorization": "x"})
+
+        assert [value for name, value in sent[0].items() if name.lower() == "authorization"] == ["Bearer abc"]
+
     async def test_rollout_id_headers_are_off_by_default(self, monkeypatch) -> None:
         sent = []
 

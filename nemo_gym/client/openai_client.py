@@ -246,6 +246,16 @@ class PermanentEndpointError(ClientResponseError):
 REQUEST_ID_HEADER = "X-Request-Id"
 
 
+def _merge_headers(*layers: Mapping[str, str]) -> Dict[str, str]:
+    """Merge header layers so a later layer replaces an earlier one's header of any spelling.
+
+    HTTP header names are case-insensitive, so `x-session` in a later layer replaces `X-Session` in an earlier one,
+    rather than both being sent. The result keeps the spelling and value of the last layer that names a header.
+    """
+    last_of_each_name = {name.lower(): (name, value) for layer in layers for name, value in layer.items()}
+    return dict(last_of_each_name.values())
+
+
 def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
     """A request id that names the rollout, for calls made inside a rollout context.
 
@@ -396,11 +406,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         connection_retries = self.max_connection_retries
         if connection_retries is None and request_kwargs.get("_resend_after_disconnect") is False:
             connection_retries = MAX_NUM_TRIES
-        headers = (
-            self.default_headers
-            | self._rollout_headers()
-            | request_headers
-            | {"Authorization": f"Bearer {self.api_key}"}
+        headers = _merge_headers(
+            self.default_headers,
+            self._rollout_headers(),
+            request_headers,
+            {"Authorization": f"Bearer {self.api_key}"},
         )
         request_id = _rollout_request_id(headers)
         if request_id is not None:
