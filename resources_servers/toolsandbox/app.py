@@ -190,6 +190,13 @@ class ToolSandboxResourcesServer(SimpleResourcesServer):
     # cached at /close time. `reward` is the combined milestone similarity.
     scoring: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        return (
+            "episodes are kept in this process's memory by the env_id in the request body, "
+            "and toolsandbox_agent sends its step, close and verify calls without the session cookie, "
+            "so they can reach a worker that does not hold the episode"
+        )
+
     # Deterministic (name, Scenario) list; built once, indexed by task_idx.
     _scenarios: Optional[List[Tuple[str, Scenario]]] = PrivateAttr(default=None)
 

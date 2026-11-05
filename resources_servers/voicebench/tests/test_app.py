@@ -94,8 +94,17 @@ def test_types_reject_wrong_subset_scorer_and_missing_reference(tmp_path):
         request(subset="ifeval", instruction_id_list=["x"], kwargs=[])
     with pytest.raises(ValidationError):
         request(subset="ifeval", instruction_id_list=["x"], kwargs=[None])
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError, match="needs num_workers=1: legacy scoring draws every rule-scored row"):
         server(tmp_path, num_workers=2)
+
+
+def test_several_workers_are_refused_before_the_ifeval_data_is_downloaded(tmp_path, monkeypatch):
+    def download(data_dir):
+        raise AssertionError("NLTK data was downloaded before the worker count was refused")
+
+    monkeypatch.setattr("resources_servers.voicebench.app._ensure_nltk", download)
+    with pytest.raises(ValueError, match="needs num_workers=1"):
+        server(tmp_path, subset="ifeval", scoring_type="ifeval", num_workers=2)
 
 
 def test_nltk_cache_existing_permissions_are_preserved_and_default_is_private(tmp_path):
