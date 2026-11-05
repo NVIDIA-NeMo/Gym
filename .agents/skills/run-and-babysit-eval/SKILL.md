@@ -90,9 +90,13 @@ sentinel (`afterany`), then reads its predecessor's final state:
 | --- | --- |
 | `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout in flight when an allocation ends is rerun from the start: the first such end of an in-flight rollout is free; from the second end on, each one charges the affected rows one attempt (`rollout_allocation_ended`, evaluation-side, counted in health; retried under the attempt cap, and final at it). The Store cannot tell a walltime cut from a preemption or a node failure, so the rule covers any ended allocation. |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Retries, spending one of `max_retries`. |
-| `COMPLETED` | Ends. The job that finishes the run cancels its successor and sentinel and journals both in `chain-end-journal.jsonl`. |
-| `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. A segment the scheduler requeued has unknown elapsed time and stops this way. |
+| `COMPLETED` | Ends. The job that finishes the run cancels the follow-up and sentinel it queued itself and journals both in `chain-end-journal.jsonl`. The sentinel its predecessor queued for it is not cancelled: it starts once the job ends and exits with nothing to do. |
+| `FAILED` | The saved evidence decides: a driver that exited 75 (unfinished work) after saving progress continues as after a `TIMEOUT`; a retryable saved failure spends one of `max_retries`; anything else stops. |
+| `CANCELLED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. A segment the scheduler requeued has unknown elapsed time and stops this way. |
 | `TIMEOUT` before the task inventory was written | Stops and names the fresh-restart command. |
+
+The chain is over when none of its jobs is `PENDING` or `RUNNING` (`squeue --me`); a leftover pending
+sentinel may be cancelled.
 
 An empty `sacct` reply for the previous job is retried: the job asks up to 6 times, 10 seconds apart,
 and then stops the chain with accounting unknown instead of resuming. A scheduler whose accounting lags
@@ -113,10 +117,11 @@ out to `.gym_chain_incomplete`. The commands are in the decision table (section 
 job of the run is live.
 
 While the chain runs, read its progress with the read-only inspection of section 3 (`gym eval resubmit
-"$GYM_JOB_ID" <benchmark> --recover --inspect`, which reports `RUNNING` while a job is live) or from the run
-directory: the line count of `artifacts/rollouts.jsonl` is the results saved so far, and
-`artifacts/rollouts_coverage.json` holds the expected count; its completion fields are final only after
-the chain stops or the run ends.
+"$GYM_JOB_ID" <benchmark> --recover --inspect`, which reports `RUNNING` while a job is live) or with
+`gym eval status "$GYM_JOB_ID"`, which reads `artifacts/rollouts_batch_status.json` (expected, completed and
+remaining rollouts per agent, from the current attempts) without a scheduler. Counting the lines of
+`artifacts/rollouts.jsonl` is only a fallback: it reads the whole store, which can be large and holds every
+attempt.
 
 ## 3. Inspect first, always
 
@@ -143,7 +148,8 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   with `--no-auto-repin`.
 - **`UNKNOWN`** with "nothing was read or decided" is a reader that did not run (reason on stderr), not a
   run fault; fix the reason and rerun the identical inspect; `NEMO_GYM_REMOTE_READER_SRUN` takes extra
-  srun args if it needs a partition or QOS.
+  srun args if it needs a partition or QOS, and `NEMO_GYM_REMOTE_READER_TIMEOUT_S` raises its time bound
+  (300 to 14400 s; by default it grows with the size of the rollout files).
 - **Exit code**: 0 only when `gate_task.status` is `SUCCESS`. A dispatching call exits 1 when it carries
   a score, MLflow or health-limit option, and a call handed to a queue can exit 0 while the gate still
   reads `RESUMING`: read `ok`, `dispatched` and `job_id` from the JSON line, not the exit code.
@@ -214,7 +220,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | STOP: N completed result(s) are masked and not measured | They are kept and a resume would run nothing; the run is not complete. Report the count and the reason. Nothing re-grades a masked row that has a saved answer but neither a gradeable artifact (no intact patch, say) nor a recorded grade; `--inspect` names those rows apart ("without a gradeable artifact") and keeps them masked. Only when the operator wants them sampled again: `--recover --rerun-masked-without-artifact --rerun-reason "<why>"` (below the table). |
 | `fresh-restart` (no task inventory) | Section 8. |
 | NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (warning `MLflow delivery <state>: <reasons>`) | The results are complete; delivery is reported beside the gate, never inside it. Close it: `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values from the run's `artifacts/rollouts_resolved_config.yaml`, and the token as `+mlflow_tracking_token=<token>` or `MLFLOW_TRACKING_TOKEN`. A repeat on an exported run verifies without touching the run lock; `--recover` on a complete run that requires tracking and has no receipt runs the export too. "although the saved config snapshot names a tracking URI...": tracking was required and the export did not finish: read the exporter's failure in the driver log, repair, export. "does not name all of the tracking URI, experiment and run name": nothing tracked the run; set `mlflow_tracking_required: false` next time. From a host without access to the tracking server the inspect reports `unverified` with `status query failed: ...`: inspect with `--mlflow-run-id <receipt run_id> --mlflow-status FINISHED` once you observed that status yourself (`GET <tracking uri>/api/2.0/mlflow/runs/get?run_id=<id>`, field `info.status`); `ModuleNotFoundError` means the reader's environment lacks `mlflow`. When the reason says the rollouts were not uploaded and the run sets `upload_rollouts: false`, the delivery stays `unverified` by configuration: report it; an export does not change it. |
-| `SUCCESS` | Done. Keep the run directory as the record. Nothing needs cancelling: the finishing job cancelled its successor and sentinel (`chain-end-journal.jsonl`). |
+| `SUCCESS` | Done. Keep the run directory as the record. The finishing job cancelled the follow-up and sentinel it queued (`chain-end-journal.jsonl`); a pending sentinel its predecessor queued may be cancelled. |
 
 A judge-only re-judge takes the judge key and the other forwarded credentials from the environment of the shell
 that dispatches it; the run keeps none of them. Export the valid key before dispatching: a stale key in that
@@ -257,9 +263,9 @@ Retries happen in three layers before a failure reaches you: **in a call** (the 
 HTTP 429, 502, 503, 504, 520, 404, 408 and 500; the judge client 408, 429, any 5xx, a timeout or a lost
 connection, three attempts in all; the sandbox client 408, 409, 425, 429 and the 5xx codes); **in a run**
 (a resumed segment dispatches every unsettled identity again, within the attempt cap); **in the chain**
-(only `PREEMPTED`, `NODE_FAIL` and `BOOT_FAIL` spend an infra retry, `TIMEOUT` continues, `FAILED`,
-`OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop it; `--recover` is the way on and dispatches only the
-missing and retriable identities).
+(`PREEMPTED`, `NODE_FAIL` and `BOOT_FAIL` spend an infra retry, `TIMEOUT` continues, `FAILED` goes by its
+saved evidence (section 2), `OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop it; `--recover` is the way on
+and dispatches only the missing and retriable identities).
 
 - **A judge failure** (`judge_failed`) or a verify call lost in transport is re-verified from its saved
   answer, never regenerated, and is never the model's zero: it is masked, out of the score, counted on the
