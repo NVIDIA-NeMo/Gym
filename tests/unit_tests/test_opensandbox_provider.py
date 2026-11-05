@@ -1029,7 +1029,7 @@ async def test_connection_transport_is_shared_and_closed_by_provider(fake_opensa
     assert provider._connection_config().kwargs["transport"] is transport
 
     await provider.aclose()
-    assert transport.aclosed
+    assert transport._transport.aclosed
     assert provider._transport is None
 
 
@@ -1064,9 +1064,9 @@ async def test_connection_tls_is_independent_of_pool_settings(
         else:
             transport = config.kwargs["transport"]
             if backend == "aiohttp":
-                assert transport.verify is verify
+                assert transport._transport.verify is verify
             else:
-                context = transport._pool._ssl_context
+                context = transport._transport._pool._ssl_context
                 assert context.verify_mode == (ssl.CERT_REQUIRED if verify else ssl.CERT_NONE)
                 assert context.check_hostname is verify
             assert provider._connection_config().kwargs["transport"] is transport
@@ -1098,16 +1098,16 @@ def test_connection_config_disable_pooling_sets_fresh_transport(fake_opensandbox
         connection={"transport_backend": "httpx", "domain": "sandbox.example"}
     )
     pooled_transport = pooled._connection_config().kwargs["transport"]
-    assert isinstance(pooled_transport, httpx.AsyncHTTPTransport)
-    assert pooled_transport._pool._max_keepalive_connections > 0
+    assert isinstance(pooled_transport._transport, httpx.AsyncHTTPTransport)
+    assert pooled_transport._transport._pool._max_keepalive_connections > 0
 
     # disable_connection_pooling -> same transport plumbing, but no reuse.
     fresh = opensandbox_provider.OpenSandboxProvider(
         connection={"transport_backend": "httpx", "domain": "sandbox.example", "disable_connection_pooling": True}
     )
     transport = fresh._connection_config().kwargs.get("transport")
-    assert isinstance(transport, httpx.AsyncHTTPTransport)
-    assert transport._pool._max_keepalive_connections == 0
+    assert isinstance(transport._transport, httpx.AsyncHTTPTransport)
+    assert transport._transport._pool._max_keepalive_connections == 0
 
 
 @pytest.mark.parametrize(
