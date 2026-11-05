@@ -2420,6 +2420,131 @@ async def test_status_loss_recovery_ends_before_long_agent_command_deadline(monk
     assert inspect.await_count == 0  # deprecated route is disabled by default
 
 
+@pytest.mark.parametrize("evidence_source", ["lifecycle", "inspect", "pending"])
+async def test_background_rechecks_late_death_evidence_within_original_recovery_budget(
+    monkeypatch: pytest.MonkeyPatch, evidence_source: str
+) -> None:
+    """Evidence arriving after the first diagnostic slice must still be read without replay."""
+    from opensandbox.exceptions import SandboxApiException
+
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    started = now
+    diagnostic_reads: list[float] = []
+
+    async def advance(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    async def get_info() -> Any:
+        diagnostic_reads.append(now)
+        oom = evidence_source == "lifecycle" and len(diagnostic_reads) >= 2
+        return SimpleNamespace(
+            status=SimpleNamespace(state="Failed" if oom else "Pending", reason="OOMKilled" if oom else None)
+        )
+
+    inspect_reads: list[float] = []
+
+    async def inspect(handle: Any, *, deadline: float) -> str | None:
+        inspect_reads.append(now)
+        assert now < deadline <= started + 0.08
+        return "current sandbox container: OOMKilled" if len(inspect_reads) >= 2 else None
+
+    monkeypatch.setattr(loop, "time", lambda: now)
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        diagnostics={"timeout_s": 0.005, "inspect_oom": evidence_source == "inspect"},
+        operations={
+            "background_exec": True,
+            "background_poll_initial_s": 0.02,
+            "background_poll_interval_s": 0.02,
+            "status_recovery_timeout_s": 0.08,
+        },
+    )
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
+    commands = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(id="one-command")),
+        get_command_status=AsyncMock(side_effect=SandboxApiException("backend unreachable", status_code=502)),
+        get_background_command_logs=AsyncMock(),
+    )
+    handle = opensandbox_provider.SandboxHandle(
+        "late-evidence", "opensandbox", SimpleNamespace(commands=commands, get_info=AsyncMock(side_effect=get_info))
+    )
+
+    expected = PROVIDER_STATUS_UNAVAILABLE if evidence_source == "pending" else PROVIDER_OOM_KILLED
+    with RequestFailureLog.capture() as log, raises_failure(expected) as caught:
+        await provider.exec(handle, "agent command", timeout_s=3600)
+
+    commands.run.assert_awaited_once()
+    commands.get_background_command_logs.assert_not_awaited()
+    assert len(diagnostic_reads) >= 2
+    assert diagnostic_reads[1] - diagnostic_reads[0] > provider._diagnostics.timeout_s
+    assert now <= started + 0.08
+    assert caught.value.__cause__.http_status == 502
+    assert isinstance(caught.value.__cause__.__cause__, SandboxApiException)
+    assert len(log.report.events) == commands.get_command_status.await_count
+    assert all(event.http_status == 502 for event in log.report.events.values())
+    if evidence_source == "pending":
+        assert now == pytest.approx(started + 0.08)
+        assert inspect_reads == []
+    else:
+        assert commands.get_command_status.await_count == 2
+    assert all(call.args == ("one-command",) for call in commands.get_command_status.await_args_list)
+
+
+async def test_background_diagnostic_retries_share_active_io_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Polling gaps preserve unused I/O time, but repeated diagnostic requests cannot replenish it."""
+    loop = asyncio.get_running_loop()
+    now = loop.time()
+    started = now
+    slices: list[float] = []
+
+    async def advance(delay: float) -> None:
+        nonlocal now
+        now += delay
+
+    async def diagnose(handle: Any, *, deadline: float, poll: bool) -> None:
+        nonlocal now
+        assert poll is False
+        assert deadline <= started + 0.08
+        if (remaining := deadline - now) > 0:
+            slices.append(remaining)
+            now += min(0.002, remaining)
+
+    monkeypatch.setattr(loop, "time", lambda: now)
+    monkeypatch.setattr(asyncio, "sleep", advance)
+    monkeypatch.setattr(
+        opensandbox_provider, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object)
+    )
+    provider = opensandbox_provider.OpenSandboxProvider(
+        diagnostics={"timeout_s": 0.005},
+        operations={
+            "background_exec": True,
+            "background_poll_initial_s": 0.01,
+            "background_poll_interval_s": 0.01,
+            "status_recovery_timeout_s": 0.08,
+        },
+    )
+    monkeypatch.setattr(provider, "_sandbox_death_evidence", diagnose)
+    commands = SimpleNamespace(
+        run=AsyncMock(return_value=SimpleNamespace(id="one-command")),
+        get_command_status=AsyncMock(side_effect=TimeoutError("status unavailable")),
+    )
+    handle = opensandbox_provider.SandboxHandle("budget", "opensandbox", SimpleNamespace(commands=commands))
+
+    with RequestFailureLog.capture() as log, raises_failure(PROVIDER_STATUS_UNAVAILABLE):
+        await provider.exec(handle, "agent command", timeout_s=3600)
+
+    assert slices == pytest.approx([0.005, 0.003, 0.001])
+    assert now == pytest.approx(started + 0.08)
+    assert commands.get_command_status.await_count > len(slices)
+    assert len(log.report.events) == commands.get_command_status.await_count
+    commands.run.assert_awaited_once()
+
+
 @pytest.mark.parametrize(
     "reason,message,expected",
     [

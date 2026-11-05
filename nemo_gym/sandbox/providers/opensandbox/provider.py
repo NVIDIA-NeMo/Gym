@@ -783,7 +783,12 @@ class OpenSandboxOperationConfig:
 
 @dataclass(frozen=True)
 class OpenSandboxDiagnosticsConfig:
-    """Optional control-plane checks after a command loses backend status."""
+    """Optional control-plane checks after a command loses backend status.
+
+    Background status recovery shares ``timeout_s`` across diagnostic I/O only;
+    status requests and polling delays do not spend that diagnostic budget.
+    Every lookup also stays within the original status-recovery deadline.
+    """
 
     inspect_oom: bool = False
     timeout_s: float = 5.0
@@ -2457,7 +2462,7 @@ class OpenSandboxProvider:
             status_timeout_s = poll_timeout_s
 
         status_failure_deadline: float | None = None
-        diagnostic_deadline: float | None = None
+        diagnostic_remaining_s = 0.0
         status_failure_error: NgFailureEvent | None = None
         poll_interval = min(self._operations.background_poll_initial_s, self._operations.background_poll_interval_s)
         while True:
@@ -2495,9 +2500,14 @@ class OpenSandboxProvider:
                     status_failure_deadline = loop.time() + self._operations.status_recovery_timeout_s
                     if deadline is not None:
                         status_failure_deadline = min(status_failure_deadline, deadline)
-                    diagnostic_deadline = min(status_failure_deadline, loop.time() + self._diagnostics.timeout_s)
+                    diagnostic_remaining_s = self._diagnostics.timeout_s
                 status_failure_error = failure
+                # Keep the unused diagnostic budget for later status failures:
+                # lifecycle/inspect evidence may arrive after the first lookup.
+                diagnostic_started = loop.time()
+                diagnostic_deadline = min(status_failure_deadline, diagnostic_started + diagnostic_remaining_s)
                 evidence = await self._sandbox_death_evidence(handle, deadline=diagnostic_deadline, poll=False)
+                diagnostic_remaining_s = max(0.0, diagnostic_remaining_s - (loop.time() - diagnostic_started))
                 if evidence is not None:
                     raise opensandbox_failure(
                         operation="command status",
@@ -2513,7 +2523,7 @@ class OpenSandboxProvider:
                         raise
                     raise failure from error
             else:
-                status_failure_deadline = diagnostic_deadline = None
+                status_failure_deadline = None
                 status_failure_error = None
                 if (
                     not all(hasattr(status, name) for name in ("running", "exit_code"))
