@@ -10,7 +10,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.lmarena_v3 import prepare as preparation
 from nemo_gym.cli.eval import _datasets_to_prepare
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 @pytest.mark.parametrize("prompt_set", ["full", "super35", "nano35"])
