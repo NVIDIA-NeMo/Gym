@@ -5025,8 +5025,10 @@ def _row_fault_class(
         )
         if isinstance(event, Mapping):
             stage = event.get("stage")
+            # A length refusal refines a generic or missing event kind. Otherwise keep the
+            # observed kind so stage rules still precede HTTP-derived reporting labels.
             return classify_failure(
-                failure_kind=event.get("failure_kind"),
+                failure_kind=fault if _length_refusal_kind(meta) == fault else event.get("failure_kind"),
                 stage=cast(FailureStage, stage) if stage in get_args(FailureStage) else None,
                 http_status=event.get("http_status"),
                 policy=_policy_call(row, ended[1]),
