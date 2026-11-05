@@ -31,6 +31,7 @@ import nemo_gym.orchestration.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.environment.assets import asset_config_path
 
 
 @pytest.fixture(autouse=True)
@@ -1784,7 +1785,7 @@ class TestDidYouMean:
         self._isolate_roots(monkeypatch, tmp_path)
 
         with pytest.raises(ValueError) as exc_info:
-            cli_main._asset_config_path("agent-type", "foo")
+            asset_config_path("agent-type", "foo")
 
         message = str(exc_info.value)
         assert "responses_api_agents/foo/configs/foo.yaml" in message
@@ -1796,7 +1797,7 @@ class TestDidYouMean:
         self._isolate_roots(monkeypatch, tmp_path)
 
         with pytest.raises(ValueError) as exc_info:
-            cli_main._asset_config_path("agent-type", "foooo")
+            asset_config_path("agent-type", "foooo")
 
         assert "Did you mean `fooo`?" in str(exc_info.value)
 
@@ -1927,7 +1928,7 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
-        resolved = cli_main._asset_config_path("resources-server", "foo")
+        resolved = asset_config_path("resources-server", "foo")
         assert resolved == str(install_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
 
     def test_user_cwd_asset_resolves_when_not_builtin(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -1940,7 +1941,7 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
-        resolved = cli_main._asset_config_path("resources-server", "myenv")
+        resolved = asset_config_path("resources-server", "myenv")
         assert resolved == str(user_cwd / "resources_servers" / "myenv" / "configs" / "myenv.yaml")
 
     def test_same_name_in_install_root_and_cwd_prefers_cwd(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
@@ -1956,7 +1957,7 @@ class TestInstallRootResolution:
         monkeypatch.chdir(user_cwd)
 
         with caplog.at_level(logging.WARNING):
-            resolved = cli_main._asset_config_path("resources-server", "foo")
+            resolved = asset_config_path("resources-server", "foo")
         assert resolved == str(user_cwd / "resources_servers" / "foo" / "configs" / "foo.yaml")
         assert "matches multiple configs" in caplog.text
 
@@ -1970,7 +1971,7 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", repo_root)
         monkeypatch.chdir(repo_root)
 
-        resolved = cli_main._asset_config_path("resources-server", "foo")
+        resolved = asset_config_path("resources-server", "foo")
         assert resolved == str(repo_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
 
 
