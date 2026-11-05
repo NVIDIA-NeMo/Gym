@@ -160,7 +160,7 @@ def test_fully_masked_run_is_complete_without_unmasked_measurements(run):
     assert len(recovered.selected("success")) == 5
 
 
-def test_a_scored_count_as_zero_row_is_reported_as_a_final_zero_by_kind(run):
+def test_a_scored_count_as_zero_row_is_reported_apart_from_final_zeros(run):
     output, manifest, rows = run
     with writer(run) as history:
         for row in rows:
@@ -177,8 +177,8 @@ def test_a_scored_count_as_zero_row_is_reported_as_a_final_zero_by_kind(run):
     recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
     report = recovered.coverage()
     assert (report["successful"], report["failed"], report["failed_final"]) == (5, 0, 0)
-    assert (report["final_zeros"], report["final_zeros_in_successful"]) == (1, 1)
-    assert report["failures_by_kind"] == {"provider_oom_killed": 1}
+    assert (report["final_zeros"], report["counted_zeros_in_successful"]) == (0, 1)
+    assert report["counted_zero_kinds"] == {"provider_oom_killed": 1}
     assert report["complete"] and report["completion_fraction"] == 1.0
 
 

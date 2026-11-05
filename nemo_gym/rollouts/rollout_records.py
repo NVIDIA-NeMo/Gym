@@ -990,8 +990,8 @@ class RolloutRecords:
         failures = self.selected_records("failure")
         # Settled final zeros are complete and in the denominator, and still failures for health.
         final_zeros = sum(self.payloads[key].final_zero for key in failures)
-        # Scored successes the policy counted as the model's zero are already in ``successful``: they are reported as
-        # final zeros and by kind, and left out of ``settled`` below so no consumer counts them twice.
+        # Scored successes the policy counted as the model's zero are already in ``successful``: they are reported
+        # apart from ``final_zeros`` (failed rollouts only), so no completion formula counts them twice.
         scored_zeros = Counter(
             self.payloads[(identity, self.latest[identity])].counted_zero_kind
             for identity in self.expected
@@ -1014,7 +1014,8 @@ class RolloutRecords:
         )
         settled = counts["success"] - masked_retryable + final_zeros
         # Rollouts with no final result: a resume still runs them, or nothing has run for them yet. Final failures
-        # (terminal or at their attempt cap) are not open, even when they are not settled.
+        # (terminal, at their attempt cap, or ``stopped_not_retried``, which resume does not run again) are not open,
+        # even when they are not settled.
         open_rollouts = masked_retryable + (len(failures) - failed_final) + not_started + missing
         return {
             "schema_version": 2,
@@ -1029,9 +1030,9 @@ class RolloutRecords:
             "failed": counts["failure"],
             "failed_final": failed_final,
             "failed_masked": failed_masked,
-            "final_zeros": final_zeros + sum(scored_zeros.values()),
-            "final_zeros_in_successful": sum(scored_zeros.values()),
-            "failures_by_kind": dict(sorted(scored_zeros.items())),
+            "final_zeros": final_zeros,
+            "counted_zeros_in_successful": sum(scored_zeros.values()),
+            "counted_zero_kinds": dict(sorted(scored_zeros.items())),
             "failed_not_final": len(failures) - failed_final,
             "failed_by_class": dict(sorted(Counter(self.payloads[key].failure_class for key in failures).items())),
             "intentionally_omitted": counts["omitted"],

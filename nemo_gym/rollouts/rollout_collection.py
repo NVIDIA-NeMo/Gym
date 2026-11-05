@@ -4617,7 +4617,7 @@ executions → not run again (left to recovery)
         scored_rollouts = completion["successful"] - completion["unscored"] + len(counted)
         store.write_coverage(
             scored=scored_rollouts,
-            failures_counted_as_zero=len(counted) - len(imputed) + store.coverage()["final_zeros_in_successful"],
+            failures_counted_as_zero=len(counted) - len(imputed) + completion.get("counted_zeros_in_successful", 0),
             imputed=len(imputed),
         )
         coverage = _coverage_report(
@@ -4666,10 +4666,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"]
-            - completion.get("masked_retryable", 0)
-            + completion["final_zeros"]
-            - completion.get("final_zeros_in_successful", 0),
+            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,
@@ -6156,8 +6153,8 @@ class RolloutAggregationHelper(BaseModel):
             "scored": scored_rollouts,
             "failures_counted_as_zero": len(counted)
             - len(missing)
-            + sum(c.get("final_zeros_in_successful", 0) for c in components),
-            "failures_by_kind": dict(sum((Counter(c.get("failures_by_kind", {})) for c in components), Counter())),
+            + sum(c.get("counted_zeros_in_successful", 0) for c in components),
+            "counted_zero_kinds": dict(sum((Counter(c.get("counted_zero_kinds", {})) for c in components), Counter())),
             "imputed": len(missing),
             "shards": components,
             "shards_without_inventory": [str(path) for path in legacy_paths],

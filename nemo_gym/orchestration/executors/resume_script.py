@@ -185,8 +185,8 @@ _gym_stop_incomplete() {{
     # The run's standing in one line: how many rollouts have no final result, from the Store's coverage report
     # (its ``open`` count), so the stop never reads as a finished run.
     local _open _expected _report="$OUTPUT_DIR/artifacts/rollouts_coverage.json"
-    _open=$(grep -m 1 '^  "open": ' "$_report" 2>/dev/null | cut -d: -f2- | tr -d ' ,"')
-    _expected=$(grep -m 1 '^  "expected": ' "$_report" 2>/dev/null | cut -d: -f2- | tr -d ' ,"')
+    _open=$(_gym_report_value open "$_report")
+    _expected=$(_gym_report_value expected "$_report")
     if [[ "$_open" =~ ^[0-9]+$ && "$_expected" =~ ^[0-9]+$ ]]; then
         echo "Run incomplete: $_open of $_expected rollouts open (no final result); see $_report."
     else
