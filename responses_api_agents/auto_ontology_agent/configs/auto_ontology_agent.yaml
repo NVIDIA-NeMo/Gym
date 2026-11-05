@@ -31,13 +31,14 @@ auto_ontology_agent:
       reasoning_model_server:
         type: responses_api_models
         name: policy_model
-      # The name Auto Ontology sends. An openai/, azure/ or aws/ prefix selects its OpenAI-compatible client.
-      reasoning_model: ${policy_model_name}
-      # To run the fast calls on the policy too, set policy_model and ${policy_model_name} here.
+      # The name Auto Ontology sends. It needs an openai/, azure/ or aws/ prefix, which selects Auto Ontology's
+      # OpenAI-compatible client, the one whose calls go through Gym. The Model Server sends its own model name.
+      reasoning_model: openai/${policy_model_name}
+      # To run the fast calls on the policy too, set policy_model and openai/${policy_model_name} here.
       fast_model_server:
         type: responses_api_models
         name: auto_ontology_fast_model
-      fast_model: ${auto_ontology_fast_model_name}
+      fast_model: openai/${auto_ontology_fast_model_name}
       embedding_base_url: ${auto_ontology_embedding_base_url}
       embedding_api_key: ${auto_ontology_embedding_api_key}
       embedding_model: ${auto_ontology_embedding_model}

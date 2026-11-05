@@ -5,7 +5,7 @@
 Auto Ontology reads its settings (model endpoints, the catalog database, feature flags) from the process environment
 when it is imported, and keeps its model clients for the whole process. So one Agent Server process holds one Auto
 Ontology with one set of settings, and ``AutoOntologyRuntime`` imports it only after it has set them. Its calls are
-synchronous: the agent runs them in threads.
+synchronous: the agent runs them in threads. Its model clients send through the agent's HTTP client (model_calls.py).
 """
 
 import os
@@ -13,6 +13,8 @@ import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, Optional
+
+import httpx
 
 
 @dataclass(frozen=True)
@@ -38,12 +40,13 @@ class AutoOntologyRuntime:
 
     ``environment`` holds the settings Auto Ontology reads at import. ``source_database_url`` is a connection string
     with a ``{database}`` field; Auto Ontology probes values in the database it names, and its connectors are kept for
-    each database.
+    each database. Auto Ontology's chat model calls go through ``http_client``.
     """
 
-    def __init__(self, environment: Mapping[str, str], source_database_url: str) -> None:
+    def __init__(self, environment: Mapping[str, str], source_database_url: str, *, http_client: httpx.Client) -> None:
         self._environment = dict(environment)
         self._source_database_url = source_database_url
+        self._http_client = http_client
         self._lock = threading.Lock()
         self._modules: Optional[dict[str, Any]] = None
         self._connectors: dict[str, list[Any]] = {}
@@ -54,8 +57,10 @@ class AutoOntologyRuntime:
                 os.environ.update(self._environment)
                 from auto_ontology.connectors.registry import create_connector
                 from auto_ontology.retrieval import interactive
-                from auto_ontology.utils import get_data_objects_retriever, get_semantic_objects_retriever
+                from auto_ontology.retrieval.interactive import coordinator
+                from auto_ontology.utils import get_data_objects_retriever, get_semantic_objects_retriever, llm_invoke
 
+                send_model_calls_through(self._http_client, llm_invoke=llm_invoke, coordinator=coordinator)
                 self._modules = {
                     "interactive": interactive,
                     "create_connector": create_connector,
@@ -128,3 +133,30 @@ class AutoOntologyRuntime:
 
     def apply_submit_result(self, session: Any, result: dict) -> None:
         self._auto_ontology()["interactive"].apply_submit_result(session, result)
+
+
+def send_model_calls_through(http_client: httpx.Client, *, llm_invoke: Any, coordinator: Any) -> None:
+    """Make Auto Ontology send its chat model calls through ``http_client``, in the context of the step that makes them.
+
+    Auto Ontology at the pinned revision takes neither an HTTP client nor an executor, so this sets both on its
+    modules. ``llm_invoke._build_client`` builds every chat client. ``apply_user_answer`` makes model calls in a
+    ``ThreadPoolExecutor``, which does not copy the step's context; LangChain's ``ContextThreadPoolExecutor`` does.
+    """
+    from langchain_core.runnables.config import ContextThreadPoolExecutor
+    from langchain_openai import ChatOpenAI
+
+    build_client = llm_invoke._build_client
+
+    def build_client_through_gym(**arguments: Any) -> Any:
+        llm = build_client(**arguments)
+        if not isinstance(llm, ChatOpenAI):
+            raise TypeError(
+                f"Auto Ontology built a {type(llm).__name__}; only its ChatOpenAI client can send through Gym"
+            )
+        # The SDK client keeps the base URL, timeout and retries that Auto Ontology gave it.
+        llm.root_client = llm.root_client.with_options(http_client=http_client)
+        llm.client = llm.root_client.chat.completions
+        return llm
+
+    llm_invoke._build_client = build_client_through_gym
+    coordinator.ThreadPoolExecutor = ContextThreadPoolExecutor

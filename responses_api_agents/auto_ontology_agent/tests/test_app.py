@@ -1,12 +1,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 import json
-from typing import Any, Optional
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
+from typing import Any, Callable, Optional
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
+from langchain_core.runnables.config import ContextThreadPoolExecutor
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
@@ -24,7 +30,12 @@ from responses_api_agents.auto_ontology_agent.app import (
     AutoOntologyAgentConfig,
     AutoOntologyCatalogConfig,
 )
-from responses_api_agents.auto_ontology_agent.runtime import AskUser, SubmitSQL
+from responses_api_agents.auto_ontology_agent.model_calls import (
+    ModelCallRoute,
+    ModelCallTransport,
+    model_call_route,
+)
+from responses_api_agents.auto_ontology_agent.runtime import AskUser, SubmitSQL, send_model_calls_through
 
 
 KNOWLEDGE = [
@@ -54,6 +65,15 @@ GRANT = DirectHTTPToolAccess(
     base_url="http://environment:9000/ng-rollout/rollout",
     headers={"X-NeMo-Gym-Episode-Token": "token"},
 )
+MODEL_URL = "http://policy_model:8000/v1/chat/completions"
+CHAT_COMPLETION = {
+    "id": "chatcmpl-1",
+    "object": "chat.completion",
+    "created": 0,
+    "model": "policy",
+    "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "trades"}}],
+    "usage": {"prompt_tokens": 4, "completion_tokens": 1, "total_tokens": 5},
+}
 
 
 class TestCInteractTexts:
@@ -128,10 +148,11 @@ class TestCInteractTexts:
 
 
 class FakeRuntime:
-    """Auto Ontology's session calls, scripted: ``step`` returns the next of ``actions``."""
+    """Auto Ontology's session calls, scripted: ``step`` makes ``model_call``, if any, and returns the next action."""
 
-    def __init__(self, actions: list[Any]) -> None:
+    def __init__(self, actions: list[Any], model_call: Optional[Callable[[], None]] = None) -> None:
         self.actions = list(actions)
+        self.model_call = model_call
         self.calls: list[tuple] = []
 
     def create_session(self, **kwargs: Any) -> str:
@@ -140,6 +161,8 @@ class FakeRuntime:
 
     def step(self, session: str, *, turn: str, text: Optional[str]) -> Any:
         self.calls.append(("step", turn, text))
+        if self.model_call is not None:
+            self.model_call()
         return self.actions.pop(0) if len(self.actions) > 1 else self.actions[0]
 
     def apply_user_answer(self, session: str, answer: str) -> None:
@@ -207,6 +230,22 @@ def _tool_server(monkeypatch: pytest.MonkeyPatch, replies: dict[str, list[Any]])
 
     monkeypatch.setattr("responses_api_agents.auto_ontology_agent.app.http_request", request)
     return calls
+
+
+def _model_server(server_client: Any, reply: dict, delay: float = 0) -> list[tuple[str, str, Optional[str]]]:
+    """Answer the model calls sent through ``server_client`` with ``reply``; return each call's server, path and
+    ``x-session-id``."""
+    sent: list[tuple[str, str, Optional[str]]] = []
+
+    async def post(*, server_name: str, url_path: str, headers: dict, **kwargs: Any) -> MagicMock:
+        sent.append((server_name, url_path, headers.get("x-session-id")))
+        await asyncio.sleep(delay)
+        response = MagicMock(status=200, headers={"Content-Type": "application/json"})
+        response.read = AsyncMock(return_value=json.dumps(reply).encode())
+        return response
+
+    server_client.post = AsyncMock(side_effect=post)
+    return sent
 
 
 def _activate(client: TestClient, activation: int, messages: list[dict], tools: Optional[list] = None) -> Any:
@@ -320,11 +359,8 @@ class TestCInteractSession:
             ("root", "submit_sql", "completed"),
             ("activation-2", "submit_sql", "completed"),
         ]
-        observations = close.json()["agent_observations"]
-        assert {gap["code"] for gap in observations["gaps"]} == {
-            "model_call_ownership_unavailable",
-            "model_call_usage_unavailable",
-        }
+        # The activations came on the rollout's route, and the turns made no model call without usage.
+        assert close.json()["agent_observations"]["gaps"] == []
 
     @pytest.mark.parametrize(
         ("message", "turn", "text"),
@@ -422,7 +458,7 @@ class TestCInteractSession:
         assert _agent(knowledge_children_dir=str(tmp_path))._children_of("crypto") == {1: [0]}
 
 
-def test_auto_ontology_gets_the_gym_model_servers_and_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_auto_ontology_gets_the_gym_model_servers_and_the_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     agent = _agent(feature_flags={"INTERACTIVE": "true"})
     monkeypatch.setattr(
         AutoOntologyAgent, "resolve_model_base_url", lambda self, name, **kwargs: f"http://{name}:8000/v1"
@@ -440,3 +476,229 @@ def test_auto_ontology_gets_the_gym_model_servers_and_the_catalog(monkeypatch: p
     )
     assert (environment["POSTGRES_HOST"], environment["POSTGRES_PASSWORD"]) == ("catalog", "secret")
     assert (environment["EMBED_ENDPOINT"], environment["INTERACTIVE"]) == ("http://embed/v1", "true")
+    assert agent.runtime()._http_client._transport is agent._model_transport
+    # Each role's calls go to its own Model Server.
+    assert agent._model_transport._model_servers == {
+        ("policy_model", 8000): "policy_model",
+        ("auto_ontology_fast_model", 8000): "auto_ontology_fast_model",
+    }
+
+
+@pytest.mark.parametrize("field", ["reasoning_model", "fast_model"])
+def test_a_model_name_that_selects_another_client_than_chat_openai_is_refused(field: str) -> None:
+    with pytest.raises(ValueError, match="openai/, azure/, aws/"):
+        _agent(**{field: "meta/llama-3.3-70b-instruct"})
+
+
+class TestModelCalls:
+    async def test_each_call_takes_its_activations_route_from_any_thread_that_copies_the_context(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        sent = _model_server(server_client, CHAT_COMPLETION)
+        transport = ModelCallTransport(
+            server_client, {"http://policy_model:8000/v1": "policy_model"}, loop=asyncio.get_running_loop()
+        )
+        client = httpx.Client(transport=transport)
+        both_running = threading.Barrier(2, timeout=5)
+
+        def step() -> None:
+            """As Auto Ontology does: a call from the step's thread, and two from a LangChain executor."""
+            both_running.wait()
+            client.post(MODEL_URL, json={"model": "openai/policy", "messages": []})
+            with ContextThreadPoolExecutor(max_workers=2) as pool:
+                list(pool.map(lambda _: client.post(MODEL_URL, json={"messages": []}), range(2)))
+
+        async def activation(rollout: str, invocation_id: str) -> ModelCallRoute:
+            route = ModelCallRoute(path_prefix=f"/ng-rollout/{rollout}", invocation_id=invocation_id)
+            with model_call_route(route):
+                await asyncio.to_thread(step)
+            return route
+
+        first, second = await asyncio.gather(activation("episode-a", "root"), activation("episode-b", "activation-2"))
+
+        assert sorted(sent) == [
+            *[("policy_model", "/ng-rollout/episode-a/v1/chat/completions", "root")] * 3,
+            *[("policy_model", "/ng-rollout/episode-b/v1/chat/completions", "activation-2")] * 3,
+        ]
+        assert (first.usage().input_tokens, first.usage().output_tokens, second.usage().total_tokens) == (12, 3, 15)
+        assert transport.unrouted_calls == 0
+
+    async def test_a_call_from_a_pool_that_drops_the_context_reaches_the_model_without_a_rollout(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        sent = _model_server(server_client, CHAT_COMPLETION)
+        transport = ModelCallTransport(
+            server_client, {"http://policy_model:8000/v1": "policy_model"}, loop=asyncio.get_running_loop()
+        )
+        client = httpx.Client(transport=transport)
+
+        def step() -> int:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                return pool.submit(client.post, MODEL_URL, json={"messages": []}).result().status_code
+
+        route = ModelCallRoute(path_prefix="/ng-rollout/episode-a", invocation_id="root")
+        with model_call_route(route):
+            status = await asyncio.to_thread(step)
+
+        assert status == 200
+        assert sent == [("policy_model", "/v1/chat/completions", None)]
+        assert (transport.unrouted_calls, route.usages) == (1, [])
+
+    @pytest.mark.parametrize(
+        "reply", [{key: value for key, value in CHAT_COMPLETION.items() if key != "usage"}, {"usage": "unknown"}]
+    )
+    async def test_a_reply_without_usage_leaves_the_activations_usage_unknown(self, reply: dict) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        _model_server(server_client, reply)
+        transport = ModelCallTransport(
+            server_client, {"http://policy_model:8000/v1": "policy_model"}, loop=asyncio.get_running_loop()
+        )
+        client = httpx.Client(transport=transport)
+        route = ModelCallRoute(path_prefix="/ng-rollout/episode-a", invocation_id="root")
+
+        with model_call_route(route):
+            await asyncio.to_thread(client.post, MODEL_URL, json={"messages": []})
+
+        assert route.usages == [None] and route.usage() is None
+
+    async def test_a_model_server_that_does_not_reply_in_time_times_the_call_out(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        _model_server(server_client, CHAT_COMPLETION, delay=5)
+        transport = ModelCallTransport(
+            server_client, {"http://policy_model:8000/v1": "policy_model"}, loop=asyncio.get_running_loop()
+        )
+        client = httpx.Client(transport=transport, timeout=0.05)
+
+        with pytest.raises(httpx.ReadTimeout):
+            await asyncio.to_thread(client.post, MODEL_URL, json={"messages": []})
+
+    async def test_a_call_on_the_event_loop_or_to_another_server_is_refused(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        transport = ModelCallTransport(
+            server_client, {"http://policy_model:8000/v1": "policy_model"}, loop=asyncio.get_running_loop()
+        )
+        client = httpx.Client(transport=transport)
+
+        with pytest.raises(RuntimeError, match="in a thread"):
+            client.post(MODEL_URL, json={"messages": []})
+        with pytest.raises(httpx.ConnectError):
+            await asyncio.to_thread(client.post, "http://elsewhere:8000/v1/chat/completions", json={})
+
+
+class TestAutoOntologyThroughGym:
+    @pytest.mark.parametrize(
+        ("path", "reply", "usage", "gaps"),
+        [
+            ("/ng-rollout/rollout/v1/responses", CHAT_COMPLETION, 5, []),
+            (
+                "/ng-rollout/rollout/v1/responses",
+                {key: value for key, value in CHAT_COMPLETION.items() if key != "usage"},
+                None,
+                ["model_call_usage_unavailable"],
+            ),
+            ("/v1/responses", CHAT_COMPLETION, 5, ["model_call_ownership_unavailable"]),
+        ],
+    )
+    def test_auto_ontologys_model_calls_take_the_activations_route_and_report_their_usage(
+        self, monkeypatch: pytest.MonkeyPatch, path: str, reply: dict, usage: Optional[int], gaps: list[str]
+    ) -> None:
+        agent = _agent()
+        monkeypatch.setattr(
+            AutoOntologyAgent, "resolve_model_base_url", lambda self, name, **kwargs: f"http://{name}:8000/v1"
+        )
+        sent = _model_server(agent.server_client, reply)
+
+        def runtime(environment: dict, source_database_url: str, *, http_client: httpx.Client) -> FakeRuntime:
+            return FakeRuntime(
+                [SubmitSQL("SELECT 1"), SubmitSQL("SELECT 2")],
+                model_call=lambda: http_client.post(MODEL_URL, json={"model": "openai/policy", "messages": []}),
+            )
+
+        monkeypatch.setattr("responses_api_agents.auto_ontology_agent.app.AutoOntologyRuntime", runtime)
+        _tool_server(monkeypatch, {"submit_sql": [PASSED_WITH_FOLLOW_UP, "Phase 2 correct! (Reward: 0.3)."]})
+        # One event loop for all requests, as in a server: the transport sends on the loop that built it.
+        with TestClient(agent.setup_webserver()) as client:
+            client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+            first = client.post(
+                path, json={"input": _first_turn(), "tools": TOOLS}, headers={AGENT_ACTIVATION_HEADER: "1"}
+            )
+            second = client.post(
+                path, json={"input": [{"role": "user", "content": FOLLOW_UP}]}, headers={AGENT_ACTIVATION_HEADER: "2"}
+            )
+            close = client.post(
+                "/v1/agent_sessions/close",
+                json={"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}},
+            )
+
+        prefix = path.removesuffix("/v1/responses")
+        assert sent == [
+            ("policy_model", f"{prefix}/v1/chat/completions", "root"),
+            ("policy_model", f"{prefix}/v1/chat/completions", "activation-2"),
+        ]
+        assert [(response.json()["usage"] or {}).get("total_tokens") for response in (first, second)] == [usage] * 2
+        observations = close.json()["agent_observations"]
+        assert [gap["code"] for gap in observations["gaps"]] == gaps
+
+    def test_a_call_outside_an_activation_marks_each_session_that_was_open(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        agent = _agent()
+        monkeypatch.setattr(
+            AutoOntologyAgent, "resolve_model_base_url", lambda self, name, **kwargs: f"http://{name}:8000/v1"
+        )
+        _model_server(agent.server_client, CHAT_COMPLETION)
+
+        def runtime(environment: dict, source_database_url: str, *, http_client: httpx.Client) -> FakeRuntime:
+            def model_call_in_a_pool_that_drops_the_context() -> None:
+                with ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(http_client.post, MODEL_URL, json={"messages": []}).result()
+
+            return FakeRuntime([SubmitSQL("SELECT 1")], model_call=model_call_in_a_pool_that_drops_the_context)
+
+        monkeypatch.setattr("responses_api_agents.auto_ontology_agent.app.AutoOntologyRuntime", runtime)
+        _tool_server(monkeypatch, {"submit_sql": [FAILED]})
+        with TestClient(agent.setup_webserver()) as client:
+            client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+            _activate(client, 1, _first_turn(), TOOLS)
+            close = client.post(
+                "/v1/agent_sessions/close",
+                json={"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}},
+            )
+
+        assert [gap["code"] for gap in close.json()["agent_observations"]["gaps"]] == [
+            "model_call_ownership_unavailable"
+        ]
+
+
+def test_auto_ontology_builds_its_chat_clients_on_the_agents_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """At the pinned revision: the two attributes the agent sets exist, and a client Auto Ontology builds uses them."""
+    from auto_ontology.retrieval.interactive import coordinator
+    from auto_ontology.utils import llm_invoke
+
+    # send_model_calls_through replaces both; monkeypatch puts them back after the test.
+    monkeypatch.setattr(llm_invoke, "_build_client", llm_invoke._build_client)
+    monkeypatch.setattr(coordinator, "ThreadPoolExecutor", coordinator.ThreadPoolExecutor)
+    monkeypatch.setattr(llm_invoke, "_API_KEY", "gym-model-server")
+    monkeypatch.setattr(llm_invoke, "_BASE_URL", "http://policy_model:8000/v1")
+    monkeypatch.setattr(llm_invoke, "_MODEL_NAME", "openai/policy")
+    requests: list[httpx.Request] = []
+
+    def reply(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=CHAT_COMPLETION)
+
+    send_model_calls_through(
+        httpx.Client(transport=httpx.MockTransport(reply)), llm_invoke=llm_invoke, coordinator=coordinator
+    )
+    answer = llm_invoke.get_llm_client().invoke("Which table holds the trades?")
+
+    assert answer.content == "trades"
+    assert [str(request.url) for request in requests] == [MODEL_URL]
+    assert json.loads(requests[0].content)["model"] == "openai/policy"
+    assert coordinator.ThreadPoolExecutor is ContextThreadPoolExecutor
+
+
+def test_a_chat_client_other_than_chat_openai_is_refused() -> None:
+    llm_invoke = SimpleNamespace(_build_client=lambda **arguments: object())
+    send_model_calls_through(httpx.Client(), llm_invoke=llm_invoke, coordinator=SimpleNamespace())
+
+    with pytest.raises(TypeError, match="only its ChatOpenAI client"):
+        llm_invoke._build_client(model="meta/llama")
