@@ -162,10 +162,10 @@ class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
     store_all_messages: bool = False
     record_terminal_session: bool = False
     interleaved_thinking: bool = False
-    model_timeout_sec: float = 2400
-    command_timeout_sec: float = 1800
+    model_timeout_sec: float = Field(default=2400, gt=0, allow_inf_nan=False)
+    command_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False)
     # The run's wall-clock budget; a task's own agent timeout lowers it for an agent session.
-    timeout: float = 10800
+    timeout: float = Field(default=10800, gt=0, allow_inf_nan=False)
     keep_logs: bool = False
     logs_root: str = "outputs/terminus_2_agent/runs"
     # Agent sessions without sandbox_access start a sandbox from this provider block and SandboxSpec fields.

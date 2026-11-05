@@ -10,6 +10,7 @@ import pytest
 import yaml
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
@@ -277,6 +278,13 @@ class TestConfig:
         assert config.concurrency == 1
         assert config.record_terminal_session is False
         assert config.trajectory_config == {"raw_content": False}
+
+    @pytest.mark.parametrize("field", ["timeout", "model_timeout_sec", "command_timeout_sec"])
+    @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+    def test_timeouts_must_be_positive_and_finite(self, field: str, value: float) -> None:
+        # The run timeout sets the supervisor's deadline and an owned sandbox's TTL.
+        with pytest.raises(ValidationError, match=field):
+            _config(**{field: value})
 
     @pytest.mark.parametrize(
         "relative_path,config_name",

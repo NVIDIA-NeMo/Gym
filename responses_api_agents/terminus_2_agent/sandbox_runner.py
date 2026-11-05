@@ -162,6 +162,9 @@ async def _run(payload: dict[str, Any], output_path: Path) -> dict[str, Any]:
             raise
     finally:
         loop.remove_signal_handler(signal.SIGTERM)
+        # Removing the handler restores the default action, which would end the runner before it writes the result.
+        # Nothing is started after this point, so no child inherits the ignored signal.
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
     # The tmux terminal and the commands running in it, such as a service, stay up after the runner ends, also after
     # a deadline, rollout stop or close, until the sandbox's owner stops the sandbox, as in Harbor. They remain
     # available to verification.
