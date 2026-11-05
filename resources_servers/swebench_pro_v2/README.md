@@ -9,8 +9,9 @@ It reuses the [v1 server](../swebench_pro/README.md) and changes only what v2 ch
   (reset test files, apply the test patch, run `run_script.sh`, parse, check fail-to-pass and pass-to-pass).
   `verification.py` only builds the entryscript that does this; the rest is v1's `run_verification`.
 - **Prompt:** the upstream `instruction.md`, verbatim.
-- **Limits:** 3000s per verification, as upstream. v1's container repairs, Go prefetch and anti-cheat setup are off,
-  because v2 images ship a sanitised git history and each `test.sh` does its own repairs.
+- **Limits:** 3000s per verification, as upstream. v1's Go prefetch and anti-cheat setup are off, and so are its container repairs except
+  `stale_database_state`, because v2 images ship a sanitised git history and each `test.sh` does its own repairs.
+  That repair runs after the patch is applied and before `test.sh`, and removes redis files that leaked into the patch.
 
 ## Prepare data
 
