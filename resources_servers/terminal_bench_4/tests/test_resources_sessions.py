@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Environment Server sessions: TB4 lends its task sandbox through SandboxAccess and grades on /verify."""
+"""Episode sessions: Terminal-Bench 4 lends its task sandbox through SandboxAccess and grades on /verify."""
 
 import asyncio
 import json
@@ -309,7 +309,7 @@ async def test_cancelled_close_fences_slow_provisioning_until_its_cleanup(harnes
     wrong = close_body(seed) | {"episode_id": {"rollout_id": "rollout", "attempt": 1}}
     with pytest.raises(HTTPException, match="episode_id"):
         await harness.server.close_resources_session(ResourcesCloseSessionRequest(**wrong))
-    assert seed.resources_session_id not in harness.server._closed_resources
+    assert seed.resources_session_id not in harness.server._fenced_resources
     closing = asyncio.create_task(
         harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
     )
@@ -317,17 +317,17 @@ async def test_cancelled_close_fences_slow_provisioning_until_its_cleanup(harnes
     closing.cancel()
     with pytest.raises(asyncio.CancelledError):
         await closing
-    # A pending allocation keeps its fence past the normal retry window.
+    # A pending allocation keeps its fence past the normal close retry window.
     now = 1000.0
     other = close_body(seed) | {"resources_session_id": "other"}
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**other))
-    assert seed.resources_session_id in harness.server._closed_resources
-    assert seed.resources_session_id not in harness.server._close_expiry
+    assert seed.resources_session_id in harness.server._fenced_resources
+    assert seed.resources_session_id not in harness.server._fence_expiry
     harness.release_prepare.set()
     with pytest.raises(HTTPException, match="closed during setup"):
         await seeding
-    # The late seed's teardown completes the close and starts its retention window.
-    assert harness.server._close_expiry[seed.resources_session_id] == 1300
+    # The late seed's teardown completes the close and starts its fence's close retry window.
+    assert harness.server._fence_expiry[seed.resources_session_id] == 1300
     assert harness.graded == []
     assert all(environment.closed for environment in harness.environments)
 
@@ -365,19 +365,19 @@ async def test_cancelled_close_still_releases_every_sandbox_and_the_slot(tmp_pat
         await closing
     deletion.set()
 
-    async def retention_recorded():
-        while seed.resources_session_id not in harness.server._close_expiry:
+    async def fence_expiry_started():
+        while seed.resources_session_id not in harness.server._fence_expiry:
             await asyncio.sleep(0)
 
-    await asyncio.wait_for(retention_recorded(), 5)
+    await asyncio.wait_for(fence_expiry_started(), 5)
     assert all(environment.closed for environment in harness.environments)
     assert not session.owns_slot and not harness.server._slots.locked()
-    assert harness.server._close_expiry[seed.resources_session_id] == 300
+    assert harness.server._fence_expiry[seed.resources_session_id] == 300
     assert session.termination.reason == "cancelled"
     assert harness.graded == []
 
 
-async def test_failed_close_keeps_its_fence_past_the_retry_window(harness, monkeypatch) -> None:
+async def test_failed_close_keeps_its_fence_past_the_close_retry_window(harness, monkeypatch) -> None:
     now = 0.0
     monkeypatch.setattr(app_module, "monotonic", lambda: now)
     request = SimpleNamespace(session={})
@@ -390,15 +390,15 @@ async def test_failed_close_keeps_its_fence_past_the_retry_window(harness, monke
     now = 1000.0
     other = close_body(seed) | {"resources_session_id": "other"}
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**other))
-    assert seed.resources_session_id in harness.server._closed_resources
-    assert seed.resources_session_id not in harness.server._close_expiry
+    assert seed.resources_session_id in harness.server._fenced_resources
+    assert seed.resources_session_id not in harness.server._fence_expiry
     with pytest.raises(HTTPException, match="already closed"):
         await harness.server.seed_session(request, seed)
     lost = await harness.server.verify(request, harness.verify_request(harness.verify_body()))
     assert masked(lost) == (0.0, True, "session_lost")
     harness.environments[0].stop_error = None
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
-    assert harness.server._close_expiry[seed.resources_session_id] == 1300
+    assert harness.server._fence_expiry[seed.resources_session_id] == 1300
     assert all(environment.closed for environment in harness.environments)
 
 
@@ -414,13 +414,13 @@ async def test_close_retries_a_failed_task_sandbox_deletion(harness, tmp_path, m
     with pytest.raises(HTTPException) as error:
         await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
     assert error.value.status_code == 503
-    assert seed.resources_session_id not in harness.server._close_expiry
+    assert seed.resources_session_id not in harness.server._fence_expiry
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
     assert box.stop.await_count == 2 and lifecycle.released(session)
-    assert harness.server._close_expiry[seed.resources_session_id] == 300
+    assert harness.server._fence_expiry[seed.resources_session_id] == 300
 
 
-async def test_completed_close_records_expire_without_retry_renewal(harness, monkeypatch) -> None:
+async def test_completed_close_fences_expire_without_retry_renewal(harness, monkeypatch) -> None:
     now = 100.0
     monkeypatch.setattr(app_module, "monotonic", lambda: now)
     request = SimpleNamespace(session={})
@@ -428,17 +428,17 @@ async def test_completed_close_records_expire_without_retry_renewal(harness, mon
     key = seed.resources_session_id
     await harness.server.seed_session(request, seed)
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
-    assert harness.server._close_expiry[key] == 400
+    assert harness.server._fence_expiry[key] == 400
     now = 200.0
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**close_body(seed)))
-    assert harness.server._close_expiry[key] == 400
+    assert harness.server._fence_expiry[key] == 400
     with pytest.raises(HTTPException, match="already closed"):
         await harness.server.seed_session(request, seed)
     now = 401.0
     other = close_body(seed) | {"resources_session_id": "other"}
     await harness.server.close_resources_session(ResourcesCloseSessionRequest(**other))
-    assert key not in harness.server._closed_resources
-    assert key not in harness.server._close_expiry
+    assert key not in harness.server._fenced_resources
+    assert key not in harness.server._fence_expiry
     assert key not in harness.server._resources_sessions
     assert key not in harness.server._resources_locks
     assert not harness.server._sessions and not harness.server._by_identity

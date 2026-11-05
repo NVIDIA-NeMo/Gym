@@ -16,7 +16,7 @@ activation; changed requests, wrong rollout identities, and closed sessions retu
 409. Use the seeded episode's `/ng-rollout/<capture_key>/v1/responses` route.
 Close cancels and drains active graph execution before verification.
 
-Required HTTP/MCP grants and any sandbox access return a final 422. Optional grants
+Required HTTP/MCP grants and any sandbox access return a terminal 422. Optional grants
 are ignored. Set `resources_tool_transports: []` and `num_workers: 1` in the pairing.
 An unbound agent config has `resources_server: null`; the Environment Server owns
 resource setup, verification and cleanup. Use a checked-in pairing, such as
