@@ -5,6 +5,7 @@
 import gzip
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -13,69 +14,96 @@ from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABL
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.sandbox.providers.base import SandboxHandle
 from nemo_gym.sandbox.providers.opensandbox._http_transport import OpenSandboxHttpTransport
-from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider, _ended_report_evidence
+from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider, _lifecycle_oom_evidence
 
 
 pytestmark = pytest.mark.sandbox
 pytest.importorskip("opensandbox")
 
-REPORT = (
-    "Sandbox sandbox-oom has ended (OOMKilled): 1/1 observed pods failed; primary reason=ContainerFailed; "
-    "sample pod=sandbox-oom-0; sample detail=Pod sandbox-oom-0 container sandbox exited with code 137 (OOMKilled)"
+LIFECYCLE_REPORT = (
+    "1/1 observed pods failed; primary reason=ContainerFailed; sample pod=sandbox-oom-0; "
+    "sample detail=Pod sandbox-oom-0 container sandbox exited with code 137 (OOMKilled)"
 )
+REPORT = f"Sandbox sandbox-oom has ended (OOMKilled): {LIFECYCLE_REPORT}"
 
 
 @pytest.mark.parametrize(
-    ("report", "code", "status", "confirmed"),
+    ("report", "sandbox_id", "state", "reason", "confirmed"),
     [
-        (REPORT, "SANDBOX::ENDED", 410, True),
-        (REPORT.replace("container sandbox", "container egress"), "SANDBOX::ENDED", 410, False),
-        (REPORT.replace("Sandbox sandbox-oom ", "Sandbox previous-sandbox "), "SANDBOX::ENDED", 410, False),
-        (REPORT.replace("1/1 observed pods", "1/2 observed pods"), "SANDBOX::ENDED", 410, False),
-        (REPORT + "; container sidecar exited with code 137 (OOMKilled)", "SANDBOX::ENDED", 410, False),
-        (REPORT.replace("(OOMKilled)", "(Evicted)"), "SANDBOX::ENDED", 410, False),
-        (REPORT, "OTHER", 410, False),
-        (REPORT, "SANDBOX::ENDED", 502, False),
-        ("exit code 137 OOMKilled", "SANDBOX::ENDED", 410, False),
-        (REPORT + "x" * 65536, "SANDBOX::ENDED", 410, False),
+        (LIFECYCLE_REPORT, "sandbox-oom", "Failed", "FAILED", True),
+        (LIFECYCLE_REPORT.replace("container sandbox", "container egress"), "sandbox-oom", "Failed", "FAILED", False),
+        (
+            LIFECYCLE_REPORT.replace("container sandbox", "init container sandbox"),
+            "sandbox-oom",
+            "Failed",
+            "FAILED",
+            False,
+        ),
+        (LIFECYCLE_REPORT, "previous-sandbox", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT, None, "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT.replace("sandbox-oom-0", "previous-sandbox-0"), "sandbox-oom", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT.replace("sandbox-oom-0", "pool-pod-0"), "sandbox-oom", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT.replace("1/1 observed pods", "1/2 observed pods"), "sandbox-oom", "Failed", "FAILED", False),
+        (
+            LIFECYCLE_REPORT + "; container sidecar exited with code 137 (OOMKilled)",
+            "sandbox-oom",
+            "Failed",
+            "FAILED",
+            False,
+        ),
+        (LIFECYCLE_REPORT.replace("(OOMKilled)", "(Evicted)"), "sandbox-oom", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT.replace("code 137", "code 0"), "sandbox-oom", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT.replace("code 137", "code 256"), "sandbox-oom", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT, "sandbox-oom", "Running", "FAILED", False),
+        (LIFECYCLE_REPORT, "sandbox-oom", "Failed", "TASK_FAILED", False),
+        (LIFECYCLE_REPORT, "sandbox-oom", "Failed", "OOMKilled", False),
+        ("exit code 137 OOMKilled", "sandbox-oom", "Failed", "FAILED", False),
+        ("Last termination: " + LIFECYCLE_REPORT, "sandbox-oom", "Failed", "FAILED", False),
+        (LIFECYCLE_REPORT + "x" * 65536, "sandbox-oom", "Failed", "FAILED", False),
     ],
     ids=[
         "current-user",
         "sidecar",
+        "init",
         "stale-sandbox",
+        "missing-sandbox-id",
+        "stale-pod",
+        "pooled-pod",
         "multiple-pods",
         "multiple-containers",
         "evicted",
-        "wrong-code",
-        "wrong-status",
+        "zero-exit",
+        "invalid-exit",
+        "running",
+        "other-failure",
+        "reason-only",
         "prose",
+        "historical-state",
         "oversized",
     ],
 )
-def test_ended_report_requires_current_unambiguous_provider_evidence(report, code, status, confirmed):
-    from opensandbox.exceptions import SandboxApiException, SandboxError
-
-    error = SandboxApiException("opaque", status_code=status, error=SandboxError(code, report))
-    evidence = _ended_report_evidence(error, sandbox_id="sandbox-oom", via_server_proxy=True)
+def test_lifecycle_report_requires_current_unambiguous_control_plane_evidence(
+    report, sandbox_id, state, reason, confirmed
+):
+    info = SimpleNamespace(id=sandbox_id, status=SimpleNamespace(state=state, reason=reason, message=report))
+    evidence = _lifecycle_oom_evidence(info, sandbox_id="sandbox-oom")
     assert (evidence is not None) == confirmed
     if evidence is not None:
         assert evidence.failure_kind == PROVIDER_OOM_KILLED
         assert evidence.exit_code == 137
-        assert "provider ended report" in evidence.message
-        assert _ended_report_evidence(error, sandbox_id="sandbox-oom", via_server_proxy=False) is None
-    # An exception merely quoting the same bytes is never a provider report.
-    assert _ended_report_evidence(RuntimeError(str(error)), sandbox_id="sandbox-oom", via_server_proxy=True) is None
+        assert evidence.provider_status_reason == "FAILED"
+        assert "lifecycle status confirms" in evidence.message
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("body", ["oom", "sidecar", "oversized", "direct", "default"])
-async def test_command_status_410_survives_real_sdk_and_selects_evidence(body, monkeypatch):
+@pytest.mark.parametrize("body", ["oom", "sidecar", "oversized", "direct", "spoofed", "wrong-id"])
+async def test_command_status_410_uses_control_plane_confirmation_through_real_sdk(body, monkeypatch):
     from opensandbox.adapters.command_adapter import CommandsAdapter
     from opensandbox.exceptions import SandboxApiException
     from opensandbox.models.sandboxes import SandboxEndpoint
 
-    report = REPORT.replace("container sandbox", "container egress") if body == "sidecar" else REPORT
-    payload = json.dumps({"code": "SANDBOX::ENDED", "message": report})
+    # Even an exact matching 410 body is not proof: execd can return it through the proxy.
+    payload = json.dumps({"code": "SANDBOX::ENDED", "message": REPORT})
     if body == "oversized":
         payload += " " * 65536
     requests = []
@@ -87,19 +115,29 @@ async def test_command_status_410_survives_real_sdk_and_selects_evidence(body, m
     provider = OpenSandboxProvider(
         connection={"use_server_proxy": body != "direct"},
         probe={"command": None},
-        diagnostics={} if body == "default" else {"ended_report_oom": True},
         operations={"background_exec": True, "retries": 0},
     )
     monkeypatch.setattr(provider, "_build_transport", lambda: httpx.MockTransport(respond))
     adapter = CommandsAdapter(provider._connection_config(), SandboxEndpoint(endpoint="sandbox.test"))
     submitted = []
+    lifecycle_reads = []
 
     async def run(command, *, opts):
         submitted.append(command)
         return SimpleNamespace(id="exec-1")
 
     async def get_info():
-        return SimpleNamespace(status=SimpleNamespace(state="Failed", reason="FAILED"))
+        lifecycle_reads.append("read")
+        message = LIFECYCLE_REPORT
+        if body == "sidecar":
+            message = message.replace("container sandbox", "container egress")
+        elif body == "spoofed":
+            message = "Operation failed"
+        # Pod deletion does not erase the sandbox controller's persisted failure condition.
+        return SimpleNamespace(
+            id="other-sandbox" if body == "wrong-id" else "sandbox-oom",
+            status=SimpleNamespace(state="Failed", reason="FAILED", message=message),
+        )
 
     handle = SandboxHandle(
         sandbox_id="sandbox-oom",
@@ -108,26 +146,61 @@ async def test_command_status_410_survives_real_sdk_and_selects_evidence(body, m
             commands=SimpleNamespace(run=run, get_command_status=adapter.get_command_status), get_info=get_info
         ),
     )
+
+    # No pod or inspect endpoint is available; the persisted control-plane report must be enough.
+    async def inspect(*args, **kwargs):
+        pytest.fail("Lifecycle confirmation must not need the deleted pod")
+
+    monkeypatch.setattr(provider, "_control_plane_inspect_oom_evidence", inspect)
     try:
         with pytest.raises(NgFailureEvent) as caught:
             await provider.exec(handle, "allocate memory", timeout_s=30)
         failure = caught.value
-        assert failure.failure_kind == (PROVIDER_OOM_KILLED if body == "oom" else PROVIDER_UNAVAILABLE)
+        confirmed = body not in {"sidecar", "spoofed", "wrong-id"}
+        assert failure.failure_kind == (PROVIDER_OOM_KILLED if confirmed else PROVIDER_UNAVAILABLE)
         assert failure.details.sandbox_id == "sandbox-oom"
         assert failure.details.execution_id == "exec-1"
         assert failure.http_status is None  # Distinct terminal observation; the failed request owns 410.
         assert failure.__cause__.http_status == 410
         assert isinstance(failure.__cause__.__cause__, SandboxApiException)
         assert failure.__cause__.__cause__.request_id == "request-410"
-        if body == "oom":
+        if confirmed:
             assert failure.details.exit_code == 137
-            assert failure.details.provider_status_reason == "OOMKilled"
+            assert failure.details.provider_status_reason == "FAILED"
         assert len(requests) == 1
         assert requests[0].url.path == "/command/status/exec-1"
         assert submitted == ["allocate memory"]
+        assert lifecycle_reads == ["read"]
     finally:
         await adapter._httpx_client.aclose()
         await adapter._sse_client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["exec", "pty"])
+async def test_lifecycle_confirmation_is_shared_by_foreground_exec_and_pty(operation):
+    provider = OpenSandboxProvider(operations={"background_exec": False, "retries": 0})
+    error = ConnectionError("exec daemon unavailable")
+    info = SimpleNamespace(
+        id="sandbox-oom",
+        status=SimpleNamespace(state="Failed", reason="FAILED", message=LIFECYCLE_REPORT),
+    )
+    raw = SimpleNamespace(
+        commands=SimpleNamespace(run=AsyncMock(side_effect=error)), get_info=AsyncMock(return_value=info)
+    )
+    handle = SandboxHandle("sandbox-oom", "opensandbox", raw)
+    if operation == "exec":
+        with pytest.raises(NgFailureEvent) as caught:
+            await provider.exec(handle, "allocate memory", timeout_s=30)
+        failure = caught.value
+        raw.commands.run.assert_awaited_once()
+    else:
+        failure = await provider._pty_failure(handle, error)
+    assert failure.failure_kind == PROVIDER_OOM_KILLED
+    assert failure.details.exit_code == 137
+    assert failure.details.provider_status_reason == "FAILED"
+    assert failure.stage is None  # The provider establishes the cause, not who owns this execution.
+    raw.get_info.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -178,28 +251,3 @@ async def test_ended_transport_bounds_stream_and_closes_before_error(oversized):
     else:
         assert caught.value.response.json() == {"code": "SANDBOX::ENDED", "message": REPORT}
         assert "content-encoding" not in caught.value.response.headers
-
-
-def test_unrecognized_ended_report_warning_is_bounded_and_suppressible(caplog):
-    from opensandbox.exceptions import SandboxApiException, SandboxError
-
-    report = REPORT + "!" * 1000
-    error = SandboxApiException("opaque", status_code=410, error=SandboxError("SANDBOX::ENDED", report))
-    for first in (True, False):
-        assert (
-            _ended_report_evidence(
-                error,
-                sandbox_id="sandbox-oom",
-                via_server_proxy=True,
-                log_unrecognized=first,
-            )
-            is None
-        )
-    assert len(caplog.records) == 1
-    assert caplog.records[0].message.endswith(report[:256])
-
-
-@pytest.mark.parametrize("value", [1, "true", None])
-def test_ended_report_opt_in_requires_boolean(value):
-    with pytest.raises(TypeError, match="diagnostics.ended_report_oom must be a bool"):
-        OpenSandboxProvider(diagnostics={"ended_report_oom": value})
