@@ -43,18 +43,25 @@ def _args(
     resolve_only: bool = False,
     json_output: bool = False,
     select: str | None = None,
+    skip_credential_preflight: bool = False,
 ) -> argparse.Namespace:
     return argparse.Namespace(
-        config=str(config_path), dry_run=dry_run, resolve_only=resolve_only, json=json_output, select=select
+        config=str(config_path),
+        dry_run=dry_run,
+        resolve_only=resolve_only,
+        json=json_output,
+        select=select,
+        skip_credential_preflight=skip_credential_preflight,
     )
 
 
 def _capture_submit(monkeypatch: MonkeyPatch) -> dict:
     captured: dict = {}
 
-    def fake_submit(config, *, dry_run: bool = False) -> None:
+    def fake_submit(config, *, dry_run: bool = False, credential_preflight: bool = True) -> None:
         captured["config"] = config
         captured["dry_run"] = dry_run
+        captured["credential_preflight"] = credential_preflight
 
     monkeypatch.setattr(submit_module, "submit", fake_submit)
     return captured
@@ -83,6 +90,19 @@ class TestEvalSubmitFlatConfig:
         _eval_submit(_args(config_path, dry_run=True), overrides=[])
 
         assert captured["dry_run"] is True
+
+    def test_skip_credential_preflight_flag_is_forwarded(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
+        captured = _capture_submit(monkeypatch)
+        config_path = tmp_path / "submit.yaml"
+        config_path.write_text(
+            yaml.dump({"services": {"svc": SERVICE}, "compute": COMPUTE, "driver": DRIVER, "job": JOB})
+        )
+
+        _eval_submit(_args(config_path), overrides=[])
+        assert captured["credential_preflight"] is True
+
+        _eval_submit(_args(config_path, skip_credential_preflight=True), overrides=[])
+        assert captured["credential_preflight"] is False
 
     def test_bare_override_replaces_existing_key(self, tmp_path, monkeypatch: MonkeyPatch) -> None:
         captured = _capture_submit(monkeypatch)
@@ -467,7 +487,7 @@ def _record(*, failed: bool = False) -> SubmissionRecord:
 
 
 def _returning(monkeypatch: MonkeyPatch, record):
-    monkeypatch.setattr(submit_module, "submit", lambda config, *, dry_run=False: record)
+    monkeypatch.setattr(submit_module, "submit", lambda config, *, dry_run=False, credential_preflight=True: record)
 
 
 def _config_file(tmp_path):

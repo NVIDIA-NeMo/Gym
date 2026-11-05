@@ -24,6 +24,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.credential_preflight import check_credentials
 from nemo_gym.orchestration.executors.base import SchedulerRefusedError
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
@@ -53,7 +54,9 @@ _EXECUTORS_BY_NAME = {executor.name: executor for executor in _EXECUTORS.values(
 
 
 @experimental
-def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
+def submit(
+    config: SubmitConfig, *, dry_run: bool = False, credential_preflight: bool = True
+) -> SubmissionRecord | None:
     compute = next(iter(config.compute.values()))
     executor_cls = _EXECUTORS[type(compute)]
 
@@ -64,6 +67,10 @@ def submit(config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord |
                 f"Benchmark(s) {', '.join(unsupported)} set `resumable`, but {executor_cls.__name__} "
                 "does not support resumable runs."
             )
+
+    # Before the executor stages or queues anything, so a rejected judge key costs no allocation.
+    if credential_preflight:
+        check_credentials(config)
 
     return executor_cls().run(config, dry_run=dry_run)
 
