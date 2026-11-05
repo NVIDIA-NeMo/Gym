@@ -391,9 +391,10 @@ counts adds to `calls_without_usage` instead of adding zero. `attributed_call_co
 captured calls with a role other than `unattributed`; it is null for a rollout with no captured calls.
 `call_latency_ms` sums call durations; calls can overlap, so it is not wall-clock time.
 
-`ng_captured_calls` is absent when observability is disabled, capture produced no trajectory, or the
-rollout's capture could not be read: those calls are unknown, not zero. `capture_complete` is false when
-capture writes were still pending or incomplete, so the counts are a lower bound.
+`ng_captured_calls` is absent when observability is disabled, capture produced no trajectory, or none of
+the rollout's capture could be read: those calls are unknown, not zero. `capture_complete` is false when
+capture writes were still pending or incomplete, or some records could not be read, so the counts are a
+lower bound.
 `perf_summary.captured_calls` adds the rollout summaries into run totals by role, with
 `rollouts_with_capture` out of `total_rollouts`, and `rollouts_with_incomplete_capture` of those (with
 `capture_complete` false when any was). A run without capture has no `captured_calls` block rather than
