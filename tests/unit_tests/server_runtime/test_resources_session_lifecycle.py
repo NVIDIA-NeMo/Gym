@@ -223,7 +223,8 @@ async def test_release_waits_for_in_flight_initialization(operation: str) -> Non
     assert request.session[SESSION_ID_KEY] == "session"
     assert server.state == {}
     assert server._session_episodes == {}
-    assert server._fence.closed_episode("session") == SEED.episode_id
+    # Only a close fences the session; retirement leaves refusing late requests to the checkpoint participant.
+    assert server._fence.closed_episode("session") == (SEED.episode_id if operation == "close" else None)
 
 
 @pytest.mark.parametrize("operation", ["close", "retire"])
@@ -240,7 +241,7 @@ async def test_failed_release_retains_state_and_identity_for_retry(operation: st
     await _release(server, operation)
     assert server.state == {}
     assert server._session_episodes == {}
-    assert server._fence.closed_episode("session") == SEED.episode_id
+    assert server._fence.closed_episode("session") == (SEED.episode_id if operation == "close" else None)
 
 
 async def test_invalid_task_never_initializes_or_binds_the_cookie() -> None:
@@ -334,4 +335,7 @@ async def test_exported_server_can_inherit_retirement_from_the_state_hooks() -> 
     await server.seed_session(SEED, request=_request())
     await server.retire_session_state(SEED.resources_session_id)
     assert server.state == {}
-    assert server._fence.closed_episode(SEED.resources_session_id) == SEED.episode_id
+    # The participant also retires a session to undo a restore, and the same session may be installed again.
+    assert server._fence.closed_episode(SEED.resources_session_id) is None
+    await server.seed_session(SEED, request=_request())
+    assert server.state == {SEED.resources_session_id: 42}
