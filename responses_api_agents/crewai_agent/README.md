@@ -142,7 +142,9 @@ built by the Agent Server for the sandbox's architecture and C library with
 [`SandboxPythonRuntime`](../../nemo_gym/agents/utils/sandbox_python.py) and cached under `sandbox_python` in Gym's
 `cache_dir`. Building needs `uv` on the Agent Server and a wheel of every dependency for the sandbox's platform. The
 sandbox needs no Python, network or `uv` of its own. The runtime lives in `/tmp/nemo-gym-crewai-runtime-<key>`,
-outside the task directory and `HOME`, and a later session in the same sandbox reuses it.
+outside the task directory and `HOME`, and a later session in the same sandbox reuses it. Each new sandbox receives
+it as two archives: for x86_64 glibc, about 35 MB of CPython and 275 MB of CrewAI and its dependencies, which include
+LanceDB and ONNX Runtime. Building them the first time takes the Agent Server a minute or two.
 
 The runner gives CrewAI a private `HOME` and data directory in the session directory, switches off its telemetry,
 trace upload and PyPI version check, and starts shell commands with the task's own environment.

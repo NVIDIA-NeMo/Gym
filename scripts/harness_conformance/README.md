@@ -219,7 +219,8 @@ field, so that it uses the probe timeout instead of the adapter's default.
 and then returns early only for the harnesses in its
 `("hermes", "stirrup", "simple", "openclaw", "crewai")` tuple: Hermes comes from that
 project, Stirrup, OpenClaw and CrewAI install in the task sandbox during session setup,
-and Simple Agent is built in. For any other harness it installs a
+and Simple Agent is built in. CrewAI's sandbox runtime takes longer to build than one probe
+episode lasts, so the install step builds it first, into a throwaway local sandbox. For any other harness it installs a
 pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
 so add a harness that installs its runtime in the task sandbox to that tuple. A
 data-driven registry entry could carry these per-harness settings and remove the
