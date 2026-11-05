@@ -541,7 +541,13 @@ def _translate_agent_type(args: argparse.Namespace) -> list[str]:
             "`--agent-type` chooses which agent runs the task, which is settled once the servers are "
             "running, so it cannot be combined with `--no-serve`. Use `--agent` to name one of them."
         )
-    return [f"+config_paths=[{_asset_config_path('agent-type', name)}]"]
+    config_path = _asset_config_path("agent-type", name)
+    overrides = [f"+config_paths=[{config_path}]"]
+    if name.split("/", 1)[0] == "langgraph_agent":
+        # Null-bound LangGraph configs also serve independently wired session agents. Only an explicit
+        # --agent-type selection asks the composer to replace the workload's existing agent.
+        overrides.append(f"+_selected_langgraph_config={_hydra_quote(config_path)}")
+    return overrides
 
 
 # `--search-dir`: extra component-search roots. `main()` folds these into the `NEMO_GYM_EXTRA_ROOTS` env

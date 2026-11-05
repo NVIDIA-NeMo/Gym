@@ -769,7 +769,12 @@ def _run_private_uv_entrypoint(
     if shared_uv != "missing":
         shared.write_text(fake_uv if shared_uv == "working" else "#!/bin/bash\nexit 1\n")
         shared.chmod(0o755)
-    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    # The clone declares the extras the entrypoint asks for, and `python` is the one that reads them.
+    (tools / "git").write_text(
+        '#!/bin/bash\nif [[ $1 == clone ]]; then mkdir -p "$3"; '
+        'printf "[project.optional-dependencies]\\nray = []\\n" > "$3/pyproject.toml"; fi\nexit 0\n'
+    )
+    (tools / "python").symlink_to(sys.executable)
     curl_log = tmp_path / "curl.log"
     # Like uv's installer: the target is UV_UNMANAGED_INSTALL, else UV_INSTALL_DIR, and only an install that is not
     # unmanaged writes the user-level receipt.
@@ -2870,6 +2875,38 @@ def test_driver_sync_targets_its_checkout_venv(tmp_path, monkeypatch, inherited_
     )
     assert result.stdout.splitlines()[:3] == [str(venv), "sync", "--locked"]
     assert os.environ.get("UV_PROJECT_ENVIRONMENT") == inherited_target
+
+
+_PIN_BEFORE_THE_EXTRAS = '[project]\nname = "gym"\n\n[project.optional-dependencies]\ntelemetry = []\nvllm = []\n'
+_PIN_WITH_THE_EXTRAS = _PIN_BEFORE_THE_EXTRAS + "mlflow = []\nray = []\n"
+
+
+@pytest.mark.parametrize(
+    ("pyproject", "kept", "dropped"),
+    [
+        (_PIN_WITH_THE_EXTRAS, "--extra telemetry --extra mlflow --extra ray", []),
+        (_PIN_BEFORE_THE_EXTRAS, "--extra telemetry", ["mlflow", "ray"]),
+    ],
+    ids=["every_requested_extra_declared", "mlflow_and_ray_not_declared"],
+)
+def test_the_driver_install_asks_uv_only_for_the_extras_the_checkout_declares(tmp_path, pyproject, kept, dropped):
+    """uv sync errors on an extra the checkout does not define, and a pin from before `ray` and `mlflow` became extras
+    defines neither."""
+    body = shlex.split(
+        render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None, extras=("telemetry", "mlflow"))
+    )[2]
+    block = body[body.index("_gym_declared_extras()") : body.index("UV_PROJECT_ENVIRONMENT=")]
+    (tmp_path / "pyproject.toml").write_text(pyproject)
+    result = subprocess.run(
+        ["bash", "-c", "set -euo pipefail\n" + block + 'printf %s "$_gym_sync_extras"'],
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={"PATH": f"{Path(sys.executable).parent}:/usr/bin:/bin"},
+    )
+    assert result.stdout == kept
+    assert [name for name in ("mlflow", "ray") if f"defines no '{name}' extra" in result.stderr] == dropped
 
 
 @pytest.fixture

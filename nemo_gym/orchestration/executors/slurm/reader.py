@@ -805,6 +805,8 @@ def _remote_managed_evidence(
             "attempt_extension_applied",
             # True from a reader whose Store applies the rerun-masked approvals; an older one leaves it unset.
             "rerun_masked_applied",
+            # The admitted re-judgments without a saved outcome the Store found (a pass killed after admitting).
+            "unresolved_rejudgments",
         }
         # A pinned reader older than a host-collected field drops it on its own model (the reader's projection then
         # lacks the key); the host collection owns such fields, and these named ones, either way.

@@ -1449,7 +1449,8 @@ def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], c
     called), then recomputes the source run's aggregate metrics and quality summary from the settled rows, and ends
     with a receipt: what was selected, judged, settled and left as it was, the run's coverage, and whether the refresh
     happened. A pass that fails (the source changed while the job was queued, a verifier that cannot be reached)
-    leaves a failed receipt naming the error, with the saved answers as they were, and the error is raised as before.
+    leaves a failed receipt naming the error and counting what it settled and withdrew before it failed: a grade it
+    settled stays and counts as progress, the other saved answers stay as they were, and the error is raised as before.
     """
     from nemo_gym.eval.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
 

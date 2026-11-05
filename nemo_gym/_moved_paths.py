@@ -1053,6 +1053,26 @@ for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
     assert not set(_listed) & set(_renamed), f"{_module} lists a renamed token capture name twice"
     _listed.update(_renamed)
 
+# ResponsesConverter renamed ChatCompletionsConverter: AnthropicConverter also converts to and from the Responses API.
+# The chat_completions_converter entries also serve its old module path, nemo_gym.responses_converter.
+_CONVERTER = "nemo_gym.models.chat_completions_converter"
+_RENAMED_CONVERTER_NAMES: dict[str, dict[str, MovedPath]] = {
+    _CONVERTER: {
+        "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+        "ResponsesConverterState": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverterState", since="0.8.0"),
+    },
+    "nemo_gym.models": {
+        "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+    },
+    "nemo_gym.models.token_capture.completion": {
+        "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+    },
+}
+for _module, _renamed in _RENAMED_CONVERTER_NAMES.items():
+    _listed = MOVED_NAMES.setdefault(_module, {})
+    assert not set(_listed) & set(_renamed), f"{_module} lists a renamed converter name twice"
+    _listed.update(_renamed)
+
 
 def _running_version() -> str:
     from nemo_gym.package_info import __version__
