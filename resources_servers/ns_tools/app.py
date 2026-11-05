@@ -449,6 +449,10 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             return NSToolsVerifyResponse(
                 **body.model_dump(),
                 reward=result["reward"],
+                # Keep a failure the verifier masked (such as a judge outage) masked: it is not a wrong answer.
+                mask_sample=result.get("mask_sample", False),
+                failure_kind=result.get("failure_kind"),
+                failure_reason=result.get("failure_reason"),
                 delegated_response=result,
                 **metrics,
             )

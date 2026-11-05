@@ -27,7 +27,7 @@ from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ResourcesServerRef
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import JUDGE_FAILED, NeMoGymResponse
 from nemo_gym.server_runtime import SimpleResourcesServer
 
 
@@ -149,6 +149,8 @@ class TestApp:
         result = await server.verify(request, verify_request)
 
         assert result.reward == 1.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
         assert result.delegated_response is not None
         assert result.delegated_response["reward"] == 1.0
 
@@ -183,6 +185,68 @@ class TestApp:
             await server.verify(request, verify_request)
 
         server.tool_manager.cleanup_request.assert_awaited_once_with("rollout-123")
+
+    async def test_verify_keeps_delegated_judge_failure_masked(self) -> None:
+        """A judge outage that the delegated verifier masked stays masked instead of scoring as a wrong answer."""
+        verifiers = {
+            "math_with_judge": ResourcesServerRef(type="resources_servers", name="math_with_judge"),
+        }
+        config = NSToolsConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="ns_tools",
+            verifiers=verifiers,
+            default_verifier="math_with_judge",
+        )
+        server = NSToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+
+        # The row math_with_judge's judge_failsafe returns when its judge call fails.
+        mock_response = AsyncMock()
+        mock_response.json = AsyncMock(
+            return_value={
+                "reward": 0.0,
+                "mask_sample": True,
+                "failure_kind": JUDGE_FAILED,
+                "failure_reason": "judge request timed out",
+                "_ng_failure_class": "judge_failed",
+            }
+        )
+        server.server_client.post = AsyncMock(return_value=mock_response)
+
+        response = NeMoGymResponse(
+            id="resp_test",
+            created_at=0.0,
+            model="dummy",
+            object="response",
+            output=[
+                {
+                    "id": "msg_test",
+                    "content": [{"annotations": [], "text": "\\boxed{4}", "type": "output_text"}],
+                    "role": "assistant",
+                    "status": "completed",
+                    "type": "message",
+                }
+            ],
+            parallel_tool_calls=True,
+            tool_choice="auto",
+            tools=[],
+        )
+        verify_request = NSToolsVerifyRequest(
+            responses_create_params={
+                "input": [{"role": "user", "content": "What is 2 + 2?"}],
+            },
+            response=response,
+            question="What is 2 + 2?",
+            expected_answer="4",
+        )
+
+        result = await server.verify(None, verify_request)
+
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == JUDGE_FAILED
+        assert result.failure_reason == "judge request timed out"
 
     async def test_verify_uses_default_verifier(self) -> None:
         """Test that default verifier is used when verifier_type not specified."""
