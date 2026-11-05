@@ -71,3 +71,45 @@ def test_restricted_access_refuses_an_endpoint_the_sandbox_cannot_reach(model_ba
             model_base_url=model_base_url,
         )
     assert refused.value.status_code == 422
+
+
+def test_a_trailing_dot_on_a_host_is_dropped_from_its_rule() -> None:
+    # The egress sidecar strips a query name's trailing dot, so "model.example." would never match.
+    restricted = restrict_sandbox_network(
+        SandboxSpec(image="task"),
+        network_access="model_only",
+        provider=OPENSANDBOX,
+        model_base_url="http://model.example.:8000/v1",
+    )
+    assert restricted.provider_options["network_policy"]["egress"] == [{"action": "allow", "target": "model.example"}]
+
+
+def test_unset_provider_options_are_restricted_like_empty_ones() -> None:
+    spec = SandboxSpec(image="task")
+    object.__setattr__(spec, "provider_options", None)
+    restricted = restrict_sandbox_network(
+        spec, network_access="model_only", provider=OPENSANDBOX, model_base_url=MODEL_URL
+    )
+    assert restricted.provider_options["network_policy"]["egress"] == [{"action": "allow", "target": "model.example"}]
+
+
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_a_required_tool_grant_needs_model_and_tools(network_access: str) -> None:
+    spec = SandboxSpec(image="task")
+
+    def restrict() -> SandboxSpec:
+        return restrict_sandbox_network(
+            spec,
+            network_access=network_access,
+            provider=OPENSANDBOX,
+            model_base_url=MODEL_URL,
+            tool_urls=TOOL_URLS,
+            required_tool_urls=TOOL_URLS[:1],
+        )
+
+    if network_access == "model_only":
+        # model_only blocks the grant's host, so the session would fail only after the sandbox exists.
+        with pytest.raises(AgentSeedRejectedError, match="model_and_tools"):
+            restrict()
+        return
+    assert {rule["target"] for rule in restrict().provider_options["network_policy"]["egress"]} >= {"tools.example"}

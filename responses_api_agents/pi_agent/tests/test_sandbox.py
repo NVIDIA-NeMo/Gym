@@ -2400,9 +2400,10 @@ async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(set
         assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
 
 
-async def test_network_access_with_borrowed_sandbox_is_rejected(setup):
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+async def test_network_access_with_borrowed_sandbox_is_rejected(setup, network_access):
     agent, sandbox = setup
-    agent.config.network_access = "model_only"
+    agent.config.network_access = network_access
     with pytest.raises(HTTPException) as rejected:
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
     assert rejected.value.status_code == 422
@@ -2462,20 +2463,24 @@ async def test_tool_egress_leaves_out_the_mcp_grants_pi_skips(setup):
     }
 
 
-@pytest.mark.parametrize("reported", ["0.80.2", "0.79.0"])
-async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported):
+@pytest.mark.parametrize(
+    ("reported", "return_code"),
+    [("0.80.2", 0), ("0.79.0", 0), ("0.80.20", 0), ("0.80.2", 1)],
+    ids=["pinned", "other_version", "version_prefix", "failed_run"],
+)
+async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code):
     agent, sandbox = setup
     agent.config.sandbox_runtime_dir = "/opt"
     execute = sandbox.exec.side_effect
 
     async def report_version(command, **kwargs):
         if command.endswith("/dist/cli.js --version"):
-            return SimpleNamespace(return_code=0, error_type=None, stdout=f"{reported}\n", stderr="")
+            return SimpleNamespace(return_code=return_code, error_type=None, stdout=f"{reported}\n", stderr="")
         return await execute(command, **kwargs)
 
     sandbox.exec.side_effect = report_version
     request = Request({"type": "http", "session": {}})
-    if reported != agent.config.pi_version:
+    if reported != agent.config.pi_version or return_code != 0:
         # Another version fails the same way on every attempt, so the seed is refused with a final 422.
         with pytest.raises(AgentSeedRejectedError, match="does not run pi_version 0.80.2") as refused:
             await agent.seed_agent_session(request, seed())
@@ -2487,6 +2492,48 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+
+
+def test_required_tool_grant_under_model_only_is_a_terminal_seed_refusal(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    body = seed_with_tools(mcp_grant("search", required=True))
+    body.sandbox_access = None
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    # model_only blocks the grant's host, so the session would fail only after the sandbox and runtime exist.
+    assert refused.status_code == 422, refused.text
+    assert "model_and_tools" in refused.json()["detail"]
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
+
+
+async def test_failure_to_resolve_the_model_url_closes_the_provider(setup):
+    agent, _ = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    body = owned_seed_with_search_grant()
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        patch.object(PiAgent, "resolve_model_base_url", side_effect=RuntimeError("model server unknown")),
+        pytest.raises(RuntimeError, match="model server unknown"),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
 
 
 async def test_preinstalled_runtime_check_that_cannot_run_stays_retryable(setup):
