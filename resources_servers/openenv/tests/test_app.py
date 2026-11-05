@@ -1067,16 +1067,29 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
 
 
 @pytest.mark.parametrize("expose_tools_over_mcp", [False, True])
-def test_malformed_typed_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp: bool) -> None:
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"resources_session_id": "resources-session"},
+        _typed_seed().model_dump(mode="json", exclude={"resources_session_id"}),
+    ],
+    ids=["session_id_without_envelope", "envelope_without_session_id"],
+)
+def test_malformed_typed_seed_does_not_fall_back_to_legacy(malformed: dict, expose_tools_over_mcp: bool) -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     server.config.expose_tools_over_mcp = expose_tools_over_mcp
-    malformed = dict({}) | {"resources_session_id": "incomplete-typed"}
     app = server.setup_webserver()
     maybe_auto_expose(server, app)
     with TestClient(app) as client:
         assert client.post("/seed_session", json=malformed).status_code == 422
-    assert server._sessions == {}
-    assert server._session_episodes == {}
+        assert server._sessions == {}
+        assert server._session_episodes == {}
+
+        # The refused body did not seed a cookie session, so the complete typed seed of that session succeeds.
+        response = client.post("/seed_session", json=_typed_seed().model_dump(mode="json"))
+        assert response.status_code == 200
+        assert (response.json().get("resources_tools") is not None) is expose_tools_over_mcp
+    assert list(server._sessions) == ["resources-session"]
 
 
 @pytest.mark.parametrize("typed", [False, True])

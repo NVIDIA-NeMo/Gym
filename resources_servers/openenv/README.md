@@ -215,8 +215,14 @@ For MCP environments, tool endpoints are discovered at startup via `ListToolsAct
 
 ### Sessions under an Environment Server
 
-`SimpleResourcesServer` supplies seed, close, and checkpoint retirement. OpenEnv implements only live-state
-lookup, environment initialization, and environment release; the base owns identity and retry bookkeeping.
+`SimpleResourcesServer` supplies seed, close, and checkpoint retirement. OpenEnv implements live-state lookup,
+environment initialization, and environment release. Its own `/verify` also keeps part of the session bookkeeping: it
+masks a verify that arrives after close, moves the typed identity out of `_session_episodes`, and records the reward,
+with that identity if any, in `_verified_sessions`. The base owns the rest of the identity and retry bookkeeping.
+
+The shipped configs (`configs/openenv_{echo,coding,maze}.yaml`) pair OpenEnv with `legacy_agent`, which relays `/run`
+to `simple_agent`. That agent seeds by cookie with the dataset row, so these configs use the cookie seed, not the
+typed seed described next.
 
 An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest` instead of the legacy
 body. The environment instance is keyed by its `resources_session_id`, and the session cookie is bound to that ID so
