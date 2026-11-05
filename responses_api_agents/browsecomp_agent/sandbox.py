@@ -113,13 +113,11 @@ class BrowsecompSandboxSession(AgentSessionState):
             "assert namespace == os.readlink('/proc/1/ns/pid'); print(namespace)"
         )
         result = await sandbox.exec(f"{quote(python)} -I -c {quote(probe)}", cwd="/", timeout_s=30)
+        if result.error_type is not None:
+            # The probe did not run to an answer, which says nothing about isolation; a retry may get one.
+            raise RuntimeError(f"BrowseComp could not finish its process isolation probe: {result.error_type}")
         namespace = (result.stdout or "").strip()
-        if (
-            result.return_code != 0
-            or result.error_type is not None
-            or re.fullmatch(r"pid:\[\d+\]", namespace) is None
-            or namespace == host_namespace
-        ):
+        if result.return_code != 0 or re.fullmatch(r"pid:\[\d+\]", namespace) is None or namespace == host_namespace:
             raise SandboxIsolationError(
                 "BrowseComp requires an isolated PID namespace and matching /proc mount. "
                 "Install a complete Enroot distribution with PID isolation support (4.2 or newer)."

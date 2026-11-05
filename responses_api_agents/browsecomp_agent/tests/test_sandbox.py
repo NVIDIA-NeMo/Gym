@@ -6,6 +6,7 @@ import asyncio
 import json
 import socket
 import sys
+import time
 import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -13,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from aiohttp import web
 
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse, NgFailureEvent
 from responses_api_agents.browsecomp_agent.sandbox import BrowsecompSandboxSession, _write_sources
 from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
     EPISODE,
@@ -33,7 +34,6 @@ from responses_api_agents.browsecomp_agent.tests.test_agent_sessions import (
     [
         ("pid:[100]\n", 0, None),  # Same namespace as the host.
         ("", 1, None),  # Includes a different /proc/1 namespace: the in-container assertion fails.
-        ("pid:[200]\n", 0, "timeout"),
         ("", 0, None),
         ("not a namespace", 0, None),
     ],
@@ -50,6 +50,20 @@ async def test_enroot_rejects_missing_process_isolation(
     monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
     with pytest.raises(RuntimeError, match="isolated PID namespace"):
         await state._check_process_isolation(python="/private/python")
+
+
+async def test_an_unfinished_isolation_probe_is_retryable_not_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    from responses_api_agents.browsecomp_agent.sandbox import SandboxIsolationError
+
+    session = MagicMock()
+    session.sandbox.provider_name = "enroot"
+    session.sandbox.exec = AsyncMock(return_value=MagicMock(stdout="", return_code=None, error_type="timeout"))
+    state = BrowsecompSandboxSession(request=_seed(), session=session, tool_access=None, resources_cookies={})
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.sandbox.os.readlink", lambda path: "pid:[100]")
+    with pytest.raises(RuntimeError, match="could not finish its process isolation probe: timeout") as error:
+        await state._check_process_isolation(python="/private/python")
+    # SandboxIsolationError refuses the seed for good (422); a probe that timed out may pass on a retry.
+    assert not isinstance(error.value, SandboxIsolationError)
 
 
 async def test_enroot_accepts_a_distinct_process_namespace(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -399,6 +413,127 @@ def test_a_loopback_model_url_refuses_the_seed(monkeypatch: pytest.MonkeyPatch) 
     reply = client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
     assert reply.status_code == 422
     assert "loopback" in reply.text
+
+
+def test_a_loopback_token_count_url_refuses_the_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
+
+    monkeypatch.setattr(
+        "responses_api_agents.browsecomp_agent.app.get_first_server_config_dict",
+        lambda *args: {"base_url": "http://10.0.0.5:9001/v1", "api_key": "unused"},
+    )
+    client, server_client, _ = _agent([], monkeypatch, save_model_call_using_vllm_tokenize_endpoint=True)
+    monkeypatch.setattr("responses_api_agents.browsecomp_agent.app.resolve_provider_config", lambda *args: {"e2b": {}})
+    monkeypatch.setattr(BrowsecompAgent, "resolve_model_base_url", lambda *args: "http://10.0.0.5:9001/v1")
+    server_client._resolve_base_url.return_value = "http://127.0.0.1:8080"
+    reply = client.post("/v1/agent_sessions", json=_seed(tool_accesses=[]).model_dump(mode="json"))
+    assert reply.status_code == 422
+    assert "127.0.0.1:8080/v1/browsecomp/token_count" in reply.text
+
+
+def _unknown_provider(*args):
+    raise ValueError("Unknown sandbox provider 'dokcer'")
+
+
+@pytest.mark.parametrize(
+    ("config", "create_provider"),
+    [({"sandbox_config": {"ttl": 7200, "workdir": "/sandbox"}}, None), ({}, _unknown_provider)],
+    ids=["unknown sandbox_config key", "unknown provider"],
+)
+def test_an_unusable_sandbox_configuration_refuses_the_seed(
+    monkeypatch: pytest.MonkeyPatch, config: dict, create_provider
+) -> None:
+    # Every seed fails the same way, so a retryable 500 would only repeat the failure for each episode.
+    client, _, _ = _agent([], monkeypatch, **config)
+    if create_provider is not None:
+        monkeypatch.setattr("responses_api_agents.browsecomp_agent.app.create_provider", create_provider)
+    reply = client.post("/v1/agent_sessions", json=_seed().model_dump(mode="json"))
+    assert reply.status_code == 422
+    assert "sandbox provider is not usable" in reply.text
+
+
+async def test_the_loop_deadline_counts_from_the_runners_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The supervisor counts from launch, so the endpoint checks must spend the loop's budget, not its grace."""
+    from responses_api_agents.browsecomp_agent import sandbox_runner
+
+    calls = []
+
+    async def check_reachable(urls):
+        calls.append(("check", time.monotonic()))
+
+    async def run_session_loop(self, request, response, body, state, *, started_at=None):
+        calls.append(("loop", started_at))
+        return NeMoGymResponse.model_validate(_model_response(_message("Paris")))
+
+    monkeypatch.setattr(sandbox_runner, "check_reachable", check_reachable)
+    monkeypatch.setattr(sandbox_runner.SandboxBrowsecompAgent, "_run_session_loop", run_session_loop)
+    monkeypatch.setattr(sandbox_runner, "get_global_aiohttp_client", lambda: MagicMock(close=AsyncMock()))
+    monkeypatch.setattr(asyncio.get_running_loop(), "add_signal_handler", lambda *args: None)
+    monkeypatch.setenv("NEMO_GYM_CONFIG_DICT", "{}")
+    payload = {
+        "config": {
+            "name": "browsecomp",
+            "host": "0.0.0.0",
+            "port": 1,
+            "entrypoint": "app.py",
+            "model_server": {"type": "responses_api_models", "name": "policy"},
+            "rollout_timeout_s": 600,
+        },
+        "seed": _seed(tool_accesses=[]).model_dump(mode="json"),
+        "tool_access": None,
+        "body": QUESTION,
+        "model_url": f"http://model:9001/ng-rollout/{EPISODE.capture_key}/v1",
+    }
+    input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
+    input_path.write_text(json.dumps(payload))
+    await sandbox_runner.run(input_path, output_path)
+    assert [name for name, _ in calls] == ["check", "loop"]
+    assert calls[1][1] is not None and calls[1][1] <= calls[0][1]
+    assert "response" in json.loads(output_path.read_text())
+
+
+def test_the_sandbox_activation_clamps_its_deadline_and_fails_on_an_error_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nemo_gym.agents import SandboxSession
+    from responses_api_agents.browsecomp_agent.app import BrowsecompAgent
+
+    activation = BrowsecompAgent._sandbox_responses  # _agent() runs the loop on the host instead.
+    payloads, timeouts = [], []
+    receipts = [
+        {"response": _model_response(_message("Paris")), "resources_cookies": {"harness": "next-cookie"}},
+        {"error": "ConnectionError: The sandbox cannot connect to model:9001", "resources_cookies": {}},
+    ]
+
+    async def stage_activation(self, payload):
+        payloads.append(payload)
+
+    async def execute(self, *, stage_activation, collect, timeout, close_timeout):
+        await stage_activation()
+        timeouts.append(timeout)
+        return receipts.pop(0)
+
+    def activate():
+        client, _, _ = _agent([], monkeypatch, sandbox_runner_timeout_seconds=900)
+        monkeypatch.setattr(BrowsecompAgent, "_sandbox_responses", activation)
+        monkeypatch.setattr(BrowsecompSandboxSession, "stage_activation", stage_activation)
+        monkeypatch.setattr(SandboxSession, "execute", execute)
+        assert client.post("/v1/agent_sessions", json=_seed(agent_timeout_sec=120).model_dump(mode="json")).is_success
+        return client.post(ROUTE, json=QUESTION)
+
+    reply = activate()
+    assert reply.status_code == 200, reply.text
+    assert reply.json()["output"][0]["content"][0]["text"] == "Paris"
+    # The task's own limit wins over the runner's, and the supervisor gets its grace on top.
+    assert payloads[0]["config"]["rollout_timeout_s"] == 120 and timeouts == [150]
+    assert payloads[0]["token_count_url"] is None
+    assert payloads[0]["seed"]["tool_accesses"] == [] and payloads[0]["seed"]["sandbox_access"] is None
+
+    with pytest.raises(NgFailureEvent) as failed:  # The served app answers it with 500.
+        activate()
+    assert "BrowseComp sandbox failed: ConnectionError" in str(failed.value.__cause__)
 
 
 def test_missing_process_isolation_refuses_the_seed_after_stopping_the_sandbox(

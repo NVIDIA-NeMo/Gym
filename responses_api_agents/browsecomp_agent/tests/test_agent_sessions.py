@@ -136,7 +136,7 @@ def _agent(model_replies: list, monkeypatch: pytest.MonkeyPatch, **config) -> tu
     monkeypatch.setattr(BrowsecompAgent, "resolve_model_base_url", lambda *args: "http://model:9001/v1")
 
     # Exercise the original loop and HTTP grants independently from provider transport; the runner
-    # subprocess and supervisor lifecycle have separate tests and real EOS smoke coverage.
+    # subprocess and supervisor lifecycle have separate tests and real cluster smoke coverage.
     async def execute_loop(self, request, body, state):
         from fastapi import Response
 

@@ -396,7 +396,10 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError("BrowseComp requires an absolute sandbox workdir")
         try:
             provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
+            if owns_sandbox:
+                SandboxSpec(**self.config.sandbox_config)
         except (TypeError, ValueError) as error:
+            # Every seed would fail the same way, so a retryable 500 would only repeat it for each episode.
             raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
         provider_name = next(iter(provider_config), None)
         if provider_name == "local":
@@ -404,15 +407,20 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 "BrowseComp sessions require an isolated sandbox provider; local is not isolated"
             )
         try:
-            assert_model_url_reachable_from_sandbox(
+            # Every URL the sandboxed loop calls: the model, the tool grant and this agent's token counting.
+            sandbox_urls = [
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-                provider_name=provider_name,
-            )
-            if tool_access is not None:
-                assert_model_url_reachable_from_sandbox(str(tool_access.base_url), provider_name=provider_name)
+                str(tool_access.base_url) if tool_access is not None else None,
+                self._token_count_url(),
+            ]
+            for url in filter(None, sandbox_urls):
+                assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
-        provider = create_provider(provider_config)
+        try:
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(f"BrowseComp sandbox provider is not usable: {error}") from error
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
         else:
@@ -492,6 +500,12 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "vLLM token counting is disabled")
         return {"count": await self._count_prompt_tokens(body)}
 
+    def _token_count_url(self) -> str | None:
+        """This agent's token-count endpoint, which a sandboxed loop calls instead of the upstream model."""
+        if not self.config.save_model_call_using_vllm_tokenize_endpoint:
+            return None
+        return f"{self.server_client._resolve_base_url(self.config.name)}/v1/browsecomp/token_count"
+
     async def _sandbox_responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming, state: BrowsecompSandboxSession
     ) -> NeMoGymResponse:
@@ -515,9 +529,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             "model_url": self.resolve_model_base_url(
                 self.config.model_server.name, state.request.episode_id.capture_key
             ),
-            "token_count_url": f"{self.server_client._resolve_base_url(self.config.name)}/v1/browsecomp/token_count"
-            if self.config.save_model_call_using_vllm_tokenize_endpoint
-            else None,
+            "token_count_url": self._token_count_url(),
             "agent_cookies": dict(request.cookies),
         }
         output = await state.session.execute(
@@ -542,15 +554,19 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming,
         state: BrowsecompAgentSessionState,
+        *,
+        started_at: float | None = None,
     ) -> NeMoGymResponse:
         """Run an Environment Server's one activation, with the empty-answer retries run() makes around it.
 
         Like run(), a retry keeps the session's resources state; it does not seed again. A model call that fails with
         an HTTP error returns a failed response that names its status, for the Environment Server's outcome policy.
+        ``started_at`` is when the activation began, if before this call (``time.monotonic()``).
         """
         attempts = max(1, self.config.max_run_retries)
-        # rollout_timeout_s bounds the whole activation, so every retry counts from the first attempt's start.
-        started_at = time.monotonic()
+        # rollout_timeout_s bounds the whole activation, so every retry counts from the activation's start.
+        if started_at is None:
+            started_at = time.monotonic()
         for attempt in range(attempts):
             attempt_body = body
             if self.config.snap_dir:

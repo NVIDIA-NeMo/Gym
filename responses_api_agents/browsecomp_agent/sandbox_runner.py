@@ -8,6 +8,7 @@ import os
 import signal
 import socket
 import sys
+import time
 import traceback
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -88,6 +89,8 @@ async def check_reachable(urls: list[str | None], *, attempts: int = 3, timeout_
 
 async def run(input_path: Path, output_path: Path) -> None:
     """Persist a receipt on success, error and supervisor interruption."""
+    # The supervisor's deadline counts from launch, so the loop's deadline includes the endpoint checks below.
+    started_at = time.monotonic()
     payload = json.loads(input_path.read_text())
     input_path.unlink()  # The runner retains scoped cookies in memory, outside model-readable staged files.
     # Deliberately empty: the sandbox never receives the server's secret-bearing global config.
@@ -121,7 +124,7 @@ async def run(input_path: Path, output_path: Path) -> None:
         )
         body = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload["body"])
         http_request = Request({"type": "http", "headers": [], "path": "/v1/responses"})
-        result = await agent._run_session_loop(http_request, Response(), body, state)
+        result = await agent._run_session_loop(http_request, Response(), body, state, started_at=started_at)
         receipt["response"] = result.model_dump(mode="json")
     except asyncio.CancelledError:
         receipt["error"] = "BrowseComp harness was interrupted by its supervisor"
