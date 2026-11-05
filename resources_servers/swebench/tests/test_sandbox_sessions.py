@@ -624,3 +624,344 @@ async def test_older_claim_release_consumer_keeps_ownership_during_concurrent_cl
     sandbox.stop.side_effect = None
     await server.close_resources_session(_request(), ResourcesCloseSessionRequest.model_validate(_close()))
     assert not server._session_id_to_sandbox
+
+
+# --- additional coverage: expiry, failed-seed leftovers, races, claim/release guards -------------------------------
+
+
+def _seed_request(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
+    return ResourcesSeedSessionRequest.model_validate(_seed(session_id))
+
+
+def _close_request(session_id: str = "resources-session") -> ResourcesCloseSessionRequest:
+    return ResourcesCloseSessionRequest.model_validate(_close(session_id))
+
+
+@pytest.mark.asyncio
+async def test_verify_after_a_successful_expiry_is_masked_as_expired_then_lost_when_the_fence_ends(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(sandbox_sessions, "monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    server = _server(session_close_retry_window_seconds=10)
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
+    await server._close_abandoned_task_sessions(clock[0])
+    server._sandboxes[0].stop.assert_awaited_once()
+
+    body = _VerifyRequest.model_validate(_VERIFY)
+    expired = await server.verify(_request(), body)
+    assert expired.mask_sample and expired.failure_kind == SESSION_EXPIRED
+    server._capture.assert_not_awaited()
+    server._grade.assert_not_awaited()
+
+    clock[0] += 11
+    lost = await server.verify(_request(), body)
+    assert lost.mask_sample and lost.failure_kind == SESSION_LOST
+    server._grade.assert_not_awaited()
+    assert "resources-session" not in server._task_sessions
+
+
+async def _seed_whose_cleanup_fails(server: _Server, *, stop_results: list[Any]) -> MagicMock:
+    """Seed a session whose preparation fails and whose cleanup stop then fails, so it leaves a record behind."""
+    server._fail_preparation = True
+    original_start = server._start_task_sandbox
+
+    async def start_with_failing_cleanup(session_id: str, task: _Task) -> str:
+        try:
+            return await original_start(session_id, task)
+        finally:
+            server._sandboxes[-1].stop.side_effect = stop_results
+
+    server._start_task_sandbox = start_with_failing_cleanup
+    with pytest.raises(RuntimeError, match="preparation failed"):
+        await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    return server._sandboxes[0]
+
+
+@pytest.mark.asyncio
+async def test_failed_seed_with_failed_cleanup_is_still_closed_after_its_lifetime(monkeypatch: MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(sandbox_sessions, "monotonic", lambda: clock[0])
+    server = _server()
+    leaked = await _seed_whose_cleanup_fails(server, stop_results=[RuntimeError("provider unavailable"), None])
+    assert server._session_id_to_sandbox["resources-session"] is leaked
+
+    clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
+    await server._close_abandoned_task_sessions(clock[0])
+    assert leaked.stop.await_count == 2, "the lifetime sweep must retry the leaked sandbox of a failed seed"
+    assert "resources-session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+async def test_verify_of_a_session_whose_seed_never_finished_is_masked_not_graded() -> None:
+    server = _server()
+    await _seed_whose_cleanup_fails(server, stop_results=RuntimeError("provider unavailable"))
+    assert server._task_sessions["resources-session"].response is None
+
+    result = await server.verify(_request(), _VerifyRequest.model_validate(_VERIFY))
+    assert result.mask_sample and result.failure_kind == SESSION_LOST
+    assert "seeding" in result.failure_reason
+    server._capture.assert_not_awaited()
+    server._grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_a_seed_replay_is_rejected_when_the_seeded_sandbox_is_gone() -> None:
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    server._session_id_to_sandbox.pop("resources-session")
+    with pytest.raises(ResourcesSessionConflictError, match="no longer available"):
+        await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    assert len(server._sandboxes) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_identical_verifies_grade_once_and_share_the_verdict() -> None:
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    gate = asyncio.Event()
+
+    async def slow_grade(patch: str) -> float:
+        await gate.wait()
+        return 1.0
+
+    server._grade.side_effect = slow_grade
+    body = _VerifyRequest.model_validate(_VERIFY)
+    first = asyncio.create_task(server.verify(_request(), body))
+    second = asyncio.create_task(server.verify(_request(), body))
+    await asyncio.sleep(0.01)
+    assert not first.done() and not second.done()
+    gate.set()
+    results = await asyncio.gather(first, second)
+    assert results[0] == results[1] and results[0].reward == 1.0
+    server._capture.assert_awaited_once()
+    server._grade.assert_awaited_once()
+    server._sandboxes[0].stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_cancelled_verify_stops_its_grader_and_the_retry_grades_the_original_patch() -> None:
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    verifier = _sandbox("verifier")
+    grading = asyncio.Event()
+
+    async def hanging_grade(patch: str) -> float:
+        server._verifier_sandboxes["resources-session"] = verifier
+        grading.set()
+        await asyncio.sleep(10)
+        return 1.0
+
+    server._grade.side_effect = hanging_grade
+    body = _VerifyRequest.model_validate(_VERIFY)
+    async with anyio.create_task_group() as group:
+        group.start_soon(server.verify, _request(), body)
+        await grading.wait()
+        group.cancel_scope.cancel()  # the client went away mid-grading
+
+    verifier.stop.assert_awaited_once()
+    assert not server._verifier_sandboxes
+    assert server._task_sessions["resources-session"].capture == "original patch"
+    server._sandboxes[0].stop.assert_awaited_once()
+
+    server._capture.return_value = "replacement patch must not be read"
+    server._grade.side_effect = None
+    server._grade.return_value = 1.0
+    result = await server.verify(_request(), body)
+    assert result.reward == 1.0
+    server._grade.assert_awaited_with("original patch")
+    server._capture.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_seed_replay_waits_for_an_inflight_verify_and_is_then_rejected() -> None:
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    gate = asyncio.Event()
+
+    async def slow_grade(patch: str) -> float:
+        await gate.wait()
+        return 1.0
+
+    server._grade.side_effect = slow_grade
+    verifying = asyncio.create_task(server.verify(_request(), _VerifyRequest.model_validate(_VERIFY)))
+    await asyncio.sleep(0.01)
+    replay = asyncio.create_task(server.seed_task_sandbox_session(_request(), _seed_request(), _Task))
+    await asyncio.sleep(0.01)
+    assert not replay.done(), "the seed replay waits for the session lock that verify holds"
+    gate.set()
+    await verifying
+    with pytest.raises(ResourcesSessionConflictError, match="started verification"):
+        await replay
+    assert len(server._sandboxes) == 1
+
+
+@pytest.mark.asyncio
+async def test_close_racing_the_expiry_sweep_stops_the_sandbox_once_and_fences_the_session(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(sandbox_sessions, "monotonic", lambda: clock[0])
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
+    # An unrelated request runs the sweep while the owner's close is in flight.
+    closing = asyncio.create_task(server.close_resources_session(_request(), _close_request()))
+    sweeping = asyncio.create_task(server.seed_task_sandbox_session(_request("other"), _seed_request("other"), _Task))
+    await asyncio.gather(closing, sweeping)
+    assert server._sandboxes[0].stop.await_count == 1
+    assert server._task_session_fence.closed_episode("resources-session") is not None
+    assert "resources-session" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+async def test_an_expired_session_that_is_being_verified_is_not_swept_and_does_not_block_other_requests(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(sandbox_sessions, "monotonic", lambda: clock[0])
+    server = _server()
+    await server.seed_task_sandbox_session(_request("busy"), _seed_request("busy"), _Task)
+    gate = asyncio.Event()
+
+    async def slow_grade(patch: str) -> float:
+        await gate.wait()
+        return 1.0
+
+    server._grade.side_effect = slow_grade
+    verifying = asyncio.create_task(server.verify(_request("busy"), _VerifyRequest.model_validate(_VERIFY)))
+    await asyncio.sleep(0.01)
+    clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
+    try:
+        async with asyncio.timeout(1):
+            await server.seed_task_sandbox_session(_request("other"), _seed_request("other"), _Task)
+        assert not verifying.done()
+        assert not server._task_sessions["busy"].expired
+    finally:
+        gate.set()
+    result = await verifying
+    assert result.reward == 1.0 and not result.mask_sample
+
+
+@pytest.mark.asyncio
+async def test_claim_rejects_a_repeated_claim_and_a_closed_session() -> None:
+    """_claim/_release is the API the SWE-bench consumer builds on; its guards need their own coverage."""
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    server._claim_task_sandbox("resources-session")
+    with pytest.raises(ResourcesSessionConflictError, match="already verified"):
+        server._claim_task_sandbox("resources-session")
+    await server._release_task_sandbox("resources-session", server._session_id_to_sandbox.pop("resources-session"))
+    await server.close_resources_session(_request(), _close_request())
+    with pytest.raises(ResourcesSessionConflictError, match="closed"):
+        server._claim_task_sandbox("resources-session")
+
+
+# --- expiry retry pacing, unreleased claims and concurrent shutdown ---------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_failed_expiry_stop_is_retried_once_per_interval_not_by_every_request(monkeypatch: MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(sandbox_sessions, "monotonic", lambda: clock[0])
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request("stuck"), _Task)
+    stuck = server._sandboxes[0]
+    stuck.stop.side_effect = RuntimeError("provider unavailable")
+    clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
+
+    for index in range(3):
+        await server.seed_task_sandbox_session(_request(), _seed_request(f"other-{index}"), _Task)
+    assert stuck.stop.await_count == 1, "unrelated requests must not each retry the stuck session"
+    assert server._task_sessions["stuck"].expired and "stuck" in server._session_id_to_sandbox
+
+    clock[0] += sandbox_sessions.EXPIRY_RETRY_INTERVAL_S + 1
+    await server.seed_task_sandbox_session(_request(), _seed_request("other-3"), _Task)
+    assert stuck.stop.await_count == 2
+
+    stuck.stop.side_effect = None
+    await server.close_resources_session(_request("stuck"), _close_request("stuck"))
+    assert stuck.stop.await_count == 3, "an explicit close does not wait for the retry interval"
+    assert "stuck" not in server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+async def test_requests_queued_behind_a_failing_expiry_stop_do_not_retry_it(monkeypatch: MonkeyPatch) -> None:
+    clock = [1000.0]
+    monkeypatch.setattr(sandbox_sessions, "monotonic", lambda: clock[0])
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request("stuck"), _Task)
+    stuck = server._sandboxes[0]
+    release = asyncio.Event()
+
+    async def fail_after_release() -> None:
+        await release.wait()
+        raise RuntimeError("provider unavailable")
+
+    stuck.stop.side_effect = fail_after_release
+    clock[0] += sandbox_sessions.DEFAULT_SESSION_LIFETIME_S + 1
+    seeds = [
+        asyncio.create_task(server.seed_task_sandbox_session(_request(), _seed_request(f"other-{index}"), _Task))
+        for index in range(4)
+    ]
+    await asyncio.sleep(0.05)
+    release.set()
+    await asyncio.gather(*seeds)
+    assert stuck.stop.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_a_claim_that_is_never_released_does_not_keep_close_from_stopping_the_sandbox(
+    monkeypatch: MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(sandbox_sessions, "STOP_TIMEOUT_S", 0.05)
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+    server._claim_task_sandbox("resources-session")
+
+    await server.close_resources_session(_request(), _close_request())
+    server._sandboxes[0].stop.assert_awaited_once()
+    assert not server._session_id_to_sandbox
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_the_open_sessions_concurrently() -> None:
+    server = _server()
+    for index in range(5):
+        await server.seed_task_sandbox_session(_request(), _seed_request(f"session-{index}"), _Task)
+    stopping = peak = 0
+
+    async def slow_stop() -> None:
+        nonlocal stopping, peak
+        stopping += 1
+        peak = max(peak, stopping)
+        await asyncio.sleep(0.05)
+        stopping -= 1
+
+    for sandbox in server._sandboxes:
+        sandbox.stop.side_effect = slow_stop
+
+    await server.shutdown()
+    assert peak == 5, "one slow stop must not delay the others"
+    assert all(sandbox.stop.await_count == 1 for sandbox in server._sandboxes)
+    assert not server._session_id_to_sandbox and not server._task_sessions
+
+
+@pytest.mark.asyncio
+async def test_a_verify_that_claims_the_task_sandbox_and_fails_does_not_block_close(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setattr(sandbox_sessions, "STOP_TIMEOUT_S", 30.0)
+    server = _server()
+    await server.seed_task_sandbox_session(_request(), _seed_request(), _Task)
+
+    async def claim_then_fail(request: Request, body: _VerifyRequest) -> BaseVerifyResponse:
+        server._claim_task_sandbox("resources-session")
+        raise RuntimeError("grading failed")
+
+    server._verify = claim_then_fail
+    with pytest.raises(RuntimeError, match="grading failed"):
+        await server.verify(_request(), _VerifyRequest.model_validate(_VERIFY))
+
+    await asyncio.wait_for(server.close_resources_session(_request(), _close_request()), timeout=2)
+    server._sandboxes[0].stop.assert_awaited_once()

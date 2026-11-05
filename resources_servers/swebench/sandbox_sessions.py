@@ -67,6 +67,11 @@ LOG = logging.getLogger(__name__)
 DEFAULT_SESSION_LIFETIME_S = 86400.0
 # Ceiling on one sandbox stop, so a hung provider cannot hold a session lock or stall shutdown.
 STOP_TIMEOUT_S = 120.0
+# Wait before the next request retries an expired session whose stop failed. Without it every request would
+# retry the stuck session, and each retry can take up to STOP_TIMEOUT_S. An explicit close or shutdown retries at once.
+EXPIRY_RETRY_INTERVAL_S = 60.0
+# Sandbox stops that shutdown runs at once, so a server with thousands of open sessions does not flood the provider.
+SHUTDOWN_STOP_CONCURRENCY = 64
 
 
 @dataclass
@@ -132,16 +137,24 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
         return app
 
     async def shutdown(self) -> None:
-        """Stop task sandboxes that no close or verify released, so they do not outlive the server."""
-        for session_id in set(self._task_sessions) | set(self._session_id_to_sandbox) | set(self._verifier_sandboxes):
-            async with self._task_session_fence.locked(session_id):
-                try:
-                    await self._stop_session_sandboxes(session_id)
-                except Exception:
-                    LOG.exception("Failed to stop the abandoned sandboxes of session %s", session_id)
-                else:
-                    self._task_sessions.pop(session_id, None)
-                    self._open_task_sessions.pop(session_id, None)
+        """Stop task sandboxes that no close or verify released, so they do not outlive the server.
+
+        Sessions are stopped concurrently: the supervisor gives a server about a second to exit, which a
+        sequence of provider stops would exhaust after the first few.
+        """
+        session_ids = set(self._task_sessions) | set(self._session_id_to_sandbox) | set(self._verifier_sandboxes)
+        stopping = asyncio.Semaphore(SHUTDOWN_STOP_CONCURRENCY)
+        await asyncio.gather(*(self._stop_abandoned_session(session_id, stopping) for session_id in session_ids))
+
+    async def _stop_abandoned_session(self, session_id: str, stopping: asyncio.Semaphore) -> None:
+        async with stopping, self._task_session_fence.locked(session_id):
+            try:
+                await self._stop_session_sandboxes(session_id)
+            except Exception:
+                LOG.exception("Failed to stop the abandoned sandboxes of session %s", session_id)
+            else:
+                self._task_sessions.pop(session_id, None)
+                self._open_task_sessions.pop(session_id, None)
 
     @asynccontextmanager
     async def _locked_task_session(self, session_id: str) -> AsyncIterator[_TaskSession]:
@@ -178,7 +191,13 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
             if record is None or record.seed is None:
                 continue
             async with self._task_session_fence.locked(session_id):
-                if self._task_sessions.get(session_id) is not record:
+                # Requests that queued on this lock while another one retried the stop see its new deadline.
+                retry_deadline = self._open_task_sessions.get(session_id)
+                if (
+                    self._task_sessions.get(session_id) is not record
+                    or retry_deadline is None
+                    or retry_deadline > monotonic()
+                ):
                     continue
                 record.expired = True
                 LOG.warning("Closing resources session %s, which was never closed", session_id)
@@ -186,6 +205,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
                     await self._stop_session_sandboxes(session_id)
                 except Exception:
                     LOG.exception("Failed to stop the task sandbox of abandoned session %s", session_id)
+                    self._open_task_sessions[session_id] = monotonic() + EXPIRY_RETRY_INTERVAL_S
                     continue
                 self._open_task_sessions.pop(session_id, None)
                 # Keep the expired marker until the configured fence expires, for SESSION_EXPIRED verification.
@@ -231,11 +251,7 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
                 response = await self._task_sandbox_response(session_id, record)
             except BaseException:
                 # The agent cannot reach a sandbox it was never handed, so stop it here.
-                try:
-                    await self._stop_task_sandbox(session_id)
-                except Exception:
-                    LOG.exception("Failed to stop the task sandbox of failed seed %s", session_id)
-                else:
+                if await self._stop_failed_seed_sandbox(session_id):
                     self._task_sessions.pop(session_id, None)
                     self._open_task_sessions.pop(session_id, None)
                 raise
@@ -288,14 +304,46 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
     async def _stop_task_sandbox(self, session_id: str) -> None:
         record = self._task_sessions.get(session_id)
         if record is not None and record.release_done is not None:
-            with anyio.fail_after(STOP_TIMEOUT_S, shield=True):
-                await record.release_done.wait()
+            try:
+                with anyio.fail_after(STOP_TIMEOUT_S, shield=True):
+                    await record.release_done.wait()
+            except TimeoutError:
+                # A claim that was never released must not keep close, expiry and shutdown from stopping it.
+                LOG.warning("Session %s claimed its task sandbox and never released it; stopping it here", session_id)
         sandbox = self._session_id_to_sandbox.get(session_id)
         if sandbox is not None:
             # Forget the sandbox only once it stopped, so a failed stop can be retried.
             await _stop(sandbox)
             self._session_id_to_sandbox.pop(session_id, None)
         self._forget_task_sandbox_state(session_id)
+
+    async def _stop_failed_seed_sandbox(self, session_id: str) -> bool:
+        """Stop the task sandbox of a seed that is failing, and say whether the stop succeeded.
+
+        A failed stop is logged instead of raised, so the seed's own error or cancellation reaches the caller.
+        The sandbox stays registered after a failed stop, so a retried seed, close or shutdown stops it.
+        """
+        try:
+            await self._stop_task_sandbox(session_id)
+        except Exception:
+            LOG.exception("Failed to stop the task sandbox of failed seed %s", session_id)
+            return False
+        return True
+
+    async def stop_task_sandbox_after_capture(self, session_id: str) -> None:
+        """Stop the task sandbox once verify captured its patch; call inside the verify callback.
+
+        A typed session raises when the stop fails: the sandbox stays registered and a retried verify reuses the
+        captured patch. A session seeded through ``/run`` has no saved capture and no close, so a failed stop is
+        logged and grading goes on; shutdown stops the sandbox that stays registered.
+        """
+        try:
+            await self._stop_task_sandbox(session_id)
+        except Exception:
+            record = self._task_sessions.get(session_id)
+            if record is not None and record.seed is not None:
+                raise
+            LOG.exception("Failed to stop the task sandbox of session %s after capturing its patch", session_id)
 
     async def _stop_verifier_sandbox(self, session_id: str) -> None:
         """Stop an owned verifier, retaining its handle when the provider cannot confirm cleanup."""
@@ -350,6 +398,9 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
                     record.verification = response
                 return response
             finally:
+                # Whatever claimed the task sandbox inside this callback is done with it, released or not.
+                if record.release_done is not None:
+                    record.release_done.set()
                 try:
                     await self._stop_verifier_sandbox(session_id)
                 except Exception:
@@ -360,8 +411,8 @@ class SandboxSessionResourcesServer(SimpleResourcesServer):
     ) -> CaptureT:
         """Save a typed session's captured patch before teardown; call inside the verify callback.
 
-        The consumer stops the task with ``_stop_task_sandbox`` after this returns, outside its extraction
-        error handler. A failed stop or grading retry can then reuse the original capture.
+        The consumer stops the task with ``stop_task_sandbox_after_capture`` after this returns, outside its
+        extraction error handler. A failed stop or grading retry can then reuse the original capture.
         """
         record = self._task_sessions.get(session_id)
         if record is not None and record.seed is not None and record.capture_ready:
