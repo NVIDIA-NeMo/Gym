@@ -846,6 +846,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         boundary="harness",
                         failure_kind=AGENT_ROUTE_FAILED,
                         operation="opencode.setup",
+                        stage="seed",
                         failure_reason=f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}",
                     )
             state.sandbox_id = sandbox.sandbox_id
@@ -854,6 +855,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     boundary="harness",
                     failure_kind=AGENT_ROUTE_FAILED,
                     operation="opencode.setup",
+                    stage="seed",
                     failure_reason="OpenCode sandbox provider did not return a sandbox_id",
                 )
             command = _sandbox_prepare_command(workdir, directory, runtime)
@@ -964,6 +966,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 operation="opencode.setup",
+                stage="seed",
                 failure_reason=command_failure_reason(f"OpenCode setup failed: command={command!r}", result),
             )
 
@@ -1511,6 +1514,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations.records.append(
                 SandboxObservation(
                     role="agent",
+                    stage="agent",
                     provider=(
                         self.config.sandbox_provider
                         if state.session.owns_sandbox
@@ -1540,7 +1544,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 provider=details.provider if isinstance(details, SandboxFailureDetails) else None,
                 sandbox_id=details.sandbox_id if isinstance(details, SandboxFailureDetails) else None,
                 outcome="oom",
-                phase="agent_execution",
+                stage=execution_oom.stage or "agent",
                 failure_id=execution_oom.event_id,
             )
             observations.records.append(observation)

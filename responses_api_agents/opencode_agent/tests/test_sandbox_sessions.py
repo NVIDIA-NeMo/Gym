@@ -307,6 +307,7 @@ def test_setup_failure_retains_status_and_bounded_output_tails():
     )
     with pytest.raises(NgFailureEvent) as failed:
         OpenCodeAgent._check_sandbox_setup("install runtime", result)
+    assert failed.value.stage == "seed"
     reason = failed.value.failure_reason
     assert "return_code=17; error_type=None" in reason
     assert "stdout end" in reason and "stderr end" in reason
@@ -398,7 +399,8 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
 
 
 @pytest.mark.parametrize("owned", [False, True])
-def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_session(setup, owned):
+@pytest.mark.parametrize("origin_stage", [None, "agent", "seed", "verification"])
+def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_session(setup, owned, origin_stage):
     agent, sandbox = setup
     agent.config.report_agent_sandbox_oom = True
     body = seed()
@@ -412,6 +414,7 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
         f"Sandbox was OOM-killed. OpenSandbox status: reason='OOMKilled'; sandbox_id='{sandbox.sandbox_id}'",
         sandbox_id=sandbox.sandbox_id,
     )
+    error.stage = origin_stage
     sandbox.launch.side_effect = error
 
     webapp = agent.setup_webserver()
@@ -447,7 +450,8 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
         observation = SandboxObservation.model_validate_json(body["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert observation.role == "agent"
         assert observation.outcome == "oom"
-        assert observation.phase == "agent_execution"
+        assert observation.stage == (origin_stage or "agent")
+        assert "phase" not in json.loads(body["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
         assert observation.provider == "opensandbox"
         assert observation.sandbox_id == sandbox.sandbox_id
         assert observation.error_type is None
@@ -457,6 +461,7 @@ def test_confirmed_agent_execution_oom_retains_sandbox_id_and_closes_dead_sessio
         assert report.failure_id is None
         assert report.events[observation.failure_id].failure_kind == PROVIDER_OOM_KILLED
         assert observation.failure_id == error.event_id
+        assert report.events[observation.failure_id].stage == origin_stage
         assert observation.error_message is None
 
         retried = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
@@ -635,6 +640,7 @@ async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, 
         await task
     records = closed.agent_observations.records
     agent_sandbox = next(record for record in records if record.kind == "sandbox")
+    assert agent_sandbox.stage == "agent"
     assert (agent_sandbox.outcome, agent_sandbox.error_type, agent_sandbox.exit_code) == (
         "cancelled",
         "cancelled",

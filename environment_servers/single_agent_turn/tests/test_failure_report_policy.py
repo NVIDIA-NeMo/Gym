@@ -299,7 +299,7 @@ async def test_checkpoint_restores_failure_reference_and_report_before_verificat
         failure_reason="Current workload OOMKilled",
         details=SandboxFailureDetails(provider="opensandbox", sandbox_id="sandbox-1"),
     )
-    observation = SandboxObservation(role="agent", phase="agent_execution", outcome="oom", failure_id=failure.event_id)
+    observation = SandboxObservation(role="agent", stage="agent", outcome="oom", failure_id=failure.event_id)
     with RequestFailureLog.capture() as original:
         observe_failure(failure)
         report = original.report.model_copy(update={"omitted": omitted})
@@ -355,7 +355,7 @@ async def test_confirmed_sandbox_oom_uses_environment_outcome_policy(action):
     )
     observation = SandboxObservation(
         role="agent",
-        phase="agent_execution",
+        stage="agent",
         outcome="oom",
         failure_id=failure.event_id,
     )

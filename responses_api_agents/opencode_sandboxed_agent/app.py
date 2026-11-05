@@ -859,6 +859,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 operation="opencode.setup",
+                stage="seed",
                 failure_reason=f"OpenCode ripgrep staging exceeded its setup budget; sandbox_id={sandbox_id}",
             ) from error
 
@@ -935,6 +936,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             outcome = "unknown"
         return SandboxObservation(
             role="agent",
+            stage="agent",
             provider=handle_provider if isinstance(handle_provider, str) else None,
             sandbox_id=handle_sandbox_id if isinstance(handle_sandbox_id, str) else None,
             outcome=outcome,
@@ -1377,6 +1379,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     boundary="harness",
                     failure_kind=AGENT_ROUTE_FAILED,
                     operation="opencode.setup",
+                    stage="seed",
                     failure_reason="OpenCode setup failed before agent execution",
                 ) from exc
             if setup_result.return_code != 0 or setup_result.error_type is not None:
@@ -1384,6 +1387,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     boundary="harness",
                     failure_kind=AGENT_ROUTE_FAILED,
                     operation="opencode.setup",
+                    stage="seed",
                     failure_reason=command_failure_reason(
                         "OpenCode setup failed before agent execution", setup_result
                     ),
@@ -1414,7 +1418,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 role="agent",
                 provider=details.provider if isinstance(details, SandboxFailureDetails) else None,
                 sandbox_id=details.sandbox_id if isinstance(details, SandboxFailureDetails) else None,
-                phase="agent_execution",
+                stage=exc.stage or "agent",
                 outcome="oom",
                 failure_id=exc.event_id,
             )
@@ -1515,6 +1519,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     boundary="harness",
                     failure_kind=AGENT_ROUTE_FAILED,
                     operation="opencode.setup",
+                    stage="seed",
                     failure_reason="Required Gym MCP tools could not be initialized",
                 )
 
@@ -1891,7 +1896,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 and any(
                     isinstance(record, SandboxObservation)
                     and record.role == "agent"
-                    and record.phase == "agent_execution"
+                    and record.stage == "agent"
                     and record.outcome == "oom"
                     and record.failure_id is not None
                     for record in observations.records

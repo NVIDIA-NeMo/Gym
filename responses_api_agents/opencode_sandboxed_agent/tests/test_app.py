@@ -1785,8 +1785,9 @@ class TestBenchmarkLifecycle:
         sandbox.stop.assert_awaited_once()
 
     @mark.parametrize("verifier_reward", [0.0, 1.0])
+    @mark.parametrize("origin_stage", [None, "agent", "seed", "verification"])
     async def test_confirmed_agent_sandbox_oom_keeps_verifier_verdict(
-        self, monkeypatch, tmp_path: Path, verifier_reward
+        self, monkeypatch, tmp_path: Path, verifier_reward, origin_stage
     ):
         config = self._create_config()
         config.preinstalled_opencode = True
@@ -1819,11 +1820,12 @@ class TestBenchmarkLifecycle:
                 payload["response"]["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY]
             )
             assert observation.role == "agent"
-            assert observation.phase == "agent_execution"
+            assert observation.stage == "agent"
             assert observation.outcome == "oom"
             assert observation.provider == "opensandbox"
             assert observation.sandbox_id == "agent-sandbox"
-            assert observation.failure_id in payload["failure_report"]["events"]
+            assert observation.failure_id == original.event_id
+            assert payload["failure_report"]["events"][observation.failure_id].get("stage") == origin_stage
             assert "OOM-killed" in payload["failure_report"]["events"][observation.failure_id]["failure_reason"]
             return SimpleNamespace(
                 ok=True,
@@ -1845,13 +1847,15 @@ class TestBenchmarkLifecycle:
 
         client.post = AsyncMock(side_effect=post)
         server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        original = sandbox_oom("Sandbox was OOM-killed. sandbox_id='agent-sandbox'", sandbox_id="agent-sandbox")
+        original.stage = origin_stage
         sandbox = MagicMock(
             upload=AsyncMock(),
             stop=AsyncMock(),
             exec=AsyncMock(
                 side_effect=[
                     SimpleNamespace(stdout="Installed OpenCode", stderr="", return_code=0, error_type=None),
-                    sandbox_oom("Sandbox was OOM-killed. sandbox_id='agent-sandbox'", sandbox_id="agent-sandbox"),
+                    original,
                 ]
             ),
         )
@@ -1868,8 +1872,16 @@ class TestBenchmarkLifecycle:
         from nemo_gym.core import RequestFailureLog
 
         with RequestFailureLog.capture():
+            if origin_stage not in (None, "agent"):
+                with raises(NgFailureEvent, match="OpenCode export unavailable"):
+                    await server.run(request, body)
+                verify.assert_not_awaited()
+                assert original.stage == origin_stage
+                sandbox.stop.assert_awaited_once()
+                return
             result = await server.run(request, body)
 
+        assert original.stage == origin_stage
         assert result.reward == verifier_reward
         verify.assert_awaited_once()
         assert verify.await_args.kwargs["force_zero_reward"] is False
