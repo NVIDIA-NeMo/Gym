@@ -17,7 +17,7 @@ from benchmarks.bunsenbench_chemistry_mcq.materialize import materialize_row
 from benchmarks.bunsenbench_chemistry_mcq.upstream import UPSTREAM_CONFIG_METADATA
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 from resources_servers.bunsenbench_chemistry_mcq.app import (
     BunsenChemResourcesServer,
     BunsenChemResourcesServerConfig,

@@ -42,7 +42,7 @@ from fastapi import FastAPI
 
 import nemo_gym.server_runtime._checkpoint.control as control
 import nemo_gym.server_runtime._checkpoint.store as store
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointPhase,
     CheckpointRecord,

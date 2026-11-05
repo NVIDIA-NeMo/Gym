@@ -15,13 +15,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
-from nemo_gym.chat_streaming import synthesize_chat_completion_sse
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletion
-from nemo_gym.responses_streaming import (
+from nemo_gym.models import (
+    ModelCallCaptureConfig,
     flatten_namespace_tools,
+    install_model_call_capture,
+    message_content_to_text,
     restore_namespace_tool_calls,
+    synthesize_chat_completion_sse,
     synthesize_responses_sse,
 )
 from nemo_gym.server_runtime import (
@@ -35,10 +37,29 @@ from nemo_gym.verification import call_judge
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec")
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec")
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
+
+
+# Identify the actual summary instruction, never the availability of tools or a
+# token threshold. These prefixes are exercised against the pinned CLI requests.
+SUMMARY_PROMPTS = (
+    "Create a new anchored summary from the conversation history.",
+    "Update the existing anchored summary using the new conversation history.",
+    "You are performing a CONTEXT CHECKPOINT COMPACTION.",
+    "The context window is approaching its limit. Please create a concise summary",
+    "Create a structured handoff summary for a later assistant",
+)
+
+
+def is_compaction_request(body: dict) -> bool:
+    messages = body.get("messages", body.get("input", []))
+    if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
+        return False
+    last = messages[-1]
+    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(SUMMARY_PROMPTS)
 
 
 @dataclass
@@ -55,6 +76,10 @@ class Probe:
     closed: int = 0
     finished: bool = False
     finish_call: dict | None = None
+    compaction_summary: str = field(
+        default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
+    )
+    compaction_response_ids: list[str] = field(default_factory=list)
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
@@ -70,6 +95,11 @@ class Probe:
             "finished": self.finished,
             "finish_call": self.finish_call,
         }
+        if self.scenario.compaction is not None:
+            witness["compaction"] = {
+                "summary": self.compaction_summary,
+                "response_ids": self.compaction_response_ids,
+            }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
 
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
@@ -132,24 +162,27 @@ class Probe:
                 return name, args, namespaces
         return None
 
+    def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
+        """Require the original ID unless a provider-specific replay rule applies."""
+        return {call["id"]}
+
     def _observe_tool_results(self, body: dict) -> None:
         history = body.get("messages", body.get("input", []))
+        if not isinstance(history, list):
+            history = []
         for call in self.tool_calls:
-            results = (
-                [
-                    item
-                    for item in history
-                    if isinstance(item, dict)
-                    and (
-                        item.get("role") == "tool"
-                        and item.get("tool_call_id") == call["id"]
-                        or item.get("type") == "function_call_output"
-                        and item.get("call_id") == call["id"]
-                    )
-                ]
-                if isinstance(history, list)
-                else []
-            )
+            result_ids = self._accepted_result_ids(call, history)
+            results = [
+                item
+                for item in history
+                if isinstance(item, dict)
+                and (
+                    item.get("role") == "tool"
+                    and item.get("tool_call_id") in result_ids
+                    or item.get("type") == "function_call_output"
+                    and item.get("call_id") in result_ids
+                )
+            ]
             call["result_seen"] = call["result_seen"] or any(
                 call["token"] in json.dumps(item.get("content", item.get("output"))) for item in results
             )
@@ -171,6 +204,7 @@ class Probe:
             status = self.scenario.http_errors[-1]
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
+        compacting = self.scenario.compaction is not None and is_compaction_request(body)
         if status != 200:
             payload = {
                 "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
@@ -179,9 +213,25 @@ class Probe:
             try:
                 if self.finished:
                     raise ValueError("unexpected model request after the scripted final answer")
-                if any(not call["result_seen"] or not call.get("executed") for call in self.tool_calls):
+                # A summary can cover only older history. Policy requests must still
+                # show every executed result before receiving the next scripted action.
+                if not compacting and any(
+                    not call["result_seen"] or not call.get("executed") for call in self.tool_calls
+                ):
                     raise ValueError("tool execution or model-visible result was not witnessed")
-                if len(self.tool_calls) < self.scenario.tool_steps:
+                if compacting:
+                    if self.scenario.compaction is not True or not self.tool_calls or self.compaction_response_ids:
+                        raise ValueError("unexpected compaction request outside the single summary stage")
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": self.compaction_summary, "annotations": []}],
+                        }
+                    ]
+                elif len(self.tool_calls) < self.scenario.tool_steps:
                     name, arguments, namespaces = self._tool(body)
                     call = self.tool_calls[-1]
                     output = [
@@ -220,12 +270,24 @@ class Probe:
                     ]
                     self.finished = True
                 calls_tool = output[0]["type"] == "function_call"
+                prompt_tokens = 20 + index
+                completion_tokens = 11 if compacting else 8
+                if self.scenario.compaction is not None:
+                    policy_index = index - len(self.compaction_response_ids)
+                    prompt_tokens = (
+                        500
+                        if compacting
+                        else 27000 + policy_index
+                        if not self.compaction_response_ids
+                        else 100 + policy_index
+                    )
                 if request.url.path.endswith("/chat/completions"):
                     message = {
                         "role": "assistant",
-                        "content": None if calls_tool else ANSWER,
-                        "reasoning_content": "Perform the prescribed check.",
+                        "content": None if calls_tool else output[0]["content"][0]["text"],
                     }
+                    if not compacting:
+                        message["reasoning_content"] = "Perform the prescribed check."
                     if calls_tool:
                         message["tool_calls"] = [
                             {
@@ -249,11 +311,11 @@ class Probe:
                     }
                     if self.scenario.usage:
                         payload["usage"] = {
-                            "prompt_tokens": 20 + index,
-                            "completion_tokens": 8,
-                            "total_tokens": 28 + index,
+                            "prompt_tokens": prompt_tokens,
+                            "completion_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
                             "prompt_tokens_details": {"cached_tokens": 3},
-                            "completion_tokens_details": {"reasoning_tokens": 2},
+                            "completion_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
                         }
                 else:
                     payload = {
@@ -271,12 +333,14 @@ class Probe:
                     }
                     if self.scenario.usage:
                         payload["usage"] = {
-                            "input_tokens": 20 + index,
-                            "output_tokens": 8,
-                            "total_tokens": 28 + index,
+                            "input_tokens": prompt_tokens,
+                            "output_tokens": completion_tokens,
+                            "total_tokens": prompt_tokens + completion_tokens,
                             "input_tokens_details": {"cached_tokens": 3},
-                            "output_tokens_details": {"reasoning_tokens": 2},
+                            "output_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
                         }
+                if compacting:
+                    self.compaction_response_ids.append(response_id)
             except ValueError as exc:
                 status = 409
                 self.violations.append(str(exc))
@@ -417,3 +481,29 @@ class Probe:
             app.post(prefix + "/verify")(observe_verifier(verify, enabled=True))
             app.post(prefix + "/bash")(bash)
         return app
+
+
+class OpenClawProbe(Probe):
+    """Match OpenClaw replay IDs while retaining the original captured identities."""
+
+    def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
+        result_ids = super()._accepted_result_ids(call, history)
+        # The pinned custom-provider replay strips the underscore from our short
+        # UUID IDs. Require the matching assistant call as well as the tool result.
+        replay_id = call["id"].replace("_", "")
+        for item in history:
+            if not isinstance(item, dict) or item.get("role") != "assistant":
+                continue
+            for replay in item.get("tool_calls") or []:
+                function = replay.get("function") or {}
+                try:
+                    arguments = json.loads(function.get("arguments", ""))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    replay.get("id") == replay_id
+                    and function.get("name") == call["name"]
+                    and arguments == call["arguments"]
+                ):
+                    result_ids.add(replay_id)
+        return result_ids

@@ -14,9 +14,9 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import StreamingResponse
 
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
-from nemo_gym.core.episode import EpisodeId, current_rollout_id
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     ModelRecord,
     PolicyAdmissionMiddleware,
@@ -27,7 +27,22 @@ from nemo_gym.models._checkpoint import (
     ledger_removal_refusal,
     note_generation_backend,
 )
-from nemo_gym.responses_streaming import synthesize_responses_keepalive_sse
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.models.responses_streaming import synthesize_responses_keepalive_sse
+from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
+from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
+from nemo_gym.models.token_capture.lineage import FileLineageStore
+from nemo_gym.models.token_capture.protocols import CaptureAdmissionError, RolloutRetiredError
+from nemo_gym.models.token_capture.records import ParentResolutionStatus
+from nemo_gym.models.token_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
+from nemo_gym.models.token_capture.staging.records import (
+    INVALID_COMMIT_COORDS_REASON,
+    CaptureAdmission,
+    CaptureLedgerCommit,
+    CommitCoords,
+    GenerationCutContinuation,
+    RolloutManifest,
+)
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
@@ -43,21 +58,7 @@ from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutReceipt,
 )
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
-from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.lineage import FileLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureAdmissionError, RolloutRetiredError
-from nemo_gym.token_id_capture.records import ParentResolutionStatus
-from nemo_gym.token_id_capture.sink import NG_COMMIT_COORDS_FIELD, CaptureContext, current_capture_context
-from nemo_gym.token_id_capture.staging.records import (
-    INVALID_COMMIT_COORDS_REASON,
-    CaptureAdmission,
-    CaptureLedgerCommit,
-    CommitCoords,
-    GenerationCutContinuation,
-    RolloutManifest,
-)
-from tests.unit_tests.test_token_capture_ledger import (
+from tests.unit_tests.models.test_token_capture_ledger import (
     ASSISTANT_1,
     ASSISTANT_2,
     USER_1,
@@ -216,7 +217,7 @@ async def test_keepalive_stream_is_cut_and_holds_model_output_until_resume(tmp_p
 
     async def app(scope, receive, send):
         attach_capture_context(
-            CaptureContext(rollout_id="r", model_call_id="c1", token_sink=None, request_items=[USER_1])
+            CaptureContext(capture_key="r", model_call_id="c1", token_sink=None, request_items=[USER_1])
         )
         note_generation_backend("http://worker-0/v1")
         await send(
@@ -492,7 +493,7 @@ def _held_call(participant: PolicyModelParticipant, capture_key: str, model_call
     ticket = participant.gate.enter(capture_key)
     ticket.backend = "http://worker-0/v1"
     ticket.capture = CaptureContext(
-        rollout_id=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
+        capture_key=capture_key, model_call_id=model_call_id, token_sink=None, request_items=request_items
     )
 
 
@@ -547,9 +548,9 @@ async def test_undelivered_call_is_cut_and_continued_by_the_reissued_call(tmp_pa
     await restored_controller.restore(_restore_request("r1", tmp_path / "ckpt", [{"rollout_id": "r"}]))
     await restored_controller.resume(CheckpointRequest(**control("r1")))
     admission = CaptureAdmission(capture_key="r-a1", model_call_id="c3", mode="text")
-    other_request = CaptureContext(rollout_id="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_3])
+    other_request = CaptureContext(capture_key="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_3])
     reissued = CaptureContext(
-        rollout_id="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
+        capture_key="r-a1", model_call_id="c3", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
     )
 
     assert prepared["report"]["counts"] == {"inflight": 1, "held": 1, "cut": 1, "cut_failed": 0, "cut_skipped": 0}
@@ -604,7 +605,7 @@ def _captured_app(participant: PolicyModelParticipant, ledger: FileLineageStore 
     async def chat(request: Request) -> dict:
         capture_key = current_rollout_id()
         context = CaptureContext(
-            rollout_id=capture_key, model_call_id="c2", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
+            capture_key=capture_key, model_call_id="c2", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
         )
         attach_capture_context(context)
         if ledger is not None:
@@ -657,7 +658,7 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
         effective_output_limit=10,
     )
     from nemo_gym.models._checkpoint import GenerationCutRecord
-    from nemo_gym.token_id_capture.fingerprint import conversation_digest
+    from nemo_gym.models.token_capture.fingerprint import conversation_digest
 
     first._restored_cuts["r"] = GenerationCutRecord(
         model_call_id="c2",
@@ -673,7 +674,7 @@ async def test_each_model_server_continues_only_its_own_restored_cut() -> None:
             responses.append((await client.post("/ng-rollout/r/v1/chat/completions")).json())
     admission = CaptureAdmission(capture_key="r", model_call_id="c9", mode="text")
     context = CaptureContext(
-        rollout_id="r", model_call_id="c9", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
+        capture_key="r", model_call_id="c9", token_sink=None, request_items=[USER_1, ASSISTANT_1, USER_2]
     )
 
     assert responses == [{"hook": True}, {"hook": True}]
@@ -707,7 +708,7 @@ async def test_a_restored_cut_not_yet_reused_survives_the_next_checkpoint(tmp_pa
 
 async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_its_retry(tmp_path: Path) -> None:
     from nemo_gym.models._checkpoint import GenerationCutRecord
-    from nemo_gym.token_id_capture.fingerprint import conversation_digest
+    from nemo_gym.models.token_capture.fingerprint import conversation_digest
 
     request_items = [USER_1, ASSISTANT_1, USER_2]
     continuation = GenerationCutContinuation(
@@ -738,7 +739,7 @@ async def test_a_newer_cut_replaces_the_restored_cut_a_resumed_call_keeps_for_it
     # The resumed call ends before its response starts, and the agent retries it.
     await participant.gate.exit(resumed)
     retry = participant.gate.enter("r-a1")
-    retried = CaptureContext(rollout_id="r-a1", model_call_id="c4", token_sink=None, request_items=request_items)
+    retried = CaptureContext(capture_key="r-a1", model_call_id="c4", token_sink=None, request_items=request_items)
     received = participant.gate.admission_hook(retry)(retried, admission).generation_cut
 
     assert continued == continuation
@@ -773,14 +774,14 @@ async def test_a_constrained_call_is_not_cut_and_never_continues_a_restored_cut(
     _held_call(participant, "r", "c1", [USER_1])
     constrained = participant.gate.enter("s")
     constrained.backend = "http://worker-0/v1"
-    constrained.capture = CaptureContext(rollout_id="s", model_call_id="c2", token_sink=None, request_items=[USER_1])
+    constrained.capture = CaptureContext(capture_key="s", model_call_id="c2", token_sink=None, request_items=[USER_1])
     constrained.cut_regenerate_reason = "tool_choice:required"
     await participant.close_admission(CheckpointRequest(**control()))
     report = participant.readiness()
 
     participant._restored_cuts["s"] = restored = participant.gate.snapshot().cuts[0].record.model_copy()
     admission = CaptureAdmission(capture_key="s", model_call_id="c9", mode="text")
-    context = CaptureContext(rollout_id="s", model_call_id="c9", token_sink=None, request_items=[USER_1])
+    context = CaptureContext(capture_key="s", model_call_id="c9", token_sink=None, request_items=[USER_1])
     attached = participant.gate.admission_hook(constrained)(context, admission).generation_cut
 
     [(_, inventory)] = requests
@@ -887,7 +888,7 @@ async def test_ledger_export_and_import_run_off_the_event_loop(tmp_path: Path) -
 def test_a_batched_ledger_import_syncs_the_directory_per_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import nemo_gym.token_id_capture.lineage as lineage
+    import nemo_gym.models.token_capture.lineage as lineage
 
     ledger = FileLineageStore(tmp_path / "ledger")
     directory_opens = []
@@ -1425,12 +1426,12 @@ def _staged_call(
         context = current_capture_context()
         context.request_items = [USER_1, ASSISTANT_1, USER_2]
         context.capture_admission = CaptureAdmission(
-            capture_key=context.rollout_id, model_call_id=context.model_call_id, mode="text"
+            capture_key=context.capture_key, model_call_id=context.model_call_id, mode="text"
         )
         if contexts is not None:
             contexts.append(context)
         coords = CommitCoords(
-            capture_key=context.rollout_id,
+            capture_key=context.capture_key,
             model_call_id=context.model_call_id,
             prev_len=0,
             weight_version=1,
@@ -1438,7 +1439,7 @@ def _staged_call(
             cum_len=3,
             digest="0" * 64,
             extras_digest="1" * 64,
-            staging_key=f"{context.rollout_id}/{context.model_call_id}",
+            staging_key=f"{context.capture_key}/{context.model_call_id}",
             chain_hash="2" * 64,
             cumulative_hash="3" * 64,
         )
@@ -1768,7 +1769,7 @@ async def test_a_call_whose_capture_attaches_after_the_snapshot_cannot_land_its_
 def test_a_misspelled_model_server_checkpoint_setting_fails_at_startup() -> None:
     from pydantic import ValidationError
 
-    from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig
+    from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
 
     with pytest.raises(ValidationError, match="polciy"):
         BaseResponsesAPIModelConfig.model_validate(
@@ -1785,7 +1786,7 @@ def _model_server_starting(name: str, global_config: dict, ledger: FileLineageSt
     """Run a model server's checkpoint setup, as its startup does."""
     from types import SimpleNamespace
 
-    from nemo_gym.base_responses_api_model import ModelCheckpointConfig, SimpleResponsesAPIModel
+    from nemo_gym.models.base_responses_api_model import ModelCheckpointConfig, SimpleResponsesAPIModel
 
     entry = next(iter(global_config[name]["responses_api_models"].values()))
     server = SimpleNamespace(
