@@ -7,10 +7,13 @@ from typing import get_args
 
 import pytest
 from PIL import Image
+from pydantic import TypeAdapter
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.data import validate_jsonl_rows
 from resources_servers.vision2code.evaluation import RubricName
 from resources_servers.vision2code.prepare import prepare
+from resources_servers.vision2code.task_data import TaskData
 
 
 def test_manifest(tmp_path):
@@ -21,6 +24,8 @@ def test_manifest(tmp_path):
     manifest.write_text("".join(json.dumps({"id": n, "rubric": n, "image_path": image.name}) + "\n" for n in names))
     output = tmp_path / "tasks.jsonl"
     assert prepare(manifest, output) == 17
+    report = validate_jsonl_rows("vision2code", TypeAdapter(TaskData), str(output), output.read_text().splitlines())
+    assert report.clean, report.summary()
     rows = [json.loads(line) for line in output.read_text().splitlines()]
     assert {row["verifier_metadata"]["rubric"] for row in rows} == set(names)
     for row in rows:
