@@ -29,6 +29,7 @@ constraint-dependencies = [
 # Unlike the root policy, wcwidth and pathspec stay installed: OpenHands tools import them.
 override-dependencies = [
     "spacy>=3.8.13",
+    "wcwidth",
     "opencv-python-headless; sys_platform == 'never'",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
@@ -36,6 +37,7 @@ override-dependencies = [
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
+    "pathspec",
     "openai==2.44.0",
     "pyjwt==2.15.1",
     # hermes-agent pins pillow==12.2.0 exactly, while openhands-sdk 1.50.0 needs >=12.3.0.

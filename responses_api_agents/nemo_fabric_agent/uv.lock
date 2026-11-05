@@ -23,6 +23,7 @@ overrides = [
     { name = "gprof2dot", marker = "sys_platform == 'never'" },
     { name = "openai", specifier = "==2.44.0" },
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
     { name = "pillow", specifier = "==12.3.0" },
     { name = "pycountry", marker = "sys_platform == 'never'" },
     { name = "pyjwt", specifier = "==2.15.1" },
@@ -31,6 +32,7 @@ overrides = [
     { name = "torchaudio", marker = "sys_platform == 'never'" },
     { name = "torchcodec", marker = "sys_platform == 'never'" },
     { name = "torchvision", marker = "sys_platform == 'never'" },
+    { name = "wcwidth" },
 ]
 excludes = [
     "alembic",
