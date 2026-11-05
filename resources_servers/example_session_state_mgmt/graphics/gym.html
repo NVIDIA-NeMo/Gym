@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <title>example_session_state_mgmt</title>
+  <style>
+    :root { --nv:#76B900; --bg:#0A0A0A; --card:#161616; --line:#2A2A2A; --ink:#FFFFFF; --mute:#8A8A8A; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 Arial, Helvetica, sans-serif; }
+    .accent { height: 3px; background: var(--nv); }
+    main { max-width: 960px; margin: 0 auto; padding: 40px 24px 64px; }
+    h1 { font-size: 20px; font-weight: 700; margin: 0 0 8px; text-align: center; }
+    .lede { color: var(--mute); margin: 0 0 28px; text-align: center; }
+    .row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 24px 12px; text-align: center; }
+    .card.store { border-color: var(--nv); }
+    .kicker { color: var(--mute); font-size: 11px; letter-spacing: 0.12em; margin: 0 0 16px; }
+    .store .kicker { color: var(--nv); }
+    .n { font-size: 36px; font-weight: 700; margin: 0; }
+    .hint { color: var(--mute); font-size: 13px; margin: 10px 0 0; }
+    .foot { color: var(--mute); font-size: 13px; margin: 28px 0 0; text-align: center; }
+    @media (max-width: 720px) { .row { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="accent"></div>
+  <main>
+    <h1>The server remembers the number. The model does not.</h1>
+    <p class="lede">Green box = the only place the count lives</p>
+    <div class="row">
+      <article class="card store">
+        <p class="kicker">RESOURCES SERVER</p>
+        <p class="n">7</p>
+        <p class="hint">stores the counter<br/>session_id → int</p>
+      </article>
+      <article class="card">
+        <p class="kicker">AGENT</p>
+        <p class="n" style="font-size:18px;margin-top:16px">calls the tools</p>
+        <p class="hint">does not keep the count</p>
+      </article>
+      <article class="card">
+        <p class="kicker">MODEL</p>
+        <p class="n" style="font-size:18px;margin-top:16px">picks the next tool</p>
+        <p class="hint">never writes the dict</p>
+      </article>
+    </div>
+    <p class="foot">0 + 4 + 3 = 7 → reward 1.0 · two cookies → two counters · process exit → empty dict</p>
+  </main>
+</body>
+</html>

@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 260" role="img" aria-labelledby="t d">
+  <title id="t">One episode: 0 then +4 then +3 then verify 7</title>
+  <desc id="d">Same session. Seed 0, add 4, add 3, verify reward 1.0 because 0+4+3=7.</desc>
+  <rect width="960" height="260" fill="#0A0A0A"/>
+  <rect width="960" height="3" fill="#76B900"/>
+  <g font-family="Arial, Helvetica, sans-serif" text-anchor="middle">
+    <text x="480" y="36" fill="#FFFFFF" font-size="16" font-weight="700">One session, running total: 0 + 4 + 3 = 7</text>
+
+    <!-- 1 -->
+    <text x="120" y="64" fill="#76B900" font-size="12" font-weight="700">1. START</text>
+    <rect x="48" y="80" width="144" height="112" rx="4" fill="#161616" stroke="#2A2A2A"/>
+    <text x="120" y="128" fill="#FFFFFF" font-size="36" font-weight="700">0</text>
+    <text x="120" y="160" fill="#8A8A8A" font-size="12">/seed_session</text>
+    <text x="120" y="178" fill="#8A8A8A" font-size="12">initial_count=0</text>
+
+    <text x="216" y="138" fill="#76B900" font-size="20">→</text>
+
+    <!-- 2 -->
+    <text x="312" y="64" fill="#76B900" font-size="12" font-weight="700">2. ADD 4</text>
+    <rect x="240" y="80" width="144" height="112" rx="4" fill="#161616" stroke="#2A2A2A"/>
+    <text x="312" y="128" fill="#FFFFFF" font-size="36" font-weight="700">4</text>
+    <text x="312" y="160" fill="#8A8A8A" font-size="12">/increment_counter</text>
+    <text x="312" y="178" fill="#8A8A8A" font-size="12">count=4</text>
+
+    <text x="408" y="138" fill="#76B900" font-size="20">→</text>
+
+    <!-- 3 -->
+    <text x="504" y="64" fill="#76B900" font-size="12" font-weight="700">3. ADD 3</text>
+    <rect x="432" y="80" width="144" height="112" rx="4" fill="#161616" stroke="#2A2A2A"/>
+    <text x="504" y="128" fill="#FFFFFF" font-size="36" font-weight="700">7</text>
+    <text x="504" y="160" fill="#8A8A8A" font-size="12">/increment_counter</text>
+    <text x="504" y="178" fill="#8A8A8A" font-size="12">count=3</text>
+
+    <text x="600" y="138" fill="#76B900" font-size="20">→</text>
+
+    <!-- 4 -->
+    <text x="768" y="64" fill="#76B900" font-size="12" font-weight="700">4. SCORE</text>
+    <rect x="624" y="80" width="288" height="112" rx="4" fill="#161616" stroke="#76B900" stroke-width="2"/>
+    <text x="768" y="120" fill="#FFFFFF" font-size="16">stored 7  =  expected 7</text>
+    <text x="768" y="156" fill="#76B900" font-size="32" font-weight="700">reward 1.0</text>
+    <text x="768" y="180" fill="#8A8A8A" font-size="12">/verify</text>
+
+    <text x="480" y="232" fill="#8A8A8A" font-size="13">If the stored count is not 7, reward is 0.0 — even if the model said “7”.</text>
+  </g>
+</svg>
