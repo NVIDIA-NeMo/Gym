@@ -24,6 +24,25 @@ def resubmit_offset_path_for(output_fpath: Path) -> Path:
     return output_fpath.with_name(output_fpath.stem + "_resubmit_offset")
 
 
+def attempt_extension_path_for(output_fpath: Path) -> Path:
+    """Where `gym eval resubmit --recover --extend-attempts N` records the attempts it added to every rollout's cap."""
+    return output_fpath.with_name(output_fpath.stem + "_attempt_extension")
+
+
+def rerun_masked_journal_path_for(output_fpath: Path) -> Path:
+    """Where `gym eval resubmit --recover --rerun-masked-without-artifact` journals the operator's approval to run again
+    masked results that kept a saved answer but have neither a gradeable artifact nor a grade: beside the rollouts file
+    and named after it, like the attempt extension, so two rollouts files in one directory never share approvals.
+
+    `results/rollouts.jsonl` -> `results/rollouts_rerun_masked_journal.jsonl`.
+    """
+    return output_fpath.with_name(output_fpath.stem + "_rerun_masked_journal.jsonl")
+
+
+# The journal beside a run's rollouts file, which a resubmit writes and the Store reads.
+RERUN_MASKED_JOURNAL_NAME = rerun_masked_journal_path_for(Path("rollouts.jsonl")).name
+
+
 def materialized_path_for(output_fpath: Path) -> Path:
     """`results/rollouts.jsonl` -> `results/rollouts_materialized_inputs.jsonl`."""
     return output_fpath.with_stem(output_fpath.stem + "_materialized_inputs").with_suffix(".jsonl")
@@ -65,3 +84,8 @@ def exporter_run_id_path_for(output_fpath: Path, exporter: str) -> Path:
 def export_done_path_for(output_fpath: Path, exporter: str) -> Path:
     """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_export_done`: set once the run was exported."""
     return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_export_done")
+
+
+def batch_status_path_for(output_fpath: Path) -> Path:
+    """`results/math.jsonl` -> `results/math_batch_status.json`."""
+    return output_fpath.with_stem(output_fpath.stem + "_batch_status").with_suffix(".json")
