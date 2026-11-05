@@ -116,12 +116,18 @@ class BrowsecompShellSandbox:
         async def collect() -> str:
             return await read_text(self.session.sandbox, path=f"{directory}/output.txt")
 
-        return await self.session.execute(
-            stage_activation=stage,
-            collect=collect,
-            timeout=duration + 30,
-            close_timeout=close_timeout,
-        )
+        try:
+            return await self.session.execute(
+                stage_activation=stage,
+                collect=collect,
+                timeout=duration + 30,
+                close_timeout=close_timeout,
+            )
+        except Exception as error:
+            # The supervisor ends a command at its deadline and records timed_out; the command wrote no output.
+            if self.session.cleanup is not None and self.session.cleanup["timed_out"]:
+                raise TimeoutError("BrowseComp shell command passed its supervisor deadline") from error
+            raise
 
     async def close(self, *, timeout: float) -> None:
         """Confirm termination and stop the owned sandbox; a failed stop remains retryable."""

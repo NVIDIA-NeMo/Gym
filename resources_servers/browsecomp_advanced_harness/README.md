@@ -67,7 +67,10 @@ reuse its host-side artifact cache. Setup failures surface to the caller and ret
 so a later close can retry. Commands are supervised inside the sandbox; their guard, supported commands, output
 truncation, and exit-code envelope are unchanged. A command that outlives the supervisor deadline answers
 `[exit_code=-1]` and a sandbox failure answers `[exit_code=-2]`, as on the host. There is no fallback to host
-execution after a sandbox failure.
+execution after a sandbox failure. A sandbox that cannot start or cannot run a command marks its session, and
+`/verify` keeps the judged reward but masks the sample (`mask_sample: true`, `failure_kind:
+provider_unavailable`), since the model lost its tool to the infrastructure. A blocked command answers without
+starting a sandbox. A missing provider block or an unknown `sandbox_config` key refuses the seed with 422.
 
 `allow_host_execution: true` explicitly enables the former host interpreter for development when no provider is
 configured, or permits the non-isolating `local` provider. It defaults to `false`; production and benchmark configs
@@ -78,7 +81,7 @@ must provide an isolating provider. Configurations with `workspace: none` do not
 Each rollout has its own session: the provider-call metrics that `/verify` reports and, with `workspace: per_session`, the disk workspace that `search` and `browse` write pages to and `bash_command` reads.
 
 - **Environment Server.** `/seed_session` takes a `ResourcesSeedSessionRequest` and keys the session by its `resources_session_id`. The seed is refused with 422 when `task_data` lacks the `question` and `ground_truth` that `/verify` needs, or, with a workspace, when the ID is not a plain directory name. `/close_session` removes the workspace and the metrics, and is idempotent. A close that cannot remove the workspace fails and keeps the session, so the caller can retry it. After a close, a seed for the same ID is refused with 409, and a tool call for it gets 404 (`session_lost`) instead of recreating the workspace. `/verify` of a closed session returns a masked sample (`reward: 0`, `mask_sample: true`, `failure_kind: session_lost`). The reward depends only on the response and the task, so the mask is kept on purpose: a closed session reads the same on every server under the resources session contract. `single_agent_turn` verifies before it closes, so only an out-of-order verify gets the mask.
-- **An agent's `/run`.** `/seed_session` takes the flat row and keys the session by the cookie. `/verify` releases the sandbox and removes the workspace, since this path sends no close. The sandbox starts with the first `bash_command`, not at the seed. A run whose agent never sends `/verify`, as `browsecomp_agent` does after a timeout, keeps its sandbox until the provider's `ttl_s` reclaims it or the server shuts down; Enroot ignores `ttl_s`. Sandboxed runs should use the Environment Server path, which always closes.
+- **An agent's `/run`.** `/seed_session` takes the flat row and keys the session by the cookie. `/verify` releases the sandbox and removes the workspace, since this path sends no close. The sandbox starts with the first `bash_command`, not at the seed. A run whose agent never sends `/verify`, as `browsecomp_agent` does after a timeout or an aborted run, keeps its sandbox until the provider's `ttl_s` reclaims it or the server shuts down; Enroot ignores `ttl_s`. Sandboxed runs should use the Environment Server path, which always closes.
 
 `/verify` and `/close_session` stop the owned sandbox before deleting its workspace and metrics. A failed stop leaves
 the session available for a close retry. Shutdown also stops any remaining tool sandboxes. Tool calls, verification,
