@@ -630,13 +630,16 @@ class FinanceAgentResourcesServer(SimpleResourcesServer):
         """Start per-question data storage and the time budget for this session.
 
         An Environment Server's typed seed is idempotent: a retry returns the open session unchanged.
-        An Agent's legacy seed resets the session. Either is refused for a session closed within
-        ``session_close_retry_window_seconds``.
+        An Agent's legacy seed resets the session, and is refused for a typed session. Either is refused for a
+        session closed within ``session_close_retry_window_seconds``.
         """
         if not isinstance(body, ResourcesSeedSessionRequest):
             # An Agent's legacy /run names its session only by its cookie.
             session_id = request.session[SESSION_ID_KEY]
             self._fence.raise_if_closed(session_id)
+            # A `{}` seed or a tool named seed_session must not wipe a typed session's documents and time budget.
+            if session_id in self._typed_seeds:
+                raise ResourcesSessionConflictError("A cookie seed cannot replace a typed session")
             self._start_session(request, session_id)
             return BaseSeedSessionResponse()
 
