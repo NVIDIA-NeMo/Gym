@@ -69,7 +69,7 @@ _DELETE_RETRY_DELAY_SECONDS = 2.0
 async def _delete_python_session(url: str, session_id: str) -> None:
     """Delete a sandbox Python session, raising if the sandbox does not acknowledge it."""
     # A transport error and a 5xx reply (a sandbox worker restarting behind its proxy) share one budget of bounded
-    # attempts, so an unreachable sandbox cannot hold the session's lock for long.
+    # attempts, so an unreachable sandbox cannot hold the session's fence for long.
     for attempt in range(1, _DELETE_ATTEMPTS + 1):
         try:
             response = await http_request(
@@ -420,7 +420,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """Run the tool before close can acknowledge releasing its Python session."""
         # Skills records ownership only when execution returns. Close must wait for that record instead of
         # fencing an empty session and relying on a later, unreported best-effort cleanup.
-        async with self._resources_session_locks.locked(request.session[SESSION_ID_KEY]):
+        async with self.session_lock(request.session[SESSION_ID_KEY]):
             return await self._execute_tool(tool_name, request)
 
     async def _execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
@@ -441,7 +441,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # The session middleware always sets the session ID, which keys the stateful python session.
         session_id = request.session[SESSION_ID_KEY]
-        if self._resources_session_fences.get(session_id) is not None or session_id in self._verified_sessions:
+        if self.session_is_closed(session_id) or self.session_is_verified(session_id):
             raise ResourcesSessionLostError(f"ns_tools session {session_id} is closed")
 
         if session_id not in self._timing_by_session:
@@ -513,9 +513,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         return session_id in self._timing_by_session
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Release state from a prior agent-run seed; Skills still creates Python state on the first tool call."""
-        if self.has_session_state(session_id) or session_id in self._verified_sessions:
-            await self.release_session_state(session_id)
+        """Skills creates Python state on the first tool call; the base releases a prior cookie run."""
 
     async def release_session_state(self, session_id: str) -> None:
         """Keep Python ownership and timings until the sandbox acknowledges release."""
@@ -529,13 +527,9 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
     def _aggregate_timing_metrics(self, session_id: Optional[str]) -> Dict[str, float | int]:
         """Aggregate tool execution timing metrics for a session."""
-        if session_id:
-            previous = self._verified_sessions.get(session_id)
-            if previous is not None:
-                return previous[1]
         tool_timings = self._timing_by_session.get(session_id, []) if session_id else []
         if session_id in self._timing_by_session:
-            # Drop detailed timings but keep ownership visible if release fails and the retry record expires.
+            # Drop detailed timings but keep the live Python session visible until release succeeds.
             self._timing_by_session[session_id] = []
 
         total_tool_time = sum(t["execution_time_seconds"] for t in tool_timings)
@@ -551,10 +545,6 @@ class NSToolsResourcesServer(SimpleResourcesServer):
             "tool_timeout_count": tool_timeout_count,
             "tool_request_timeout_count": tool_request_timeout_count,
         }
-        if session_id:
-            # A lost verify reply must not turn this rollout into one with zero tool calls. Keep only the
-            # aggregate for the routing retry window; release the detailed timing list and Python state.
-            self._verified_sessions.remember(session_id, (self._session_episodes.get(session_id), metrics))
         return metrics
 
     async def verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
@@ -569,64 +559,62 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         Detailed per-call and summary logging is controlled by verbose_tool_logging.
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
-        if session_id:
-            # Agent-run reseeds keep their ID. Do not let an old delegated verify release a replacement run.
-            async with self._resources_session_locks.locked(session_id):
-                return await self._verify(request, body)
-        return await self._verify(request, body)
+        if not session_id:
+            return await self._verify(request, body, self._aggregate_timing_metrics(None))
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                return NSToolsVerifyResponse(
+                    **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
+                )
+            metrics = verification.retained
+            if not isinstance(metrics, dict):
+                metrics = self._aggregate_timing_metrics(session_id)
+            # Retain the snapshot even when the delegated verifier fails. A retry must rerun its judge without
+            # losing the original timing totals, and a failed release must keep that snapshot owned.
+            verification.retain(metrics)
+            return await self._verify(request, body, metrics)
 
-    async def _verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
+    async def _verify(
+        self, request: Request, body: NSToolsVerifyRequest, metrics: Dict[str, float | int]
+    ) -> NSToolsVerifyResponse:
         session_id = request.session.get(SESSION_ID_KEY) if request else None
-        if session_id is not None and self._resources_session_fences.get(session_id) is not None:
-            # Close released the session's tool timings, so its metrics would read as a rollout without tool calls.
-            return NSToolsVerifyResponse(
-                **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
-            )
-        try:
-            metrics = self._aggregate_timing_metrics(session_id)
-            if self.config.verbose_tool_logging:
-                logger.info(
-                    f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
-                    f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
-                    f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
-                    f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
-                )
-
-            # Select verifier
-            verifier_type = body.verifier_type or self.config.default_verifier
-
-            if verifier_type not in self.config.verifiers:
-                raise ValueError(
-                    f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
-                )
-
-            verifier_ref = self.config.verifiers[verifier_type]
-
-            # Delegate to the verifier
-            response = await self.server_client.post(
-                server_name=verifier_ref.name,
-                url_path="/verify",
-                json=body.model_dump(),
+        if self.config.verbose_tool_logging:
+            logger.info(
+                f"Session {session_id[:8] if session_id else 'unknown'}... metrics: "
+                f"{metrics['num_tool_calls']} tool calls, total={metrics['total_tool_execution_time_seconds']:.3f}s, "
+                f"avg={metrics['avg_tool_call_time_seconds']:.3f}s, "
+                f"internal_timeouts={metrics['tool_timeout_count']}, request_timeouts={metrics['tool_request_timeout_count']}"
             )
 
-            result = await response.json()
+        # Select verifier
+        verifier_type = body.verifier_type or self.config.default_verifier
 
-            # Hard fail if no reward in response
-            if "reward" not in result:
-                raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
-
-            return NSToolsVerifyResponse(
-                **body.model_dump(),
-                reward=result["reward"],
-                delegated_response=result,
-                **metrics,
+        if verifier_type not in self.config.verifiers:
+            raise ValueError(
+                f"Unknown verifier: {verifier_type}. Configure it in 'verifiers' or check 'default_verifier'."
             )
-        finally:
-            if session_id:
-                # A successful verify reply ends checkpoint ownership. Cleanup failure must fail the
-                # request too, so its retry or checkpoint retirement can still find the Python state.
-                await self.release_session_state(session_id)
-                self._session_episodes.pop(session_id, None)
+
+        verifier_ref = self.config.verifiers[verifier_type]
+
+        # Delegate to the verifier
+        response = await self.server_client.post(
+            server_name=verifier_ref.name,
+            url_path="/verify",
+            json=body.model_dump(),
+        )
+
+        result = await response.json()
+
+        # Hard fail if no reward in response
+        if "reward" not in result:
+            raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
+
+        return NSToolsVerifyResponse(
+            **body.model_dump(),
+            reward=result["reward"],
+            delegated_response=result,
+            **metrics,
+        )
 
     # --------------------------------------------------------
     # Cleanup

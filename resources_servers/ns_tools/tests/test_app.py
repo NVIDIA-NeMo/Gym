@@ -622,7 +622,7 @@ async def _real_python_tool_server(
 
 
 class TestResourcesSessions:
-    async def test_agent_run_reseed_waits_for_delegated_verify_and_keeps_replacement_state(self) -> None:
+    async def test_cookie_reseed_waits_for_delegated_verify_and_keeps_replacement_state(self) -> None:
         manager = FakePythonToolManager()
         server, _ = _session_server(manager)
         request = MagicMock()
@@ -662,7 +662,7 @@ class TestResourcesSessions:
         assert verify.result().num_tool_calls == 1
         assert manager.python_sessions == {"cookie": ["print(4)"]}
         assert len(server._timing_by_session["cookie"]) == 1
-        assert "cookie" not in server._verified_sessions
+        assert not server.session_is_verified("cookie")
         assert (await server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY))).num_tool_calls == 1
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
@@ -713,7 +713,7 @@ class TestResourcesSessions:
         # Default wait verification unbinds before the HTTP reply. A replacement may never send close.
         assert not server.checkpoint_participant.is_open("rs-1")
         assert server._session_episodes == {}
-        assert server._verified_sessions.get("rs-1")[0] == (
+        assert server.session_identity("rs-1") == (
             EPISODE_ID,
             TaskId.model_validate(_seed("rs-1")["task_id"]),
         )
@@ -728,7 +728,7 @@ class TestResourcesSessions:
         monkeypatch.setattr(
             base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
         )
-        assert server._verified_sessions.get("rs-1") is None
+        assert not server.session_is_verified("rs-1")
 
     async def test_checkpoint_retire_releases_owned_python_state_and_retries_failure(self) -> None:
         tool_manager = FakePythonToolManager()
@@ -869,19 +869,19 @@ class TestResourcesSessions:
         tool.requests_to_sessions["rs-1"] = "python-session"
         tool._sandbox.session_histories["python-session"] = ["x = 1"]
         server, _ = _session_server(tool_manager)
-        server._session_episodes["rs-1"] = (EPISODE_ID, TaskId(taskset="ns_tools", task_id="0"))
+        server.restore_session_identity("rs-1", episode_id=EPISODE_ID, task_id=TaskId(taskset="ns_tools", task_id="0"))
         try:
             with pytest.raises(ClientResponseError, match="503"):
                 await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert tool.requests_to_sessions["rs-1"] == "python-session"
             assert tool._sandbox.session_histories["python-session"] == ["x = 1"]
-            assert server._resources_session_fences.get("rs-1") is None
+            assert not server.session_is_closed("rs-1")
 
             status = deleted_status
             await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert "rs-1" not in tool.requests_to_sessions
             assert "python-session" not in tool._sandbox.session_histories
-            assert server._resources_session_fences.get("rs-1") == EPISODE_ID
+            assert server.session_is_closed("rs-1")
             # Three attempts for the failed close, one for the close that succeeds.
             assert seen == [("python-session", "python-session")] * 4
         finally:
@@ -919,7 +919,7 @@ class TestResourcesSessions:
             # Refused connections and 5xx replies share one budget of three single-try attempts.
             assert tries_per_call == [1, 1, 1]
             assert tool.requests_to_sessions["rs-1"] == "python-session"
-            assert server._resources_session_fences.get("rs-1") is None
+            assert not server.session_is_closed("rs-1")
         finally:
             await tool._sandbox.close()
             await http_client.close()
@@ -961,7 +961,7 @@ class TestResourcesSessions:
 
             assert sandbox.deletes == [python_session] * 4
             assert sandbox.sessions == set() and "rs-1" not in tool.requests_to_sessions
-            assert server._resources_session_fences.get("rs-1") == EPISODE_ID
+            assert server.session_is_closed("rs-1")
 
     def test_failed_cleanup_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         tool_manager = FakePythonToolManager()
@@ -1026,13 +1026,13 @@ class TestResourcesSessions:
 
         tool_manager.cleanup_error = RuntimeError("sandbox unreachable")
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
-        assert server._resources_session_fences.get("rs-1") is None
+        assert not server.session_is_closed("rs-1")
         assert "rs-1" in tool_manager.python_sessions
 
         tool_manager.cleanup_error = None
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
         assert "rs-1" not in tool_manager.python_sessions
-        assert server._resources_session_fences.get("rs-1") == EPISODE_ID
+        assert server.session_is_closed("rs-1")
 
     def test_tool_call_after_close_is_a_lost_session(self) -> None:
         tool_manager = FakePythonToolManager()
@@ -1077,7 +1077,7 @@ class TestResourcesSessions:
             with pytest.raises(RuntimeError, match="sandbox unreachable"):
                 await close
             assert "rs-1" in tool_manager.python_sessions
-            assert server._resources_session_fences.get("rs-1") is None
+            assert not server.session_is_closed("rs-1")
             tool_manager.cleanup_error = None
             await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert tool_manager.python_sessions == {}
@@ -1129,7 +1129,7 @@ class TestResourcesSessions:
         assert tool_manager.python_sessions == {}
 
     @pytest.mark.parametrize("verified", [False, True])
-    def test_episode_seed_cannot_take_over_existing_agent_run_state(self, verified: bool) -> None:
+    def test_typed_seed_cannot_take_over_existing_cookie_state(self, verified: bool) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1143,12 +1143,11 @@ class TestResourcesSessions:
         timings = server._timing_by_session[session_id]
         if verified:
             assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == 1
-        metrics = server._verified_sessions.get(session_id)
 
         assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
         assert server._session_episodes == {}
         if verified:
-            assert server._verified_sessions.get(session_id) is metrics
+            assert server.session_is_verified(session_id)
             assert manager.python_sessions == {}
         else:
             assert manager.python_sessions[session_id] is python_session
@@ -1156,7 +1155,7 @@ class TestResourcesSessions:
             assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == (1 if verified else 2)
 
-    def test_agent_run_reseed_keeps_id_and_replaces_verification_metrics(self) -> None:
+    def test_cookie_reseed_keeps_id_and_replaces_verification_metrics(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1173,9 +1172,9 @@ class TestResourcesSessions:
         assert manager.python_sessions == {} and server._timing_by_session == {}
         assert client.post("/verify", json=VERIFY_BODY).json() == first.json()
 
-        # Agent-run seeds reuse the ID but start a new run and discard the old retry record.
+        # Deprecated cookie seeds reuse the ID but start a new run and discard the old retry record.
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
-        assert first_session not in server._verified_sessions
+        assert not server.session_is_verified(first_session)
         assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         [second_session] = manager.python_sessions
@@ -1184,7 +1183,7 @@ class TestResourcesSessions:
         assert second.status_code == 200 and second.json()["num_tool_calls"] == 2
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
-    def test_failed_agent_run_reseed_keeps_verification_metrics_and_python_ownership(self) -> None:
+    def test_failed_cookie_reseed_keeps_verification_metrics_and_python_ownership(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app, raise_server_exceptions=False)
@@ -1197,18 +1196,17 @@ class TestResourcesSessions:
         python_session = manager.python_sessions[session_id]
         manager.cleanup_error = RuntimeError("sandbox release unavailable")
         assert client.post("/verify", json=VERIFY_BODY).status_code == 500
-        receipt = server._verified_sessions.get(session_id)
 
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 500
-        assert server._verified_sessions.get(session_id) is receipt
+        assert server.session_is_verified(session_id)
         assert manager.python_sessions[session_id] is python_session
         manager.cleanup_error = None
         assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == 1
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
-        assert session_id not in server._verified_sessions
+        assert not server.session_is_verified(session_id)
         assert manager.python_sessions == {}
 
-    def test_expired_verification_metrics_do_not_hide_failed_python_release(
+    def test_failed_python_release_keeps_metrics_owned_past_retry_window(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import nemo_gym.server_runtime.base_resources_server as base_resources
@@ -1228,7 +1226,7 @@ class TestResourcesSessions:
         monkeypatch.setattr(
             base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
         )
-        assert server._verified_sessions.get(session_id) is None
+        assert server.session_is_verified(session_id)
 
         assert client.post("/seed_session", json=_seed(session_id)).status_code == 409
         assert server._session_episodes == {}
@@ -1237,11 +1235,12 @@ class TestResourcesSessions:
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 500
         assert server._timing_by_session[session_id] == []
         manager.cleanup_error = None
+        assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == 1
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
     @pytest.mark.parametrize("state", ["active", "verified", "closed"])
-    def test_agent_run_seed_does_not_take_over_an_episode_session(self, state: str) -> None:
+    def test_legacy_seed_does_not_take_over_a_typed_cookie(self, state: str) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1262,7 +1261,7 @@ class TestResourcesSessions:
         }
         assert manager.python_sessions == {}
 
-    def test_agent_run_seed_keeps_working(self) -> None:
+    def test_legacy_seed_keeps_working(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)
         client = TestClient(app)
