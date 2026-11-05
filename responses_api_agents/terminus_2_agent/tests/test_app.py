@@ -15,14 +15,12 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.terminus_2_agent.app import (
-    LocalEnvironment,
-    LocalTmuxSession,
-    StandaloneTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _extract_instruction,
 )
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
+from responses_api_agents.terminus_2_agent.terminus import LocalEnvironment, LocalTmuxSession, StandaloneTerminus2
 
 
 def _config(**kwargs) -> Terminus2AgentConfig:
@@ -93,7 +91,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "darwin"):
+        with patch("responses_api_agents.terminus_2_agent.terminus.sys.platform", "darwin"):
             command = session._tmux_start_session
         assert "script -qc" not in command
         assert "tmux new-session" in command
@@ -106,7 +104,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "linux"):
+        with patch("responses_api_agents.terminus_2_agent.terminus.sys.platform", "linux"):
             command = session._tmux_start_session
         assert "script -qc" in command
 

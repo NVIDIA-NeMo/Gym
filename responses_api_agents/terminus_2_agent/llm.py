@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# The sandbox runner imports this module with only Harbor installed, so it imports nemo_gym lazily.
 import re
 from typing import Any, cast
 
@@ -31,8 +32,6 @@ from tenacity import (
     wait_exponential,
 )
 
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-
 
 _RoutedExperts = list[list[list[int]]] | str
 _RolloutDetailsKey = tuple[tuple[int, ...], tuple[int, ...], tuple[float, ...] | None]
@@ -50,6 +49,29 @@ _THINK_CLOSE = "</think>"
 _THINK_PATTERN = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
 
+def chat_completion_params(
+    responses_create_params: dict[str, Any], *, collect_rollout_details: bool = False
+) -> dict[str, Any]:
+    """The Chat Completions fields, other than messages, that Gym's vLLM converter derives from Responses fields."""
+    if not responses_create_params:
+        return {}
+
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.models import VLLMConverter
+
+    params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
+    params_for_conversion["input"] = []
+    responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
+
+    converter = VLLMConverter(
+        return_token_id_information=collect_rollout_details,
+    )
+    chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(exclude_unset=True)
+
+    chat_params.pop("messages", None)
+    return chat_params
+
+
 class NemoGymLLM(BaseLLM):
     """LLM backend that calls NeMo Gym model servers via chat completions."""
 
@@ -61,14 +83,22 @@ class NemoGymLLM(BaseLLM):
         model_info: dict[str, Any] | None = None,
         responses_create_params: dict[str, Any] | None = None,
         timeout_sec: float = 600.0,
+        *,
+        chat_params: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
         **kwargs: Any,
     ) -> None:
+        """``chat_params`` replaces the conversion of ``responses_create_params`` where nemo_gym is not installed.
+
+        ``headers`` go on every model request, for example an ``x-session-id`` that model-call capture joins on.
+        """
         super().__init__(**kwargs)
         self._model_name = model_name
         self._api_base = api_base.rstrip("/")
         self._collect_rollout_details = collect_rollout_details
         self._model_info = model_info or {}
         self._timeout_sec = timeout_sec
+        self._headers = dict(headers or {})
 
         # Reuse the session cookie so every turn reaches the same vLLM engine and
         # retains prefix-cache locality.
@@ -84,7 +114,16 @@ class NemoGymLLM(BaseLLM):
 
         self.context_length_exceeded = False
         self.last_response_id: str | None = None
-        self._extra_chat_params = self._build_extra_chat_params(responses_create_params or {})
+        # Every answered call, in order; a call that returned no usage is counted, not estimated.
+        self.response_ids: list[str] = []
+        self.calls_without_usage = 0
+        self._extra_chat_params = (
+            dict(chat_params)
+            if chat_params is not None
+            else chat_completion_params(
+                responses_create_params or {}, collect_rollout_details=self._collect_rollout_details
+            )
+        )
 
     @retry(
         stop=stop_after_attempt(3),
@@ -138,6 +177,9 @@ class NemoGymLLM(BaseLLM):
         response_id = response_dict.get("id")
         if isinstance(response_id, str) and response_id:
             self.last_response_id = response_id
+            self.response_ids.append(response_id)
+        if not isinstance(response_dict.get("usage"), dict):
+            self.calls_without_usage += 1
 
         choices = response_dict.get("choices", [])
         choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -245,7 +287,7 @@ class NemoGymLLM(BaseLLM):
         endpoint = self._chat_completions_endpoint()
         timeout = timeout_sec if timeout_sec is not None else self._timeout_sec
         if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=timeout)
+            self._http_client = httpx.AsyncClient(timeout=timeout, headers=self._headers)
         response = await self._http_client.post(endpoint, json=payload, timeout=timeout)
 
         if response.status_code >= 400:
@@ -285,26 +327,6 @@ class NemoGymLLM(BaseLLM):
             self._normalize_token_ids(prompt_token_ids),
             self._normalize_token_ids(completion_token_ids),
         )
-
-    def _build_extra_chat_params(self, responses_create_params: dict[str, Any]) -> dict[str, Any]:
-        if not responses_create_params:
-            return {}
-
-        from nemo_gym.models import VLLMConverter
-
-        params_for_conversion = {key: value for key, value in responses_create_params.items() if key != "input"}
-        params_for_conversion["input"] = []
-        responses_params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_for_conversion)
-
-        converter = VLLMConverter(
-            return_token_id_information=self._collect_rollout_details,
-        )
-        chat_params = converter.responses_to_chat_completion_create_params(responses_params).model_dump(
-            exclude_unset=True
-        )
-
-        chat_params.pop("messages", None)
-        return chat_params
 
     def _extract_logprobs(self, response: dict[str, Any]) -> list[float] | None:
         choices = response.get("choices", [])
