@@ -7,7 +7,6 @@ import asyncio
 import json
 import logging
 import tempfile
-from collections import defaultdict
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -36,6 +35,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
@@ -98,12 +99,14 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
     config: SWEAtlasQAResourcesServerConfig
     _sessions: dict[str, tuple[str, SandboxHandle]] = PrivateAttr(default_factory=dict)
-    _closed_sessions: set[str] = PrivateAttr(default_factory=set)
-    _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=lambda: defaultdict(asyncio.Lock))
+    # A close or a verify fences the session, so a late seed cannot start a second sandbox for it.
+    _fences: ResourcesSessionFences[None] = PrivateAttr()
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
     _sandboxes: dict[str, SandboxHandle] = PrivateAttr(default_factory=dict)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         validate_source(self.config.tasks_dir.parent.parent)
         global_config = self.server_client.global_config_dict
         self._provider = create_provider(resolve_provider_config(self.config.sandbox_provider, global_config))
@@ -153,8 +156,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
     async def seed_session(self, request: Request, body: SWEAtlasQARequest) -> SWEAtlasQASeedSessionResponse:
         task = load_task(self.config.tasks_dir, body.task_id)
         session_id = request.session[SESSION_ID_KEY]
-        async with self._session_locks[session_id]:
-            if session_id in self._closed_sessions:
+        async with self._locks.locked(session_id):
+            if session_id in self._fences:
                 raise ValueError("This SWE Atlas Q&A session has already closed")
             if session_id in self._sessions:
                 task_id, handle = self._sessions[session_id]
@@ -213,7 +216,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
         cookie_id = request.session.get(SESSION_ID_KEY)
         if cookie_id != session_id and cookie_id in self._sessions:
             raise ValueError("The session cookie conflicts with resources_session_id")
-        async with self._session_locks[session_id]:
+        async with self._locks.locked(session_id):
             if session_id in self._sessions:
                 handle = self._sessions[session_id][1]
                 try:
@@ -221,8 +224,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                 finally:
                     if handle.sandbox_id not in self._sandboxes:
                         del self._sessions[session_id]
-                        self._closed_sessions.add(session_id)
-            self._closed_sessions.add(session_id)
+                        self._fences.fence(session_id, None)
+            self._fences.fence(session_id, None)
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 
     async def _grade(self, task_id: str, answer_path: Path, directory: Path) -> dict[str, Any]:
@@ -296,9 +299,9 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: SWEAtlasQAVerifyRequest) -> SWEAtlasQAVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        async with self._session_locks[session_id]:
-            session = None if session_id in self._closed_sessions else self._sessions.pop(session_id, None)
-            self._closed_sessions.add(session_id)
+        async with self._locks.locked(session_id):
+            session = None if session_id in self._fences else self._sessions.pop(session_id, None)
+            self._fences.fence(session_id, None)
         result: dict[str, Any] = {"reward": 0.0, "evaluation_completed": True}
         if session is None:
             result.update(evaluation_completed=False, **lost_session_verification("Task sandbox session is missing"))

@@ -411,6 +411,23 @@ async def test_explicit_close_is_idempotent_and_blocks_late_seed(server, body, s
     assert not server._sessions and not server._sandboxes
 
 
+async def test_a_fence_expires_after_the_close_retry_window_and_locks_are_released(server, body, monkeypatch) -> None:
+    clock = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    for session_id in ("first", "second"):
+        await server.seed_session(_request(session_id), body)
+        close = ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id={"rollout_id": "test"})
+        await server.close_resources_session(_request(session_id), close)
+    with pytest.raises(ValueError, match="closed"):
+        await server.seed_session(_request("first"), body)
+
+    clock[0] += server.config.session_close_retry_window_seconds
+    # Once the window passes, the ID is new again and the fences are gone rather than kept forever.
+    await server.seed_session(_request("first"), body)
+    assert "first" in server._sessions and len(server._fences) == 0
+    assert not server._locks._locks
+
+
 async def test_close_rejects_conflicting_active_cookie(server, body) -> None:
     await asyncio.gather(*(server.seed_session(_request(s), body) for s in ("session", "other")))
     close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id={"rollout_id": "test"})
@@ -501,7 +518,7 @@ async def test_cancellation_during_close_waits_and_preserves_cleanup_state(serve
         assert server._sandboxes == {handle.sandbox_id: handle}
     else:
         assert not server._sessions and not server._sandboxes
-        assert "session" in server._closed_sessions
+        assert "session" in server._fences
         with pytest.raises(ValueError, match="closed"):
             await server.seed_session(_request(), body)
 
