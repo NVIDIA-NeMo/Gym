@@ -48,7 +48,13 @@ HLE_PAIRING = {
     HLE_ENVIRONMENT: {"environment_servers": {"single_agent_turn_legacy": {"resources_tool_transports": []}}}
 }
 IMAGE = "registry.example.invalid/sandbox:1"
-RUNTIME_DIR = "/opt/harness-runtime"
+# Values for the harness settings a restricted profile requires (`???`): a restricted sandbox cannot download the
+# harness, so the image carries its runtime or binary.
+REQUIRED_SETTING_VALUES = {
+    "sandbox_runtime_dir": "/opt/harness-runtime",
+    "sandbox_executable_path": "/opt/harness/bin/harness",
+    "sandbox_executable_sha256": "0" * 64,
+}
 
 # Adapter directory name -> (agent class, its config class).
 HARNESSES = {
@@ -69,8 +75,11 @@ def profile_settings(agent: str) -> dict[str, Any]:
 
 # Read from each profile, so a harness that restricts its profile changes only its own files.
 MODEL_ONLY_PROFILES = {agent for agent in HARNESSES if profile_settings(agent).get("network_access") == "model_only"}
-# A restricted sandbox cannot download these harnesses, so their profiles require a runtime in the image.
-RUNTIME_DIR_PROFILES = {agent for agent in HARNESSES if profile_settings(agent).get("sandbox_runtime_dir") == "???"}
+# The harness settings each profile requires the caller to supply.
+REQUIRED_SETTINGS = {
+    agent: sorted(key for key in REQUIRED_SETTING_VALUES if profile_settings(agent).get(key) == "???")
+    for agent in HARNESSES
+}
 
 
 def compose_profile_on_hle(
@@ -79,7 +88,7 @@ def compose_profile_on_hle(
     *,
     pairing: bool = True,
     image: bool = True,
-    runtime_dir: bool = True,
+    required: bool = True,
     cli_args: tuple = (),
 ) -> DictConfig:
     """Compose the agent's benchmark profile onto HLE, with the README's override unless `pairing` is False."""
@@ -89,8 +98,12 @@ def compose_profile_on_hle(
     # Set under the composed agent's name, as the missing-value error for the profile's `image: ???` suggests.
     if image:
         cli_args = (f"++{composed}.responses_api_agents.{agent}.sandbox_config.image={IMAGE}", *cli_args)
-    if runtime_dir and agent in RUNTIME_DIR_PROFILES:
-        cli_args = (f"++{composed}.responses_api_agents.{agent}.sandbox_runtime_dir={RUNTIME_DIR}", *cli_args)
+    if required:
+        settings = f"++{composed}.responses_api_agents.{agent}"
+        cli_args = (
+            *(f"{settings}.{key}={REQUIRED_SETTING_VALUES[key]}" for key in REQUIRED_SETTINGS[agent]),
+            *cli_args,
+        )
     monkeypatch.setattr("sys.argv", ["gym", *cli_args])
     return GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
