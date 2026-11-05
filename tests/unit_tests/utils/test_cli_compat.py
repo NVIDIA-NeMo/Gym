@@ -56,7 +56,7 @@ MOVED_SYMBOLS = [
     ("nemo_gym.rollout_collection", "collect_rollouts", "nemo_gym.cli.eval", "collect_rollouts"),
     ("nemo_gym.rollout_collection", "aggregate_rollouts", "nemo_gym.cli.eval", "aggregate_rollouts"),
     ("nemo_gym.train_data_utils", "prepare_data", "nemo_gym.cli.dataset", "prepare_data"),
-    ("nemo_gym.cli", "RunHelper", "nemo_gym.cli.env", "RunHelper"),
+    ("nemo_gym.cli", "RunHelper", "nemo_gym.orchestration.server_supervisor", "RunHelper"),
     ("nemo_gym.cli", "RunConfig", "nemo_gym.cli.env", "RunConfig"),
     ("nemo_gym.cli", "TestConfig", "nemo_gym.cli.env", "TestConfig"),
     ("nemo_gym.cli", "TestAllConfig", "nemo_gym.cli.env", "TestAllConfig"),
@@ -73,8 +73,6 @@ MOVED_SYMBOLS = [
     ("nemo_gym.cli", "VersionConfig", "nemo_gym.cli.general", "VersionConfig"),
     ("nemo_gym.cli", "version", "nemo_gym.cli.general", "version"),
     ("nemo_gym.cli", "GlobalConfigDictParserConfig", "nemo_gym.config.global_config", "GlobalConfigDictParserConfig"),
-    ("nemo_gym.cli_setup_command", "run_command", "nemo_gym.cli.setup_command", "run_command"),
-    ("nemo_gym.cli_setup_command", "setup_env_command", "nemo_gym.cli.setup_command", "setup_env_command"),
 ]
 
 

@@ -25,4 +25,11 @@ RUN_EXPORTERS: dict[str, str] = {
     "mlflow": "nemo_gym.artifacts.exporters.mlflow:MLflowExporter",
     "wandb": "nemo_gym.artifacts.exporters.wandb:WandbExporter",
 }
+# Exporter name -> "module:class" of the model holding its settings, importable without the exporter's SDK.
+RUN_EXPORTER_CONFIGS: dict[str, str] = {
+    "atif": "nemo_gym.trajectory.atif_export:ExportAtifConfig",
+    "evalrdl": "nemo_gym.artifacts.exporters.evalrdl:EvalRDLExportConfig",
+    "mlflow": "nemo_gym.artifacts.exporters.mlflow_config:MLflowExportConfig",
+    "wandb": "nemo_gym.artifacts.exporters.wandb_config:WandbExportConfig",
+}
 DEFAULT_RUN_EXPORTER = "atif"

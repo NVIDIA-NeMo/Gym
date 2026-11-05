@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from pydantic import TypeAdapter
 
 from benchmarks.automationbench import prepare
@@ -75,3 +77,13 @@ def test_example_rows_carry_task_ids_and_are_clean_under_the_verifiers_agent_sch
 
     assert [row["task_id"] for row in rows] == [f"{row['info']['task_name']}/{row['example_id']}" for row in rows]
     assert _validate(rows).clean
+
+
+def test_missing_dependency_guidance_uses_isolated_project(monkeypatch):
+    monkeypatch.setitem(sys.modules, "verifiers", None)
+    command = "uv run --locked --project benchmarks/automationbench python benchmarks/automationbench/prepare.py"
+    with pytest.raises(SystemExit, match="Could not import automationbench_env") as error:
+        prepare.prepare()
+    assert command in str(error.value)
+    readme = Path(prepare.__file__).with_name("README.md").read_text()
+    assert command in readme

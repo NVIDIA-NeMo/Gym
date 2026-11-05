@@ -67,6 +67,37 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.cli_setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.benchmarks": MovedPath(new="nemo_gym.environment.benchmarks", since="0.8.0"),
+    "nemo_gym.deliverables": MovedPath(new="nemo_gym.environment.deliverables", since="0.8.0"),
+    "nemo_gym.registry": MovedPath(new="nemo_gym.environment.registry", since="0.8.0"),
+    "nemo_gym.discovery": MovedPath(new="nemo_gym.environment.discovery", since="0.8.0"),
+    "nemo_gym.resources_server_registry": MovedPath(
+        new="nemo_gym.environment.resources_server_registry", since="0.8.0"
+    ),
+    "nemo_gym.agent_registry": MovedPath(new="nemo_gym.environment.agent_registry", since="0.8.0"),
+    "nemo_gym.model_registry": MovedPath(new="nemo_gym.environment.model_registry", since="0.8.0"),
+    "nemo_gym.rollout_reverification": MovedPath(new="nemo_gym.eval.rollout_reverification", since="0.8.0"),
+    "nemo_gym.eval_plan": MovedPath(new="nemo_gym.eval.eval_plan", since="0.8.0"),
+    "nemo_gym.comparison": MovedPath(new="nemo_gym.eval.comparison", since="0.8.0"),
+    "nemo_gym.rollout_compare": MovedPath(new="nemo_gym.eval.rollout_compare", since="0.8.0"),
+    "nemo_gym.h2_ping_sidecar": MovedPath(new="nemo_gym.orchestration.h2_ping_sidecar", since="0.8.0"),
+    "nemo_gym.cli.setup_command": MovedPath(new="nemo_gym.orchestration.server_venv", since="0.8.0"),
+    "nemo_gym.testing": MovedPath(new="nemo_gym.server_runtime.testing", since="0.8.0"),
+    "nemo_gym.testing.agent_session_conformance": MovedPath(
+        new="nemo_gym.agents.testing.agent_session_conformance", since="0.8.0"
+    ),
+    "nemo_gym.observability": MovedPath(new="nemo_gym.rollouts", since="0.8.0"),
+    "nemo_gym.rollout_collection": MovedPath(new="nemo_gym.rollouts.rollout_collection", since="0.8.0"),
+    "nemo_gym.batch_status": MovedPath(new="nemo_gym.rollouts.batch_status", since="0.8.0"),
+    "nemo_gym.rollout_health": MovedPath(new="nemo_gym.rollouts.rollout_health", since="0.8.0"),
+    "nemo_gym.health": MovedPath(new="nemo_gym.rollouts.health", since="0.8.0"),
+    "nemo_gym.rollout_outcomes": MovedPath(new="nemo_gym.rollouts.rollout_outcomes", since="0.8.0"),
+    "nemo_gym.omitted_rollouts": MovedPath(new="nemo_gym.rollouts.omitted_rollouts", since="0.8.0"),
+    "nemo_gym.rollout_records": MovedPath(new="nemo_gym.rollouts.rollout_records", since="0.8.0"),
+    "nemo_gym.rollout_recovery": MovedPath(new="nemo_gym.rollouts.rollout_recovery", since="0.8.0"),
+    "nemo_gym.rollout_store": MovedPath(new="nemo_gym.rollouts.rollout_store", since="0.8.0"),
+    "nemo_gym.harness_capabilities": MovedPath(new="nemo_gym.rollouts.harness_capabilities", since="0.8.0"),
     "nemo_gym.tasks.harbor.cli": MovedPath(new="nemo_gym.data.tasks.harbor.prepare", since="0.8.0"),
     "nemo_gym.prompt": MovedPath(new="nemo_gym.data.prompt", since="0.8.0"),
     "nemo_gym.vision_input": MovedPath(new="nemo_gym.data.vision_input", since="0.8.0"),
@@ -108,7 +139,7 @@ MOVED_MODULES: dict[str, MovedPath] = {
     ),
     "nemo_gym.mcp_auto_exposure": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure", since="0.8.0"),
     "nemo_gym.server_status": MovedPath(new="nemo_gym.server_runtime.server_status", since="0.8.0"),
-    "nemo_gym.episode_types": MovedPath(new="nemo_gym.server_runtime.episode_types", since="0.8.0"),
+    "nemo_gym.episode_types": MovedPath(new="nemo_gym.core.episode_types", since="0.8.0"),
     "nemo_gym.single_agent_turn_types": MovedPath(
         new="nemo_gym.server_runtime.single_agent_turn_types", since="0.8.0"
     ),
@@ -196,7 +227,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         **_names(
-            "nemo_gym.core.episode",
+            "nemo_gym.core.episode_context",
             "0.8.0",
             """
             current_rollout_id current_verifier_invocation_id maybe_rollout_id_from_run_body rollout_context
@@ -445,7 +476,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     },
     "nemo_gym.rollout_correlation": {
         **_names(
-            "nemo_gym.core.episode",
+            "nemo_gym.core.episode_context",
             "0.8.0",
             """
             VERIFIER_INVOCATION_HEADER _ROLLOUT_ID _VERIFIER_INVOCATION_ID current_episode_id
@@ -462,24 +493,48 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         # rollout_correlation imported these and they stay importable through it.
-        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId"),
+        **_names("nemo_gym.core.episode_types", "0.8.0", "EpisodeId"),
         # rollout_correlation imported these and they stay importable through it.
         **_names("pydantic", "0.8.0", "BaseModel"),
         # Moved, and still imported by rollout_correlation for its own use.
-        **_names("nemo_gym.core.episode", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
+        **_names("nemo_gym.core.episode_context", "0.8.0", "ROLLOUT_ID_PATTERN rollout_context"),
     },
     "nemo_gym.episode_types": {
-        **_names("nemo_gym.core.episode", "0.8.0", "_CAPTURE_KEY_ATTEMPT"),
+        **_names("nemo_gym.core.failure_records", "0.8.0", "FailureBoundary FailureEvent SdkErrorDetails"),
         # Moved, and still imported by episode_types for its own use.
-        **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
+        **_names("nemo_gym.core.failure_records", "0.8.0", "EpisodeFailure FailureReport"),
+        # episode_types imported these and they stay importable through it.
+        **_names("nemo_gym.core.failure_kinds", "0.8.0", "FailureStage validate_failure_kind"),
     },
     "nemo_gym.rollout_collection": {
-        **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS"),
+        **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS _strip_capture_payloads"),
         # Moved, and still imported by rollout_collection for its own use.
         **_names(
             "nemo_gym.artifacts.rollout_rows",
             "0.8.0",
-            "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export _strip_capture_payloads",
+            "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export",
+        ),
+        # Split out of rollout_collection.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "_build_ng_perf"),
+        **_names(
+            "nemo_gym.rollouts.trajectory_builder",
+            "0.8.0",
+            """
+            _build_trajectory_record _nonnegative_int _trajectory_identity _turn_content _turns_from_model_calls
+            """,
+        ),
+        # Moved, and still imported by rollout_collection for its own use.
+        **_names("nemo_gym.rollouts.rollout_perf", "0.8.0", "DispatchLatencyTracker NG_PERF_KEY _attach_ng_perf"),
+        **_names("nemo_gym.rollouts.trajectory_builder", "0.8.0", "_attach_trajectory_record _has_observation_gap"),
+        # rollout_collection imported these for code that moved out of it.
+        **_names(
+            "nemo_gym.trajectory.trajectory_record",
+            "0.8.0",
+            """
+            AgentInvocation AgentObservationBundle ModelCallRef ObservationGap ToolCallObservation
+            TrajectoryModelCall TrajectoryRecord TrajectoryTokenStats TrajectoryToolCall TrajectoryTurn
+            VerifierInvocation
+            """,
         ),
     },
     "nemo_gym.health.types": {
@@ -489,9 +544,29 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "QUALITY_SUMMARY_FILENAME QUALITY_SUMMARY_SOURCES_KEY ROLLOUT_VERDICTS_FILENAME",
         ),
     },
+    "nemo_gym.observability.model_calls": {
+        # Split out of observability.model_calls.
+        **_names(
+            "nemo_gym.trajectory.model_call_record",
+            "0.8.0",
+            "_as_arguments _cache_signal _prompt_size _token_count _tool_calls_and_reasoning _usage_detail_token extract_token_stats",
+        ),
+        # Moved, and still imported by observability.model_calls for its own use.
+        **_names(
+            "nemo_gym.trajectory.model_call_record",
+            "0.8.0",
+            "ModelCallRecord aggregate_model_call_records build_model_call_record",
+        ),
+        # observability.model_calls imported this for code that moved out of it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ModelServerRef"),
+    },
     "nemo_gym.batch_status": {
         # Moved, and still imported by batch_status for its own use.
         **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
+    },
+    "nemo_gym.exporters.base": {
+        # Imported by the exporter base before it masked a plain container copy instead.
+        **_names("nemo_gym.config.secret_utils", "0.8.0", "recursively_hide_secrets"),
     },
     "nemo_gym.base_responses_api_model": {
         # Split out of base_responses_api_model.
@@ -518,7 +593,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         ),
         # base_responses_api_model imported these for code that moved out of it.
         **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT"),
-        **_names("nemo_gym.core.episode", "0.8.0", "VERIFIER_INVOCATION_HEADER rollout_context"),
+        **_names("nemo_gym.core.episode_context", "0.8.0", "VERIFIER_INVOCATION_HEADER rollout_context"),
         **_names("nemo_gym.models._checkpoint", "0.8.0", "attach_capture_context ledger_removal_refusal"),
         **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
         **_names("pydantic", "0.8.0", "model_validator"),
@@ -590,6 +665,87 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.sandbox.compose_config", "0.8.0", "deployment_platform"),
         **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
         **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
+    },
+    "nemo_gym.cli.env": {
+        # Split out of env.
+        **_names(
+            "nemo_gym.orchestration.server_supervisor",
+            "0.8.0",
+            """
+            RAY_ENABLE_AUTO_CONNECT_ENV_VAR_NAME ServerSpinupTimeoutError _BASE_URL_KEY_SUFFIX _ConfiguredServer
+            _DEFAULT_MODEL_ENDPOINT_READINESS_TIMEOUT_SEC _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC _ENDPOINT_ANSWERING
+            _ENDPOINT_POLL_INTERVAL_SEC _ENDPOINT_PROBE_TIMEOUT_SEC _ENDPOINT_REFUSED _ENDPOINT_STARTING
+            _ENDPOINT_STARTING_STATUS_CODES _ENDPOINT_UNRESOLVABLE _FORCE_KILL_REAP_TIMEOUT_SEC
+            _GRACEFUL_SHUTDOWN_TIMEOUT_SEC _MODEL_SERVER_TYPE _SERVER_PROBE_TIMEOUT_SEC _collect_model_endpoints
+            _configured_servers _endpoint_probe_url _is_dns_failure _model_endpoint_timeout_seconds
+            _probe_endpoint _ray_server_names _server_group_exists _server_launch_command
+            _server_shutdown_timeout_seconds _server_spinup_timeout_seconds _signal_server_group _startup_outcome
+            _wait_for_model_endpoints
+            """,
+        ),
+        # Moved, and still imported by env for its own use.
+        **_names("nemo_gym.orchestration.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
+        # env imported these for code that moved out of it.
+        **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient ServerStatus"),
+        **_names(
+            "nemo_gym.config.global_config",
+            "0.8.0",
+            """
+            DRY_RUN_KEY_NAME HEAD_SERVER_KEY_NAME MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME
+            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
+            SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NAME SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.h2_ping_sidecar.launcher",
+            "0.8.0",
+            """
+            H2PingSidecarManager start_h2_ping_sidecar
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.server_supervisor",
+            "0.8.0",
+            """
+            ListConfig _resolve_under_cwd_or_install pprint
+            """,
+        ),
+        **_names(
+            "nemo_gym.server_runtime.ray_support",
+            "0.8.0",
+            """
+            entrypoint_ray_enabled initialize_ray ray_is_installed
+            """,
+        ),
+        **_names("nemo_gym.server_runtime.registry_server", "0.8.0", "HeadServer ServerInstanceDisplayConfig"),
+        **_names("nemo_gym.telemetry.config", "0.8.0", "MemoryProfilingConfig"),
+        **_names(
+            "nemo_gym.telemetry.memory",
+            "0.8.0",
+            """
+            MemoryProfiler ServerMemoryTarget process_tree_memory_supported
+            """,
+        ),
+        **_names("nemo_gym.telemetry.metrics", "0.8.0", "record_active_servers"),
+        **_names(
+            "nemo_gym.telemetry.setup",
+            "0.8.0",
+            """
+            configure_telemetry_env get_telemetry init_telemetry is_telemetry_metrics_enabled
+            memory_profiling_config_from_env shutdown_telemetry telemetry_config_from_global_config
+            """,
+        ),
+        **_names("nemo_gym.telemetry.startup", "0.8.0", "STARTUP_SETUP_DONE_NS_ENV SupervisorStartup"),
+    },
+    # The token_id_capture package imported this name without exporting it.
+    # Token capture's public API serves only the names it lists.
+    "nemo_gym.token_id_capture": {
+        **_names("nemo_gym.models.token_capture.fingerprint", "0.8.0", "canonicalize_tool_arguments"),
+    },
+    # The token_id_capture staging package re-exported the terminal resolver from token capture.
+    # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
+    "nemo_gym.token_id_capture.staging": {
+        **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
     },
 }
 

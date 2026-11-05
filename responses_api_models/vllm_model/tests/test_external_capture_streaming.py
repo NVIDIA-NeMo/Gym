@@ -13,27 +13,27 @@ from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
-from nemo_gym.models import (
+from nemo_gym.models import AnthropicConverter, chat_streaming, responses_streaming
+from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
+from nemo_gym.models.token_capture import (
     ENGINE_REFUSED_CALL_REASON,
     UNCOMMITTED_CALL_REASON,
-    WORKER_MISSING_COMMIT_COORDS_REASON,
-    AnthropicConverter,
-    CaptureAdmission,
     FileLineageStore,
+    VLLMCaptureAdapter,
+    current_capture_context,
+    resolve_terminal,
+)
+from nemo_gym.models.token_capture.staging import (
+    WORKER_MISSING_COMMIT_COORDS_REASON,
+    CaptureAdmission,
     RolloutManifest,
     RolloutReceipt,
     RolloutTokenCapture,
     StagedCallBaseSnapshot,
     StageResult,
-    VLLMCaptureAdapter,
-    chat_streaming,
-    current_capture_context,
-    resolve_terminal,
-    responses_streaming,
     select_terminal_call,
     verify_and_linearize,
 )
-from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import VLLMModelWithCompaction
 
