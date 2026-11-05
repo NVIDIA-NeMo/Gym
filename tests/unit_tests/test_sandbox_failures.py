@@ -235,36 +235,56 @@ async def test_idempotent_lifecycle_reads_recover_wrapped_timeouts(operation, ac
         assert event.foreign_error.exception_type.endswith("SandboxInternalException")
 
 
-@pytest.mark.parametrize("expire_outer_cap", [True, False])
+@pytest.mark.parametrize(
+    "expire_outer_cap", [True, False], ids=["execution-budget-expired", "diagnostic-budget-available"]
+)
 async def test_foreground_diagnostics_cannot_extend_the_execution_deadline(monkeypatch, expire_outer_cap):
     monkeypatch.setattr(module, "_require_opensandbox_sdk", lambda: (object, object, dict, object, object))
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    elapsed = 0.0
+    request_cancelled = asyncio.Event()
 
     async def run(*args, **kwargs):
+        nonlocal elapsed
         if expire_outer_cap:
+            elapsed += 61
             try:
-                await asyncio.sleep(60)
+                await asyncio.Event().wait()
             except asyncio.CancelledError:
                 # A wedged SDK ignores its request deadline; the outer cap still owns diagnosis.
-                await asyncio.sleep(60)
+                request_cancelled.set()
+                elapsed += 60
+                await asyncio.Event().wait()
         raise TimeoutError("provider read timed out")
 
+    async def get_info():
+        nonlocal elapsed
+        # One successful read uses the diagnostic budget, without real polling sleeps.
+        elapsed += 5
+        return SimpleNamespace(status=SimpleNamespace(state="Running", reason=None))
+
     commands = SimpleNamespace(run=AsyncMock(side_effect=run))
-    lifecycle_read = AsyncMock(return_value=SimpleNamespace(status=SimpleNamespace(state="Running", reason=None)))
+    lifecycle_read = AsyncMock(side_effect=get_info)
     provider = module.OpenSandboxProvider(
         operations={"background_exec": False, "command_timeout_headroom_s": 0, "exec_hard_cap_slack_s": 0},
         diagnostics={"timeout_s": 5, "request_timeout_s": 1, "poll_interval_s": 0.001},
     )
     handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(commands=commands, get_info=lifecycle_read))
-    with pytest.raises(NgFailureEvent) as caught:
-        async with asyncio.timeout(0.3):
-            await provider.exec(handle, "one command", timeout_s=0.01)
+    # Cross the SDK's 60s request deadline, then the 120s hard cap in separate
+    # event-loop turns. Scheduling load cannot reverse the cancellation order.
+    with monkeypatch.context() as clock, pytest.raises(NgFailureEvent) as caught:
+        clock.setattr(loop, "time", lambda: real_time() + elapsed)
+        await asyncio.wait_for(provider.exec(handle, "one command", timeout_s=60), 125)
     assert caught.value.failure_kind == PROVIDER_IO_TIMEOUT
     assert isinstance(caught.value.__cause__, TimeoutError)
     commands.run.assert_awaited_once()
     if expire_outer_cap:
+        assert request_cancelled.is_set()
         lifecycle_read.assert_not_awaited()
     else:
-        lifecycle_read.assert_awaited()
+        # With execution budget remaining, diagnosis runs within its own shorter budget.
+        lifecycle_read.assert_awaited_once()
 
 
 @pytest.mark.parametrize("background", [True, False])

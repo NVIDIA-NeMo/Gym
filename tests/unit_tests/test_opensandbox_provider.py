@@ -4919,20 +4919,53 @@ async def test_orphan_reap_retries_requests_and_retains_failures(monkeypatch, op
 
 
 async def test_orphan_reap_retries_share_original_deadline(monkeypatch):
-    from opensandbox.exceptions import SandboxApiException
+    from functools import partial
 
+    from opensandbox.exceptions import SandboxApiException
+    from tenacity import wait_fixed
+
+    loop = asyncio.get_running_loop()
+    real_time = loop.time
+    elapsed = 0.0
+    waits = []
+    backoff_cancelled = asyncio.Event()
+
+    async def sleep(delay):
+        nonlocal elapsed
+        waits.append(float(delay))
+        elapsed += float(delay)
+        if len(waits) == 2:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                backoff_cancelled.set()
+        await asyncio.sleep(0)
+
+    retrying, retry_if_exception, stop_after_attempt, _ = opensandbox_provider._require_tenacity()
+    # Replace the backoff factory with a fixed wait; keep real retry/cancellation behavior.
+    monkeypatch.setattr(
+        opensandbox_provider,
+        "_require_tenacity",
+        lambda: (
+            partial(retrying, sleep=sleep),
+            retry_if_exception,
+            stop_after_attempt,
+            lambda **_: wait_fixed(40),
+        ),
+    )
     service = FakeLifecycleService(sandboxes=[])
     service.list_sandboxes = AsyncMock(side_effect=SandboxApiException("busy", status_code=429))
     install_lifecycle(monkeypatch, service)
-    monkeypatch.setattr(opensandbox_provider, "ORPHAN_REAP_TIMEOUT_S", 0.03)
-    provider = opensandbox_provider.OpenSandboxProvider(
-        operations={"retries": 100, "retry_delay_s": 1, "retry_max_delay_s": 1},
-    )
-    started = asyncio.get_running_loop().time()
-    with RequestFailureLog.capture() as log:
-        assert await provider._reap_orphaned_create({"attempt": "owned"}, "attempt") == []
-    assert asyncio.get_running_loop().time() - started < 0.2
-    service.list_sandboxes.assert_awaited_once()
+    monkeypatch.setattr(opensandbox_provider, "ORPHAN_REAP_TIMEOUT_S", 60)
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"retries": 100})
+    # Advance through two backoffs: the second crosses the original cleanup
+    # deadline. Real asyncio cancellation must interrupt it before a third call.
+    with monkeypatch.context() as clock, RequestFailureLog.capture() as log:
+        clock.setattr(loop, "time", lambda: real_time() + elapsed)
+        assert await asyncio.wait_for(provider._reap_orphaned_create({"attempt": "owned"}, "attempt"), 90) == []
+    assert waits == [40, 40]
+    assert backoff_cancelled.is_set()
+    assert service.list_sandboxes.await_count == 2
     assert any(event.http_status == 429 for event in log.report.events.values())
 
 
