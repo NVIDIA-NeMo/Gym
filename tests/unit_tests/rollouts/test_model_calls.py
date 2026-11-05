@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import orjson
 import pytest
 from omegaconf import OmegaConf
@@ -311,3 +313,28 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+def test_clear_model_call_captures_for_rollouts_clears_pending_markers_in_one_listing(tmp_path, monkeypatch):
+    from nemo_gym.rollouts.model_calls import clear_model_call_captures_for_rollouts
+
+    store = CaptureStore(tmp_path)
+    store.mark_pending("0-0", "call-a")
+    store.mark_pending("0-0", "call-b")
+    store.mark_pending("0-0-retry1", "call-c")  # shares the `0-0` prefix; must survive
+    store.mark_pending("1-0", "call-d")
+
+    listings = []
+    real_scandir = os.scandir
+
+    def _counting_scandir(path):
+        listings.append(path)
+        return real_scandir(path)
+
+    monkeypatch.setattr(os, "scandir", _counting_scandir)
+    records = [{"_ng_task_index": 0, "_ng_rollout_index": 0}, {"_ng_task_index": 1, "_ng_rollout_index": 0}]
+    clear_model_call_captures_for_rollouts(records, [tmp_path])
+
+    assert len(listings) == 1
+    assert not store.has_pending("0-0") and not store.has_pending("1-0")
+    assert store.has_pending("0-0-retry1")
