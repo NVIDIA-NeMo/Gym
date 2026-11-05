@@ -26,7 +26,7 @@ from math_verify import grader
 from math_verify.errors import TimeoutException
 from math_verify.metric import math_metric
 from math_verify.parser import ExprExtractionConfig, LatexExtractionConfig
-from pydantic import BaseModel, PositiveFloat, PositiveInt
+from pydantic import BaseModel, Field, PositiveFloat, PositiveInt
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -70,6 +70,12 @@ class LibraryJudgeMathVerifyRequest(LibraryJudgeMathRunRequest, BaseVerifyReques
 class JudgeEvaluation(BaseModel):
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     response: NeMoGymResponse
+    # The verdict the reply gave, `[[A=B]]` or `[[A!=B]]`, or `judge_parsing_error` when it gave none. A reply without
+    # a verdict still scores as unequal, and the saved label lets recovery re-judge it instead of keeping that zero.
+    # Servers that parse their own verdict (physics_judge, math_with_autograder, ugphysics_judge) build this model
+    # without a label. Recovery reads a saved null label as a judge that gave no verdict, so an unset label is left
+    # out and their evaluations are saved as before the field existed.
+    verdict_label: Optional[str] = Field(default=None, exclude_if=lambda label: label is None)
 
 
 class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
@@ -401,6 +407,7 @@ Example output: "My final verdict is different [[A!=B]]"."""
 
     JUDGE_EQUAL_LABEL: ClassVar[str] = "[[A=B]]"
     JUDGE_NOT_EQUAL_LABEL: ClassVar[str] = "[[A!=B]]"
+    JUDGE_PARSING_ERROR_LABEL: ClassVar[str] = "judge_parsing_error"
 
     config: LibraryJudgeMathResourcesServerConfig
 
@@ -627,24 +634,28 @@ Example output: "My final verdict is different [[A!=B]]"."""
             json=responses_create_params,
             response_model=NeMoGymResponse,
         )
-        judge_evaluation = JudgeEvaluation(responses_create_params=responses_create_params, response=judge_response)
-
         # Currently, for all the cases in which the response from the LLM judge
         # does not conform to the expected format, the judge's evaluation is
         # treated as if the answers are not equal.  This may not be ideal, but it
         # is intended to minimize the number of failures for verify requests.
+        # The evaluation records that it found no verdict, so the zero is not mistaken for a grade.
+        verdict_label = self.JUDGE_PARSING_ERROR_LABEL
         last_output = judge_response.output[-1]
-        if last_output.type != "message":
-            return False, judge_evaluation
-
-        last_content = last_output.content[-1]
-        if last_content.type != "output_text":
-            return False, judge_evaluation
-
-        output_text = normalize_math_judge_verdict(last_content.text)
-        equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
-        not_equal_choice_position = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
-        return equal_choice_position > not_equal_choice_position, judge_evaluation
+        last_content = last_output.content[-1] if last_output.type == "message" else None
+        if last_content is not None and last_content.type == "output_text":
+            output_text = normalize_math_judge_verdict(last_content.text)
+            equal_choice_position = output_text.rfind(self.JUDGE_EQUAL_LABEL)
+            not_equal_choice_position = output_text.rfind(self.JUDGE_NOT_EQUAL_LABEL)
+            if equal_choice_position != not_equal_choice_position:  # both -1: the reply names neither
+                verdict_label = (
+                    self.JUDGE_EQUAL_LABEL
+                    if equal_choice_position > not_equal_choice_position
+                    else self.JUDGE_NOT_EQUAL_LABEL
+                )
+        judge_evaluation = JudgeEvaluation(
+            responses_create_params=responses_create_params, response=judge_response, verdict_label=verdict_label
+        )
+        return verdict_label == self.JUDGE_EQUAL_LABEL, judge_evaluation
 
     # ──────────────────────────────────────────────────────────
     # Aggregate metrics overrides
