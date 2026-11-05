@@ -25,11 +25,11 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.evidence import select_managed_evidence
+from nemo_gym.eval.recovery.grading import masked_without_artifact_kind
+from nemo_gym.eval.recovery.planner import (
     RERUN_MASKED_JOURNAL_NAME,
     decide_from_collected,
-    masked_without_artifact_kind,
-    select_managed_evidence,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
@@ -102,7 +102,7 @@ def test_every_other_exclusion_still_applies(row):
 
 
 def test_a_row_that_re_verification_can_grade_is_excluded_by_that_rule_alone():
-    from nemo_gym.orchestration.recovery import reverification_cause
+    from nemo_gym.eval.recovery.grading import reverification_cause
     from nemo_gym.rollouts.rollout_recovery import masked_kept_answer_kind
 
     patch = "diff --git a/x b/x\n"
@@ -141,7 +141,7 @@ def test_a_masked_row_without_artifact_keeps_an_operator_continuation_of_unknown
     # The masked-without-artifact note extends the decision's display reason. The unknown accounting is still the
     # cause of the stop, so an explicit operator budget continues the run: the masked row stays retained (masked,
     # not rerun) and the missing one resumes.
-    from nemo_gym.orchestration.recovery import OperatorBudget
+    from nemo_gym.eval.recovery.budgets import OperatorBudget
 
     output, _ = _run(tmp_path, [[_kept()], []])
     (tmp_path / ".gym_infra_retries").write_text("unreadable" + chr(10))
@@ -285,10 +285,10 @@ def _accounting(slurm_bin):
 
 
 def test_recover_with_the_flag_journals_one_line_and_queues_the_job(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
     from nemo_gym.orchestration.submit import inspect_recovery, recover
 
-    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    monkeypatch.setattr(slurm_chain.getpass, "getuser", lambda: "operator-a")
     job = _staged(tmp_path, [[_kept()]])
     _accounting(slurm_bin)
     assert inspect_recovery(*_handle(job)).decision.action.value == "stop"
@@ -422,8 +422,12 @@ def test_the_command_refuses_a_bad_combination_before_doing_anything(monkeypatch
 @pytest.mark.parametrize("inspect_only", [False, True])
 def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypatch, capsys, inspect_only):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
+    from nemo_gym.eval.recovery.decision import (
+        RecoveryAction,
+        RecoveryDecision,
+        RecoveryOutcome,
+    )
     from nemo_gym.orchestration import submit
-    from nemo_gym.orchestration.recovery import RecoveryAction, RecoveryDecision, RecoveryOutcome
 
     seen = {}
 

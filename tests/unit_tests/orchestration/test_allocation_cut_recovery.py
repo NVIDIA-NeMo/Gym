@@ -27,17 +27,19 @@ import pytest
 
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.eval.recovery.continuation import (
+    allocation_cut_from_accounting,
+    chain_accounting,
+)
+from nemo_gym.eval.recovery.evidence import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+    select_managed_evidence,
+)
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
-from nemo_gym.orchestration.recovery import (
-    COLLECT_SCRIPT,
-    CollectedEvidence,
-    allocation_cut_from_accounting,
-    chain_accounting,
-    decide_from_collected,
-    select_managed_evidence,
-)
 from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -105,7 +107,7 @@ def _digests(job):
 
 
 def test_the_in_job_admission_verifies_and_reads_the_store_once(tmp_path, monkeypatch, capsys):
-    from nemo_gym.orchestration import recovery
+    from nemo_gym.eval.recovery import continuation as recovery
 
     job = tmp_path / "job"
     _cut_run(job, scored=2, in_flight=2, not_started=2)
@@ -153,7 +155,7 @@ def test_a_scheduler_cut_is_not_applied_while_a_job_of_the_run_is_live(tmp_path)
 
 
 def test_a_live_job_is_reported_before_rows_nobody_owns(tmp_path):
-    from nemo_gym.orchestration.recovery import gate_task_summary
+    from nemo_gym.eval.recovery.gate import gate_task_summary
 
     _cut_run(tmp_path, masked=1)
     _, decision = _decide(tmp_path, allocation_cut=False, live_job=True)
@@ -214,7 +216,7 @@ def test_unknown_failures_a_resume_would_rerun_still_stop(tmp_path):
 
 
 def test_only_masked_results_left_stop_and_say_they_are_kept(tmp_path):
-    from nemo_gym.orchestration.recovery import gate_task_summary
+    from nemo_gym.eval.recovery.gate import gate_task_summary
 
     _cut_run(tmp_path, scored=1, in_flight=0, not_started=0, masked=2)
     _, decision = _decide(tmp_path, allocation_cut=True)

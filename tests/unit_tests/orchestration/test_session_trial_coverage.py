@@ -3,21 +3,23 @@
 """Strict consumer boundary controls; fixture metadata is not a new runtime acceptance claim."""
 
 import json
-from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.evidence import (
     CollectedEvidence,
     ManagedRecoveryFact,
-    decide_from_collected,
+)
+from nemo_gym.eval.recovery.gate import (
     trial_health,
     trial_verdict,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from tests.unit_tests.orchestration.test_tool_trial_coverage import recorded_run
 
 
 def session_fixture(case="healthy"):
-    value = json.loads((Path(__file__).parent / f"fixtures/cpu-grading-mcqa-{case}.json").read_text())
+    value = json.loads(recorded_run(f"cpu-grading-mcqa-{case}"))
     c = CollectedEvidence.model_validate(value)
     row = c.results[0]
     environment = c.quality["provenance"]["servers"][row["_ng_environment_server"]]
@@ -128,7 +130,7 @@ def test_session_metadata_is_reported_and_only_grading_or_failures_reject(mutati
     ],
 )
 def test_reader_checkpoint_fact_comes_from_bound_saved_config(tmp_path, config, expected):
-    from nemo_gym.orchestration.recovery import select_managed_evidence
+    from nemo_gym.eval.recovery.evidence import select_managed_evidence
     from tests.unit_tests.orchestration.test_managed_recovery_selection import collect, prepare_managed
 
     prepare_managed(tmp_path, "healthy")

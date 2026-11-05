@@ -1361,7 +1361,10 @@ def validate_settle_source_snapshot(source: Path, raw: str) -> None:
 
 def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
     """Whether a selected saved result is graded again from its saved answer (``reverification_cause``)."""
-    from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+    from nemo_gym.eval.recovery.grading import (
+        reverification_cause,
+        saved_row_evidence,
+    )
 
     return reverification_cause(saved_row_evidence(row)) is not None
 

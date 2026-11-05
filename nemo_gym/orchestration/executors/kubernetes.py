@@ -46,7 +46,7 @@ from nemo_gym.orchestration.jobs import (
 )
 
 
-# Kept in sync with the Slurm executor's benchmark-name check (`slurm.py:_VALID_BENCHMARK_NAME`):
+# Kept in sync with the Slurm executor's benchmark-name check (`slurm/scheduler.py:_VALID_BENCHMARK_NAME`):
 # the name becomes part of a k8s Job name (DNS-1123), so it's restricted further than Slurm needs.
 _VALID_BENCHMARK_NAME = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 

@@ -16,7 +16,7 @@
 
 import pytest
 
-from nemo_gym.orchestration.recovery import accounted_chain_walltime
+from nemo_gym.eval.recovery.continuation import accounted_chain_walltime
 from tests.unit_tests.orchestration.test_allocation_cut_recovery import _cut_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index

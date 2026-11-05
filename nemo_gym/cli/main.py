@@ -607,7 +607,7 @@ def _raise_keyboard_interrupt_on_sigterm() -> None:
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
-    from nemo_gym.orchestration.executors.slurm import RemoteReaderInterrupted
+    from nemo_gym.orchestration.executors.slurm.reader import RemoteReaderInterrupted
     from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
 
     _raise_keyboard_interrupt_on_sigterm()

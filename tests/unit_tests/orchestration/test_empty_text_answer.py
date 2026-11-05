@@ -25,16 +25,18 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
-    CollectedEvidence,
-    _empty_answer,
-    _model_failure,
-    decide_from_collected,
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import (
     failure_facts,
-    reverification_cause,
-    saved_row_evidence,
     trial_verdict,
 )
+from nemo_gym.eval.recovery.grading import (
+    _empty_answer,
+    _model_failure,
+    reverification_cause,
+    saved_row_evidence,
+)
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 
 

@@ -23,7 +23,11 @@ import yaml
 from nemo_gym.cli.main import build_parser
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import REPIN_JOURNAL_NAME, WALLTIME_JOURNAL_NAME, SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm.chain import (
+    REPIN_JOURNAL_NAME,
+    WALLTIME_JOURNAL_NAME,
+)
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
@@ -235,7 +239,7 @@ def test_a_limit_raise_from_a_launcher_of_another_revision_is_refused_before_any
     tmp_path, slurm_bin, launcher_at, change
 ):
     # The run is pinned to Gym OLD. This launcher is NEW: its job.sh templates may need modules OLD does not have.
-    from nemo_gym.orchestration.executors.slurm import IncompatibleRerenderError
+    from nemo_gym.orchestration.executors.slurm.chain import IncompatibleRerenderError
     from nemo_gym.orchestration.submit import recover
 
     launcher_at(NEW)

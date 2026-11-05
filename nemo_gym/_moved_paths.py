@@ -171,6 +171,11 @@ MOVED_MODULES: dict[str, MovedPath] = {
     "nemo_gym.install_lock": MovedPath(new="nemo_gym.utils.install_lock", since="0.8.0"),
     "nemo_gym.cli._compat": MovedPath(new="nemo_gym.utils.compat", since="0.8.0"),
     "nemo_gym.cli._venv_setup": MovedPath(new="nemo_gym.utils.venv_setup", since="0.8.0"),
+    "nemo_gym.orchestration.recovery": MovedPath(new="nemo_gym.eval.recovery.planner", since="0.8.0"),
+    "nemo_gym.orchestration.collect_evidence": MovedPath(new="nemo_gym.eval.recovery.evidence", since="0.8.0"),
+    "nemo_gym.orchestration.executors.judge_profile": MovedPath(
+        new="nemo_gym.orchestration.executors.slurm.judge_profile", since="0.8.0"
+    ),
 }
 
 
@@ -781,6 +786,252 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     # Staging's public API serves only staging's own modules, so token capture's public API serves the resolver.
     "nemo_gym.token_id_capture.staging": {
         **_names("nemo_gym.models.token_capture.terminal", "0.8.0", "TerminalAttribution resolve_terminal"),
+    },
+    "nemo_gym.orchestration.executors.slurm": {
+        # Split into the executors/slurm package by part; served by the package's __getattr__ with a warning.
+        **_names(
+            "nemo_gym.orchestration.executors.slurm.scheduler",
+            "0.8.0",
+            """
+            _JOB_ID_RE _MARKER _parse_sbatch_results _RESUBMIT_LOCK _sbatch_command _submission_env_exports
+            _submission_exports _VALID_BENCHMARK_NAME
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.slurm.executor",
+            "0.8.0",
+            """
+            _validate_benchmark_names _validate_mounts
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.api",
+            "0.8.0",
+            """
+            SAVED_CONFIG SlurmComputeConfig SubmitConfig VllmPDServiceConfig
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.base",
+            "0.8.0",
+            """
+            BaseExecutor
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.connection",
+            "0.8.0",
+            """
+            Connection get_connection
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.git_ref",
+            "0.8.0",
+            """
+            validate_gym_install_ref
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.otel",
+            "0.8.0",
+            """
+            COLLECTOR_CONFIG_NAME collector_config_path COLLECTOR_DIR otel_active render_collector_config
+            resolve_token validate_destination validate_gym_telemetry
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.resume_script",
+            "0.8.0",
+            """
+            RESUBMIT_ENV
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.executors.slurm_script",
+            "0.8.0",
+            """
+            build_sbatch_script
+            """,
+        ),
+        **_names(
+            "nemo_gym.orchestration.jobs",
+            "0.8.0",
+            """
+            BenchmarkJob installed_gym_commit new_gym_job_id RESOLVED_CONFIG_NAME SubmissionRecord utc_now
+            utc_timestamp
+            """,
+        ),
+    },
+    "nemo_gym.orchestration.recovery": {
+        # Split by the question each part answers when the module moved to nemo_gym.eval.recovery.planner;
+        # served by the planner's __getattr__ with a warning.
+        "INFRA_RETRIES_FILE": MovedPath(new="nemo_gym.eval.recovery.markers:RETRY_FILE_NAME", since="0.8.0"),
+        "ACCUMULATED_WALLTIME_FILE": MovedPath(
+            new="nemo_gym.eval.recovery.markers:ACCUMULATED_WALLTIME_NAME", since="0.8.0"
+        ),
+        "INFRA_RETRY_EXTENSION_FILE": MovedPath(
+            new="nemo_gym.eval.recovery.markers:RETRY_EXTENSION_NAME", since="0.8.0"
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.evidence",
+            "0.8.0",
+            """
+            COLLECT_SCRIPT EPISODE_DEADLINE_REASON JUDGE_JOB_ACK_JOURNAL_NAME JUDGE_JOB_JOURNAL_NAME
+            _managed_source_digest _managed_trial_metadata ManagedRecoveryFact OPERATOR_CONTINUATION_JOURNAL_NAME
+            OperatorEpoch READER_PLACEMENT_FIELDS ROLLOUT_INDEX select_managed_evidence STORE_SKIP_KEYS TASK_INDEX
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.decision",
+            "0.8.0",
+            """
+            ACKNOWLEDGE_JUDGE_JOBS_FLAGS ALLOCATION_ENDED_STATES COLLECTED_CAUSE COUNTS_AS_ZERO _events
+            EXTEND_ATTEMPTS_HINT FAILURE_CLASS FAILURE_EVENTS FAILURE_ID JUDGE_JOB_FAILURE_BOUND
+            _judge_job_unsettled _known_kind MAX_ATTEMPTS MAX_EXTEND_ATTEMPTS NO_INVENTORY
+            OPERATOR_CONTINUATION_NOTE RERUN_MASKED_FLAGS RERUN_MASKED_REASON RerunMaskedApproval
+            RESERVATION_WITHOUT_OUTCOME SCORED_UNPARSEABLE_REASON STORE_DOES_NOT_REPLAY TERMINAL
+            UNKNOWN_BUDGET_REASON UNKNOWN_WALLTIME_REASON
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.budgets",
+            "0.8.0",
+            """
+            retry_budget
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.policy",
+            "0.8.0",
+            """
+            _cause_chain _cause_kind configured_outcome_policy effective_outcome_policy _judge_state
+            _legacy_agent_outcome _policy_evidence _policy_replay_is_unsupported _replay_refusal _retry_kind
+            _saved_answer SAVED_ANSWER_KEY _sidecar_action
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.grading",
+            "0.8.0",
+            """
+            _bound_answer _collector_function _COLLECTOR_FUNCTIONS _empty_answer _environment_reward
+            grading_artifact GRADING_ARTIFACTS _grading_facts _grading_unrecorded _guarded_objective_score
+            _incomplete_answer _judge_evaluations _judge_record _judge_unparseable masked_without_artifact_kind
+            _metric_record _model_failure _native_scorer_score _node_set_f1 _repository_test_run
+            reverification_cause REVERIFY_JUDGE _REVERIFY_JUDGE_KINDS REVERIFY_UNGRADED REVERIFY_VERIFIER
+            REVERIFY_VERIFY_TRANSPORT _reward _rubric_verdict _saved_model_patch saved_row_evidence _scored_unmasked
+            _session_reward_file _substep_tests _symbolic_match _test_execution _transport_kind _unit_test_results
+            _unknown_grading_outcome _unparsed_judge_verdict _unparsed_verdict _verify_transport_chain
+            _verify_transport_failure
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.rows",
+            "0.8.0",
+            """
+            _EXTEND_RETRIES_SCOPE omission_summary _populations _unknown_label
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.trials",
+            "0.8.0",
+            """
+            _answer_cut_off _answer_fault _bound_artifact _bound_grading _clip_text _count _cut_judge_reply _cut_off
+            CUTOFF_REASONS _ended_on_failed_request _failed_request fault_class fault_report _fault_text
+            final_zero_trials _graded _grading_sandbox_failed GRADING_WITHOUT_VERDICT _health_view
+            infrastructure_timeouts _last_captured_call _length_refusal_kind LENGTH_REFUSAL_KINDS
+            _observed_incomplete_answer _observed_trial_operations _percent _policy_call
+            _predates_operation_observations _recorded_by_verifier _recorded_grade recovered_attempt_joins
+            _recovered_note _row_recovered_attempts _SANDBOX_FAILURES _scored_fault _scored_kind status_fault_kind
+            _teardown_failure_only trajectory_evidence _trajectory_kinds _trajectory_text trial_boundary
+            trial_counts trial_faults trial_population _unaccounted_failures UNVERIFIED_NOTE _verification_owner
+            _verifier_recorded _verifying_servers
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.gate",
+            "0.8.0",
+            """
+            agent_adaptations _bounded failure_facts GATE_FAILURE_LIMIT gate_summary_from_collected
+            gate_task_summary GateCriteria health_check_facts health_verdict judge_job_note _MAX_FACTS
+            metric_coverage mlflow_delivery mlflow_errors MLFLOW_NOT_REQUIRED_NOTE mlflow_notes
+            MLFLOW_STATUS_NOT_OBSERVED MLFLOW_STATUS_QUERY_RETRIES MLFLOW_STATUS_QUERY_TIMEOUT_S
+            mlflow_tracking_required output_budget_refits quality_inputs query_mlflow_status RESPONSE_FAILURE_CAUSES
+            response_health trial_failure_cause TRIAL_FAILURE_CAUSES _TRIAL_FAILURE_STATES trial_health
+            trial_verdict
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.continuation",
+            "0.8.0",
+            """
+            accounted_chain_walltime accounted_requeued_chain_walltime allocation_cut_from_accounting
+            chain_accounting continuation_admission FOLLOWUP_ACCOUNTING_FORMAT _FOLLOWUP_ENDED_STATES
+            reconcile_requeued_chain _requeue_continuation requeue_note stopped_followup _store_writer_ended
+            """,
+        ),
+        **_names(
+            "nemo_gym.eval.recovery.markers",
+            "0.8.0",
+            """
+            ACCOUNTED_WALLTIME_PREFIX CHAIN_ACCOUNTING_ENV CONTINUATION_REASON_PREFIX PROVISIONAL_MARKER_PREFIX
+            REQUEUE_RECONCILE_STATE REQUEUE_UNKNOWN_REASON
+            """,
+        ),
+        **_names(
+            "nemo_gym.agents.agent_outcome",
+            "0.8.0",
+            """
+            AGENT_OUTCOME_METADATA_KEY AgentOutcome choose_action OutcomeAction OutcomePolicyConfig
+            """,
+        ),
+        **_names(
+            "nemo_gym.artifacts.run_artifacts",
+            "0.8.0",
+            """
+            ACCEPTED_STAGE_OMISSION accepted_stage_omission
+            """,
+        ),
+        **_names(
+            "nemo_gym.config.config_types",
+            "0.8.0",
+            """
+            ConfigError
+            """,
+        ),
+        **_names(
+            "nemo_gym.config.secret_utils",
+            "0.8.0",
+            """
+            mask_url_passwords
+            """,
+        ),
+        **_names(
+            "nemo_gym.core.failure_kinds",
+            "0.8.0",
+            """
+            AGENT_TIMEOUT_INFRASTRUCTURE COLLECTION_DISPATCH_FAILED EMPTY_ANSWER EPISODE_FAILED HARBOR_FAILED
+            HARNESS_TERMINATION_UNCONFIRMED INFRASTRUCTURE_ERROR INVALID_OUTPUT_BUDGET INVALID_REQUEST_PARAMETER
+            is_namespaced is_registered is_server_status JUDGE_FAILED JUDGE_UNPARSEABLE MALFORMED_ANSWER
+            MODEL_CONTEXT_LIMIT MODEL_FAULT_KINDS MODEL_POLICY_RESPONSE_TIMEOUT MODEL_REQUEST_ERROR
+            MODEL_SERVER_ERROR MODEL_TRANSPORT_ERROR NON_POLICY_MODEL_REJECTION ROLLOUT_ALLOCATION_ENDED
+            SERVER_FAULT_KINDS SERVER_START_FAILED TRUNCATED_ANSWER VERIFIER_ERROR
+            """,
+        ),
+        **_names(
+            "nemo_gym.core.failure_records",
+            "0.8.0",
+            """
+            FailureBoundary
+            """,
+        ),
+        **_names(
+            "nemo_gym.core.failure_transport",
+            "0.8.0",
+            """
+            FailureReportRow
+            """,
+        ),
     },
 }
 

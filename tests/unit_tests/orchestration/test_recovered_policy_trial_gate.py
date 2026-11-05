@@ -23,13 +23,13 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
-    CollectedEvidence,
-    decide_from_collected,
-    final_zero_trials,
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import (
     gate_summary_from_collected,
     trial_health,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
+from nemo_gym.eval.recovery.trials import final_zero_trials
 
 
 FIXTURE = Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json"

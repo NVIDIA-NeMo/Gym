@@ -262,12 +262,12 @@ def _decision(job: Path, live_job: bool | None = False):
     import subprocess
     import sys
 
-    from nemo_gym.orchestration.recovery import (
+    from nemo_gym.eval.recovery.evidence import (
         COLLECT_SCRIPT,
         CollectedEvidence,
-        decide_from_collected,
         select_managed_evidence,
     )
+    from nemo_gym.eval.recovery.planner import decide_from_collected
 
     raw = subprocess.run([sys.executable, "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True)
     collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
@@ -282,7 +282,7 @@ def _state(output: Path) -> tuple[dict, list[str], dict]:
 
 
 async def test_a_pass_that_fails_after_admitting_leaves_the_judge_failure_for_reverify(tmp_path, monkeypatch):
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
 
     job, output, (identity,) = _job(tmp_path, judge_failures=1)
 
@@ -305,7 +305,7 @@ async def test_a_regrade_that_answered_is_settled_when_a_later_one_disconnects(t
 
     from aiohttp import ServerDisconnectedError
 
-    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.eval.recovery.decision import RecoveryAction
 
     job, output, (answered, lost) = _job(tmp_path, judge_failures=2)
 

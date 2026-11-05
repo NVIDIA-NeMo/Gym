@@ -158,7 +158,7 @@ def is_answered_agent_deadline(row: Mapping[str, Any]) -> bool:
 
 
 # The collector's minimal projection of a saved row's captured model calls (``COLLECT_SCRIPT`` in
-# ``nemo_gym.orchestration.recovery`` writes it in ``captured_model_calls``'s normalized shape).
+# ``nemo_gym.eval.recovery.planner`` writes it in ``captured_model_calls``'s normalized shape).
 COLLECTED_MODEL_CALLS_KEY = "_ng_collected_model_calls"
 # Faulted model calls own an agent's deadline when they took at least this share of its window.
 AGENT_TIMEOUT_FAULT_SHARE = 0.25

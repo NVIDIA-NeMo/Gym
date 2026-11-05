@@ -22,13 +22,16 @@ import pytest
 import yaml
 
 from nemo_gym.orchestration.api import SubmitConfig
-from nemo_gym.orchestration.executors import slurm as slurm_module
 from nemo_gym.orchestration.executors.connection import LocalConnection
-from nemo_gym.orchestration.executors.slurm import (
-    SlurmExecutor,
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
+from nemo_gym.orchestration.executors.slurm import scheduler as slurm_scheduler
+from nemo_gym.orchestration.executors.slurm.executor import _validate_mounts
+from nemo_gym.orchestration.executors.slurm.scheduler import (
     _parse_sbatch_results,
     _sbatch_command,
-    _validate_mounts,
 )
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, SubmissionRecord
 
@@ -143,8 +146,10 @@ class _FakeConnection(LocalConnection):
 
 
 def _install(monkeypatch, conn):
-    monkeypatch.setattr(slurm_module, "get_connection", lambda hostname: conn)
-    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda hostname: conn)
+    monkeypatch.setattr(slurm_executor, "_validate_mounts", lambda config, connection: None)
 
 
 def test_run_returns_a_record_naming_every_benchmark(tmp_path, monkeypatch):
@@ -245,7 +250,9 @@ def test_run_records_a_benchmark_the_scheduler_never_answered_for(tmp_path, monk
 
 def test_two_runs_in_the_same_second_get_different_run_dirs(tmp_path, monkeypatch):
     frozen = datetime(2026, 9, 9, 10, 2, 3, tzinfo=timezone.utc)
-    monkeypatch.setattr(slurm_module, "utc_now", lambda: frozen)
+    monkeypatch.setattr(slurm_chain, "utc_now", lambda: frozen)
+    monkeypatch.setattr(slurm_judge_job, "utc_now", lambda: frozen)
+    monkeypatch.setattr(slurm_executor, "utc_now", lambda: frozen)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
 
     run_dirs = []
@@ -286,7 +293,7 @@ def test_submitting_locally_runs_the_real_sbatch_command(tmp_path, monkeypatch):
     sbatch.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+    monkeypatch.setattr(slurm_executor, "_validate_mounts", lambda config, connection: None)
 
     record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
 
@@ -302,7 +309,7 @@ def test_submitting_locally_records_a_failing_sbatch(tmp_path, monkeypatch):
     sbatch.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+    monkeypatch.setattr(slurm_executor, "_validate_mounts", lambda config, connection: None)
 
     record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
 
@@ -321,7 +328,7 @@ def test_submitting_locally_does_not_let_a_warning_become_the_job_id(tmp_path, m
     sbatch.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+    monkeypatch.setattr(slurm_executor, "_validate_mounts", lambda config, connection: None)
 
     record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
 
@@ -344,7 +351,7 @@ def test_submitting_locally_keeps_a_multiline_error_on_one_marker_line(tmp_path,
     sbatch.chmod(0o755)
     monkeypatch.setenv("PATH", f"{fake_bin}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    monkeypatch.setattr(slurm_module, "_validate_mounts", lambda config, connection: None)
+    monkeypatch.setattr(slurm_executor, "_validate_mounts", lambda config, connection: None)
 
     record = SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
 
@@ -416,7 +423,9 @@ def test_a_missing_gym_install_ref_fails_before_anything_is_copied_or_queued(tmp
     def reject(config):
         raise ValueError("ref not found")
 
-    monkeypatch.setattr(slurm_module, "validate_gym_install_ref", reject)
+    monkeypatch.setattr(slurm_chain, "validate_gym_install_ref", reject)
+    monkeypatch.setattr(slurm_judge_job, "validate_gym_install_ref", reject)
+    monkeypatch.setattr(slurm_executor, "validate_gym_install_ref", reject)
 
     with pytest.raises(ValueError, match="ref not found"):
         SlurmExecutor().run(_submit_config(tmp_path, ["bench_a"]))
@@ -460,7 +469,7 @@ def test_runtime_variable_is_not_implicitly_forwarded(tmp_path, monkeypatch):
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0,1")
     config = _submit_config(tmp_path, ["bench_a"])
     config.driver.env = {"CUDA_VISIBLE_DEVICES": "runtime:CUDA_VISIBLE_DEVICES"}
-    assert slurm_module._submission_env_exports(config.compute["hsg"]) == []
+    assert slurm_scheduler._submission_env_exports(config.compute["hsg"]) == []
 
 
 def test_missing_forwarded_variable_fails_before_submission(tmp_path, monkeypatch):

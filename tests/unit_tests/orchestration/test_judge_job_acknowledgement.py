@@ -22,13 +22,13 @@ import json
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.decision import (
     ACKNOWLEDGE_JUDGE_JOBS_FLAGS,
-    JUDGE_JOB_ACK_JOURNAL_NAME,
     RecoveryAction,
     failed_judge_jobs_blocking,
     failed_judge_jobs_stop,
 )
+from nemo_gym.eval.recovery.evidence import JUDGE_JOB_ACK_JOURNAL_NAME
 from nemo_gym.orchestration.submit import inspect_recovery, recover
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle
 from tests.unit_tests.orchestration.test_eval_resubmit import (
@@ -76,9 +76,9 @@ def test_the_guard_stops_without_an_acknowledgement_and_names_the_way_on(tmp_pat
 
 
 def test_an_acknowledgement_lets_exactly_one_more_job_queue_and_is_journaled(tmp_path, judge_slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
 
-    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    monkeypatch.setattr(slurm_chain.getpass, "getuser", lambda: "operator-a")
     job_dir = _blocked_run(tmp_path, judge_slurm_bin)
 
     out = recover(
@@ -225,8 +225,11 @@ def test_the_command_refuses_a_bad_combination_before_doing_anything(monkeypatch
 @pytest.mark.parametrize("inspect_only", [False, True])
 def test_the_command_passes_the_stripped_reason_to_recovery_and_inspect(monkeypatch, capsys, inspect_only):
     from nemo_gym.cli.main import _eval_resubmit, build_parser
+    from nemo_gym.eval.recovery.decision import (
+        RecoveryDecision,
+        RecoveryOutcome,
+    )
     from nemo_gym.orchestration import submit
-    from nemo_gym.orchestration.recovery import RecoveryDecision, RecoveryOutcome
 
     seen = {}
 

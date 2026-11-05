@@ -10,12 +10,12 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
+from nemo_gym.eval.recovery.evidence import (
     COLLECT_SCRIPT,
     CollectedEvidence,
-    decide_from_collected,
     select_managed_evidence,
 )
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _provider_failures, _resumable_run, _sbatch_env
@@ -251,8 +251,10 @@ def test_superseded_journal_is_not_parsed_by_the_consumer(tmp_path):
 
 
 def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin, monkeypatch):
-    from nemo_gym.orchestration.executors import slurm
     from nemo_gym.orchestration.executors.connection import Connection, LocalConnection
+    from nemo_gym.orchestration.executors.slurm import chain as slurm_chain
+    from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import judge_job as slurm_judge_job
     from nemo_gym.orchestration.submit import recover
 
     job, _, _ = _resumable_run(tmp_path)
@@ -269,7 +271,9 @@ def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin
         def write_text(self, remote, content, *, private=False):
             raise AssertionError("no dispatch")
 
-    monkeypatch.setattr(slurm, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_chain, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_judge_job, "get_connection", lambda hostname: RemoteTransport())
+    monkeypatch.setattr(slurm_executor, "get_connection", lambda hostname: RemoteTransport())
     result = recover(*_handle(job))
     assert result.decision.action.value == "stop" and result.dispatched is None
     assert "authoritative Store reader" in result.decision.reason
@@ -309,7 +313,7 @@ def test_managed_selection_never_materializes_a_whole_rollout_file(tmp_path, mon
 def test_snapshot_hash_memory_is_bounded_on_large_sparse_file(tmp_path, reader):
     import tracemalloc
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "large.jsonl"
     size = 256 << 20
@@ -346,7 +350,7 @@ def collector_hash():
 def test_hashing_rejects_mid_read_file_mutation(tmp_path, monkeypatch, reader, mutation):
     import builtins
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20))
@@ -492,7 +496,7 @@ def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_pat
     import builtins
     import os
 
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20))
@@ -532,7 +536,7 @@ def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_pat
 
 @pytest.mark.parametrize("reader", ["managed", "collector"])
 def test_an_unchanged_file_gets_the_same_digest_from_both_readers(tmp_path, reader):
-    from nemo_gym.orchestration.recovery import _managed_source_digest
+    from nemo_gym.eval.recovery.evidence import _managed_source_digest
 
     path = tmp_path / "source.jsonl"
     path.write_bytes(b"a" * (2 << 20) + b"tail")

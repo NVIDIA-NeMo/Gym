@@ -8,8 +8,8 @@ saved without that record keeps the verdict it had: the trial gate reads it as b
 
 import pytest
 
+from tests.unit_tests.eval.recovery.test_verifier_recorded_trial_coverage import _gate
 from tests.unit_tests.orchestration.test_tool_trial_coverage import fixture
-from tests.unit_tests.orchestration.test_verifier_recorded_trial_coverage import _gate
 
 
 AGENT = "simple"

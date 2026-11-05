@@ -20,8 +20,9 @@ from types import SimpleNamespace
 import pytest
 
 from nemo_gym.cli.main import _eval_resubmit
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import gate_task_summary
 from nemo_gym.orchestration import submit
-from nemo_gym.orchestration.recovery import CollectedEvidence, gate_task_summary
 from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
 
 
@@ -74,7 +75,11 @@ def test_a_real_error_beside_unverified_health_is_failed():
 
 
 def test_an_unread_score_of_an_incomplete_run_names_the_run_not_the_score_options():
-    from nemo_gym.orchestration.recovery import IdentityState, RecoveryAction, RecoveryDecision
+    from nemo_gym.eval.recovery.decision import (
+        IdentityState,
+        RecoveryAction,
+        RecoveryDecision,
+    )
 
     # Both score options were passed; the run is half done, so there is no aggregate to read yet.
     decision = RecoveryDecision(

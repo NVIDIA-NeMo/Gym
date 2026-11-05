@@ -18,9 +18,10 @@ import shlex
 
 import pytest
 
-from nemo_gym.orchestration.executors import slurm
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection
-from nemo_gym.orchestration.recovery import CollectedEvidence
+from nemo_gym.orchestration.executors.slurm import executor as slurm_executor
+from nemo_gym.orchestration.executors.slurm import reader as slurm_reader
 from tests.unit_tests.orchestration.test_remote_managed_recovery import config
 
 
@@ -46,13 +47,14 @@ def _job(tmp_path, *, rollout_bytes: int = 0):
 
 def _install(monkeypatch, script: str) -> None:
     """Replace only the bootstrap: the outer transport runs as written, in a real local shell."""
-    monkeypatch.setattr(slurm, "render_driver_entrypoint", lambda **_: "bash -c " + shlex.quote(script))
+    monkeypatch.setattr(slurm_reader, "render_driver_entrypoint", lambda **_: "bash -c " + shlex.quote(script))
+    monkeypatch.setattr(slurm_executor, "render_driver_entrypoint", lambda **_: "bash -c " + shlex.quote(script))
 
 
 def test_a_reader_that_runs_out_of_memory_names_its_exit_code_and_stderr(tmp_path, monkeypatch):
     job = _job(tmp_path)
     _install(monkeypatch, "echo 'Traceback (most recent call last):' >&2; echo MemoryError >&2; exit 1")
-    result = slurm._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
     assert result.managed_selection is None
     assert result.managed_reader_error.startswith("remote Store reader unavailable: exited 1 after ")
     assert "stderr: Traceback (most recent call last): MemoryError" in result.managed_reader_error
@@ -62,7 +64,7 @@ def test_the_bound_scales_with_the_saved_rollout_bytes(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", raising=False)
     job = _job(tmp_path, rollout_bytes=5 * 2**30)
     _install(monkeypatch, "exit 3")
-    result = slurm._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
     # 900 s floor plus 100 s per GB of rollout files.
     assert "(the 1400 s bound for 5.0 GB of rollout files)" in result.managed_reader_error
 
@@ -71,7 +73,7 @@ def test_an_explicit_bound_overrides_the_size(tmp_path, monkeypatch):
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", "2400")
     job = _job(tmp_path, rollout_bytes=5 * 2**30)
     _install(monkeypatch, "exit 3")
-    result = slurm._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
     assert "(the 2400 s bound for 5.0 GB of rollout files)" in result.managed_reader_error
 
 
@@ -80,7 +82,7 @@ def test_a_reader_killed_before_its_bound_is_named_with_its_exit_code_and_not_re
     job = _job(tmp_path)
     marker = tmp_path / "attempts"
     _install(monkeypatch, f"echo x >> {shlex.quote(str(marker))}; echo 'reading rows' >&2; kill -9 $$")
-    result = slurm._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
     assert marker.read_text().count("x") == 1
     assert result.managed_reader_error.startswith(
         "remote Store reader unavailable: killed (SIGKILL; OOM or external kill) after "
@@ -104,7 +106,7 @@ def test_only_a_reached_deadline_is_a_timeout_and_every_cause_keeps_the_exit_cod
     rc, elapsed, cause, retry
 ):
     output = f"__GYM_READER_BOUND:2\n__GYM_READER_RC:{rc}\n__GYM_READER_ERR:last line\n"
-    assert slurm._reader_failure(output, elapsed) == (
+    assert slurm_reader._reader_failure(output, elapsed) == (
         f"remote Store reader unavailable: {cause}; stderr: last line",
         retry,
     )
@@ -112,11 +114,11 @@ def test_only_a_reached_deadline_is_a_timeout_and_every_cause_keeps_the_exit_cod
 
 def test_a_timeout_is_retried_once_with_twice_the_bound(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", raising=False)
-    monkeypatch.setattr(slurm, "_READER_FLOOR_S", 1)
+    monkeypatch.setattr(slurm_reader, "_READER_FLOOR_S", 1)
     job = _job(tmp_path)
     marker = tmp_path / "attempts"
     _install(monkeypatch, f"echo x >> {shlex.quote(str(marker))}; sleep 30")
-    result = slurm._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
     assert marker.read_text().count("x") == 2
     assert "timed out after" in result.managed_reader_error
     assert "(the 2 s bound for 0.0 GB of rollout files)" in result.managed_reader_error
@@ -125,7 +127,7 @@ def test_a_timeout_is_retried_once_with_twice_the_bound(tmp_path, monkeypatch):
 
 def test_a_reader_that_answers_on_the_retry_is_used(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", raising=False)
-    monkeypatch.setattr(slurm, "_READER_FLOOR_S", 1)
+    monkeypatch.setattr(slurm_reader, "_READER_FLOOR_S", 1)
     job = _job(tmp_path)
     collected = _collected(job)
     marker = tmp_path / "attempts"
@@ -135,7 +137,7 @@ def test_a_reader_that_answers_on_the_retry_is_used(tmp_path, monkeypatch):
         f"else touch {shlex.quote(str(marker))}; sleep 30; fi"
     )
     _install(monkeypatch, script)
-    result = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), collected, job, config())
     assert result.managed_reader_error is None
 
 
@@ -145,12 +147,12 @@ def test_a_field_the_pinned_reader_does_not_know_is_not_a_change_but_a_known_one
     collected = _collected(job).model_copy(update={"followup_claims": {"100": "101"}})
     older = "__GYM_MANAGED:" + collected.model_dump_json(exclude={"followup_claims"})
     _install(monkeypatch, f"cat <&3 >/dev/null; echo {shlex.quote(older)}")
-    kept = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    kept = slurm_reader._remote_managed_evidence(LocalConnection(), collected, job, config())
     assert (kept.managed_reader_error, kept.followup_claims) == (None, {"100": "101"})
 
     changed = "__GYM_MANAGED:" + collected.model_copy(update={"resubmit_offset": 5}).model_dump_json()
     _install(monkeypatch, f"cat <&3 >/dev/null; echo {shlex.quote(changed)}")
-    refused = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    refused = slurm_reader._remote_managed_evidence(LocalConnection(), collected, job, config())
     assert "remote Store reader changed collection evidence" in refused.managed_reader_error
 
 
@@ -178,12 +180,12 @@ class _Hop(Connection):
 
 @pytest.mark.parametrize("failures,answered", [(1, True), (2, False)])
 def test_a_failed_ssh_hop_is_retried_once_after_a_backoff(tmp_path, monkeypatch, failures, answered):
-    monkeypatch.setattr(slurm.time, "sleep", lambda _: None)
+    monkeypatch.setattr(slurm_reader.time, "sleep", lambda _: None)
     job = _job(tmp_path)
     collected = _collected(job)
     _install(monkeypatch, "cat <&3 >/dev/null; echo " + shlex.quote("__GYM_MANAGED:" + collected.model_dump_json()))
     hop = _Hop(failures)
-    result = slurm._remote_managed_evidence(hop, collected, job, config())
+    result = slurm_reader._remote_managed_evidence(hop, collected, job, config())
     assert hop.calls == 2
     if answered:
         assert result.managed_reader_error is None
@@ -198,5 +200,5 @@ def test_the_reader_reports_nothing_on_success(tmp_path, monkeypatch):
     job = _job(tmp_path)
     collected = _collected(job)
     _install(monkeypatch, "cat <&3 >/dev/null; echo " + shlex.quote("__GYM_MANAGED:" + collected.model_dump_json()))
-    result = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    result = slurm_reader._remote_managed_evidence(LocalConnection(), collected, job, config())
     assert result.managed_reader_error is None

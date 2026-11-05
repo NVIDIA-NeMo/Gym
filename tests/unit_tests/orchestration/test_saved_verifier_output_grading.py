@@ -30,12 +30,10 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.recovery import (
-    CollectedEvidence,
-    decide_from_collected,
-    grading_artifact,
-    trial_verdict,
-)
+from nemo_gym.eval.recovery.evidence import CollectedEvidence
+from nemo_gym.eval.recovery.gate import trial_verdict
+from nemo_gym.eval.recovery.grading import grading_artifact
+from nemo_gym.eval.recovery.planner import decide_from_collected
 from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
 
 

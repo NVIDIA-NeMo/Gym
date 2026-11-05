@@ -20,7 +20,7 @@ import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import RETRY_EXTENSION_MARKER, RETRY_EXTENSION_NAME
-from nemo_gym.orchestration.executors.slurm import RETRY_EXTENSION_JOURNAL_NAME
+from nemo_gym.orchestration.executors.slurm.chain import RETRY_EXTENSION_JOURNAL_NAME
 from tests.unit_tests.orchestration.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.orchestration.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm_bin

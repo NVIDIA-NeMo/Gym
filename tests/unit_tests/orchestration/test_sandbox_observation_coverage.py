@@ -26,8 +26,8 @@ import pytest
 from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxSpec
+from tests.unit_tests.eval.recovery.test_grading_artifacts import _observed, _ungraded
 from tests.unit_tests.orchestration.test_evaluation_health import _run
-from tests.unit_tests.orchestration.test_grading_artifacts import _observed, _ungraded
 
 
 def _sandbox(role: str, **changes) -> dict:
