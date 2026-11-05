@@ -401,7 +401,7 @@ async def test_close_during_seed_fences_the_seed_which_releases_its_own_sandbox(
         await asyncio.wait_for(seeding, 5)
     await asyncio.wait_for(closing, 5)
     assert fenced.value.status_code == 409
-    assert not world.server._episodes and "resources-1" in world.server._closed
+    assert not world.server._episodes and "resources-1" in world.server._fences
     assert len(world.backends.to("/close_session")) == 1
 
 

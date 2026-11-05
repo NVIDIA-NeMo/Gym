@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The task backend's typed resources session, with explicit ownership of verification and teardown.
+"""The task backend's episode session, with explicit ownership of verification and teardown.
 
 It does not execute the harness or grade IF. The episode retains a session before
 awaiting preparation, so even a partially prepared task is released.
@@ -21,7 +21,7 @@ from resources_servers.agentic_if.episode.runtime import BoundSandbox
 
 
 class SandboxTaskSession:
-    """SWE and TB2.1 own their sandboxes through Gym's typed resources session; the episode only borrows them."""
+    """SWE and Terminal-Bench 2.1 own their sandboxes through an episode session; the episode only borrows them."""
 
     def __init__(
         self,

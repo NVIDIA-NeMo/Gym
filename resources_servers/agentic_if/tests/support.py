@@ -270,7 +270,7 @@ class LocalTransport:
 
 
 def seeded(workdir="/app", *, session_id="attempt-a", sandbox_id="sandbox-a"):
-    """The typed seed reply of a task backend that owns the sandbox."""
+    """The episode seed reply of a task backend that owns the sandbox."""
     return ResourcesSeedSessionResponse(
         resources_session_id=session_id,
         sandbox_access=SandboxAccess(
