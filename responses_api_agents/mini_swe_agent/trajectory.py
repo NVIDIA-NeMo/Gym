@@ -174,9 +174,11 @@ def project(trajectory: dict | None, mcp_calls: list[dict]) -> Projection:
         elif message.get("role") in {"system", "user", "assistant"}:
             conversation.append({k: v for k, v in message.items() if k != "extra"})
         elif message.get("role") == "exit" and extra.get("exit_status") == "Submitted" and extra.get("tool_call_id"):
-            # mini-SWE submits only after the command exited 0; the exit message carries its timing, no output.
+            # mini-SWE submits only after the command exited 0 and saves no observation; the runner's exit message
+            # carries the command's output and timing. The model never sees that output: the run ends there.
             tool = _find(projection.tools, extra["tool_call_id"])
             if tool is not None:
+                tool.output = extra.get("output")
                 tool.started_at = extra.get("started_at")
                 tool.completed_at = extra.get("completed_at")
                 tool.duration_ms = extra.get("duration_ms")
@@ -199,7 +201,8 @@ def observation_records(
     """Fill ``invocation`` with the projected conversation and model calls; return tool records and gaps.
 
     ``stopped`` is ``timeout`` or ``cancelled`` when Gym stopped the run, which also ends a tool call mini-SWE had
-    started but not saved.
+    started but not saved. An MCP call is part of the bash call that made it, which the model requested, so it is not
+    a tool call record of its own; the response carries it for verifiers.
     """
     gaps: list[ObservationGap] = []
     for index, (entry, response) in enumerate(zip(projection.history, projection.responses), start=1):
@@ -244,21 +247,6 @@ def observation_records(
                 timing_source="artifact",
                 status=status,
                 error_type=error_type,
-            )
-        )
-    for number, call in enumerate(projection.mcp_calls):
-        records.append(
-            ToolCallObservation(
-                invocation_id=invocation.invocation_id,
-                tool_call_id=mcp_call_id(number, call),
-                sandbox_id=sandbox_id,
-                tool_name=mcp_tool_name(call["server"], call["tool"]),
-                started_at=call.get("started_at"),
-                completed_at=call.get("completed_at"),
-                duration_ms=call.get("duration_ms"),
-                timing_source="artifact",
-                status="failed" if call.get("is_error") else "completed",
-                error_type="tool_error" if call.get("is_error") else None,
             )
         )
     return records, gaps

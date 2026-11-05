@@ -161,8 +161,12 @@ def build_agent(payload: dict[str, Any], *, attribute_calls: bool):
         """mini-SWE's local environment, adding when each command started and ended.
 
         mini-SWE copies ``output["extra"]`` into the saved tool observation. A submission raises ``Submitted`` after
-        its command exited 0 and saves no observation, so its timing and tool call ID go on the exit message.
+        its command exited 0 and saves no observation, so its output, timing and tool call ID go on the exit message.
         """
+
+        def _check_finished(self, output: dict) -> None:
+            self.finished_output = output.get("output", "")
+            super()._check_finished(output)
 
         def execute(self, action: dict, cwd: str = "", *, timeout: int | None = None) -> dict:
             started_at, started = time.time(), time.monotonic()
@@ -173,7 +177,9 @@ def build_agent(payload: dict[str, Any], *, attribute_calls: bool):
                 output = super().execute(action, cwd, timeout=timeout)
             except Submitted as submitted:
                 extra = submitted.messages[0].setdefault("extra", {})
-                extra.update(timing(started_at, started), tool_call_id=action.get("tool_call_id"))
+                extra.update(
+                    timing(started_at, started), tool_call_id=action.get("tool_call_id"), output=self.finished_output
+                )
                 raise
             finally:
                 self.config.env = environment

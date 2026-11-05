@@ -95,6 +95,7 @@ def native_trajectory() -> dict:
                     "exit_status": "Submitted",
                     "submission": "",
                     "tool_call_id": "call_2",
+                    "output": "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n",
                     "started_at": 200.0,
                     "completed_at": 200.1,
                     "duration_ms": 100.0,
@@ -127,6 +128,8 @@ def test_the_projection_keeps_every_model_call_and_replays_only_accepted_respons
         ("message", None),
         ("message", None),
         ("function_call", "call_2"),
+        # The runner keeps the submission command's output, which mini-SWE itself does not save.
+        ("function_call_output", "call_2"),
     ]
 
 
@@ -137,8 +140,9 @@ def test_tool_status_and_timing_come_from_the_saved_observations() -> None:
 
     first, submitted = projection.tools
     assert (first.status, first.duration_ms, first.completed_at) == ("failed", None, 150.0)
-    # The submission saves no output; its exit message carries the command's timing.
-    assert (submitted.status, submitted.duration_ms, submitted.output) == ("completed", 100.0, None)
+    # mini-SWE saves no observation for the submission; the exit message carries its output and timing.
+    assert (submitted.status, submitted.duration_ms) == ("completed", 100.0)
+    assert submitted.output == "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT\n"
 
     invocation = AgentInvocation(invocation_id="rollout-1")
     records, gaps = observation_records(
@@ -238,13 +242,13 @@ def test_mcp_calls_follow_the_bash_call_that_made_them() -> None:
         ("function_call", "mcp__task_tools__ping", "mcp-mcp-1"),
         ("function_call_output", None, "mcp-mcp-1"),
     ]
+    invocation = AgentInvocation(invocation_id="r")
     records, _ = observation_records(
-        projection, invocation=AgentInvocation(invocation_id="r"), model_server=MODEL, sandbox_id=None, stopped=None
+        projection, invocation=invocation, model_server=MODEL, sandbox_id=None, stopped=None
     )
-    assert [(r.tool_name, r.status, r.duration_ms) for r in records[2:]] == [
-        ("mcp__task_tools__get_weather", "completed", 200.0),
-        ("mcp__task_tools__ping", "failed", None),
-    ]
+    # The model requested the bash calls; an MCP call is part of one, not a tool call record of its own.
+    assert [r.tool_name for r in records] == ["bash", "bash"]
+    assert not any("mcp__" in str(item) for item in invocation.conversation)
 
 
 def test_no_trajectory_projects_to_nothing() -> None:

@@ -352,6 +352,8 @@ def test_real_mini_swe_runs_the_task_through_the_rollout_url_and_submits(tmp_pat
     assert (workdir / "marker.txt").read_text() == "done\n"
     trajectory = json.loads((session_dir / "trajectory.json").read_text())
     assert trajectory["info"]["exit_status"] == "Submitted"
+    # mini-SWE saves no observation for the submission; the exit message keeps its output for the record.
+    assert trajectory["messages"][-1]["extra"]["output"].startswith("COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT")
     output = json.loads((session_dir / "output.json").read_text())
     assert output["exit_status"] == "Submitted" and output["error"] is None
     # Every call carries the rollout path, its owner, mini-SWE's bash tool, and the request's sampling.

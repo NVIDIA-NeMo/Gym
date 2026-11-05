@@ -41,12 +41,15 @@ gym eval run terminal_bench_4 --agent mini_swe_agent/mini_swe_agent_sandboxed --
   --model-type vllm_model --model <model> --model-url <url>
 ```
 
+The agent class declares `ray_enabled` for `/run`, so Gym starts Ray for it on either path: the environment that
+runs `gym` needs the `ray` extra (`pip install "nemo-gym[ray]"`). Agent sessions do not use Ray otherwise.
+
 The step limit (500) and command timeout (30 seconds) in that config follow the Terminal Bench 4 profile. The
 template's `step_limit` and `step_timeout` set mini-SWE's `agent.step_limit` and the environment's command timeout;
 `/run` reads the same two fields.
 
 **Capability level:** Evaluation and Observability. The close bundle reports one invocation with the model calls,
-conversation and status, a timed observation for every bash call and MCP call, and the agent sandbox's outcome.
+conversation and status, a timed observation for every bash call, and the agent sandbox's outcome.
 Token IDs are not captured; use Gym's `token_id_capture` for training.
 
 ### Where it runs
@@ -114,7 +117,9 @@ lists their tools as JSON schemas and the command that calls them. The servers a
 A required server, and every server a task declares, must connect before the first model call; otherwise the
 activation fails without inference. An optional server that does not connect is left out of the prompt. Each MCP
 call is placed in the response after the bash call that made it, as `mcp__<server>__<tool>` with its result, so
-verifiers that read tool calls see it.
+verifiers that read tool calls see it. It is not a tool-call observation of its own: the model requested the bash call.
+mini-SWE saves no observation for its submission command; the runner keeps that command's output, which ends the
+response and the reported conversation.
 
 ### Outcomes
 
