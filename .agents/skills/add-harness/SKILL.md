@@ -161,7 +161,12 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |
 | Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) table lists the harness; so do the [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) table for a sandboxed harness and each paired benchmark's README harness table, where one exists. Each entry matches the adapter: its limits, the request fields it rejects, and whether it captures token IDs. | Docs diff |
 
+To run an evaluation with the harness as a submitted job on a cluster (submit, resume, recover, acceptance gates),
+follow the [run-and-babysit-eval](../run-and-babysit-eval/SKILL.md) skill.
+
 The [conformance results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#results) are published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
+
+An agent that grades its own rollouts (no resources server) also follows [add-benchmark](../add-benchmark/SKILL.md), Step 7b, "Failure-handling conformance": its grading path, typed failures, time contract and the three fault fixtures.
 
 ## Step 8: Pre-commit and PR
 
@@ -171,7 +176,7 @@ pytest tests/unit_tests/test_session_contract_repo.py
 ```
 
 - `test_session_contract_repo.py` checks every adapter's source for the session hooks; a search for your adapter's name does not find it.
-- `tests/unit_tests/test_add_legacy_agent_environment_servers.py` checks every repository config for a missing Environment Server. In `scripts/add_legacy_agent_environment_servers.py`, add the adapter's type to the unbound session templates in `needs_environment_server` when its default config sets `resources_server: null` for composition, or to the `stirrup_agent` check when the adapter has no `/run`. Otherwise the script adds a legacy relay beside the session Environment Server. Add a test like `test_default_pi_composes_with_exactly_one_session_environment`.
+- `tests/unit_tests/tooling/test_add_legacy_agent_environment_servers.py` checks every repository config for a missing Environment Server. In `scripts/add_legacy_agent_environment_servers.py`, add the adapter's type to the unbound session templates in `needs_environment_server` when its default config sets `resources_server: null` for composition, or to the `stirrup_agent` check when the adapter has no `/run`. Otherwise the script adds a legacy relay beside the session Environment Server. Add a test like `test_default_pi_composes_with_exactly_one_session_environment`.
 - Merge current `main` before the final checks and rerun the adapter's tests and conformance. The sandbox helpers an adapter calls change often, and a long-lived branch can pass on its old base and fail after the merge.
 - Search `tests/` for every config file you changed (`grep -rn <config or agent name> tests/`) and run those tests too. Core tests can assert a config's shape, and they are not part of the adapter's own suite.
 - Use a Conventional Commit title such as `feat(<harness>): add the <harness> harness adapter`, and DCO sign-off (`git commit -s`).

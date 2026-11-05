@@ -1,3 +1,0 @@
--e nemo-gym[dev] @ ../../
-gymnasium==1.1.1
-numpy>=1.26

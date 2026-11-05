@@ -336,30 +336,27 @@ tool. The successful smoke kept `tool_choice=auto` and lowered
 - A NeMo Gym development environment. From the repo root:
 
 ```bash
-uv sync --extra dev --extra sandbox
+uv sync --locked --extra dev --extra sandbox
 ```
 
   This installs `nemo-gym[dev,sandbox]` (including the OpenSandbox SDK) into the
   root venv, which is all `gym env start` needs. `gym env start` builds this
   agent's own per-server venv from
-  `responses_api_agents/mini_swe_agent_2/requirements.txt` (installing
+  `responses_api_agents/mini_swe_agent_2/uv.lock` (installing
   `mini-swe-agent`, `swebench`, and a compatible `openai`), so you do not
   install those yourself.
 
-  Do **not** install `mini-swe-agent`/`swebench` into the root venv (e.g.
-  `uv pip install mini-swe-agent==2.1.0 swebench==4.1.0`). `mini-swe-agent`
-  allows a newer `openai` than `nemo-gym` pins (`openai<=2.7.2`), so installing
-  it upgrades the root venv's `openai`. `gym env start` then pins every
-  per-server venv to the root venv's `openai` version, which conflicts with
-  `nemo-gym`'s pin and fails to resolve (`... nemo-gym depends on openai<=2.7.2
-  ... you require openai==2.44.0 ... unsatisfiable`). If this happens, reset the
-  root venv with `uv sync --extra dev --extra sandbox`.
+  Do **not** install `mini-swe-agent`/`swebench` into the root venv. Keep its
+  dependencies aligned with the committed root lock using
+  `uv sync --locked --extra dev --extra sandbox`. Component setup checks the
+  locked environment against the parent process's required versions and sources;
+  a mismatch fails with lock-update guidance rather than repinning at startup.
 
-  Also do not run
-  `uv pip install -r responses_api_agents/mini_swe_agent_2/requirements.txt`
-  from the repo root: its `../../` editable path resolves relative to the
-  current working directory, so from the repo root it points above the repo and
-  fails with `... does not appear to be a Python project`.
+  For manual component setup from the repo root, run
+  `uv sync --locked --project responses_api_agents/mini_swe_agent_2`.
+  The editable `../../` source is relative to that component's `pyproject.toml`,
+  not the current working directory. This sync targets the component's own venv;
+  normal `gym env start` users can leave component setup to Gym.
 
 - Access to an OpenSandbox deployment reachable from the server process. Follow
   [OpenSandbox access and setup](https://docs.nvidia.com/nemo/gym/main/infrastructure/sandbox/opensandbox#setup)
