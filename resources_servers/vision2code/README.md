@@ -45,7 +45,8 @@ Run commands from the Gym repository root:
 uv venv --python 3.13.14
 source .venv/bin/activate
 uv sync --frozen --extra dev
-uv pip install -r resources_servers/vision2code/requirements.txt
+uv sync --locked --project resources_servers/vision2code
+source resources_servers/vision2code/.venv/bin/activate
 ```
 
 The worker needs Enroot. Build the renderer image on a Docker host and place the resulting
