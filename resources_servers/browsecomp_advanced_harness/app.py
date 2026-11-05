@@ -41,6 +41,7 @@ from nemo_gym.agents import SandboxSession
 from nemo_gym.client import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES, SESSION_ID_KEY, raise_for_status, request
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    PROVIDER_UNAVAILABLE,
     EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -970,6 +971,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _bash_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
     _workspace_root: Optional[str] = PrivateAttr(default=None)
     _shell_sessions: dict[str, BrowsecompShellSandbox] = PrivateAttr(default_factory=dict)
+    # Why the session's tool sandbox failed, if it did: /verify masks that sample instead of scoring it.
+    _shell_failures: dict[str, str] = PrivateAttr(default_factory=dict)
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
     JUDGE_MAX_ATTEMPTS: ClassVar[int] = 15
@@ -1127,6 +1130,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if self.config.workspace == "per_session":
             await asyncio.to_thread(self._cleanup_workspace, sid)
         self._release_metrics(sid)
+        self._shell_failures.pop(sid, None)
 
     def _validate_shell_config(self) -> None:
         """Refuse a missing isolation boundary before creating a workspace or provider."""
@@ -1137,7 +1141,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                     "allow_host_execution=true is only for development"
                 )
             return
-        provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+        try:
+            provider_config = resolve_provider_config(self.config.sandbox_provider, get_global_config_dict())
+            SandboxSpec(**self.config.sandbox_config)
+        except (TypeError, ValueError) as error:
+            # A missing provider block or an unknown sandbox_config key fails every seed alike, so no retry can help.
+            raise ResourcesSeedRejectedError(f"BrowseComp sandbox configuration is invalid: {error}") from error
         if "local" in provider_config and not self.config.allow_host_execution:
             raise ResourcesSeedRejectedError("The local provider does not isolate BrowseComp workspace tools")
         workdir = self.config.sandbox_config.get("workdir", "/workspace")
@@ -1226,12 +1235,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 return BashCommandResponse(
                     results_string="[bash error: terminal workspace is not enabled for this server]"
                 )
-            shell = await self._ensure_shell(sid)
             command = body.keystrokes or ""
+            # A blocked command needs no sandbox, so it neither starts one nor waits for one.
             blocked = _bash_denylisted(command) or _bash_allowlisted(command)
             if blocked is not None:
                 return BashCommandResponse(results_string=f"[blocked: {blocked}]\n[exit_code=-3]")
             duration = max(1.0, min(self.config.bash_timeout_s, float(body.duration or 10)))
+            try:
+                shell = await self._ensure_shell(sid)
+            except Exception:
+                return BashCommandResponse(results_string=self._shell_failure(sid, "start"))
             if shell is None:
                 out = await self._run_bash_readonly(command, duration, str(page_writer.workspace))
             else:
@@ -1248,10 +1261,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                         LOG.warning("BrowseComp shell command timed out in session %s: %r", sid, command[:160])
                         out = f"[command timed out after {duration:.0f}s]\n[exit_code=-1]"
                     except Exception:
-                        # The model gets the usual error envelope; the provider's detail stays in the server log.
-                        LOG.exception("BrowseComp shell command failed in session %s", sid)
-                        out = "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+                        out = self._shell_failure(sid, "run a command")
             return BashCommandResponse(results_string=out)
+
+    def _shell_failure(self, sid: str, action: str) -> str:
+        """Log the current sandbox error, mark the session's sample for masking, and return the model's envelope."""
+        # The model gets the usual error envelope; the provider's detail stays in the server log.
+        LOG.exception("BrowseComp shell sandbox could not %s in session %s", action, sid)
+        self._shell_failures.setdefault(sid, f"The BrowseComp tool sandbox could not {action}")
+        return "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
 
     async def _run_bash_readonly(self, keystrokes: str, duration: float, cwd: str) -> str:
         """Development-only pocketshell execution; HTTP routes require explicit host opt-in.
@@ -1729,6 +1747,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             num_provider_other_retries=num_provider_other_retries,
             timed_out=int(timed_out),
         )
+
+        shell_failure = self._shell_failures.get(sid)
+        if shell_failure is not None:
+            # The model lost its shell to the sandbox, not to its own commands, so the reward does not measure it.
+            verify_response = verify_response.model_copy(
+                update={"mask_sample": True, "failure_kind": PROVIDER_UNAVAILABLE, "failure_reason": shell_failure}
+            )
 
         # The verify response carries the session's metrics, and an agent's /run sends no close, so release here.
         await self._release_session(sid)

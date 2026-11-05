@@ -174,6 +174,30 @@ def test_local_provider_requires_explicit_development_opt_in(sandboxed, monkeypa
     assert not containers
 
 
+def _missing_provider_block(*_) -> dict:
+    raise ValueError("Sandbox provider config 'sandbox' was not found")
+
+
+@pytest.mark.parametrize(
+    ("sandbox_config", "resolve"),
+    [({"ttl": 7200}, None), ({}, _missing_provider_block)],
+    ids=["unknown sandbox_config key", "missing provider block"],
+)
+def test_invalid_sandbox_configuration_refuses_the_seed_for_good(
+    sandboxed, monkeypatch: pytest.MonkeyPatch, sandbox_config, resolve
+) -> None:
+    # Every seed fails the same way, so a retryable 500 would only repeat the failure for each episode.
+    server, containers = sandboxed
+    server.config.sandbox_config.update(sandbox_config)
+    if resolve is not None:
+        monkeypatch.setattr(harness, "resolve_provider_config", resolve)
+    with TestClient(server.setup_webserver()) as client:
+        response = client.post("/seed_session", json=_seed())
+    assert response.status_code == 422
+    assert "sandbox configuration is invalid" in response.json()["detail"]
+    assert not containers and not server._typed_sessions
+
+
 @pytest.mark.asyncio
 async def test_seed_is_idempotent_and_close_stops_each_owned_sandbox(sandboxed) -> None:
     server, containers = sandboxed
@@ -240,21 +264,29 @@ async def test_bash_uses_sandbox_and_retains_guard_output(sandboxed, monkeypatch
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("error", "expected", "masked"),
     [
-        (TimeoutError("supervisor deadline"), "[command timed out after 10s]\n[exit_code=-1]"),
+        (TimeoutError("supervisor deadline"), "[command timed out after 10s]\n[exit_code=-1]", False),
         (
             RuntimeError("exec failed: provider detail"),
             "[bash error: the sandbox could not run the command]\n[exit_code=-2]",
+            True,
         ),
     ],
 )
-async def test_sandbox_failures_answer_with_the_host_error_envelope(sandboxed, error, expected) -> None:
+async def test_sandbox_failures_answer_with_the_host_error_envelope(sandboxed, error, expected, masked) -> None:
     server, _ = sandboxed
     await server.seed_session(_request(), ResourcesSeedSessionRequest.model_validate(_seed()))
     server._shell_sessions["resources-session"].execute = AsyncMock(side_effect=error)
     output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat pages/0001.txt"))
     assert output.results_string == expected
+    # A slow command is the model's doing; a sandbox that cannot run one is not, so only that sample is masked.
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    verified = await server.verify(_request(), body)
+    assert verified.reward == 1
+    assert verified.mask_sample is masked
+    assert verified.failure_kind == ("provider_unavailable" if masked else None)
+    assert not server._shell_failures
     await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close()))
 
 
@@ -274,6 +306,50 @@ async def test_run_seed_starts_the_sandbox_with_the_first_shell_command(
     assert (await server.verify(_request(), body)).reward == 1
     containers[0].stop.assert_awaited_once()
     assert not server._shell_sessions and not server._session_workspaces
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_sandbox_cannot_start_gets_the_envelope_and_a_masked_sample(
+    sandboxed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    server, containers = sandboxed
+
+    async def fail_install(state, *, timeout):
+        raise RuntimeError("docker daemon unavailable: provider detail")
+
+    monkeypatch.setattr(shell_module.BrowsecompShellSandbox, "install", fail_install)
+    await server.seed_session(_request(), harness.BaseSeedSessionRequest())
+    blocked = await server.bash_command(_request(), BashCommandRequest(keystrokes="rm -rf pages"))
+    assert blocked.results_string == "[blocked: command 'rm' is blocked]\n[exit_code=-3]"
+    assert not containers  # A blocked command needs no sandbox.
+
+    output = await server.bash_command(_request(), BashCommandRequest(keystrokes="cat pages/0001.txt"))
+    assert output.results_string == "[bash error: the sandbox could not run the command]\n[exit_code=-2]"
+    containers[0].stop.assert_awaited_once()
+    assert not server._shell_sessions
+
+    body = harness.TavilySearchVerifyRequest.model_validate(_verify_body("Answer: Paris Confidence: 90%"))
+    verified = await server.verify(_request(), body)
+    assert (verified.reward, verified.mask_sample, verified.failure_kind) == (1, True, "provider_unavailable")
+    assert "provider detail" not in verified.failure_reason
+    assert not server._shell_failures and not server._session_workspaces
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("timed_out", "raised"), [(True, TimeoutError), (False, RuntimeError)])
+async def test_a_command_the_supervisor_ends_at_its_deadline_reads_as_a_timeout(timed_out, raised) -> None:
+    # The supervisor kills the runner and exits 0 with a timed_out receipt, so only the missing output fails.
+    session = SimpleNamespace(
+        session_dir="/private/session/calls/first",
+        workdir="/workspace",
+        begin_activation=AsyncMock(),
+        execute=AsyncMock(side_effect=RuntimeError("output.txt is missing")),
+        cleanup={"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": timed_out},
+    )
+    state = shell_module.BrowsecompShellSandbox(session=session)
+    state.ready = True
+    with pytest.raises(raised):
+        await state.execute(command="grep -r x pages", duration=10, workspace=Path("/unused"), close_timeout=5)
 
 
 @pytest.mark.asyncio
@@ -377,7 +453,7 @@ async def test_controller_transfers_only_pages_and_manifest_and_never_interpolat
     (workspace / "private-key").write_text("not a retrieved page")
     sandbox = AsyncMock()
     sandbox.exec.return_value = SimpleNamespace(return_code=0, error_type=None)
-    session = SimpleNamespace(sandbox=sandbox, session_dir="/private/session", workdir="/workspace")
+    session = SimpleNamespace(sandbox=sandbox, session_dir="/private/session", workdir="/workspace", cleanup=None)
     directories, commands, payloads = [], [], []
 
     async def begin(*, session_dir, timeout):
