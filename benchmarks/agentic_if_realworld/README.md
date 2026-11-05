@@ -30,9 +30,12 @@ hash. Existing verified caches remain valid. For new downloads, use the current
 approved tracking URI with this revision; older runtime pins retain their
 original registry binding.
 
-Install Gym with `uv sync --extra dev --extra mlflow`, then install the frozen
+Use uv 0.13.4 or newer. Install Gym with
+`uv sync --locked --extra dev --extra mlflow`, then install the frozen
 validator dependency with
 `uv pip install -r resources_servers/agentic_if_realworld/benchmark/policy/requirements.txt`.
+Gym installs the resource and model servers from their committed `pyproject.toml`
+and `uv.lock` files. The nested policy requirements file remains frozen.
 Set `AGENTIC_IF_DATA_DIR` to an existing private release/cache, or use the default
 `~/.cache/nemo-gym/agentic_if_realworld/1.0.0`. Preparation checks every original
 artifact hash and makes the entire ignored `data/` directory a symlink to the
