@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
-from typing import Any, Awaitable, Callable, Literal, NoReturn
+from typing import Any, Awaitable, Callable, ClassVar, Literal, NoReturn
 from urllib.parse import quote, urlsplit
 
 from pydantic import Field, model_validator
@@ -46,6 +46,7 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_SETUP_FAILED,
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
+    FailureClassificationConfig,
 )
 from nemo_gym.core.failure_transport import observe_failure
 from nemo_gym.core.outcome_policy import OutcomeAction, OutcomePolicyConfig, failure_outcome_policy
@@ -356,7 +357,8 @@ def _is_retryable_create_error(
     )
     if failure.failure_kind == PROVIDER_CREATE_PENDING and fail_fast_on_pending:
         return False
-    return failure_outcome_policy(failure, config=config or OpenSandboxCreateOutcomePolicy()) == OutcomeAction.RETRY
+    config = config or OpenSandboxCreateOutcomePolicy()
+    return failure_outcome_policy(failure, config=config, classification=config.classification) == OutcomeAction.RETRY
 
 
 def _retry_delay(error: BaseException | None, *, fallback: float, max_delay_s: float) -> float:
@@ -661,6 +663,9 @@ OpenSandboxAttributionConfig = AttributionConfig
 class OpenSandboxOutcomePolicy(OutcomePolicyConfig):
     """Runtime request policy; execution separately enforces replay safety and budgets."""
 
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset({OutcomeAction.RETRY, OutcomeAction.FAIL})
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+
     by_failure_kind: dict[str, OutcomeAction] = Field(
         default_factory=lambda: {
             PROVIDER_IO_TIMEOUT: OutcomeAction.RETRY,
@@ -676,17 +681,7 @@ class OpenSandboxOutcomePolicy(OutcomePolicyConfig):
     default_action: OutcomeAction = OutcomeAction.FAIL
 
     @model_validator(mode="after")
-    def supported_actions(self) -> "OpenSandboxOutcomePolicy":
-        if any(
-            action not in (OutcomeAction.RETRY, OutcomeAction.FAIL)
-            for action in (
-                self.default_action,
-                *self.by_failure_kind.values(),
-                *self.by_status_code.values(),
-                *self.by_failure_class.values(),
-            )
-        ):
-            raise ValueError("Sandbox request policies support only retry and fail")
+    def validate_status_codes(self) -> "OpenSandboxOutcomePolicy":
         if any(not 400 <= status <= 599 for status in self.by_status_code):
             raise ValueError("Policy HTTP statuses must be in 400..599")
         return self
@@ -1584,7 +1579,12 @@ class OpenSandboxProvider:
                 isinstance(error, NgFailureEvent)
                 and (replay_safe or error.failure_kind != PROVIDER_IO_TIMEOUT)
                 and (is_retryable is None or is_retryable(error.__cause__ or error))
-                and failure_outcome_policy(error, config=self._operations.outcome_policy) == OutcomeAction.RETRY
+                and failure_outcome_policy(
+                    error,
+                    config=self._operations.outcome_policy,
+                    classification=self._operations.outcome_policy.classification,
+                )
+                == OutcomeAction.RETRY
             )
 
         backoff = wait_random_exponential(
@@ -2598,7 +2598,14 @@ class OpenSandboxProvider:
                         provider_status_reason=evidence.provider_status_reason,
                         exit_code=evidence.exit_code,
                     ) from failure
-                if failure_outcome_policy(failure, config=self._operations.outcome_policy) != OutcomeAction.RETRY:
+                if (
+                    failure_outcome_policy(
+                        failure,
+                        config=self._operations.outcome_policy,
+                        classification=self._operations.outcome_policy.classification,
+                    )
+                    != OutcomeAction.RETRY
+                ):
                     if failure is error:
                         raise
                     raise failure from error

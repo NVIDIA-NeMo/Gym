@@ -495,7 +495,7 @@ async def test_create_recovered_failures_and_policy_override_preserve_facts():
 
 
 def test_create_policy_rejects_grading_actions():
-    with pytest.raises(ValidationError, match="only retry and fail"):
+    with pytest.raises(ValidationError, match="does not support count_as_zero"):
         module.OpenSandboxProvider(create={"outcome_policy": {"default_action": "count_as_zero"}})
 
 
@@ -830,3 +830,14 @@ def test_class_actions_cannot_bypass_provider_supported_actions(action):
 
     with pytest.raises(ValueError):
         OpenSandboxOutcomePolicy(by_failure_class={"evaluation": action})
+
+
+def test_provider_create_class_action_uses_configured_classification():
+    policy = module.OpenSandboxCreateOutcomePolicy(
+        by_failure_class={"model": "retry"},
+        classification={"by_failure_kind": {"provider_request_failed": "model"}},
+    )
+    failure = NgFailureEvent(boundary="sandbox", failure_kind="provider_request_failed", failure_reason="SDK failed")
+    assert module._is_retryable_create_error(failure, config=policy)
+    policy.classification.by_failure_kind["provider_request_failed"] = "evaluation"
+    assert not module._is_retryable_create_error(failure, config=policy)

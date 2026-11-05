@@ -3,7 +3,7 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
@@ -14,6 +14,7 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureClassificationConfig,
     classify_failure,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
@@ -63,6 +64,11 @@ class AgentOutcome(BaseModel):
 class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     """Existing Environment Server defaults for classified failed agent responses."""
 
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
+        {OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL}
+    )
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+
     by_failure_kind: dict[str, OutcomeAction] = Field(
         default_factory=lambda: {
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
@@ -79,21 +85,12 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
     )
     default_action: OutcomeAction = OutcomeAction.FAIL
 
-    @model_validator(mode="after")
-    def require_environment_actions(self) -> "AgentOutcomePolicyConfig":
-        """These boundaries can verify or fail an episode, but cannot execute an explicit-zero action."""
-        if OutcomeAction.COUNT_AS_ZERO in [
-            self.default_action,
-            *self.by_failure_kind.values(),
-            *self.by_status_code.values(),
-            *self.by_failure_class.values(),
-        ]:
-            raise ValueError("Environment Server policy does not support count_as_zero")
-        return self
-
 
 def agent_outcome_policy(
-    response: "NeMoGymResponse", *, config: AgentOutcomePolicyConfig | None = None
+    response: "NeMoGymResponse",
+    *,
+    config: AgentOutcomePolicyConfig | None = None,
+    classification: FailureClassificationConfig | None = None,
 ) -> OutcomeAction:
     """Apply configured grading/retry rules to a classified failed response.
 
@@ -113,7 +110,11 @@ def agent_outcome_policy(
         failure_kind=outcome.failure_kind,
         http_status=outcome.status_code,
         config=config,
-        failure_class=classify_failure(failure_kind=outcome.failure_kind, http_status=outcome.status_code),
+        failure_class=classify_failure(
+            failure_kind=outcome.failure_kind,
+            http_status=outcome.status_code,
+            config=classification or config.classification,
+        ),
     )
 
 

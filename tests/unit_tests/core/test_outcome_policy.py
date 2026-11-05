@@ -103,9 +103,7 @@ def test_explicit_oom_override_can_change_action_and_attribution():
         {"agent_execution": {}},
         {"setup": {}},
         {"agent": {"by_failure_kind": {"provider_oom_typo": "fail"}}},
-        {"agent": {"attribution_by_failure_kind": {"provider_oom_typo": "model"}}},
         {"agent": {"by_status_code": {"600": "fail"}}},
-        {"agent": {"default_attribution": "model_fault"}},
     ],
 )
 def test_invalid_policy_facts_are_rejected_at_config_load(rules):
@@ -211,29 +209,32 @@ def test_stage_class_override_changes_class_rule_but_not_more_specific_action():
     assert decision.action == "fail" and decision.attribution == FailureClass.MODEL
 
 
-def test_policy_classification_preserves_recovered_event_and_cause():
-    from nemo_gym.core.failure_records import FailureReport
+def test_omitted_class_is_not_an_explicit_unknown_class():
+    from nemo_gym.core.outcome_policy import OutcomePolicyConfig, choose_action
+
+    config = OutcomePolicyConfig(default_action="retry", by_failure_class={"unknown": "fail"})
+    assert choose_action(failure_kind=PROVIDER_IO_TIMEOUT, http_status=None, config=config) == "retry"
+    assert (
+        choose_action(
+            failure_kind=PROVIDER_IO_TIMEOUT, http_status=None, config=config, failure_class=FailureClass.UNKNOWN
+        )
+        == "fail"
+    )
+
+
+def test_event_adapter_uses_supplied_classification_without_mutating_event():
+    from nemo_gym.core.outcome_policy import OutcomePolicyConfig, failure_outcome_policy
     from nemo_gym.core.typed_exceptions import NgFailureEvent
 
-    inner = NgFailureEvent(
-        boundary="sandbox",
-        failure_kind=PROVIDER_IO_TIMEOUT,
+    failure = NgFailureEvent(
+        boundary="model",
+        failure_kind="model_policy_response_timeout",
+        failure_reason="request timed out",
         stage="agent",
-        operation="read",
-        failure_reason="read timed out",
     )
-    outer = NgFailureEvent(
-        boundary="agent", failure_kind="agent_route_failed", stage="agent", failure_reason="route failed"
-    )
-    outer.__cause__ = inner
-    before = outer.to_record()
-    decision = choose_stage_outcome(
-        failure_kind=inner.failure_kind, stage=inner.stage, http_status=None, config=StageOutcomePolicyConfig()
-    )
-    result = {"reward": 1.0, **before}
-    assert decision.attribution == FailureClass.EVALUATION
-    assert outer.to_record() == before
-    report = FailureReport(failure_id=before["failure_id"], events=before["failure_events"])
-    assert report.events[inner.event_id].stage == "agent"
-    assert report.events[outer.event_id].cause_id == inner.event_id
-    assert result["reward"] == 1.0
+    before = failure.to_record()
+    policy = OutcomePolicyConfig(default_action="fail", by_failure_class={"evaluation": "retry"})
+    classification = FailureClassificationConfig(by_failure_kind={"model_policy_response_timeout": "evaluation"})
+    assert failure_outcome_policy(failure, config=policy) == "fail"
+    assert failure_outcome_policy(failure, config=policy, classification=classification) == "retry"
+    assert failure.to_record() == before

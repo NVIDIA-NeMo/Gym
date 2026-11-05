@@ -185,6 +185,30 @@ HARBOR_FAILED = "harbor_failed"
 INFRASTRUCTURE_ERROR = "infrastructure_error"
 
 
+PROVIDER_FAILURE_KINDS: frozenset[str] = frozenset(
+    {
+        PROVIDER_CREATE_TIMEOUT,
+        PROVIDER_CREATE_PENDING,
+        PROVIDER_NOT_READY,
+        PROVIDER_SETUP_FAILED,
+        PROVIDER_INTERNAL_ERROR,
+        PROVIDER_PTY_UNAVAILABLE,
+        PROVIDER_PTY_BUSY,
+        PROVIDER_PROTOCOL_ERROR,
+        PROVIDER_REQUEST_FAILED,
+        PROVIDER_IO_TIMEOUT,
+        PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+        PROVIDER_COMMAND_TIMEOUT,
+        PROVIDER_STATUS_UNAVAILABLE,
+        PROVIDER_UNAVAILABLE,
+        PROVIDER_QUOTA_EXHAUSTED,
+        PROVIDER_OOM_KILLED,
+        PROVIDER_CREDENTIALS_REJECTED,
+    }
+)
+"""Registered provider observations; membership does not assign responsibility."""
+
+
 FAILURE_KINDS: frozenset[str] = frozenset(
     {
         TRANSPORT_UNREACHABLE,
@@ -206,23 +230,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
-        PROVIDER_CREATE_TIMEOUT,
-        PROVIDER_CREATE_PENDING,
-        PROVIDER_NOT_READY,
-        PROVIDER_SETUP_FAILED,
-        PROVIDER_INTERNAL_ERROR,
-        PROVIDER_PTY_UNAVAILABLE,
-        PROVIDER_PTY_BUSY,
-        PROVIDER_PROTOCOL_ERROR,
-        PROVIDER_REQUEST_FAILED,
-        PROVIDER_IO_TIMEOUT,
-        PROVIDER_COMMAND_OUTCOME_UNKNOWN,
-        PROVIDER_COMMAND_TIMEOUT,
-        PROVIDER_STATUS_UNAVAILABLE,
-        PROVIDER_UNAVAILABLE,
-        PROVIDER_QUOTA_EXHAUSTED,
-        PROVIDER_OOM_KILLED,
-        PROVIDER_CREDENTIALS_REJECTED,
+        *PROVIDER_FAILURE_KINDS,
         SESSION_LOST,
         SESSION_EXPIRED,
         SESSION_RELEASE_FAILED,
@@ -318,22 +326,7 @@ _DEFAULT_CLASSIFICATION.update(
             MODEL_TRANSPORT_ERROR,
             MODEL_SERVER_ERROR,
             AGENT_TIMEOUT_INFRASTRUCTURE,
-            PROVIDER_CREATE_TIMEOUT,
-            PROVIDER_CREATE_PENDING,
-            PROVIDER_NOT_READY,
-            PROVIDER_SETUP_FAILED,
-            PROVIDER_INTERNAL_ERROR,
-            PROVIDER_PTY_UNAVAILABLE,
-            PROVIDER_PTY_BUSY,
-            PROVIDER_PROTOCOL_ERROR,
-            PROVIDER_REQUEST_FAILED,
-            PROVIDER_IO_TIMEOUT,
-            PROVIDER_COMMAND_TIMEOUT,
-            PROVIDER_COMMAND_OUTCOME_UNKNOWN,
-            PROVIDER_STATUS_UNAVAILABLE,
-            PROVIDER_UNAVAILABLE,
-            PROVIDER_QUOTA_EXHAUSTED,
-            PROVIDER_CREDENTIALS_REJECTED,
+            *PROVIDER_FAILURE_KINDS,
         ),
         (FailureClass.EVALUATION, "server"),
     )
@@ -426,22 +419,30 @@ class FailureClassificationConfig(BaseModel):
     @field_validator("by_stage", mode="before")
     @classmethod
     def merge_stages(cls, value: object) -> object:
-        if not isinstance(value, dict):
-            return value
-        defaults = {stage: rules.model_dump() for stage, rules in _default_stage_classification().items()}
-        for stage, override in value.items():
-            if isinstance(override, StageClassificationConfig):
-                override = override.model_dump(exclude_unset=True)
-            if not isinstance(override, dict):
-                defaults[stage] = override
-                continue
-            rules = defaults.get(stage, {})
-            for name, rule in override.items():
-                rules[name] = (
-                    rules.get(name, {}) | rule if name == "by_failure_kind" and isinstance(rule, dict) else rule
-                )
-            defaults[stage] = rules
-        return defaults
+        return _merge_stage_overrides(_default_stage_classification(), value, dict_fields=("by_failure_kind",))
+
+
+def _merge_stage_overrides(
+    defaults: dict[str, BaseModel],
+    value: object,
+    *,
+    dict_fields: tuple[str, ...],
+) -> object:
+    """Merge partial stage configurations before their concrete models validate them."""
+    if not isinstance(value, dict):
+        return value
+    merged = {stage: rules.model_dump() for stage, rules in defaults.items()}
+    for stage, override in value.items():
+        if isinstance(override, BaseModel):
+            override = override.model_dump(exclude_unset=True)
+        if not isinstance(override, dict):
+            merged[stage] = override
+            continue
+        rules = merged.get(stage, {})
+        for name, rule in override.items():
+            rules[name] = rules.get(name, {}) | rule if name in dict_fields and isinstance(rule, dict) else rule
+        merged[stage] = rules
+    return merged
 
 
 def reporting_failure_kind(
@@ -499,9 +500,9 @@ def is_server_status(status: object) -> bool:
     return type(status) is int and 500 <= status <= 599
 
 
-def is_evaluation_side(name: str) -> bool:
+def is_evaluation_side(name: str, *, config: FailureClassificationConfig | None = None) -> bool:
     """Whether a registered kind has a shared evaluation-side default without extra context."""
-    return is_registered(name) and classify_failure(failure_kind=name) == FailureClass.EVALUATION
+    return is_registered(name) and classify_failure(failure_kind=name, config=config) == FailureClass.EVALUATION
 
 
 def is_gate_derived(name: str) -> bool:

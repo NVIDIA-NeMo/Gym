@@ -4,9 +4,9 @@
 """Shared configurable outcome selection; each boundary executes its own actions."""
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
@@ -18,6 +18,7 @@ from nemo_gym.core.failure_kinds import (
     FailureClass,
     FailureClassificationConfig,
     FailureStage,
+    _merge_stage_overrides,
     classify_failure,
 )
 
@@ -49,6 +50,7 @@ class OutcomePolicyConfig(BaseModel):
     """Select an action from explicit failure evidence; partial overrides retain boundary defaults."""
 
     model_config = ConfigDict(extra="forbid")
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(OutcomeAction)
 
     by_failure_kind: dict[str, OutcomeAction] = Field(default_factory=dict)
     by_status_code: dict[Annotated[int, Field(ge=400, le=599)], OutcomeAction] = Field(default_factory=dict)
@@ -69,29 +71,55 @@ class OutcomePolicyConfig(BaseModel):
         """Reject misspelled failure names at configuration load, before starting an evaluation."""
         return _require_registered_kinds(value)
 
+    @model_validator(mode="after")
+    def require_supported_actions(self) -> "OutcomePolicyConfig":
+        selected = {
+            self.default_action,
+            *self.by_status_code.values(),
+            *self.by_failure_kind.values(),
+            *self.by_failure_class.values(),
+        }
+        invalid = selected - self.supported_actions
+        if invalid:
+            raise ValueError(f"{type(self).__name__} does not support {', '.join(sorted(invalid))}")
+        return self
+
 
 def choose_action(
     *,
     failure_kind: str,
     http_status: int | None,
     config: OutcomePolicyConfig,
-    failure_class: FailureClass = FailureClass.UNKNOWN,
+    failure_class: FailureClass | None = None,
 ) -> OutcomeAction:
     """Select by status, kind, class, then default; execution belongs to the boundary."""
     return config.by_status_code.get(
         http_status,
-        config.by_failure_kind.get(failure_kind, config.by_failure_class.get(failure_class, config.default_action)),
+        config.by_failure_kind.get(
+            failure_kind,
+            config.by_failure_class.get(failure_class, config.default_action)
+            if failure_class is not None
+            else config.default_action,
+        ),
     )
 
 
-def failure_outcome_policy(failure: "NgFailureEvent", *, config: OutcomePolicyConfig) -> OutcomeAction:
+def failure_outcome_policy(
+    failure: "NgFailureEvent",
+    *,
+    config: OutcomePolicyConfig,
+    classification: FailureClassificationConfig | None = None,
+) -> OutcomeAction:
     """Adapt only this event's evidence, without searching its causal chain."""
     return choose_action(
         failure_kind=failure.failure_kind,
         http_status=failure.http_status,
         config=config,
         failure_class=classify_failure(
-            failure_kind=failure.failure_kind, stage=failure.stage, http_status=failure.http_status
+            failure_kind=failure.failure_kind,
+            stage=failure.stage,
+            http_status=failure.http_status,
+            config=classification,
         ),
     )
 
@@ -151,23 +179,11 @@ class StageOutcomePolicyConfig(BaseModel):
     @classmethod
     def merge_stage_defaults(cls, value: object) -> object:
         """Merge partial stage and rule overrides without dropping other defaults."""
-        if not isinstance(value, dict):
-            return value
-        defaults = {stage: policy.model_dump() for stage, policy in _default_stage_policies().items()}
-        for stage, override in value.items():
-            if isinstance(override, StagePolicyConfig):
-                override = override.model_dump(exclude_unset=True)
-            if not isinstance(override, dict):
-                defaults[stage] = override
-                continue
-            policy = defaults.get(stage, {})
-            for field, rules in override.items():
-                if field in ("by_failure_kind", "by_status_code", "by_failure_class") and isinstance(rules, dict):
-                    policy[field] = policy.get(field, {}) | rules
-                else:
-                    policy[field] = rules
-            defaults[stage] = policy
-        return defaults
+        return _merge_stage_overrides(
+            _default_stage_policies(),
+            value,
+            dict_fields=("by_failure_kind", "by_status_code", "by_failure_class"),
+        )
 
 
 def choose_stage_outcome(
