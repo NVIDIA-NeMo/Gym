@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from argparse import Namespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -119,6 +120,36 @@ class IncrementalTest(unittest.TestCase):
             with patch.object(runtime, "fingerprint", return_value={"sha256": "changed"}):
                 with self.assertRaisesRegex(RuntimeError, "runtime changed"):
                     runtime.verify()
+
+    def test_cacheable_batch_keeps_default_external_pytest_temporary_directory(self):
+        import run
+
+        commands = []
+
+        def execute(command, **kwargs):
+            commands.append(command)
+            if "test" in command:
+                (self.root / "test_result_info_report_runid-test.json").write_text("{}")
+            return Namespace(stdout="{}", returncode=0)
+
+        with (
+            patch.object(run.subprocess, "run", side_effect=execute),
+            patch.object(run, "validate_plan", return_value=2),
+        ):
+            run.execute_batch(
+                checkout=self.root,
+                output=self.root,
+                identifier="migration",
+                selected=["//candidate:tests"],
+                cacheable=True,
+                args=Namespace(pants="/pinned/pants", group="core"),
+                workers=4,
+                environment={"PANTS_LOCAL_STORE_DIR": str(self.root / "store")},
+            )
+        test_command = commands[-1]
+        self.assertFalse(any(value.startswith("--basetemp") for value in test_command))
+        self.assertIn("--pex-executable-search-paths=['/usr/bin', '/bin']", test_command)
+        self.assertNotIn("--test-force", test_command)
 
 
 if __name__ == "__main__":
