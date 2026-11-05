@@ -853,14 +853,17 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
                 raise RuntimeError("OpenCode ripgrep upload retry loop did not run")
         except TimeoutError as error:
-            if not budget.expired():
-                raise
+            reason = (
+                "OpenCode ripgrep staging exceeded its setup budget"
+                if budget.expired()
+                else "OpenCode ripgrep upload exhausted its timeout retries"
+            )
             raise NgFailureEvent(
                 boundary="harness",
                 failure_kind=AGENT_ROUTE_FAILED,
                 operation="opencode.setup",
                 stage="seed",
-                failure_reason=f"OpenCode ripgrep staging exceeded its setup budget; sandbox_id={sandbox_id}",
+                failure_reason=f"{reason}; sandbox_id={sandbox_id}",
             ) from error
 
     def _plugin_uploads(self) -> list[tuple[Path, str]]:
@@ -1685,9 +1688,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                         trajectory,
                         model_ref=self.config.model_server,
                     )
-            except NgFailureEvent:
-                raise
-            except Exception:
+            except Exception as error:
+                if isinstance(error, NgFailureEvent):
+                    if error.boundary != "sandbox" or error.failure_kind != PROVIDER_IO_TIMEOUT:
+                        raise
+                    # This optional snapshot supplements an already validated primary export.
+                    observe_failure(error)
                 print("Failed to capture OpenCode session usage or observations", format_exc(), file=sys.stderr)
                 if collect_observations:
                     trajectory.gaps.append(ObservationGap(code="turns_unavailable"))

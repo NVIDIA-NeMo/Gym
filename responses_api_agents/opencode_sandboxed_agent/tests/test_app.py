@@ -53,6 +53,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
     NgFailureEvent,
+    RequestFailureLog,
     SandboxFailureDetails,
 )
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
@@ -951,10 +952,19 @@ class TestOpenCodeSandboxedAgent:
             responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
         )
 
-        with raises(type(upload_error)) as caught:
+        expected_error_type = NgFailureEvent if error_type is TimeoutError else type(upload_error)
+        with raises(expected_error_type) as caught:
             await server.run(request, body)
 
-        assert caught.value is upload_error
+        if error_type is TimeoutError:
+            assert caught.value.__cause__ is upload_error
+            assert caught.value.boundary == "harness"
+            assert caught.value.failure_kind == "agent_route_failed"
+            assert caught.value.operation == "opencode.setup"
+            assert caught.value.stage == "seed"
+            assert "exhausted its timeout retries" in caught.value.failure_reason
+        else:
+            assert caught.value is upload_error
         assert sandbox.upload.await_count == expected_attempts
         assert len({upload.args[1] for upload in sandbox.upload.await_args_list}) == expected_attempts
         sandbox.exec.assert_not_awaited()
@@ -1253,6 +1263,72 @@ class TestOpenCodeSandboxedAgent:
             assert argv[-1] == question, argv
 
     @mark.parametrize(
+        "operation,boundary,kind",
+        [
+            ("export", "sandbox", PROVIDER_IO_TIMEOUT),
+            ("download", "sandbox", PROVIDER_IO_TIMEOUT),
+            ("snapshot", "sandbox", PROVIDER_OOM_KILLED),
+            ("snapshot_download", "sandbox", PROVIDER_OOM_KILLED),
+            ("snapshot", "sandbox", "provider_request_failed"),
+            ("snapshot_download", "sandbox", PROVIDER_UNAVAILABLE),
+            ("snapshot", "harness", PROVIDER_IO_TIMEOUT),
+        ],
+    )
+    @mark.parametrize("collect_observations", [False, True])
+    async def test_capture_does_not_hide_primary_or_non_io_snapshot_failures(
+        self, tmp_path, opencode_export_test_data, operation, boundary, kind, collect_observations
+    ):
+        config = self._create_config()
+        config.artifacts_dir = str(tmp_path)
+        config.report_agent_sandbox_oom = True
+        client = MagicMock(spec=ServerClient)
+        client.global_config_dict = {"observability_enabled": collect_observations}
+        client.post = AsyncMock(
+            return_value=SimpleNamespace(ok=True, cookies={}, json=AsyncMock(return_value={"sandbox_handle": "seed"}))
+        )
+        server = OpenCodeSandboxedAgent(config=config, server_client=client)
+        server._create_opencode_config = AsyncMock(return_value={})
+        failure = NgFailureEvent(
+            boundary=boundary, failure_kind=kind, failure_reason="capture failed", operation=operation, stage="agent"
+        )
+
+        async def execute(command, **kwargs):
+            if (operation == "export" and "opencode export" in command) or (
+                operation == "snapshot" and "opencode db" in command
+            ):
+                raise failure
+            stdout = '[{"id":"root"}]' if "session list" in command else "Shell: bash\nOpenCode run finished"
+            return SimpleNamespace(stdout=stdout, stderr="", return_code=0, error_type=None)
+
+        async def download(remote, local):
+            if remote == "/tmp/opencode_export.json":
+                if operation == "download":
+                    raise failure
+                local.write_text(json.dumps(opencode_export_test_data))
+            else:
+                assert operation == "snapshot_download"
+                raise failure
+
+        sandbox = MagicMock(
+            upload=AsyncMock(),
+            exec=AsyncMock(side_effect=execute),
+            download=AsyncMock(side_effect=download),
+            stop=AsyncMock(),
+        )
+        sandbox._handle = SandboxHandle(sandbox_id="capture-sandbox", provider_name="opensandbox", raw=None)
+        server._start_sandbox = AsyncMock(return_value=sandbox)
+        request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "capture-failure"}})
+        body = OpenCodeSandboxedAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "Solve"}]}
+        )
+        with raises(NgFailureEvent) as caught:
+            await server.run(request, body)
+        assert caught.value is failure
+        assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
+        sandbox.stop.assert_awaited_once()
+        assert server._sandbox_id_to_run_result == server._sandbox_id_to_sandbox == {}
+
+    @mark.parametrize(
         "database_name,snapshot_failure",
         [
             ("opencode.db", None),
@@ -1260,6 +1336,8 @@ class TestOpenCodeSandboxedAgent:
             ("custom database.sqlite", None),
             ("opencode.db", "exit"),
             ("opencode.db", "execution"),
+            ("opencode.db", "execute_io_timeout"),
+            ("opencode.db", "download_io_timeout"),
         ],
     )
     @mark.parametrize("collect_observations", [True, False])
@@ -1380,6 +1458,7 @@ class TestOpenCodeSandboxedAgent:
         sandbox = MagicMock()
         sandbox.upload = AsyncMock()
         sandbox._handle = SandboxHandle(sandbox_id="connected-sandbox", provider_name="opensandbox", raw=None)
+        snapshot_timeout = sandbox_io_timeout("optional snapshot request timed out")
         sandbox.exec = AsyncMock(
             side_effect=[
                 SimpleNamespace(
@@ -1387,7 +1466,9 @@ class TestOpenCodeSandboxedAgent:
                 ),
                 SimpleNamespace(stdout='[{"id": "root"}]', stderr="", return_code=0, error_type=None),
                 SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
-                SimpleNamespace(
+                snapshot_timeout
+                if snapshot_failure == "execute_io_timeout"
+                else SimpleNamespace(
                     stdout="",
                     stderr="snapshot failed" if snapshot_failure else "",
                     return_code=1 if snapshot_failure == "exit" else 0,
@@ -1404,6 +1485,9 @@ class TestOpenCodeSandboxedAgent:
                 assert remote_path.endswith("/opencode/nemo-gym-observations.db") or remote_path.startswith(
                     "/tmp/nemo-gym-observations-"
                 )
+                if snapshot_failure == "download_io_timeout":
+                    local_path.write_bytes(b"partial snapshot")
+                    raise snapshot_timeout
                 command = shlex.split(sandbox.exec.await_args_list[-1].kwargs["command"])
                 assert command[:5] == ["export", "PATH=$HOME/.opencode/bin:$PATH", "&&", "opencode", "db"]
                 # Exercise the real SQLite query against committed rows still in the WAL.
@@ -1473,10 +1557,23 @@ class TestOpenCodeSandboxedAgent:
         )
 
         try:
-            result = await server.run(request, body)
+            with RequestFailureLog.capture() as failure_log:
+                result = await server.run(request, body)
         finally:
             connection.close()
 
+        assert result.reward == 1.0
+        assert [item.model_dump(exclude={"id"}) for item in result.response.output] == [
+            item.model_dump(exclude={"id"})
+            for item in server._opencode_export_to_output_items(opencode_export_test_data)[1:]
+        ]
+        assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
+        if snapshot_failure in {"execute_io_timeout", "download_io_timeout"}:
+            report = failure_log.report
+            assert report.failure_id is None
+            assert report.events[snapshot_timeout.event_id].failure_kind == PROVIDER_IO_TIMEOUT
+            verify_call = server_client.post.await_args_list[-1].kwargs["json"]
+            assert snapshot_timeout.event_id in verify_call["failure_report"]["events"]
         parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
         usage = result.response.usage
         assert usage.input_tokens == parent_usage.input_tokens + (0 if snapshot_failure else 30)
@@ -1500,7 +1597,7 @@ class TestOpenCodeSandboxedAgent:
             assert "observation_capture_failed" in {gap.code for gap in result.ng_agent_observations.gaps}
             assert result.opencode_export_found
             assert sandbox.exec.await_count == 4
-            sandbox.download.assert_awaited_once()
+            assert sandbox.download.await_count == (2 if snapshot_failure == "download_io_timeout" else 1)
             return
         [turn] = TrajectoryRecord.model_validate(result.ng_trajectory).turns
         assert (turn.task_id, turn.rollout_id, turn.invocation_id) == ("7", "7-2", "root")
