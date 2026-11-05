@@ -17,6 +17,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
+- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
+  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
+  synonyms.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 

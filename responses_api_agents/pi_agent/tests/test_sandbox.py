@@ -1116,7 +1116,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
     assert all(record.state is None for record in agent._session_records.values())
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -2481,7 +2481,7 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     sandbox.exec.side_effect = report_version
     request = Request({"type": "http", "session": {}})
     if reported != agent.config.pi_version or return_code != 0:
-        # Another version fails the same way on every attempt, so the seed is refused with a final 422.
+        # Another version fails the same way on every attempt, so the seed is refused with a terminal 422.
         with pytest.raises(AgentSeedRejectedError, match="does not run pi_version 0.80.2") as refused:
             await agent.seed_agent_session(request, seed())
         assert refused.value.status_code == 422

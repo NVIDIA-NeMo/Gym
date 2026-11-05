@@ -24,8 +24,8 @@
 # ── Enforced ──────────────────────────────────────────────────────────────
 .github/ @nvidia-nemo/automation
 docker/ @nvidia-nemo/automation
-pyproject.toml @nvidia-nemo/automation
-uv.lock @nvidia-nemo/automation
+/pyproject.toml @nvidia-nemo/automation
+/uv.lock @nvidia-nemo/automation
 
 # BioNeMo
 /benchmarks/larp* @nvidia-nemo/gym_bionemo @nvidia-nemo/gym_maintainers
