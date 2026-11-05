@@ -110,6 +110,45 @@ local Bubblewrap configurations. A configuration selecting `sandbox_provider`
 must use agent sessions; it cannot fall back to running on the host. Session
 configuration must not also specify the local `sandbox` field.
 
+## Evaluation tool permissions
+
+Evaluation uses explicit permissions for image, file and shell tools. WebFetch
+and WebSearch are disabled by default. To select web tools for a benchmark,
+include their settings in that benchmark's run configuration
+when using `opencode_sessions.yaml`:
+
+```yaml
+visual_agent:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      opencode_config:
+        tools:
+          webfetch: true
+          websearch: false
+```
+
+Configure each tool independently; omitted tools default to disabled. The example
+enables WebFetch only. The adapter derives the corresponding permissions from
+these two tool settings. On the local compatibility path, use the configured
+agent name (`visual_opencode` in the
+example recipes) instead of `visual_agent`. Use separate agent configurations
+when evaluating benchmarks with different policies. These overrides apply to the
+evaluation entrypoint and leave training configuration unchanged. Enabling web
+tools does not enable skills, CodeSearch or remove shell-command denies. For
+OpenCode 1.17.11, enabling WebSearch also sets `OPENCODE_ENABLE_EXA=1`, which makes it
+available with the configured model provider. WebSearch uses OpenCode's Exa
+service; it is independent of the model provider and requires outbound access.
+The flag is explicitly off when WebSearch is disabled.
+
+The Agent-X [OpenCode pairing](../../benchmarks/opencode_multimodal_benchmarks/agentx/opencode.yaml)
+enables both web tools. Other benchmark pairings retain the disabled default.
+
+This is a tool-permission setting, not a network firewall: Bash and Python can
+still make network requests if the sandbox permits them. Use sandbox network
+controls when an evaluation requires enforced network isolation. Do not add a
+top-level `permission: {"*": "allow"}` to the evaluation policy: OpenCode 1.17.11
+can give that wildcard precedence over specific denies.
+
 ## Prompts
 
 Two configuration fields have different roles:

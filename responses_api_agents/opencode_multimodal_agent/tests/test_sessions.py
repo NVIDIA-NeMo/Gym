@@ -16,6 +16,10 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
 )
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import setup as opencode_setup  # noqa: F401
 from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalAgent, OpenCodeMultimodalAgentConfig
+from responses_api_agents.opencode_multimodal_agent.eval import (
+    OpenCodeMultimodalEvalAgent,
+    OpenCodeMultimodalEvalConfig,
+)
 
 
 def image_url():
@@ -92,6 +96,7 @@ def test_session_stages_images_preserves_outputs_and_replays_once(visual_setup):
         assert output["output"][-1]["image_url"] == image_url()
         assert response["opencode_evidence"]["turns_used"] == 1
         payload = sandbox.params()
+        assert payload["env"]["OPENCODE_ENABLE_EXA"] == "0"
         assert "Inspect carefully.\n\nCount red objects" in payload["prompt"]
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert config["agent"]["build"]["temperature"] == 0.6
@@ -108,6 +113,37 @@ def test_session_stages_images_preserves_outputs_and_replays_once(visual_setup):
         assert client.post(path, json=request_body()).status_code == 409
     sandbox.stop.assert_not_awaited()
     sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("webfetch", [False, True])
+@pytest.mark.parametrize("websearch", [False, True])
+def test_session_web_tool_policy_reaches_runtime(visual_setup, webfetch, websearch):
+    original, sandbox = visual_setup
+    tools = {"webfetch": webfetch, "websearch": websearch}
+    config = OpenCodeMultimodalEvalConfig.model_validate(
+        original.config.model_dump()
+        | {
+            "entrypoint": "eval.py",
+            "final_answer_reserve": None,
+            "opencode_config": original.config.opencode_config | {"tools": tools},
+        }
+    )
+    agent = OpenCodeMultimodalEvalAgent(config=config, server_client=original.server_client)
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
+        assert response.status_code == 200, response.text
+        payload = sandbox.params()
+        assert payload["env"]["OPENCODE_ENABLE_EXA"] == ("1" if websearch else "0")
+        policy = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        for tool, enabled in tools.items():
+            assert policy["tools"][tool] is enabled
+            assert policy["permission"][tool] == ("allow" if enabled else "deny")
+        assert policy["permission"]["bash"]["*pkill*"] == "deny"
+        assert "*" not in policy["permission"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200
 
 
 @pytest.mark.parametrize(

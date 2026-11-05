@@ -162,6 +162,7 @@ class MultimodalSessionMixin:
                 share="disabled",
             )
             payload["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+            payload["env"].update(runner._web_tool_environment())
             payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(runner.config.max_output_tokens)
             payload["env"]["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(
                 self.config.command_exec_timeout * 1000

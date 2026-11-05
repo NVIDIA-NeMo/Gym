@@ -62,7 +62,13 @@ for adapted evaluation code. No benchmark data is included in this entry.
 | Harness | Configuration | Status |
 | --- | --- | --- |
 | `simple_agent` | This catalog entry, with a vision-capable model | Experimental; no task tools |
-| `opencode_multimodal_agent` | This entry plus [`opencode_sessions.yaml`](../opencode_sessions.yaml) and a sandbox provider | Experimental; OpenCode 1.17.11, initial images and text, one activation |
+| `opencode_multimodal_agent` | [`opencode.yaml`](opencode.yaml) plus model and sandbox-provider settings | Experimental; OpenCode 1.17.11, WebFetch and WebSearch enabled, one activation |
+
+Configure `webfetch` and `websearch` independently under the pairing's
+`visual_agent.responses_api_agents.opencode_multimodal_agent.opencode_config.tools`.
+Both are enabled in this pairing; set either to `false` to disable it. Record
+these settings with reported scores.
+Tool permissions do not restrict networking from Bash or Python.
 
 The OpenCode session path requires explicit sampling, embeds tool-produced images
 before cleanup, and rejects continuation and training-capture requests. The

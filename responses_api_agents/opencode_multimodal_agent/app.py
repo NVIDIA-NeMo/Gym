@@ -247,10 +247,14 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
 
     def _env(self, data_home: str, rollout_id: str | None = None) -> dict[str, str]:
         env = super()._env(data_home, rollout_id)
+        env.update(self._web_tool_environment())
         # Supported stock flags, not a separate runtime/provider.
         env["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(self.config.command_exec_timeout * 1000)
         env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(self.config.max_output_tokens)
         return env
+
+    def _web_tool_environment(self) -> dict[str, str]:
+        return {"OPENCODE_ENABLE_EXA": "0"}
 
     def _input_image_name(self, source: Path, index: int) -> str:
         return source.name

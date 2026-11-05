@@ -67,6 +67,10 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
 
     config: OpenCodeMultimodalEvalConfig
 
+    def _web_tool_environment(self) -> dict[str, str]:
+        websearch = self.config.opencode_config.get("tools", {}).get("websearch", False)
+        return {"OPENCODE_ENABLE_EXA": "1" if websearch else "0"}
+
     async def _create_episode(self, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any) -> AgentEpisode:
         if self.config.sandbox is None:
             raise HTTPException(
@@ -196,6 +200,10 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
         config = super()._build_opencode_config(rollout_id)
         policy = json.loads(Path(__file__).with_name("eval-policy.json").read_text())
         config.update(policy)
+        for tool in ("webfetch", "websearch"):
+            enabled = self.config.opencode_config.get("tools", {}).get(tool, False)
+            config["tools"][tool] = enabled
+            config["permission"][tool] = "allow" if enabled else "deny"
         config["compaction"] = {"auto": self.config.compaction_auto, "prune": False}
         if self.config.use_default_image_resize:
             config.pop("attachment", None)

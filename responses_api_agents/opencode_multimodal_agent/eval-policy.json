@@ -1,6 +1,5 @@
 {
   "permission": {
-    "*": "allow",
     "edit": {
       "**": "allow"
     },
@@ -79,7 +78,18 @@
       "*wget *githubusercontent.com*": "deny",
       "*curl *github.io*": "deny",
       "*wget *github.io*": "deny"
-    }
+    },
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "task": "allow",
+    "todowrite": "allow",
+    "external_directory": "allow",
+    "doom_loop": "allow",
+    "webfetch": "deny",
+    "websearch": "deny",
+    "codesearch": "deny",
+    "skill": "deny"
   },
   "tools": {
     "bash": true,
@@ -91,6 +101,7 @@
     "apply_patch": true,
     "webfetch": false,
     "websearch": false,
+    "codesearch": false,
     "task": true,
     "skill": false,
     "todowrite": true

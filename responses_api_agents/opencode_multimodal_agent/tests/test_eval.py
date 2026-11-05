@@ -61,7 +61,8 @@ def test_eval_keeps_budget_and_matches_original_prompt_image_tools(monkeypatch, 
     }
     assert cfg["compaction"] == {"auto": False, "prune": False}
     assert cfg["tools"]["task"] is True
-    assert cfg["permission"]["*"] == "allow"
+    assert "*" not in cfg["permission"]
+    assert cfg["permission"]["webfetch"] == cfg["permission"]["websearch"] == "deny"
     evaluation_agent._write_opencode_config(tmp_path)
     plugin = (tmp_path / ".eval-system-prompt.mjs").read_text()
     assert '"experimental.chat.system.transform"' in plugin
@@ -396,3 +397,25 @@ def test_eval_missing_executable_fails_before_launch(monkeypatch, tmp_path):
     command = ["missing-opencode", "run", "--dir", str(tmp_path), "--file", "--", "question"]
     with pytest.raises(FileNotFoundError, match="OpenCode executable not found"):
         runner._prepare_command(command, tmp_path, {"PATH": str(tmp_path)})
+
+
+@pytest.mark.parametrize("webfetch", [False, True])
+@pytest.mark.parametrize("websearch", [False, True])
+def test_eval_web_tools_are_independent_and_do_not_override_other_denies(monkeypatch, tmp_path, webfetch, websearch):
+    evaluation_agent = evaluation(monkeypatch, tmp_path)
+    tools = {"webfetch": webfetch, "websearch": websearch}
+    evaluation_agent.config.opencode_config["tools"] = tools
+    cfg = evaluation_agent._build_opencode_config("web-policy")
+    for tool, enabled in tools.items():
+        assert cfg["tools"][tool] is enabled
+        assert cfg["permission"][tool] == ("allow" if enabled else "deny")
+    assert "*" not in cfg["permission"]
+    assert cfg["permission"]["skill"] == "deny"
+    assert cfg["tools"]["skill"] is False
+    assert cfg["tools"]["codesearch"] is False
+    assert cfg["permission"]["codesearch"] == "deny"
+    assert cfg["permission"]["bash"]["*pkill*"] == "deny"
+    assert cfg["permission"]["bash"]["*killall*"] == "deny"
+    assert cfg["permission"]["bash"]["*"] == "allow"
+    monkeypatch.setenv("OPENCODE_ENABLE_EXA", "0" if websearch else "1")
+    assert evaluation_agent._env(str(tmp_path))["OPENCODE_ENABLE_EXA"] == ("1" if websearch else "0")

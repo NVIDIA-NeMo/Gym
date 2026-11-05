@@ -22,6 +22,8 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     prefix = "benchmarks/opencode_multimodal_benchmarks"
     suffix = f"{benchmark}/config.yaml" if sessions else f"{benchmark}.yaml"
     profile = "opencode_sessions.yaml" if sessions else "opencode_eval_agent.yaml"
+    if benchmark == "agentx" and sessions:
+        suffix = "agentx/opencode.yaml"
     initial = OmegaConf.create(
         {
             "config_paths": [
@@ -78,6 +80,8 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     ]["opencode_multimodal_agent"]
     assert agent.build_system_prompt == original["build_system_prompt"]
     assert agent.context_window == agent.max_output_tokens == 131072
+    for tool in ("webfetch", "websearch"):
+        assert agent.opencode_config.get("tools", {}).get(tool, False) is (benchmark == "agentx")
     assert agent.max_turns == agent.turn_budget.hard_limit == 65
     assert agent.turn_budget.model_dump() == OmegaConf.to_container(
         cfg.policy_model.responses_api_models.vllm_model.turn_budget

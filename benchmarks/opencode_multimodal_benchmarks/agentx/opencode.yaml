@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Agent-X with OpenCode's web research tools. Supply model and sandbox settings separately.
+config_paths:
+  - benchmarks/opencode_multimodal_benchmarks/agentx/config.yaml
+  - benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml
+visual_agent:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      opencode_config:
+        tools:
+          webfetch: true
+          websearch: true
