@@ -2311,9 +2311,9 @@ class OpenSandboxProvider:
     ) -> _SandboxDeathNotice | None:
         """One evidence path for exec and PTY, bounded by the caller's existing deadline.
 
-        Lifecycle reason must be the explicit OOMKilled code in a terminal state.
-        Optional inspect accepts only the current user container, never message text,
-        previous container state, sidecars, or an exit code alone.
+        Lifecycle reasons do not identify the affected container, so even OOMKilled
+        establishes only unavailability. Optional inspect confirms OOM only from the
+        current user container, never message text, historical state, or sidecars.
         """
         loop = asyncio.get_running_loop()
         terminal_notice = None
@@ -2327,15 +2327,13 @@ class OpenSandboxProvider:
                     status = getattr(info, "status", None)
                     state, reason = getattr(status, "state", None), getattr(status, "reason", None)
                     if _to_sandbox_status(state) in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
-                        oom = reason == "OOMKilled"
+                        # The lifecycle API exposes a workload reason without a container identity.
+                        # Keep OOMKilled as evidence, but do not attribute a possible sidecar OOM.
                         terminal_notice = _SandboxDeathNotice(
-                            f"Sandbox {'was OOM-killed' if oom else 'is unavailable'}; lifecycle status: "
-                            f"state={state!r}, reason={str(reason)[:256]!r}",
-                            failure_kind=PROVIDER_OOM_KILLED if oom else PROVIDER_UNAVAILABLE,
+                            f"Sandbox is unavailable; lifecycle status: state={state!r}, reason={str(reason)[:256]!r}",
+                            failure_kind=PROVIDER_UNAVAILABLE,
                             provider_status_reason=reason if isinstance(reason, str) else None,
                         )
-                        if oom:
-                            return terminal_notice
                 except Exception:
                     # Optional diagnosis must not replace the original failure.
                     pass
@@ -2349,6 +2347,7 @@ class OpenSandboxProvider:
                     return _SandboxDeathNotice(
                         f"Sandbox was OOM-killed: inspect confirms {evidence}",
                         failure_kind=PROVIDER_OOM_KILLED,
+                        provider_status_reason=terminal_notice.provider_status_reason if terminal_notice else None,
                     )
             if terminal_notice is not None or get_info is None or not poll:
                 return terminal_notice

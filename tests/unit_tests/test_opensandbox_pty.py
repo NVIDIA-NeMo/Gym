@@ -848,7 +848,7 @@ async def test_provider_attach_pty_reports_dead_sandbox_on_exhausted_takeover(
     with pytest.raises(NgFailureEvent) as exc_info:
         await provider.attach_pty(handle, "s-7", takeover=True)
     failure = exc_info.value
-    assert failure.failure_kind == (PROVIDER_OOM_KILLED if reason == "OOMKilled" else PROVIDER_UNAVAILABLE)
+    assert failure.failure_kind == PROVIDER_UNAVAILABLE
     assert failure.details.provider_status_reason == reason
     assert isinstance(failure.__cause__, NgFailureEvent)
     assert failure.__cause__.failure_kind == PROVIDER_PTY_BUSY

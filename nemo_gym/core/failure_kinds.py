@@ -136,8 +136,8 @@ PROVIDER_STATUS_UNAVAILABLE = "provider_status_unavailable"
 # A transport failure, unavailable-backend HTTP response or structured endpoint-unavailability report.
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
-# Authoritative current-workload OOM evidence. OpenSandbox requires an explicit terminal
-# OOMKilled lifecycle reason or current user-container inspect evidence, retaining its source.
+# Authoritative current-workload OOM evidence. OpenSandbox inspect must identify the
+# current user container; an unattributed lifecycle OOMKilled reason alone is insufficient.
 # Exit 137, message text, historical container state and sidecar OOMs are insufficient.
 PROVIDER_OOM_KILLED = "provider_oom_killed"
 # The provider answered HTTP 401 or 403: the sandbox credentials were refused.

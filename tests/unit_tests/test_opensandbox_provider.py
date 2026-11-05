@@ -1692,7 +1692,7 @@ async def test_exec_background_keeps_exit_status_when_the_command_deleted_its_ou
 
 
 @pytest.mark.asyncio
-async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_exec_background_preserves_unattributed_oom_reason_after_502(monkeypatch: pytest.MonkeyPatch) -> None:
     class Backend502Error(Exception):
         status_code = 502
 
@@ -1733,12 +1733,12 @@ async def test_exec_background_reports_oom_status_after_502(monkeypatch: pytest.
     raw = FakeRaw()
     handle = opensandbox_provider.SandboxHandle(sandbox_id="sandbox-oom", provider_name="opensandbox", raw=raw)
 
-    with raises_failure(PROVIDER_OOM_KILLED) as exc_info:
+    with raises_failure(PROVIDER_UNAVAILABLE) as exc_info:
         await provider.exec(handle, "allocate memory", timeout_s=30)
 
     assert exc_info.value.details.sandbox_id == "sandbox-oom"
     message = str(exc_info.value)
-    assert "OOM-killed" in message
+    assert "is unavailable" in message
     assert "SandboxResources.memory_mib" not in message
     assert "reason='OOMKilled'" in message
     assert len(message) < 800
@@ -1857,7 +1857,9 @@ async def test_exec_background_retries_timed_out_status_then_checks_ended_sandbo
             else isinstance(exc_info.value.__cause__, Backend410Error)
         )
         assert exc_info.value.details.sandbox_id == "sandbox-oom"
-        assert exc_info.value.details.provider_status_reason is None
+        assert exc_info.value.details.provider_status_reason == (
+            "ContainerFailed" if control_status == "container_failed" else None
+        )
         assert exc_info.value.details.provider == "opensandbox"
     else:
         with raises_failure(PROVIDER_UNAVAILABLE) as exc_info:
@@ -2028,9 +2030,10 @@ async def test_exec_background_inspects_current_container_after_persistent_statu
         ),
     ],
 )
+@pytest.mark.parametrize("lifecycle_reason", ["ContainerFailed", "OOMKilled"])
 @pytest.mark.asyncio
 async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_terminal_502(
-    monkeypatch: pytest.MonkeyPatch, inspect: str, status_code: int, evidence: str | None
+    monkeypatch: pytest.MonkeyPatch, inspect: str, status_code: int, evidence: str | None, lifecycle_reason: str
 ) -> None:
     from nemo_gym.client import http_client
 
@@ -2089,7 +2092,7 @@ async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_t
         commands=FakeCommands(),
         get_info=AsyncMock(
             return_value=SimpleNamespace(
-                status=SimpleNamespace(state="Failed", reason="ContainerFailed", message="not OOMKilled; exit 137")
+                status=SimpleNamespace(state="Failed", reason=lifecycle_reason, message="container identity unknown")
             )
         ),
     )
@@ -2100,11 +2103,12 @@ async def test_exec_background_inspect_confirms_only_current_sandbox_oom_after_t
             await provider.exec(handle, "allocate memory", timeout_s=30)
         assert isinstance(exc_info.value.__cause__.__cause__, Backend502Error)
         assert evidence in str(exc_info.value)
+        assert exc_info.value.details.provider_status_reason == lifecycle_reason
     else:
         with raises_failure(PROVIDER_UNAVAILABLE) as exc_info:
             await provider.exec(handle, "allocate memory", timeout_s=30)
         assert exc_info.value.failure_kind != PROVIDER_OOM_KILLED
-        assert exc_info.value.details.provider_status_reason == "ContainerFailed"
+        assert exc_info.value.details.provider_status_reason == lifecycle_reason
         assert isinstance(exc_info.value.__cause__.__cause__, Backend502Error)
 
     assert raw.get_info.await_count >= 1
@@ -2474,7 +2478,11 @@ async def test_background_rechecks_late_death_evidence_within_original_recovery_
         "late-evidence", "opensandbox", SimpleNamespace(commands=commands, get_info=AsyncMock(side_effect=get_info))
     )
 
-    expected = PROVIDER_STATUS_UNAVAILABLE if evidence_source == "pending" else PROVIDER_OOM_KILLED
+    expected = {
+        "pending": PROVIDER_STATUS_UNAVAILABLE,
+        "lifecycle": PROVIDER_UNAVAILABLE,
+        "inspect": PROVIDER_OOM_KILLED,
+    }[evidence_source]
     with RequestFailureLog.capture() as log, raises_failure(expected) as caught:
         await provider.exec(handle, "agent command", timeout_s=3600)
 
@@ -2550,10 +2558,10 @@ async def test_background_diagnostic_retries_share_active_io_budget(monkeypatch:
     [
         ("ContainerFailed", "sandbox out of memory", PROVIDER_UNAVAILABLE),
         ("ContainerFailed", "not OOMKilled; exit 137", PROVIDER_UNAVAILABLE),
-        ("OOMKilled", "", PROVIDER_OOM_KILLED),
+        ("OOMKilled", "", PROVIDER_UNAVAILABLE),
     ],
 )
-async def test_exec_and_pty_require_explicit_oom_evidence(reason, message, expected):
+async def test_exec_and_pty_never_classify_oom_from_lifecycle_reason_alone(reason, message, expected):
     provider = opensandbox_provider.OpenSandboxProvider()
     raw = SimpleNamespace(
         get_info=AsyncMock(

@@ -85,13 +85,15 @@ The next command request cannot reach it, and an attached PTY can lose its conne
 also occur for other reasons, such as node loss or sandbox expiry.
 
 On command execution failure or PTY loss, Gym checks the sandbox's lifecycle status within the remaining
-diagnostic budget. An explicit terminal `OOMKilled` reason, or the opt-in inspect fallback's current
-user-container state, confirms OOM and produces a `provider_oom_killed` failure event.
+diagnostic budget. A terminal lifecycle `OOMKilled` reason does not identify the affected container;
+it establishes unavailability, and is retained for diagnosis. The opt-in inspect fallback confirms OOM
+only from the current user-container state, producing a `provider_oom_killed` failure event.
 The diagnostic reason identifies the evidence source. Without that evidence, a disconnect or exit code 137
 does not establish OOM. See [Failure reporting and recovery](./opensandbox#failure-reporting-and-recovery)
 for OpenSandbox timeouts and retry settings, and [Error Handling](./index#error-handling) for the shared contract.
 
-If lifecycle status does not confirm OOM and inspect is disabled or cannot finish within the diagnostic budget,
+`diagnostics.inspect_oom` defaults to `false`, so a lifecycle reason alone never produces `provider_oom_killed`.
+If inspect is disabled or cannot confirm OOM within the diagnostic budget,
 Gym retains the observed request or command-outcome failure. A confirmed stopped or failed sandbox without
 OOM evidence is `provider_unavailable`, retaining the original request failure as its cause.
 An unconfirmed OOM does not qualify for an OOM-specific `count_as_zero` rule: retries and terminal handling
