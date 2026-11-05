@@ -16252,6 +16252,13 @@ class TestEnrichRunResult:
             call["response"]["output"][0]["content"][0]["text"] for call in result["ng_trajectory"]["model_calls"]
         ]
         assert texts == ["first", "second"]
+        # Both calls are counted, though no agent turn references them: enrichment summarizes every captured call.
+        captured = result[NG_CAPTURED_CALLS_KEY]
+        assert (captured["calls"], captured["by_role"]["unattributed"]["calls"], captured["capture_complete"]) == (
+            2,
+            2,
+            True,
+        )
 
     async def test_metadata_only_keeps_the_capture_file(self, tmp_path: Path) -> None:
         from nemo_gym.models.model_call_capture import CaptureStore

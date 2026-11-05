@@ -16,6 +16,9 @@ from nemo_gym.trajectory.trajectory_record import (
 )
 
 
+CAPTURE_UNREADABLE_GAP = "model_call_capture_unreadable"
+CAPTURE_INCOMPLETE_GAPS = frozenset({"model_call_capture_pending", "model_call_capture_incomplete"})
+
 # Token fields summed per call role, named as in ``ng_perf``.
 _CAPTURED_CALL_TOKEN_FIELDS: tuple[tuple[str, str], ...] = (
     ("prompt_tokens", "prompt_tokens"),
@@ -27,25 +30,30 @@ _CAPTURED_CALL_TOKEN_FIELDS: tuple[tuple[str, str], ...] = (
 
 
 def build_captured_calls(result: dict[str, Any]) -> Optional[CapturedCallSummary]:
-    """Summarize every captured model call of a rollout by role; ``None`` without ``ng_trajectory`` (capture off)."""
+    """Summarize every captured model call of a rollout by role.
+
+    ``None`` without ``ng_trajectory`` (capture off) and when the capture could not be read at all: those calls are
+    unknown, not zero. A capture with writes still pending or incomplete is summarized with
+    ``capture_complete=False``, so its totals read as a lower bound.
+    """
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
     if not isinstance(raw_trajectory, dict):
         return None
     try:
-        # Verifier invocations are read from the raw record, so this works whether or not TrajectoryRecord
-        # declares them. Read trajectory.verifier_invocations once NVIDIA-NeMo/Gym#4630 has merged.
-        trajectory = TrajectoryRecord.model_validate(
-            {key: value for key, value in raw_trajectory.items() if key != "verifier_invocations"}
-        )
+        trajectory = TrajectoryRecord.model_validate(raw_trajectory)
     except Exception:
         return None
-    roles = _call_roles(trajectory, raw_trajectory.get("verifier_invocations") or [])
+    gap_codes = {gap.code for gap in trajectory.gaps}
+    if CAPTURE_UNREADABLE_GAP in gap_codes:
+        return None
+    roles = _call_roles(trajectory)
     by_role = _totals_by_role(trajectory.model_calls, roles)
     calls = len(trajectory.model_calls)
     return {
         "calls": calls,
         "calls_without_usage": sum(totals["calls_without_usage"] for totals in by_role.values()),
         "attributed_call_coverage": len(roles) / calls if calls else None,
+        "capture_complete": not (gap_codes & CAPTURE_INCOMPLETE_GAPS),
         "by_role": by_role,
     }
 
@@ -91,20 +99,14 @@ def model_call_matcher(trajectory: TrajectoryRecord) -> Callable[[ModelCallRef],
     return match
 
 
-def _call_roles(trajectory: TrajectoryRecord, raw_verifier_invocations: list[Any]) -> dict[int, CapturedCallRole]:
+def _call_roles(trajectory: TrajectoryRecord) -> dict[int, CapturedCallRole]:
     """Map the position of each referenced captured call to its owner.
 
     Agent references are applied before verifier references and the first owner wins, so a call referenced by
     both is an agent call. Positions, not ids, identify a call, so two references to one call count it once.
-    A reference that matches no single captured call, or is malformed, attributes nothing.
+    A reference that matches no single captured call attributes nothing.
     """
-    verifier_refs: list[ModelCallRef] = []
-    for invocation in raw_verifier_invocations:
-        for raw_ref in (invocation.get("model_calls") or []) if isinstance(invocation, dict) else []:
-            try:
-                verifier_refs.append(ModelCallRef.model_validate(raw_ref))
-            except Exception:
-                continue
+    verifier_refs = [ref for invocation in trajectory.verifier_invocations for ref in invocation.model_calls]
     agent_refs = [ref for invocation in trajectory.invocations for ref in invocation.model_calls]
     match = model_call_matcher(trajectory)
     roles: dict[int, CapturedCallRole] = {}

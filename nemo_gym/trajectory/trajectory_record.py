@@ -600,18 +600,25 @@ class CapturedCallSummary(TypedDict):
     ``agent``: referenced by an agent invocation. ``verifier``: referenced by a verifier invocation.
     ``unattributed``: captured under the rollout but referenced by neither. ``attributed_call_coverage`` is the
     share of calls with a role other than ``unattributed``, or ``None`` when there are no calls.
+    ``capture_complete`` is false when capture writes were still pending or incomplete, so the counts are a lower
+    bound. A rollout whose capture could not be read has no summary at all.
     """
 
     calls: int
     calls_without_usage: int
     attributed_call_coverage: Optional[float]
+    capture_complete: bool
     by_role: dict[CapturedCallRole, CapturedCallTotals]
 
 
 class CapturedCallRunSummary(CapturedCallSummary):
-    """``perf_summary.captured_calls``: the rollout summaries added up, covering ``rollouts_with_capture`` rollouts."""
+    """``perf_summary.captured_calls``: the rollout summaries added up, covering ``rollouts_with_capture`` rollouts.
+
+    ``capture_complete`` is false when any of them was incomplete; ``rollouts_with_incomplete_capture`` counts them.
+    """
 
     rollouts_with_capture: int
+    rollouts_with_incomplete_capture: int
     total_rollouts: int
 
 

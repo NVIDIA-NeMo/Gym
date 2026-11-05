@@ -377,7 +377,7 @@ counts every captured call of the rollout by the role that owns it:
 
 ```json
 "ng_captured_calls": {
-  "calls": 3, "calls_without_usage": 0, "attributed_call_coverage": 0.333,
+  "calls": 3, "calls_without_usage": 0, "attributed_call_coverage": 0.333, "capture_complete": true,
   "by_role": {
     "agent": {"calls": 1, "calls_without_usage": 0, "prompt_tokens": 100, "call_latency_ms": 40.0},
     "unattributed": {"calls": 2, "calls_without_usage": 0, "prompt_tokens": 500, "call_latency_ms": 50.0}
@@ -391,7 +391,10 @@ counts adds to `calls_without_usage` instead of adding zero. `attributed_call_co
 captured calls with a role other than `unattributed`; it is null for a rollout with no captured calls.
 `call_latency_ms` sums call durations; calls can overlap, so it is not wall-clock time.
 
-`ng_captured_calls` is absent when observability is disabled or capture produced no trajectory.
+`ng_captured_calls` is absent when observability is disabled, capture produced no trajectory, or the
+rollout's capture could not be read: those calls are unknown, not zero. `capture_complete` is false when
+capture writes were still pending or incomplete, so the counts are a lower bound.
 `perf_summary.captured_calls` adds the rollout summaries into run totals by role, with
-`rollouts_with_capture` out of `total_rollouts`. A run without capture has no `captured_calls` block
-rather than zero totals.
+`rollouts_with_capture` out of `total_rollouts`, and `rollouts_with_incomplete_capture` of those (with
+`capture_complete` false when any was). A run without capture has no `captured_calls` block rather than
+zero totals.
