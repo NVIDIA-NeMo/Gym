@@ -11,7 +11,7 @@ import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Literal, NotRequired, Optional, TypedDict
 
 from pydantic import (
     BaseModel,
@@ -571,6 +571,48 @@ class AgentObservationBundle(ObservationModel):
                 current = parent
             checked.update(chain)
         return self
+
+
+CapturedCallRole = Literal["agent", "verifier", "unattributed"]
+
+
+class CapturedCallTotals(TypedDict):
+    """Captured model calls owned by one role.
+
+    A token field is present only when at least one call reported it. ``calls_without_usage`` counts calls that
+    reported no prompt, completion or total count; their tokens are unknown and not in the totals.
+    ``call_latency_ms`` sums call durations; calls can overlap, so it is not wall-clock time.
+    """
+
+    calls: int
+    calls_without_usage: int
+    prompt_tokens: NotRequired[int]
+    cached_prompt_tokens: NotRequired[int]
+    completion_tokens: NotRequired[int]
+    reasoning_tokens: NotRequired[int]
+    total_tokens: NotRequired[int]
+    call_latency_ms: NotRequired[float]
+
+
+class CapturedCallSummary(TypedDict):
+    """Every captured model call of one rollout (``ng_captured_calls``), counted once by the role that owns it.
+
+    ``agent``: referenced by an agent invocation. ``verifier``: referenced by a verifier invocation.
+    ``unattributed``: captured under the rollout but referenced by neither. ``attributed_call_coverage`` is the
+    share of calls with a role other than ``unattributed``, or ``None`` when there are no calls.
+    """
+
+    calls: int
+    calls_without_usage: int
+    attributed_call_coverage: Optional[float]
+    by_role: dict[CapturedCallRole, CapturedCallTotals]
+
+
+class CapturedCallRunSummary(CapturedCallSummary):
+    """``perf_summary.captured_calls``: the rollout summaries added up, covering ``rollouts_with_capture`` rollouts."""
+
+    rollouts_with_capture: int
+    total_rollouts: int
 
 
 class TrajectoryRecord(ObservationModel):
