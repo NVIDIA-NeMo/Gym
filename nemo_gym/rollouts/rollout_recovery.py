@@ -528,6 +528,7 @@ _SERVER_RUNTIME_OPTIONS = frozenset(
         "switchyard_api_key",
         "hf_token",
         "num_workers",
+        "uvicorn_reuse_port",
         "base_url",
         "openai_base_url",
         "policy_base_url",
@@ -728,10 +729,14 @@ def _normalize_runtime_references(value: Any) -> Any:
 
 
 # A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
-# `exa_api_key`, `X-Api-Key`, `Authorization`, `X_TOKEN`, `my_service_pw`, but not `max_tokens` or `author`.
+# `exa_api_key`, `X-Api-Key`, `service_key`, `Authorization`, `X-Session`, `X_TOKEN`, `my_service_pw`, but not
+# `max_tokens`, `author`, `reference_key` or `record_terminal_session`. A `..._key` counts only after a word that names
+# an account or a service, since other `..._key` settings (`metric_key`, `reference_key`) select what is measured.
 _CREDENTIAL_NAME = re.compile(
     r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
     r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
+    r"|(^|_)(service|client|signing|license|master|account|subscription|encryption|session|app)_key$"
+    r"|^(x_)?session(_id)?$"
 )
 _REDACTED = "<redacted>"
 # An environment variable or config reference by name, a `NAME=value` assignment, and an HTTP credential scheme.

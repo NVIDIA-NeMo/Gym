@@ -212,6 +212,7 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
+from nemo_gym.data.task_selection import select_tasks
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -3339,6 +3340,7 @@ class RolloutCollectionHelper(BaseModel):
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
+        task_ids: Optional[Sequence[str]] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
 
@@ -3349,8 +3351,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
-        the head server's config. Input rows are not mutated; the expanded, stamped copies are
-        returned.
+        the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
+        stored in each row (see ``nemo_gym.data.task_selection.select_tasks``), each task once before
+        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -3360,9 +3363,10 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
         )
+        selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
-            for idx, row in enumerate(examples)
+            (idx, orjson.dumps(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            for idx in selected
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
@@ -5887,6 +5891,7 @@ class RolloutAggregationHelper(BaseModel):
 
         results: List[Dict] = []
         histories: List[RolloutStore] = []
+        health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
         legacy_results: List[Dict] = []
         history_results: Dict[str, List[Dict]] = {}
@@ -5899,6 +5904,7 @@ class RolloutAggregationHelper(BaseModel):
             history = RolloutStore.read(
                 shard, import_legacy=False, retry_terminal_timeouts=config.retry_terminal_timeouts
             )
+            health_histories[shard] = history
             if history is not None:
                 if history.manifest.run_id in run_ids:
                     raise ConfigError("The same run was supplied through multiple shard paths.")
@@ -6198,7 +6204,6 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if not config.disable_health_check:
             from nemo_gym.rollouts.rollout_health import (
-                JournalHealthUnavailable,
                 format_health_report,
                 run_health_checks,
             )
@@ -6208,15 +6213,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     run_health_checks,
                     # Keep each shard's identity, failure history and saved retry policy.
                     [Path(path) for path in input_paths],
-                    selected_projection=output_fpath if config.merge_shards and inventory_known else None,
                     run_coverage=components if inventory_known else None,
+                    source_histories=health_histories,
                     output_dir=output_fpath.parent,
                     workers=config.health_check_workers,
                     ignored_checks=config.health_check_ignored_checks,
                     limits=config.run_health_limits,
                 )
-            except JournalHealthUnavailable as error:
-                print(f"Rollout health checks skipped: {error}")
             except Exception:
                 logger.exception(
                     "Rollout health checks failed after aggregation; aggregate artifacts are still available."

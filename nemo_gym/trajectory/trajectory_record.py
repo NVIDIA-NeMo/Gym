@@ -25,7 +25,7 @@ from pydantic import (
 )
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.failure_kinds import validate_failure_kind
+from nemo_gym.core.failure_kinds import FailureStage, validate_failure_kind
 from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import ModelOperationObservation
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
@@ -351,6 +351,9 @@ class SandboxObservation(ObservationModel):
     """Outcome and lifetime resource usage reported by a sandbox-owning harness."""
 
     kind: Literal["sandbox"] = "sandbox"
+    stage: FailureStage | None = Field(
+        default=None, description="Originating execution stage, when known to the caller."
+    )
     role: Literal["agent", "verifier", "environment"]
     provider: Optional[str] = None
     sandbox_id: Optional[str] = None

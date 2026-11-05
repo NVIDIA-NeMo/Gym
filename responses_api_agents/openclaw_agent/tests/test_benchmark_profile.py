@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -12,8 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""This adapter's benchmark profile, seeded through HLE's Environment Server."""
+
+import pytest
+
+from tests.session_harness_profiles import check_hle_seed
 
 
-def test_placeholder():
-    """Should be True"""
-    assert True is True
+@pytest.mark.parametrize("pairing", [True, False], ids=["with_override", "without_override"])
+async def test_hle_seed_reaches_the_agents_own_sandbox_only_with_the_pairing_override(
+    pairing: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await check_hle_seed("openclaw_agent", pairing, monkeypatch)
