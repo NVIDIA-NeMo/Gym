@@ -633,6 +633,21 @@ class TestSession:
         assert refused.session[SESSION_ID_KEY] == "caller-session"
 
     @pytest.mark.asyncio
+    async def test_legacy_seed_cannot_reset_a_typed_session(self) -> None:
+        """A `{}` seed with a typed session's cookie must not wipe its documents or restart its time budget."""
+        server = _make_server()
+        await server.seed_session(_mock_request(), _typed_seed())
+        server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
+        started = server._session_start_times[_TEST_SESSION_ID]
+
+        with pytest.raises(HTTPException) as error:
+            await server.seed_session(_mock_request(), BaseSeedSessionRequest())
+
+        assert error.value.status_code == 409
+        assert server._data_storage[_TEST_SESSION_ID] == {"doc": "Annual Report 2024"}
+        assert server._session_start_times[_TEST_SESSION_ID] == started
+
+    @pytest.mark.asyncio
     async def test_close_releases_state_and_fences_both_seed_routes(self) -> None:
         server = _make_server()
         seed = _typed_seed()
