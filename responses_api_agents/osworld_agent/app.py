@@ -1929,9 +1929,7 @@ def _build_response(
         # NeMo-RL resolves these served response IDs against capture records.
         # Keeping membership separate from response.output means rejected
         # retries remain in the capture manifest as exact context evidence.
-        response_fields["ng_trajectory"] = {
-            "turns": [{"model_calls": accepted_call_references}]
-        }
+        response_fields["ng_trajectory"] = {"turns": [{"model_calls": accepted_call_references}]}
     # A refused rollout is a typed failure row: an infrastructure cause retries, a failed policy call is the model's.
     response_fields |= _admission_failure_fields(result, runtime_admission)
     sandbox_start_failure = result.get("sandbox_start_failure")

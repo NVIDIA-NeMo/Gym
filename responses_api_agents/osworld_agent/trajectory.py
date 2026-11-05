@@ -410,12 +410,8 @@ def collect_model_calls(
             if not isinstance(parsed_actions, list):
                 parsed_actions = []
             response_id = response.get("response_id") if isinstance(response, Mapping) else None
-            if response_id is not None and (
-                not isinstance(response_id, str) or not response_id
-            ):
-                raise ValueError(
-                    f"OSWorld step {step_position} model response_id must be a non-empty string"
-                )
+            if response_id is not None and (not isinstance(response_id, str) or not response_id):
+                raise ValueError(f"OSWorld step {step_position} model response_id must be a non-empty string")
             model_calls.append(
                 {
                     "model_call_id": model_call_id,

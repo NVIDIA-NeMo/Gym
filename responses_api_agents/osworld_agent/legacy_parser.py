@@ -49,14 +49,13 @@ def is_invalid_legacy_parse(low_level_instruction: Any, actions: List[str], cot:
     """
 
     return (
-        not actions
-        or str(low_level_instruction).startswith(":")
-        or not isinstance(cot, dict)
-        or not cot.get("code")
+        not actions or str(low_level_instruction).startswith(":") or not isinstance(cot, dict) or not cot.get("code")
     )
 
 
-def parse_response_to_cot_and_action(response, screen_size, coordinate_type, thinking: bool) -> Tuple[str, List[str], dict]:
+def parse_response_to_cot_and_action(
+    response, screen_size, coordinate_type, thinking: bool
+) -> Tuple[str, List[str], dict]:
     """Parse response including Thought (via <think> tags or ## Thought), Action and code block"""
     input_string = response["content"].lstrip()
 
@@ -79,7 +78,9 @@ def parse_response_to_cot_and_action(response, screen_size, coordinate_type, thi
             else:
                 sections["thought"] = ""
 
-        action_match = re.search(r"^\s*##\s*Action\s*:?\s*[\n\r]+(.*?)(?=^\s*##|\Z)", input_string, re.DOTALL | re.MULTILINE)
+        action_match = re.search(
+            r"^\s*##\s*Action\s*:?\s*[\n\r]+(.*?)(?=^\s*##|\Z)", input_string, re.DOTALL | re.MULTILINE
+        )
         if action_match:
             action = action_match.group(1).strip()
             sections["action"] = action.strip()

@@ -59,9 +59,7 @@ def test_raw_live_history_replays_the_served_output_as_an_exact_prefix() -> None
         parse_retries=1,
     )
     payloads: List[Dict[str, Any]] = []
-    raw_outputs = [
-        f"<think>\nThought {index}\n</think>\n{GOOD}" for index in (1, 2)
-    ]
+    raw_outputs = [f"<think>\nThought {index}\n</think>\n{GOOD}" for index in (1, 2)]
 
     def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
         payloads.append(payload)
@@ -102,11 +100,7 @@ def test_raw_live_history_normalizes_only_at_a_compaction_boundary() -> None:
     payloads = _drive(agent, 4)
     compacted_prompt = payloads[3]["messages"]
 
-    assistant_messages = [
-        message["content"]
-        for message in compacted_prompt
-        if message.get("role") == "assistant"
-    ]
+    assistant_messages = [message["content"] for message in compacted_prompt if message.get("role") == "assistant"]
     assert assistant_messages
     assert all("## Code:" in content for content in assistant_messages)
 
@@ -143,11 +137,7 @@ def test_raw_full_history_keeps_original_code_in_compacted_turns() -> None:
     assert second_prompt[: len(first_prompt)] == first_prompt
 
     compacted_prompt = payloads[3]["messages"]
-    assistant_messages = [
-        message["content"]
-        for message in compacted_prompt
-        if message.get("role") == "assistant"
-    ]
+    assistant_messages = [message["content"] for message in compacted_prompt if message.get("role") == "assistant"]
     assert assistant_messages
     assert all("## Code:" in content for content in assistant_messages)
 
@@ -176,9 +166,7 @@ def test_normalized_history_remains_the_benchmark_default() -> None:
     )
     payloads = _drive(agent, 2)
     assistant_messages = [
-        message["content"]
-        for message in payloads[1]["messages"]
-        if message.get("role") == "assistant"
+        message["content"] for message in payloads[1]["messages"] if message.get("role") == "assistant"
     ]
     assert len(assistant_messages) == 1
     assert "## Action:" in assistant_messages[0]
@@ -735,8 +723,14 @@ def test_default_context_options_keep_the_published_contract() -> None:
     assert stop["context_overflow_policy"] == "stop"
     assert stop["context_prompt_token_limit"] == 40960
     assert "unterminated_episode_policy" not in default
-    assert normalize_nemotron_agent_options({"unterminated_episode_policy": "fail"})["unterminated_episode_policy"] == "fail"
-    assert normalize_nemotron_agent_options({"unterminated_episode_policy": "mask"})["unterminated_episode_policy"] == "mask"
+    assert (
+        normalize_nemotron_agent_options({"unterminated_episode_policy": "fail"})["unterminated_episode_policy"]
+        == "fail"
+    )
+    assert (
+        normalize_nemotron_agent_options({"unterminated_episode_policy": "mask"})["unterminated_episode_policy"]
+        == "mask"
+    )
     with pytest.raises(ValueError, match="unterminated_episode_policy"):
         normalize_nemotron_agent_options({"unterminated_episode_policy": "score"})
 

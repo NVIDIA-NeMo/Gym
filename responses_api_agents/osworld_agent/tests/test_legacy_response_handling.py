@@ -106,9 +106,7 @@ def test_truncated_text_is_parsed_when_clean_finish_is_not_required() -> None:
 
 def test_context_overflow_stand_in_stays_invalid_without_clean_finish() -> None:
     stand_in = {"content": "", "raw_content": "", "finish_reason": "length", "response_id": "local-1"}
-    _, actions, info = _predict(
-        _agent(require_clean_finish=False, unterminated_episode_policy="fail"), [stand_in]
-    )
+    _, actions, info = _predict(_agent(require_clean_finish=False, unterminated_episode_policy="fail"), [stand_in])
     assert actions == ["FAIL"]
     assert info["model_calls"][-1]["accepted"] is False
 
@@ -178,7 +176,9 @@ def _result(*, terminal_loss_member: bool) -> Dict[str, Any]:
                 "actions": ["pyautogui.click(1, 2)"],
                 "reward": 0.0,
                 "done": False,
-                "info": {"agent": {"model_calls": [_call(_served_response("chatcmpl-1", first, "stop"), accepted=True)]}},
+                "info": {
+                    "agent": {"model_calls": [_call(_served_response("chatcmpl-1", first, "stop"), accepted=True)]}
+                },
             },
             {
                 "step": 1,
@@ -257,7 +257,10 @@ def test_legacy_parser_enters_the_contract_only_when_enabled() -> None:
     ("content", "expected"),
     [
         (GOOD, "pyautogui.click(960, 540)"),
-        ('Click on "View".\n## Code:\n```python\npyautogui.click(0.82543, 0.208526)\n```', "pyautogui.click(1585, 225)"),
+        (
+            'Click on "View".\n## Code:\n```python\npyautogui.click(0.82543, 0.208526)\n```',
+            "pyautogui.click(1585, 225)",
+        ),
         # No Action section: the old agent executed the parser's FAIL as a policy action.
         (INLINE_CODE_HEADING, "FAIL"),
     ],
@@ -306,9 +309,7 @@ def test_context_limit_stays_a_trained_fail_by_default() -> None:
 
 
 def test_masked_context_limit_ends_the_rollout_without_a_terminal_action() -> None:
-    agent = _legacy_agent(
-        context_overflow_policy="stop", context_prompt_token_limit=38000, mask_context_limit=True
-    )
+    agent = _legacy_agent(context_overflow_policy="stop", context_prompt_token_limit=38000, mask_context_limit=True)
     _, actions, info = _predict(agent, [_over_guard_reply()])
     assert actions == []
     assert "forced_terminal" not in info
@@ -317,9 +318,7 @@ def test_masked_context_limit_ends_the_rollout_without_a_terminal_action() -> No
 
 
 def test_masked_context_limit_leaves_invalid_responses_trained() -> None:
-    agent = _legacy_agent(
-        context_overflow_policy="stop", context_prompt_token_limit=38000, mask_context_limit=True
-    )
+    agent = _legacy_agent(context_overflow_policy="stop", context_prompt_token_limit=38000, mask_context_limit=True)
     _, actions, info = _predict(agent, [_served_reply(NO_CODE)])
     assert actions == ["FAIL"]
     assert info["forced_terminal"] == "model_response_invalid"
