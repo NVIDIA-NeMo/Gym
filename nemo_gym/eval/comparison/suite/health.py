@@ -70,6 +70,7 @@ def check_rollout_file_health(
                 output_dir=Path(directory),
                 workers=workers,
                 limits=RunHealthLimits(max_not_final_failure_fraction=0, max_final_failure_fraction=0),
+                limits_source="override",
                 progress=_log_health_progress(path, started),
             )
         except (OSError, ValueError, TypeError, ConfigError) as error:
