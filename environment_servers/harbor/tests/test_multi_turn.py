@@ -1062,6 +1062,11 @@ timeout_sec = 0.05
     failure = response.failure
     assert failure.stage == "agent" and failure.failure_kind == "harbor:task_deadline" and not failure.terminal
     assert "time budget of task 'hello'" in failure.failure_reason and "over 2 turn(s)" in failure.failure_reason
+    assert response.failure_report is not None
+    assert any(
+        event.foreign_error is not None and event.foreign_error.exception_type == "TimeoutError"
+        for event in response.failure_report.events.values()
+    )
     assert not any("test.sh" in call["command"] for call in sandbox.execs)
     # The final unwind still closed the agent session and stopped the sandbox.
     assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
@@ -1899,7 +1904,7 @@ async def test_a_steps_workdir_is_merged_into_the_working_directory_before_its_a
     # The one root exec clears a link the previous turn's agent planted at any shipped name before it extracts, so
     # a BusyBox tar (which follows a link at a directory member's path) lands the merge where GNU tar and Harbor's
     # docker cp do: the listing loop precedes the extraction in the same shell line (the real tars are exercised in
-    # tests/unit_tests/test_sandbox_transfer.py).
+    # tests/unit_tests/sandbox/test_sandbox_transfer.py).
     extraction = sandbox.execs[index]["command"]
     assert 'if [ -L /app/"$m" ]; then rm -- /app/"$m"; fi; done; tar -xzf' in extraction
     assert extraction.index("tar -tzf") < extraction.index("tar -xzf")
@@ -2659,7 +2664,7 @@ async def test_a_collection_the_sandbox_cannot_serve_masks_the_turn_as_an_outage
 
 
 SLOPCODEBENCH_TASK = (
-    Path(__file__).parents[3] / "tests" / "unit_tests" / "fixtures" / "harbor_slopcodebench" / "code_search"
+    Path(__file__).parents[3] / "tests/unit_tests/data/tasks/harbor/fixtures/harbor_slopcodebench/code_search"
 )
 
 

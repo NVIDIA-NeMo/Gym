@@ -97,6 +97,11 @@ def _runs() -> dict:
     return importlib.import_module("newpkg.counter").RUNS
 
 
+def _moved_path_warnings(caught: list[warnings.WarningMessage]) -> list[warnings.WarningMessage]:
+    """The moved-path deprecations among the captured warnings, ignoring unrelated ones."""
+    return [w for w in caught if w.category is DeprecationWarning and " moved to `" in str(w.message)]
+
+
 class TestMovedModuleFinder:
     def test_old_path_is_the_new_module(self, moved_tree) -> None:
         with pytest.warns(DeprecationWarning):
@@ -168,7 +173,8 @@ class TestMovedModuleFinder:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             importlib.import_module("oldpkg.mod")
-        [warning] = caught
+        # Other packages may warn during the import too; check only the moved-path warning.
+        [warning] = _moved_path_warnings(caught)
         message = str(warning.message)
         assert warning.category is DeprecationWarning
         assert "`oldpkg.mod` moved to `newpkg.sub.mod` in nemo_gym 0.8.0" in message
@@ -181,7 +187,7 @@ class TestMovedModuleFinder:
             warnings.simplefilter("always")
             importlib.import_module("oldpkg.mod")
             importlib.import_module("oldpkg.mod")
-        assert len(caught) == 1
+        assert len(_moved_path_warnings(caught)) == 1
 
     def test_find_spec_of_old_path_points_at_the_new_file(self, moved_tree, tmp_path: Path) -> None:
         # find_spec imports the parent packages, which are old paths too.
@@ -581,6 +587,29 @@ class TestImportSurface:
             assert module in surface
         assert "text_file_equals" in surface["nemo_gym.verifiers.files"]
 
+    def test_failure_surface_records_the_intentional_canonical_exception_migration(self) -> None:
+        """Package moves preserve names; the separate failure API migration deliberately retires concrete types.
+
+        Keep its replacement in the snapshot so compatibility checks cannot silently discard the canonical API.
+        The v1 EpisodeFailure data envelope is retained; only its old raised-error wrapper and type variable go away.
+        """
+        from nemo_gym.core.typed_exceptions import NgFailureEvent
+
+        retired = {
+            "nemo_gym.agent_utils.sandbox_session": ("HarnessTerminationError",),
+            "nemo_gym.agent_utils.supervisor_client": ("HarnessTerminationError",),
+            "nemo_gym.base_environment_server": ("HandledEpisodeError", "EpisodeFailureT"),
+        }
+        for module, old_names in retired.items():
+            current = importlib.import_module(module)
+            assert "NgFailureEvent" in self.surface[module]
+            assert current.NgFailureEvent is NgFailureEvent
+            for name in old_names:
+                assert name not in self.surface[module]
+                assert not hasattr(current, name)
+        assert "NgFailureEvent" in self.surface["nemo_gym.core.typed_exceptions"]
+        assert "FailureReportRow" in self.surface["nemo_gym.core.failure_transport"]
+
     def test_every_recorded_name_still_resolves_at_its_old_path(self) -> None:
         missing = []
         for module, names in self.surface.items():
@@ -727,3 +756,54 @@ def test_harbor_cli_imports_from_the_old_package(first: str) -> None:
         "    raise AssertionError('unknown attribute resolved')\n"
     )
     subprocess.run([sys.executable, "-W", "ignore::DeprecationWarning", "-c", code], check=True)
+
+
+def test_package_facade_warns_once_for_a_renamed_name() -> None:
+    # In a fresh interpreter: a from-import looks the name up on the package more than once.
+    # nemo_gym.config serves TOKEN_ID_CAPTURE_BLOCK only through MOVED_NAMES, by way of lazy_exports.
+    code = (
+        "import warnings\n"
+        "with warnings.catch_warnings(record=True) as caught:\n"
+        "    warnings.simplefilter('always')\n"
+        "    from nemo_gym.config import TOKEN_ID_CAPTURE_BLOCK\n"
+        "    import nemo_gym.config\n"
+        "    nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK\n"
+        "messages = [str(w.message) for w in caught if issubclass(w.category, DeprecationWarning)]\n"
+        "assert len(messages) == 1, messages\n"
+        "assert messages[0].startswith('`nemo_gym.config.TOKEN_ID_CAPTURE_BLOCK` moved to'), messages\n"
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.parametrize(
+    ("module", "old_name", "new_name"),
+    [
+        # Released in 0.7.0.
+        ("nemo_gym.responses_converter", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.responses_converter", "ResponsesConverterState", "ChatCompletionsConverterState"),
+        # Paths the reorganization introduced before the rename.
+        ("nemo_gym.models.chat_completions_converter", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.models.chat_completions_converter", "ResponsesConverterState", "ChatCompletionsConverterState"),
+        ("nemo_gym.models", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.models.token_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
+        ("nemo_gym.token_id_capture.completion", "ResponsesConverter", "ChatCompletionsConverter"),
+    ],
+)
+def test_renamed_converter_resolves_at_each_old_path_with_a_warning(module: str, old_name: str, new_name: str) -> None:
+    # In a fresh interpreter: each old path warns only on its first use in a process.
+    code = textwrap.dedent(
+        f"""
+        import warnings
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            from {module} import {old_name} as old
+        from nemo_gym.models.chat_completions_converter import {new_name} as new
+        assert old is new, (old, new)
+        messages = [str(w.message) for w in caught if w.category is DeprecationWarning and "{old_name}`" in str(w.message)]
+        assert len(messages) == 1, messages
+        (message,) = messages
+        assert "chat_completions_converter.{new_name}`" in message, message
+        assert "removed in nemo_gym 0.10.0" in message, message
+        """
+    )
+    subprocess.run([sys.executable, "-c", code], check=True)

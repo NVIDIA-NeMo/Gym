@@ -178,6 +178,9 @@ class ProofVerificationVerifyResponse(BaseVerifyResponse):
 
 
 class ProofVerificationResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: ProofVerificationResourcesServerConfig
 
     _ext_clients: Optional[list] = PrivateAttr(default=None)

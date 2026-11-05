@@ -15,8 +15,12 @@ from fastapi.testclient import TestClient
 from nemo_gym.client import ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest, install_session_routing
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+    install_session_routing,
+)
 from resources_servers.gdpval import persisted_layout, task_sandbox
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig, GDPValVerifyRequest
 
@@ -188,6 +192,8 @@ def test_unjudged_deliverables_are_persisted_and_masked(server, root, tmp_path, 
     verified = _verify(client, rubric_json=[{"criterion": "clarity", "score": 1}])
 
     assert (verified["reward"], verified["mask_sample"]) == (0.0, True)
+    assert verified["failure_kind"] == "gdpval:judging_disabled"
+    assert verified["failure_reason"] == "judge_deliverables is false, so the deliverables were saved without judging"
     assert verified["judge_response"] is None
     assert (Path(verified["deliverables_dir"]) / "report.md").read_text() == "the report"
 

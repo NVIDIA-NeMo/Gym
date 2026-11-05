@@ -18,7 +18,7 @@ from environment_servers.single_agent_turn.app import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
 from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
     capture_observations,

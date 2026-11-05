@@ -4,12 +4,34 @@
 """Stock OpenCode plus the same observability patch, locally and in sandboxes."""
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from nemo_gym.sandbox import SandboxExecResult
 
 
 OPENCODE_VERSION = "1.17.11"
-OBSERVABILITY_PATCH = Path(__file__).with_name("assistant_message_header.js")
+RUNTIME_INSTALLER_SOURCE = Path(__file__).with_name("install_opencode_runtime.sh")
+RUNTIME_INSTALLER_FILE = RUNTIME_INSTALLER_SOURCE.name
+TASK_ENVIRONMENT_PLUGIN_SOURCE = Path(__file__).with_name("task_environment.mjs")
+TASK_ENVIRONMENT_PLUGIN_FILE = TASK_ENVIRONMENT_PLUGIN_SOURCE.name
+ASSISTANT_MESSAGE_PLUGIN_SOURCE = Path(__file__).with_name("assistant_message_header.js")
+ASSISTANT_MESSAGE_PLUGIN_FILE = ASSISTANT_MESSAGE_PLUGIN_SOURCE.name
+REQUIRED_MCP_PLUGIN_SOURCE = Path(__file__).with_name("required_mcp.mjs")
+REQUIRED_MCP_PLUGIN_FILE = REQUIRED_MCP_PLUGIN_SOURCE.name
+# Retain the import used by the separate opencode_sandboxed_agent adapter.
+OBSERVABILITY_PATCH = ASSISTANT_MESSAGE_PLUGIN_SOURCE
 
 
-def apply_observability_patch(config: dict, *, plugin_path: Path = OBSERVABILITY_PATCH) -> None:
+def apply_observability_patch(config: dict, *, plugin_path: Path = ASSISTANT_MESSAGE_PLUGIN_SOURCE) -> None:
     """Register the shared correlation plugin at its execution-side location."""
     config.setdefault("plugin", []).append(plugin_path.as_uri())
+
+
+def command_failure_reason(message: str, result: "SandboxExecResult") -> str:
+    """Keep bounded raw diagnostics; an error status need not represent a process exit."""
+    return (
+        f"{message[:512]}; return_code={result.return_code}; error_type={str(result.error_type)[:128]}; "
+        f"stdout_tail={repr(result.stdout or '')[-400:]}; stderr_tail={repr(result.stderr or '')[-400:]}"
+    )

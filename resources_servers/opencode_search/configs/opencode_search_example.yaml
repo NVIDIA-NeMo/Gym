@@ -1,0 +1,60 @@
+# Example-dataset agent for the opencode_search resources server. `gym env test
+# +should_validate_data=true` (nemo_gym/cli/env.py `_validate_data_single`) checks that data/example.jsonl,
+# data/example_metrics.json and data/example_rollouts.jsonl exist; this file is what collate needs to
+# rebuild example_metrics.json from example.jsonl:
+#
+#   gym dataset collate "+config_paths=[resources_servers/opencode_search/configs/opencode_search_example.yaml]" \
+#       +output_dirpath=data/opencode_search +mode=example_validation
+#
+# The committed example_rollouts.jsonl were produced by the benchmark's opencode_sandboxed_search_agent.
+# This agent composes no harness config and is not meant to be run.
+#
+# A SEPARATE FILE from opencode_search.yaml on purpose. Benchmarks compose opencode_search.yaml and
+# build their own server from it with `_inherit_from`, which MOVES opencode_search_resources_server
+# (global_config.py pops the source). An example agent living in that file would then point at a
+# server that no longer exists, and the benchmark fails to resolve -- the same reason
+# swebench.yaml carries no example agent.
+#
+# Also a separate INSTANCE from opencode_sandboxed_search_agent, so the example rows can never ride
+# along into a run that composes the search agent. OmegaConf replaces lists wholesale: a composition
+# that restates `datasets` (browsecomp_opencode.yaml does) would silently drop an example entry, and
+# one that does not would inherit it.
+config_paths:
+- resources_servers/opencode_search/configs/opencode_search.yaml
+
+opencode_search_example_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        # The INSTANCE name declared in opencode_search.yaml, not the implementation directory.
+        name: opencode_search_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/opencode_search/data/example.jsonl
+
+opencode_search_example_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: opencode_search_example_agent
+
+# opencode_search.yaml points the server's judge_model_server at `search_judge_model`, which only the
+# benchmark (benchmarks/browsecomp/configs/browsecomp_opencode.yaml) defines. Same judge, restated so
+# this file resolves on its own; keep the two in sync.
+search_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      model: nvidia/zai-org/glm-5.2
+      api_key: ${oc.select:inference_api_key,null}
+      return_token_id_information: false
+      uses_reasoning_parser: true
