@@ -84,6 +84,7 @@ A cookie or MCP token from before the restore names only the session ID, so its 
 """
 
 import asyncio
+import errno
 import fcntl
 import hashlib
 import heapq
@@ -261,11 +262,42 @@ class SessionOwners:
         """The worker that owns the ID, or None if nobody does."""
         if session_id in self._mine:
             return self.routing_id
+        return self._owner_on_disk(session_id)
+
+    def _owner_on_disk(self, session_id: str) -> Optional[str]:
         try:
             with open(self._path(session_id), encoding="ascii") as owner_file:
                 return _valid_routing_id(owner_file.read())
         except FileNotFoundError:
             return None
+
+    def replace_if_owner(self, session_id: str, expected_owner: str) -> Optional[str]:
+        """Take over only if the on-disk owner still matches; return the resulting owner.
+
+        Model routing uses this after a confirmed pre-dispatch connection failure.
+        The lock coordinates competing recoveries, releases, and checkpoint rewrites;
+        atomic replacement leaves no gap in which a third worker can claim the ID.
+        """
+        path = self._path(session_id)
+        temporary = f"{path}.{self.routing_id}.{secrets.token_hex(8)}.tmp"
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            try:
+                os.write(fd, self.routing_id.encode("ascii"))
+            finally:
+                os.close(fd)
+            with self._exclusive():
+                owner = self._owner_on_disk(session_id)
+                if owner != expected_owner:
+                    return owner
+                os.replace(temporary, path)
+                self._mine.add(session_id)
+                return self.routing_id
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
     def acquire(self, session_id: str) -> Optional[str]:
         """Make this worker the ID's owner unless another worker already owns it; return the owner.
@@ -588,6 +620,12 @@ class _AgentSessionLifetimes:
         return []
 
 
+class _OwnerConnectionFailed(Exception):
+    def __init__(self, body: bytes) -> None:
+        super().__init__("Model owner socket is unavailable before dispatch")
+        self.body = body
+
+
 class WorkerForwarder:
     """Relay a request to a worker's private socket and stream its response unchanged."""
 
@@ -639,9 +677,11 @@ class WorkerForwarder:
                 # Send only the caller's headers.
                 skip_auto_headers=("User-Agent", "Accept", "Accept-Encoding", "Content-Type"),
             )
-        except ClientConnectorError:
+        except ClientConnectorError as error:
             # The owner's socket is gone or refuses connections: the worker that held this session exited.
             await self._discard_client(owner)
+            if self._can_recover_owner(error):
+                raise _OwnerConnectionFailed(body) from error
             await JSONResponse(
                 {
                     "detail": (
@@ -674,6 +714,9 @@ class WorkerForwarder:
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
             await send({"type": "http.response.body", "body": b"", "more_body": False})
 
+    def _can_recover_owner(self, error: ClientConnectorError) -> bool:
+        return False  # Stateful agent/resource sessions retain their HTTP 410 contract.
+
     async def _discard_client(self, owner: str) -> None:
         client = self.clients.pop(owner, None)
         if client is not None:
@@ -687,17 +730,36 @@ class RolloutRouter(WorkerForwarder):
         super().__init__(socket_dir)
         self.claims = SessionOwners(socket_dir, uuid4().hex, holds=holds)
 
-    async def route(self, rollout_id: str, scope: Scope, receive: Receive, send: Send) -> bool:
-        """Return True if the request was forwarded or refused; False if it belongs here."""
-        owner = self.claims.acquire(rollout_id)
-        if owner == self.claims.routing_id:
-            return False
-        if owner is None or scope.get(_FORWARDED_SCOPE_KEY):
-            # A forwarded request must never bounce between workers.
-            await _conflict("The rollout's worker ownership changed while routing the request.", scope, receive, send)
-        else:
-            await self.forward(owner, scope, receive, send)
-        return True
+    def _can_recover_owner(self, error: ClientConnectorError) -> bool:
+        # Never take over after timeouts, permission errors, or uncertain execution.
+        return error.os_error.errno in {errno.ENOENT, errno.ECONNREFUSED}
+
+    async def route(self, rollout_id: str, scope: Scope, receive: Receive, send: Send) -> Optional[Receive]:
+        """Return a body reader for local dispatch, or None after forwarding/refusal."""
+        body = None
+        for _ in range(2):
+            owner = self.claims.acquire(rollout_id)
+            if owner == self.claims.routing_id:
+                return _replay_body(body, receive) if body is not None else receive
+            if owner is None or scope.get(_FORWARDED_SCOPE_KEY):
+                # A forwarded request must never bounce between workers.
+                await _conflict("The rollout's worker ownership changed while routing the request.", scope, receive, send)
+                return None
+            try:
+                await self.forward(owner, scope, receive, send, body=body)
+                return None
+            except _OwnerConnectionFailed as error:
+                body = error.body
+                # The failed connect sent no HTTP bytes. Only replace the owner
+                # we checked; another recovery or restore may have won meanwhile.
+                replacement = self.claims.replace_if_owner(rollout_id, owner)
+                if replacement == self.claims.routing_id:
+                    return _replay_body(body, receive)
+        # Repeated worker loss must not turn into an unbounded internal retry loop.
+        await JSONResponse({"detail": "Model ownership changed repeatedly during recovery"}, status_code=503)(
+            scope, receive, send
+        )
+        return None
 
 
 def install_rollout_routing(
