@@ -192,10 +192,17 @@ class ClineSandboxSession(AgentSessionState):
     async def collect_artifacts(self) -> ClineArtifacts:
         """Copy the JSON event stream after confirmed termination, keeping partial output of a stopped run."""
         wall_time_s = perf_counter() - self.started_at if self.started_at is not None else None
+        if self.session.expired_before_launch:
+            # A rollout stop arrived before launch, so Cline never ran and wrote no output.
+            return ClineArtifacts(stdout="", stderr="", wall_time_s=wall_time_s)
         directory = self.session.session_dir
         try:
             stdout = await read_text(self.session.sandbox, path=f"{directory}/stdout.jsonl")
         except Exception as error:
+            if self.session.expired and await self._stdout_absent():
+                # A rollout stop can end the runner after launch but before it opens Cline's output.
+                LOG.warning("Cline wrote no output before a rollout stop ended it; keeping an empty transcript")
+                return ClineArtifacts(stdout="", stderr="", wall_time_s=wall_time_s)
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Cline runner produced no readable output: {logs[-STDERR_TAIL_BYTES:]}") from error
         # Cline repeats SDK deprecation warnings on every model call; keep only the tail.
@@ -209,6 +216,21 @@ class ClineSandboxSession(AgentSessionState):
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         return ClineArtifacts(stdout=stdout, stderr=stderr, wall_time_s=wall_time_s)
+
+    async def _stdout_absent(self) -> bool:
+        """Whether the session directory exists without Cline's output; an unclear answer counts as present."""
+        directory = quote(self.session.session_dir)
+        stdout = quote(f"{self.session.session_dir}/stdout.jsonl")
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {stdout} ]; then echo present; elif [ -d {directory} ]; then echo absent; fi",
+                cwd="/",
+                timeout_s=10,
+            )
+        except Exception:
+            LOG.warning("Could not check for Cline output after a rollout stop", exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type and (probe.stdout or "").strip() == "absent"
 
     async def close(self, timeout: float) -> None:
         """Confirm termination and capture before cancelling the HTTP activation."""

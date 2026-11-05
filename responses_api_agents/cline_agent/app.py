@@ -50,6 +50,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_CONTEXT_LIMIT,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
@@ -69,6 +70,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
@@ -92,6 +94,8 @@ RUNTIME_PREFIX = "/tmp/nemo-gym-cline-runtime-"
 _TRANSPORT_ERRORS = ("Cannot connect to API", "The operation timed out.")
 # Cline 3.0.55 ends the run with this error when a model call stops at its output-token cap.
 _OUTPUT_LIMIT_ERROR = "Model reached the maximum output token limit"
+# Cline 3.0.55 ends the run with this error when the model answers with no text, reasoning or tool call.
+_EMPTY_RESPONSE_ERROR = "Model returned empty response"
 
 
 def _cline_state_env(data_dir: str) -> dict[str, str]:
@@ -152,6 +156,19 @@ def _session_usage(stdout: str) -> Optional[NeMoGymResponseUsage]:
         ),
         total_tokens=input_tokens + output_tokens,
     )
+
+
+def _run_result_finish(stdout: str) -> Optional[str]:
+    """``finishReason`` of Cline's final ``run_result``, or None without one; a ``done`` event alone is not a result."""
+    finish = None
+    for line in stdout.splitlines():
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(record, dict) and record.get("type") == "run_result":
+            finish = record.get("finishReason")
+    return finish
 
 
 def _terminal_error(stdout: str) -> dict[str, Any]:
@@ -512,8 +529,8 @@ class ClineAgentConfig(BaseResponsesAPIAgentConfig):
     compaction: Optional[str] = None
     # Max consecutive mistakes before Cline halts, passed as --retries. None leaves its default.
     retries: Optional[int] = None
-    # Seconds for the `cline` call. Cline's own --timeout is also set from this so the CLI winds
-    # the session down itself before the subprocess is killed; see _build_command.
+    # Seconds for one Cline run. The host path kills the subprocess then (and passes --timeout, which
+    # Cline 3.0.55 ignores for --json); in a sandbox the process supervisor enforces it.
     timeout: int = 900
     # Seconds for the one-off `cline auth` call that writes the provider settings.
     setup_timeout: int = 300
@@ -789,6 +806,8 @@ class ClineAgent(SimpleResponsesAPIAgent):
             return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if str(error.get("message") or "").startswith(_TRANSPORT_ERRORS):
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if str(error.get("message") or "").startswith(_EMPTY_RESPONSE_ERROR):
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return AgentOutcome(failure_kind="unknown")
 
     def _reached_model_limit(self, terminal: Mapping[str, Any]) -> bool:
@@ -831,7 +850,17 @@ class ClineAgent(SimpleResponsesAPIAgent):
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise AgentSeedRejectedError("Cline requires sandbox_access or a configured sandbox_provider")
-            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            settings = {"workdir": "/app", **self.config.sandbox_config}
+            settings["metadata"] = {
+                **resolve_provider_metadata(self.config.sandbox_provider, self.server_client.global_config_dict),
+                **(settings.get("metadata") or {}),
+                "gym-agent": "cline",
+                "gym-session": body.agent_session_id[:63],
+                "gym-rollout": body.episode_id.capture_key[:63],
+            }
+            # Provider TTLs outlive this server: cover installation and the run, plus ten minutes for close.
+            settings.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
+            spec = SandboxSpec(**settings)
             workdir, provider_ref = spec.workdir, self.config.sandbox_provider
         else:
             if not isinstance(access.connection, DirectSandboxConnection):
@@ -909,7 +938,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
             value = getattr(body, name)
             if name in supported or (name in ("stream", "background") and value is False):
                 continue
-            if name == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+            if name == "metadata" and set(value or {}) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(422, f"Cline sandbox sessions do not support request field {name}")
@@ -919,6 +948,11 @@ class ClineAgent(SimpleResponsesAPIAgent):
         items = (
             [NeMoGymEasyInputMessage(role="user", content=body.input)] if isinstance(body.input, str) else body.input
         )
+        # A developer message is the system message; the instruction extractor recognizes only "system".
+        items = [
+            item.model_copy(update={"role": "system"}) if getattr(item, "role", None) == "developer" else item
+            for item in items
+        ]
         if [getattr(item, "role", None) for item in items] not in (["user"], ["system", "user"]):
             raise HTTPException(422, "Cline accepts one text user prompt with an optional system message")
         for item in items:
@@ -937,7 +971,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
         user_message, input_system = _extract_instruction(items)
         system = "\n\n".join(part for part in (self.config.system_prompt, body.instructions, input_system) if part)
         prompt = f"{system}\n\n{user_message}" if system else user_message
-        if len(prompt.encode()) > MAX_PROMPT_BYTES:
+        if len(quote_prompt(prompt).encode()) > MAX_PROMPT_BYTES:
             raise HTTPException(422, f"Cline's prompt exceeds the {MAX_PROMPT_BYTES}-byte argv limit")
         return prompt
 
@@ -1012,9 +1046,10 @@ class ClineAgent(SimpleResponsesAPIAgent):
         stdout = artifacts.stdout if artifacts is not None else ""
         output_items, metadata = parse_cline_events(stdout)
         terminal = _terminal_error(stdout)
-        finish = metadata.get("finish_reason")
+        finish = _run_result_finish(stdout)
         exit_code = cleanup["return_code"] if cleanup is not None and not timed_out else None
-        # Cline exits 0 only for finishReason "completed"; its error event names what ended any other run.
+        # Cline 3.0.55 exits 0 for finishReason "completed" and also for an abort, so the final run_result decides
+        # the status; its error event names what ended any other run.
         crash: str | None = None
         error_message: str | None = None
         if failure is not None:

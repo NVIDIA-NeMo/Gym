@@ -20,8 +20,10 @@ path for the host path (as `environments/cline_math` did) point at the new one.
 
 ## Agent sessions (task sandbox)
 
-Pair the agent with a benchmark through a `single_agent_turn` Environment Server. For Terminal-Bench
-2.1, replace the Codex import and settings in the benchmark README's `run.yaml` with:
+Pair the agent with a benchmark through a `single_agent_turn` Environment Server. No benchmark
+declares Cline yet. The Terminal-Bench 2.1 recipe below is the unsupported development pairing the
+adapter's smoke runs used, not a validated pairing: replace the Codex import and settings in the
+benchmark README's `run.yaml` with:
 
 ```yaml
 config_paths:
@@ -43,8 +45,9 @@ single_agent_turn:
       resources_tool_transports: []
 ```
 
-Cline is not in the benchmark's `allowed_agents` yet, so start the servers with
-`--allow-unsupported-pairing`. The task sandbox must reach the Gym Model Server; on a shared host,
+Cline is not in the benchmark's `allowed_agents`, so start the servers with
+`--allow-unsupported-pairing`; declaring the pairing takes a full evaluation and the benchmark
+owner's review. The task sandbox must reach the Gym Model Server; on a shared host,
 pass `++use_absolute_ip=true`. Cline replays earlier turns' reasoning, which the vLLM Model Server
 forwards as both `reasoning` and `reasoning_content` by default; an endpoint that rejects the pair
 (NIM's `minimaxai/minimax-m3.1-flash` answers `duplicate field reasoning_content`) needs
@@ -70,24 +73,27 @@ shared `harness_runner.sh`. Everything Cline writes goes to `/tmp/nemo-gym-cline
 Cline's provider settings there directly — the `openai-compatible` provider with the
 rollout-prefixed Model Server URL and an `x-session-id` header carrying the rollout's capture key,
 which owns every model attempt, including failed ones — and global settings that turn off
-telemetry and self-update. Tool shells keep the task's `HOME` and `XDG_*` directories: a run checked
-against a Debian image left no file outside the session directory and the task's own outputs. The
-supervisor's deadline is `timeout`, or a task's `metadata.agent_timeout_sec` below it.
+telemetry and self-update. Tool shells keep the task's `HOME` and `XDG_*` directories. Close removes
+the session directory, but the runtime in `/tmp/nemo-gym-cline-runtime-<version>`, which later
+sessions reuse, any packages the seed installed, and Cline's checkpoint commits (see
+[Limitations](#limitations)) stay in the sandbox. The supervisor's deadline is `timeout`, or a
+task's `metadata.agent_timeout_sec` below it.
 
 **Close** stops Cline, captures its output, removes the session directory and disconnects; the
 Resources Server keeps and later destroys the borrowed sandbox. `POST /rollouts/<id>/stop` ends a
 running Cline like its deadline does, where the sandbox provider supports it.
 
-An activation accepts one text user message with an optional system message, `instructions`, the
-configured model (or the model server's name) and `metadata.agent_timeout_sec`. Other request
-fields, such as `temperature` or `max_output_tokens`, are refused with HTTP 422: Cline has no
-per-request sampling flags, so set sampling on the model server. The prompt is
-`system_prompt`, `instructions` and the system message, then the user message, as on the host path.
+An activation accepts one text user message with an optional system (or developer) message,
+`instructions`, the configured model (or the model server's name) and `metadata.agent_timeout_sec`.
+Other request fields, such as `temperature` or `max_output_tokens`, are refused with HTTP 422: Cline
+has no per-request sampling flags, so set sampling on the model server. The prompt is
+`system_prompt`, `instructions` and the system message, then the user message; the host path builds
+it the same way but leaves out `instructions`.
 
 | Cline run | Response |
 |---|---|
 | `finishReason: completed` (Cline exits 0) | `completed` |
-| `finishReason: error` | `failed`, with the outcome Cline names: a context overflow is `incomplete` instead, a refused or timed-out connection `model_transport_error`, anything else `unknown` |
+| `finishReason: error` | `failed`, with the outcome Cline names: a context overflow is `incomplete` instead, a refused or timed-out connection `model_transport_error`, an empty model response `agent_invalid_output`, anything else `unknown` |
 | `finishReason: aborted`, the model's output-token cap, another limit, or the deadline | `incomplete`; the partial work is verified |
 | No run result (Cline or the runner crashed) | The activation fails (HTTP 500) |
 
@@ -200,7 +206,7 @@ model: claude-sonnet-4-5
 ## Config fields
 
 - `model_server`: Gym model server Cline calls; `null` to use an already-configured provider
-- `concurrency`: max simultaneous `run()` calls
+- `concurrency`: max simultaneous `run()` calls, and of Cline runs in agent sessions
 - `command`: the Cline command, split on spaces so a multi-word launcher works (e.g. `npx cline`)
 - `model`: the model id; required with a model server, `null` otherwise leaves the provider's own
   selection (`-m` is omitted)
@@ -249,7 +255,9 @@ See `configs/cline_local_agent.yaml` and `configs/cline_agent.yaml`.
 Cline closes a turn's reasoning *after* its text, so the think block is assembled from the reasoning
 streamed so far rather than from the trailing `content_end`, which would otherwise attach it to the
 next turn. `run_result`'s `aggregateUsage` is authoritative when present; a run killed on timeout
-never prints it, so the per-turn `usage` totals are used and `timed_out` is recorded.
+never prints it, so on the host path the per-turn `usage` totals are used and `timed_out` is
+recorded. Agent sessions report that run's usage as unknown instead (see
+[Observations](#observations)).
 
 ## Limitations
 
@@ -263,10 +271,15 @@ never prints it, so the per-turn `usage` totals are used and `timed_out` is reco
   an argument: an agent session refuses one over 128 KiB (Linux's limit for one argument), and a
   process listing inside the sandbox shows it.
 - Each model call must answer within 300 seconds, the request timeout of Cline's runtime; a slower
-  call ends the run with `The operation timed out.` and no retry. The provider settings' own
-  `timeout` field cannot raise it: with it set, Cline 3.0.55 fails to connect at all.
+  call ends the run with `The operation timed out.` and Cline does not retry it. An agent session
+  reports that run as `model_transport_error`, which the Environment Server retries by default. The
+  provider settings' own `timeout` field cannot raise it: with it set, Cline 3.0.55 fails to connect
+  at all.
 - Agent sessions use only Cline's built-in tools: MCP and `direct_http` grants are not wired into
   Cline, so required grants are refused and optional ones skipped (`resources_tool_transports: []`).
+- Cline 3.0.55 always records checkpoint commits under `refs/cline/checkpoints/` when the workdir is a
+  git repository, and has no flag to turn them off. The working tree and branches are unchanged, but
+  a verifier that reads every ref or unreachable object of the task repository sees them.
 - A new `cline_version` needs its platform tarballs' SHA-512 added to `CLINE_RUNTIME_SHA512` before
   agent sessions accept it.
 - The host path reports `input_tokens` as Cline's `inputTokens` plus `cacheReadTokens`, which counts

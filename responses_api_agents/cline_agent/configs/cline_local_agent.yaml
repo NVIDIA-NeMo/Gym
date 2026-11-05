@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Runs the Cline CLI on the Agent Server host for the /run path and sessionless /v1/responses calls.
 # Agent sessions, which run Cline in the task sandbox, use cline_agent.yaml.
 cline_agent:

@@ -4,7 +4,14 @@
 
 import asyncio
 import json
+import os
+import shlex
+import shutil
+import signal
+import stat
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,12 +22,17 @@ from omegaconf import OmegaConf
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AGENT_SESSION_COOKIE_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    ROLLOUT_STOP_METADATA_KEY,
     AgentSeedSessionRequest,
+    SandboxSession,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from responses_api_agents.cline_agent import app
 from responses_api_agents.cline_agent import sandbox as adapter
@@ -98,6 +110,10 @@ def run_result(finish, **fields):
     return {"type": "run_result", "finishReason": finish, "durationMs": 1200, **fields}
 
 
+def done(reason):
+    return {"type": "agent_event", "event": {"type": "done", "reason": reason, "iterations": 1}}
+
+
 COMPLETED = stream(
     tool("content_start", "call-1", toolName="run_commands", input={"commands": ["ls"]}),
     tool("content_end", "call-1", toolName="run_commands", output=[{"query": "ls", "result": "a", "success": True}]),
@@ -141,6 +157,64 @@ def cleanup(*, code=0, timed_out=False):
     return {"cleanup_confirmed": True, "return_code": code, "timed_out": timed_out, "error": None}
 
 
+class LocalSandbox:
+    """A sandbox whose files and commands are this machine's: uploads copy, exec runs bash."""
+
+    sandbox_id = "local-1"
+    uploads_independent_of_execs = True
+
+    def __init__(self):
+        self.disconnected = False
+
+    async def upload(self, source, destination):
+        Path(destination).parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    async def download(self, source, destination):
+        shutil.copyfile(source, destination)
+
+    async def disconnect(self):
+        self.disconnected = True
+
+    async def exec(self, command, *, cwd=None, timeout_s=30, user=None):
+        process = await asyncio.create_subprocess_exec(
+            "bash",
+            "-c",
+            command,
+            cwd=cwd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            out, err = await asyncio.wait_for(process.communicate(), timeout_s)
+        except BaseException:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            await process.wait()
+            raise
+        return SandboxExecResult(out.decode(errors="replace"), err.decode(errors="replace"), process.returncode)
+
+
+def local_state(tmp_path):
+    """A borrowed session over a real SandboxSession, with the directories seed would have prepared."""
+    session_dir = tmp_path / "session"
+    (session_dir / "config").mkdir(parents=True)
+    (session_dir / "data" / "settings").mkdir(parents=True)
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, session_dir / HARNESS_RUNNER_FILE)
+    workdir = tmp_path / "task"
+    workdir.mkdir()
+    sandbox = LocalSandbox()
+    state = adapter.ClineSandboxSession(
+        request=seed(workdir=str(workdir)),
+        session=SandboxSession(sandbox=sandbox, session_dir=str(session_dir), workdir=str(workdir), harness="Cline"),
+        runtime=str(tmp_path / "runtime"),
+    )
+    return state, sandbox, workdir
+
+
 # Seed
 
 
@@ -156,17 +230,27 @@ def cleanup(*, code=0, timed_out=False):
         ({"cline_version": "3.0"}, {}, "Cline sandbox sessions require an exact cline_version, for example 3.0.55"),
         ({"cline_version": "9.9.9"}, {}, "Cline 9.9.9 has no pinned runtime checksums; supported: 3.0.55"),
         ({"model_server": None}, {}, "Cline sandbox sessions require a Gym model_server and its model name"),
+        ({"model": None}, {}, "Cline sandbox sessions require a Gym model_server and its model name"),
         (
             {"env": {"A": "b"}, "extra_args": ["--verbose"], "command": "npx cline"},
             {},
             "Cline sandbox sessions do not support these host settings: env, extra_args, command",
         ),
-        ({}, {"borrowed": False}, "Cline requires sandbox_access or a configured sandbox_provider"),
-        ({}, {"workdir": "/tmp"}, "Cline sandbox workdir must be absolute and separate from its session storage"),
         (
+            {"repo_dir": "/repo", "openai_api_key": "key", "openai_base_url": "http://x"},  # pragma: allowlist secret
             {},
-            {"workdir": "/tmp/nemo-gym-cline-sessions/x"},
-            "Cline sandbox workdir must be absolute and separate from its session storage",
+            "Cline sandbox sessions do not support these host settings: repo_dir, openai_api_key, openai_base_url",
+        ),
+        ({}, {"borrowed": False}, "Cline requires sandbox_access or a configured sandbox_provider"),
+        *(
+            ({}, {"workdir": workdir}, "Cline sandbox workdir must be absolute and separate from its session storage")
+            for workdir in (
+                "/tmp",
+                "app",
+                "/app/../x",
+                "/tmp/nemo-gym-cline-sessions/x",
+                "/tmp/nemo-gym-cline-runtime-3.0.55/x",
+            )
         ),
     ],
 )
@@ -213,6 +297,35 @@ async def test_seed_installs_pinned_runtime_inside_the_sandbox(monkeypatch, borr
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("sandbox_config", "ttl_s"),
+    [
+        # Provider TTLs outlive the agent server: installation, the run and ten minutes to close.
+        ({"metadata": {"team": "gym"}}, 600 + 900 + 600),
+        ({"metadata": {"team": "gym"}, "ttl_s": 42}, 42),
+    ],
+)
+async def test_owned_sandbox_gets_a_ttl_and_episode_labels(monkeypatch, sandbox_config, ttl_s):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(aclose=AsyncMock()))
+    instance = agent(sandbox_provider="sandbox", sandbox_config=sandbox_config)
+    instance.server_client.global_config_dict.sandbox.default_metadata = {"site": "lab", "team": "x"}
+    await instance._seed_agent_session_state(seed(borrowed=False))
+    spec = remote.start.await_args.args[0]
+    assert spec.ttl_s == ttl_s
+    # Provider defaults, then sandbox_config, then the episode's labels.
+    assert spec.metadata == {
+        "site": "lab",
+        "team": "gym",
+        "gym-agent": "cline",
+        "gym-session": "session",
+        "gym-rollout": "rollout",
+    }
+    assert spec.workdir == "/app"
+
+
+@pytest.mark.asyncio
 async def test_failed_install_releases_and_failed_release_retains_state(monkeypatch):
     remote = SimpleNamespace(exec=AsyncMock(side_effect=[result(), result("no network", code=6)]), upload=AsyncMock())
     monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
@@ -226,8 +339,13 @@ async def test_failed_install_releases_and_failed_release_retains_state(monkeypa
 
     remote.exec = AsyncMock(side_effect=[result(), result(code=1)])
     close.side_effect = RuntimeError("release failed")
-    with pytest.raises(app.AgentSessionSetupError):
+    with pytest.raises(app.AgentSessionSetupError) as error:
         await instance._seed_agent_session_state(seed())
+    # The unreleased state goes to close, and the installation error stays the cause.
+    assert isinstance(error.value.state, adapter.ClineSandboxSession)
+    assert error.value.state.session.sandbox is remote
+    assert isinstance(error.value.error, RuntimeError)
+    assert str(error.value.error).startswith("Cline sandbox installation failed (exit 1")
 
 
 # Activation
@@ -284,6 +402,92 @@ async def test_activation_stages_isolated_settings_and_maps_a_completed_run():
     assert (tool_call.status, tool_call.sandbox_id) == ("completed", "sandbox-1")
 
 
+# Stands in for the Cline binary: records what it was started with, then leaves a detached process holding its
+# stdout open, as a tool that starts a background service does.
+FAKE_CLINE = r"""
+import json, os, subprocess, sys
+seen = {
+    "argv": sys.argv[1:],
+    "cwd": os.getcwd(),
+    "home": os.environ.get("HOME"),
+    "cline_vars": sorted(name for name in os.environ if name.startswith("CLINE_")),
+    "openai": sorted(name for name in os.environ if name.startswith("OPENAI_")),
+    "providers": json.load(open(os.environ["CLINE_PROVIDER_SETTINGS_PATH"])),
+    "stdin": sys.stdin.read(),
+}
+json.dump(seen, open(os.path.join(os.environ["PROBE_OUT"], "seen.json"), "w"))
+child = subprocess.Popen(["sleep", "30"], start_new_session=True, stdout=sys.stdout, stderr=sys.stderr)
+open(os.path.join(os.environ["PROBE_OUT"], "child.pid"), "w").write(str(child.pid))
+print(json.dumps({"type": "agent_event", "event": {"type": "content_end", "contentType": "text", "text": "Done."}}))
+print(json.dumps({"type": "run_result", "finishReason": "completed", "aggregateUsage": {"inputTokens": 3, "outputTokens": 2}}))
+print("deprecation warning", file=sys.stderr)
+"""
+
+
+@pytest.mark.asyncio
+async def test_staged_runner_isolates_cline_and_captures_its_output(tmp_path, monkeypatch):
+    instance = agent(command_permissions={"allow": ["ls *"]})
+    state, _, workdir = local_state(tmp_path)
+    Path(state.runtime).mkdir()
+    script = tmp_path / "fake_cline.py"
+    script.write_text(FAKE_CLINE)
+    binary = Path(state.executable)
+    # A wrapper rather than a shebang naming the interpreter, whose path can exceed the kernel's shebang limit.
+    binary.write_text(f'#!/usr/bin/env bash\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} "$@"\n')
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    probe_out = tmp_path / "probe"
+    probe_out.mkdir()
+    # Variables an image can carry; none of them may reach Cline.
+    monkeypatch.setenv("CLINE_DATA_DIR", "/root/.cline")
+    monkeypatch.setenv("CLINE_IMAGE_SETTING", "1")
+    monkeypatch.setenv("OPENAI_API_KEY", "image-key")  # pragma: allowlist secret
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://image")
+    monkeypatch.setenv("PROBE_OUT", str(probe_out))
+
+    async def execute(*, stage_activation, collect, timeout, close_timeout):
+        # The process supervisor needs Linux; run the staged runner command as it would.
+        command = await stage_activation()
+        process = await asyncio.create_subprocess_exec(
+            *command.argv, cwd=str(workdir), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        await asyncio.wait_for(process.communicate(), 20)
+        state.session.cleanup = cleanup(code=process.returncode)
+        state.session.artifacts = await collect()
+        return state.session.artifacts
+
+    state.session.execute = execute
+    try:
+        response = await asyncio.wait_for(
+            instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="Fix the bug")), 30
+        )
+    finally:
+        if (probe_out / "child.pid").exists():
+            try:
+                os.kill(int((probe_out / "child.pid").read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    seen = json.loads((probe_out / "seen.json").read_text())
+    session_dir = state.session.session_dir
+    assert response.status == "completed"
+    assert response.output[-1].content[0].text == "Done."
+    assert (response.usage.input_tokens, response.usage.output_tokens) == (3, 2)
+    assert Path(seen["cwd"]).resolve() == workdir.resolve()
+    assert seen["home"] == os.environ["HOME"]
+    assert seen["cline_vars"] == sorted([*app._cline_state_env(state.data_dir), "CLINE_COMMAND_PERMISSIONS"])
+    assert seen["openai"] == []
+    assert seen["stdin"] == ""
+    assert seen["argv"][-2:] == ["--", "Fix the bug"]
+    settings = seen["providers"]["providers"]["openai-compatible"]["settings"]
+    assert settings["headers"] == {"x-session-id": "rollout"}
+    assert settings["baseUrl"] == "http://10.0.0.5:9000/ng-rollout/rollout/v1"
+    global_settings = json.loads(Path(f"{session_dir}/data/settings/global-settings.json").read_text())
+    assert global_settings == {"telemetryOptOut": True, "autoUpdateEnabled": False}
+    assert state.session.artifacts.stderr.strip() == "deprecation warning"
+    assert state.runtime_info is not None and state.runtime_info.pid > 0
+    assert not list(workdir.iterdir())
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("records", "receipt", "status", "failure_kind"),
@@ -312,7 +516,8 @@ async def test_activation_stages_isolated_settings_and_maps_a_completed_run():
             "incomplete",
             None,
         ),
-        ([text("partial"), run_result("aborted")], cleanup(code=1), "incomplete", None),
+        # Cline 3.0.55 exits 0 on an abort too.
+        ([text("partial"), run_result("aborted")], cleanup(code=0), "incomplete", None),
         # The supervisor stopped Cline at its deadline.
         ([text("partial")], cleanup(code=None, timed_out=True), "incomplete", None),
     ],
@@ -330,11 +535,20 @@ async def test_activation_status_follows_clines_exit_rule(records, receipt, stat
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code", [0, 125, 127])
-async def test_run_without_a_result_fails_the_activation(code):
+@pytest.mark.parametrize(
+    ("stdout", "code"),
+    [
+        ("", 0),
+        ("", 125),
+        ("", 127),
+        # Only the final run_result is a result; a done event alone is not.
+        (stream(text("Done."), done("completed")), 0),
+    ],
+)
+async def test_run_without_a_result_fails_the_activation(stdout, code):
     instance = agent()
     session = FakeSession(
-        artifacts=adapter.ClineArtifacts(stdout="", stderr="cline: crashed"), cleanup=cleanup(code=code)
+        artifacts=adapter.ClineArtifacts(stdout=stdout, stderr="cline: crashed"), cleanup=cleanup(code=code)
     )
     state = state_with(session)
     with pytest.raises(RuntimeError, match="Cline produced no run result .*crashed"):
@@ -387,6 +601,22 @@ async def test_retry_shares_one_activation_and_rejects_another():
 
 
 @pytest.mark.asyncio
+async def test_closing_session_refuses_an_activation():
+    instance = agent()
+    session = FakeSession()
+    session.closing = True
+    state = state_with(session)
+    async with instance._locked_agent_session("session") as record:
+        record.state = state
+    instance._sandbox_response = AsyncMock()
+    with pytest.raises(HTTPException) as error:
+        await instance.responses(request(), NeMoGymResponseCreateParamsNonStreaming(input="Question"))
+    assert error.value.status_code == 409
+    instance._sandbox_response.assert_not_called()
+    assert state.task is None
+
+
+@pytest.mark.asyncio
 async def test_unknown_session_never_falls_back_to_the_host():
     instance = agent()
     instance._run_cline = AsyncMock()
@@ -429,9 +659,27 @@ def test_session_request_accepts_the_policy_model_and_its_server_name():
         instance._validate_session_request(NeMoGymResponseCreateParamsNonStreaming(input="Q", model=model))
 
 
-def test_prompt_beyond_the_argv_limit_is_rejected():
+def test_session_request_takes_a_developer_message_as_the_system_message():
     instance = agent()
-    body = NeMoGymResponseCreateParamsNonStreaming(input="x " * (app.MAX_PROMPT_BYTES // 2 + 1))
+    body = instance._validate_session_request(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"role": "developer", "content": "Dev"}, {"role": "user", "content": "Q"}], metadata={}
+        )
+    )
+    assert instance._session_prompt(body) == "Dev\n\nQ"
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "x " * (app.MAX_PROMPT_BYTES // 2 + 1),
+        # Within the limit until Cline's trailing space pads the single word.
+        "x" * app.MAX_PROMPT_BYTES,
+    ],
+)
+def test_prompt_beyond_the_argv_limit_is_rejected(prompt):
+    instance = agent()
+    body = NeMoGymResponseCreateParamsNonStreaming(input=prompt)
     with pytest.raises(HTTPException, match="argv limit") as error:
         instance._session_prompt(body)
     assert error.value.status_code == 422
@@ -479,6 +727,80 @@ async def test_close_cancels_an_activation_still_staging():
     await asyncio.wait_for(started.wait(), 1)
     await asyncio.wait_for(state.close(1), 5)
     assert state.task.cancelled()
+
+
+# Rollout stop
+
+
+@pytest.mark.asyncio
+async def test_rollout_stop_before_launch_is_graded_as_a_stop(tmp_path):
+    instance = agent()
+    state, sandbox, _ = local_state(tmp_path)
+    # What POST /rollouts/<id>/stop does to a seeded session whose Cline has not launched.
+    assert await state.session.expire(timeout=5, reason="budget")
+    response = await asyncio.wait_for(
+        instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="Question")), 30
+    )
+    assert response.status == "incomplete"
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "budget"}
+    assert state.session.expired_before_launch
+    await state.close(5)
+    assert sandbox.disconnected
+
+
+@pytest.mark.asyncio
+async def test_rollout_stop_after_launch_marks_the_response():
+    instance = agent()
+    session = FakeSession(
+        artifacts=adapter.ClineArtifacts(stdout=stream(text("partial")), stderr=""),
+        cleanup=cleanup(code=None, timed_out=True),
+    )
+    session.expired, session.expire_reason = True, "operator"
+    state = state_with(session)
+    response = await instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
+    assert response.status == "incomplete"
+    assert json.loads(response.metadata[ROLLOUT_STOP_METADATA_KEY]) == {"reason": "operator"}
+
+
+@pytest.mark.asyncio
+def stopped_state(sandbox, *, return_code):
+    """A Cline session that a rollout stop ended, with the supervisor's receipt for that stop."""
+    session = SandboxSession(
+        sandbox=sandbox, session_dir="/tmp/nemo-gym-cline-sessions/id", workdir="/app", harness="Cline"
+    )
+    session._expire_requested = True
+    session.cleanup = {"cleanup_confirmed": True, "return_code": return_code, "timed_out": True, "error": None}
+    return adapter.ClineSandboxSession(request=seed(), session=session, runtime="/runtime")
+
+
+@pytest.mark.asyncio
+async def test_rollout_stop_before_launch_collects_nothing_from_the_sandbox():
+    unreachable = AsyncMock(side_effect=ConnectionError("sandbox unreachable"))
+    state = stopped_state(SimpleNamespace(exec=unreachable, download=unreachable), return_code=None)
+    assert state.session.expired_before_launch
+    assert await state.collect_artifacts() == adapter.ClineArtifacts(stdout="", stderr="")
+    unreachable.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rollout_stop_before_cline_opened_its_output_keeps_an_empty_transcript():
+    commands = []
+
+    async def exec_(command, **kwargs):
+        commands.append(command)
+        return SimpleNamespace(return_code=0, error_type=None, stdout="absent\n", stderr="")
+
+    async def download(source, destination):
+        raise FileNotFoundError(source)
+
+    # The stop ended the runner after launch, before it redirected Cline's stdout.
+    state = stopped_state(SimpleNamespace(exec=exec_, download=download), return_code=143)
+    assert (await state.collect_artifacts()).stdout == ""
+    assert "/tmp/nemo-gym-cline-sessions/id/stdout.jsonl" in commands[-1]
+    # Without the stop, missing output is still a failure.
+    state.session._expire_requested = False
+    with pytest.raises(RuntimeError, match="no readable output"):
+        await state.collect_artifacts()
 
 
 # Host path and outcome classification
@@ -545,6 +867,7 @@ async def test_host_install_is_lazy_shared_and_retryable(monkeypatch):
         ({"error": {"name": "Error", "message": "x"}, "errorClass": "context_window_exceeded"}, "model_context_limit"),
         ({"error": {"name": "Error", "message": "The operation timed out."}}, "model_transport_error"),
         ({"error": {"name": "Error", "message": "Cannot connect to API: refused"}}, "model_transport_error"),
+        ({"error": {"name": "Error", "message": "Model returned empty response"}}, "agent_invalid_output"),
         ({"error": {"name": "Error", "message": "Rate limit exceeded"}}, "unknown"),
         ({}, "unknown"),
     ],
