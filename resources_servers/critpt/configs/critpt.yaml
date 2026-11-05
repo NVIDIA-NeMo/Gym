@@ -32,6 +32,9 @@ critpt_agent_environment_server:
       # The episode includes CritPt's batched verify() wait (bounded by verify_timeout_seconds on the resources
       # server). The legacy_agent relay applied no episode bound, so keep none rather than the 6 h default.
       default_episode_timeout_seconds: null
+      resources_server:
+        type: resources_servers
+        name: critpt_resources_server
       agent_server:
         type: responses_api_agents
         name: critpt_agent
