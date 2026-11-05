@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from shlex import quote
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -120,6 +121,8 @@ class DroidSandboxSession(AgentSessionState):
     async def collect_artifacts(self) -> DroidArtifacts:
         """Copy stdout, the stderr tail and runner identity after confirmed harness termination."""
         directory = self.session.session_dir
+        if self.session.expired_before_launch:
+            return DroidArtifacts(events="")  # A rollout stop arrived before launch, so Droid never ran.
         stderr = ""
         try:
             stderr = (await read_text(self.session.sandbox, path=f"{directory}/stderr.log"))[-16000:]
@@ -128,6 +131,10 @@ class DroidSandboxSession(AgentSessionState):
         try:
             events = await read_text(self.session.sandbox, path=f"{directory}/events.jsonl")
         except Exception as error:
+            if self.session.expired and await self._events_absent():
+                # A rollout stop can end the runner after launch but before it opens Droid's stdout file.
+                LOG.warning("Droid wrote no events before a rollout stop ended it; keeping an empty transcript")
+                return DroidArtifacts(events="", stderr=stderr)
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Droid runner returned no events: {(stderr or logs)[-16000:]}") from error
         try:
@@ -136,3 +143,18 @@ class DroidSandboxSession(AgentSessionState):
             runtime = None
         self.runtime_info = parse_runtime_info(runtime)
         return DroidArtifacts(events=events, stderr=stderr)
+
+    async def _events_absent(self) -> bool:
+        """Whether the session directory exists without events.jsonl; an unclear answer counts as present."""
+        directory = self.session.session_dir
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {quote(directory + '/events.jsonl')} ]; then echo present; "
+                f"elif [ -d {quote(directory)} ]; then echo absent; fi",
+                cwd="/",
+                timeout_s=10,
+            )
+        except Exception:
+            LOG.warning("Could not check for Droid events after a rollout stop", exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type and (probe.stdout or "").strip() == "absent"

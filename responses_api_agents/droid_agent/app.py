@@ -63,6 +63,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.droid_agent.parsing import DroidRun, parse_events
@@ -72,16 +73,17 @@ from responses_api_agents.droid_agent.sandbox import RUNTIME_PREFIX, SESSION_ROO
 
 LOG = logging.getLogger(__name__)
 DEFAULT_DROID_VERSION = "1.1.0"
-# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash.
-_BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
-    [ "$(id -u)" = 0 ] || { echo "Droid sandbox sessions require bash: preinstall it or use a root image." >&2; exit 1; }
-    if command -v apk >/dev/null 2>&1; then
-        apk add --no-cache bash || exit 1
-    elif command -v apt-get >/dev/null 2>&1; then
+# The bootstrap's exit status for an image Droid cannot run in, which seed refuses as final.
+_UNSERVABLE_IMAGE = 78
+# Bootstrap with POSIX sh; the runtime installer, the harness runner and the supervisor require Bash. There is no
+# apk branch: Droid has no musl build, so an Alpine image is refused either way, before bash is installed into it.
+_BASH_BOOTSTRAP = f"""if ! command -v bash >/dev/null 2>&1; then
+    [ "$(id -u)" = 0 ] || {{ echo "Droid sandbox sessions require bash: preinstall it or use a root image." >&2; exit {_UNSERVABLE_IMAGE}; }}
+    if command -v apt-get >/dev/null 2>&1; then
         apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash || exit 1
     else
-        echo "Droid sandbox sessions require bash: preinstall it (automatic installation requires apt-get or apk)." >&2
-        exit 1
+        echo "Droid sandbox sessions require bash: preinstall it (automatic installation requires apt-get)." >&2
+        exit {_UNSERVABLE_IMAGE}
     fi
 fi
 """
@@ -151,8 +153,8 @@ class DroidAgent(SimpleResponsesAPIAgent):
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise AgentSeedRejectedError("Droid requires sandbox_access or a configured sandbox_provider")
-            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
-            workdir, provider_ref = spec.workdir, self.config.sandbox_provider
+            settings = {"workdir": "/app", **self.config.sandbox_config}
+            workdir, provider_ref = settings["workdir"], self.config.sandbox_provider
         else:
             if not isinstance(access.connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("Droid supports only direct sandbox connections")
@@ -168,13 +170,25 @@ class DroidAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(
                 "Droid sandbox workdir must be absolute and separate from runtime/session storage"
             )
-        provider_config = resolve_provider_config(provider_ref, self.server_client.global_config_dict)
+        global_config = self.server_client.global_config_dict
         try:
+            provider_config = resolve_provider_config(provider_ref, global_config)
             # Droid calls the Model Server from inside the sandbox, where a loopback URL is the sandbox itself.
             assert_model_url_reachable_from_sandbox(
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
                 provider_name=next(iter(provider_config), None),
             )
+            if owns_sandbox:
+                settings["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **(settings.get("metadata") or {}),
+                    "gym-agent": "droid",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
+                # Provider TTLs outlive this server: cover setup, one activation and cleanup.
+                settings.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
+                spec = SandboxSpec(**settings)
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
         provider = create_provider(provider_config)
@@ -199,13 +213,16 @@ class DroidAgent(SimpleResponsesAPIAgent):
                 if owns_sandbox:
                     await sandbox.start(spec)
                     self._check_setup(await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30))
-                self._check_setup(
-                    await sandbox.exec(
-                        _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/home",
-                        cwd="/",
-                        timeout_s=self.config.sandbox_install_timeout_seconds,
-                    )
+                prepared = await sandbox.exec(
+                    _BASH_BOOTSTRAP + f"test -d {quote(workdir)} && umask 077 && mkdir -p {quote(directory)}/home",
+                    cwd="/",
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                if prepared.return_code == _UNSERVABLE_IMAGE and not prepared.error_type:
+                    raise AgentSeedRejectedError(
+                        (prepared.stderr or "").strip()[-2000:] or "Droid cannot run in this sandbox image"
+                    )
+                self._check_setup(prepared)
                 await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
                 installer = "install_droid_runtime.sh"
                 await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
@@ -398,6 +415,15 @@ class DroidAgent(SimpleResponsesAPIAgent):
             )
         if state.runtime_info is None:
             gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if status == "failed" and run.error is None and artifacts is not None and artifacts.stderr.strip():
+            # Droid reports a failure that ends it before an error event (a crash, rejected settings) only on stderr.
+            LOG.warning("Droid run %s failed (%s): %s", invocation_id, reason, artifacts.stderr[-2000:])
+            if not artifacts.events.strip():
+                gaps.append(
+                    ObservationGap(
+                        code="agent_startup_failed", invocation_id=invocation_id, detail=artifacts.stderr[-4000:]
+                    )
+                )
         sandbox_id = state.session.sandbox.sandbox_id
         for tool in run.tools:
             tool.sandbox_id = sandbox_id

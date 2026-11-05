@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import base64
 import hashlib
 import json
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.agents import AgentSeedRejectedError
 from responses_api_agents.droid_agent import runtime
 
 
@@ -44,6 +46,7 @@ def registry(monkeypatch, tmp_path):
     """Serve npm metadata and one tarball; record each requested URL."""
     monkeypatch.setattr(runtime, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(runtime, "_VERIFIED", {})
+    monkeypatch.setattr(runtime, "_SOURCES", {})
     served = {"package": PACKAGE, "urls": []}
 
     async def request(method, url, **kwargs):
@@ -79,8 +82,10 @@ def test_platform_probe_selects_the_matching_package(probe, target):
     ],
 )
 def test_unsupported_platforms_are_named(probe, message):
-    with pytest.raises(ValueError, match=message):
+    with pytest.raises(ValueError, match=message) as error:
         runtime.package_target(probe)
+    # A platform Droid has no build for is refused as final; unreadable probe output stays retryable.
+    assert isinstance(error.value, AgentSeedRejectedError) is (len(probe.splitlines()) == 4)
 
 
 def test_default_version_has_pinned_integrity_for_every_target():
@@ -95,6 +100,16 @@ async def test_package_is_verified_cached_and_reused(registry):
     again, _ = await runtime.cached_package("9.9.9", "linux-x64")
     assert again == path
     assert sum(url.endswith(".tgz") for url in registry["urls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_registry_metadata_is_fetched_once_per_version(registry):
+    for _ in range(3):
+        await runtime.cached_package("9.9.9", "linux-x64")
+    assert registry["urls"] == [
+        "https://registry.npmjs.org/@factory/cli-linux-x64/9.9.9",
+        "https://registry.npmjs.org/@factory/cli-linux-x64/-/cli-linux-x64-9.9.9.tgz",
+    ]
 
 
 @pytest.mark.asyncio
@@ -173,3 +188,44 @@ async def test_failed_check_or_install_reports_the_installer_output(monkeypatch,
     with pytest.raises(RuntimeError, match="installer said no"):
         await runtime.install_sandbox_runtime(sandbox, version="1.1.0", directory="/tmp/s", runtime="/r", timeout=5)
     sandbox.upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_corrupt_cached_package_is_downloaded_again(registry):
+    cached = runtime.CACHE_DIR / "9.9.9" / "cli-linux-x64.tgz"
+    cached.parent.mkdir(parents=True)
+    for directory in (runtime.CACHE_DIR, cached.parent):
+        directory.chmod(0o700)
+    cached.write_bytes(b"truncated")
+    path, checksum = await runtime.cached_package("9.9.9", "linux-x64")
+    assert path == cached and path.read_bytes() == PACKAGE and checksum == SHA256
+    assert sum(url.endswith(".tgz") for url in registry["urls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_releases_every_upload_slot(monkeypatch, tmp_path):
+    monkeypatch.setattr(runtime, "_UPLOAD_SLOTS", asyncio.Semaphore(4))
+
+    async def to_thread(function, *args):
+        # In the loop, so the failure lands while the group still holds pieces it has not started.
+        await asyncio.sleep(0)
+        return function(*args)
+
+    monkeypatch.setattr(runtime.asyncio, "to_thread", to_thread)
+    package = tmp_path / "droid.tgz"
+    package.write_bytes(b"x" * (6 * 1024 * 1024))
+
+    async def upload(source, destination):
+        await asyncio.sleep(0)
+        if destination.endswith("-0001.part"):
+            raise ConnectionError("upload lost")
+        await asyncio.sleep(0.01)
+
+    sandbox = SimpleNamespace(upload=upload, exec=AsyncMock(return_value=result()))
+    with pytest.raises(ExceptionGroup) as error:
+        await runtime._upload_package(sandbox, package, "/tmp/s", timeout=5)
+    assert error.group_contains(ConnectionError)
+    sandbox.exec.assert_not_awaited()
+    # The limit is process-wide: a slot a failed upload kept would stall every later seed once four leaked.
+    for _ in range(4):
+        await asyncio.wait_for(runtime._UPLOAD_SLOTS.acquire(), timeout=1)

@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import gzip
 import hashlib
 import io
 import shutil
@@ -13,8 +14,10 @@ import pytest
 
 
 INSTALLER = Path(__file__).parents[1] / "install_droid_runtime.sh"
+# The installer runs with this PATH only, so the skip guard looks for its tools there too.
+SYSTEM_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
 pytestmark = pytest.mark.skipif(
-    any(shutil.which(tool) is None for tool in ("bash", "sha256sum", "timeout", "tar", "gzip")),
+    any(shutil.which(tool, path=SYSTEM_PATH) is None for tool in ("bash", "sha256sum", "timeout", "tar", "gzip")),
     reason="the installer needs bash, coreutils sha256sum and timeout, tar and gzip",
 )
 
@@ -25,7 +28,8 @@ def package(path: Path, *, reported: str = "1.1.0") -> str:
         f'#!/bin/sh\nmkdir -p "${{FACTORY_HOME_OVERRIDE:-$HOME}}/.factory"\n[ "$1" = --version ] && echo {reported}\n'
     )
     data = script.encode()
-    with tarfile.open(path, "w:gz") as archive:
+    # A fixed gzip mtime keeps the bytes, and so the SHA-256, the same when a test writes the package again.
+    with gzip.GzipFile(path, "wb", mtime=0) as compressed, tarfile.open(fileobj=compressed, mode="w") as archive:
         info = tarfile.TarInfo("package/bin/droid")
         info.size, info.mode = len(data), 0o755
         archive.addfile(info, io.BytesIO(data))
@@ -52,7 +56,7 @@ def install(tmp_path: Path, sha256: str, *args: str) -> subprocess.CompletedProc
         capture_output=True,
         text=True,
         timeout=60,
-        env={"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(home)},
+        env={"PATH": SYSTEM_PATH, "HOME": str(home)},
     )
 
 

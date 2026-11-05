@@ -16,6 +16,7 @@ from uuid import uuid4
 
 from aiohttp import ClientTimeout
 
+from nemo_gym.agents import AgentSeedRejectedError
 from nemo_gym.client import request
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 
@@ -47,22 +48,29 @@ PLATFORM_PROBE = (
 )
 _CACHE_LOCKS: dict[Path, asyncio.Lock] = {}
 _VERIFIED: dict[Path, tuple[tuple[int, ...], str, str]] = {}
+# Registry metadata per (version, target): a published npm version never changes, so it is fetched once.
+_SOURCES: dict[tuple[str, str], tuple[str, str]] = {}
 _UPLOAD_SLOTS = asyncio.Semaphore(4)
 
 
 def package_target(probe: str) -> str:
-    """Map the sandbox platform probe to the npm package that runs there."""
+    """Map the sandbox platform probe to the npm package that runs there.
+
+    A platform Droid publishes no build for is refused as final; unreadable probe output stays retryable.
+    """
     lines = probe.strip().splitlines()
-    if len(lines) != 4 or lines[0] != "Linux":
-        raise ValueError(f"Unsupported Droid sandbox platform: {probe!r}")
-    _, architecture, libc, cpu = lines
+    if len(lines) != 4:
+        raise ValueError(f"Unexpected Droid sandbox platform probe output: {probe!r}")
+    system, architecture, libc, cpu = lines
+    if system != "Linux":
+        raise AgentSeedRejectedError(f"Unsupported Droid sandbox platform: {system}")
     if libc != "gnu":
-        raise ValueError("Droid publishes glibc Linux builds only; the sandbox image uses musl")
+        raise AgentSeedRejectedError("Droid publishes glibc Linux builds only; the sandbox image uses musl")
     if architecture == "x86_64":
         return "linux-x64" if cpu == "avx2" else "linux-x64-baseline"
     if architecture == "aarch64":
         return "linux-arm64"
-    raise ValueError(f"Unsupported Droid sandbox architecture: {architecture}")
+    raise AgentSeedRejectedError(f"Unsupported Droid sandbox architecture: {architecture}")
 
 
 def digests(path: Path) -> tuple[str, str]:
@@ -106,13 +114,16 @@ async def _package_source(version: str, target: str) -> tuple[str, str]:
     pinned = PINNED_INTEGRITY.get((version, target))
     if pinned is not None:
         return f"{REGISTRY}/@factory/{name}/-/{name}-{version}.tgz", pinned
+    if (version, target) in _SOURCES:
+        return _SOURCES[version, target]
     async with await request("GET", f"{REGISTRY}/@factory/{name}/{version}", timeout=ClientTimeout(total=60)) as reply:
         reply.raise_for_status()
         metadata = json.loads(await reply.text())
     dist = metadata["dist"]
     if not str(dist.get("integrity", "")).startswith("sha512-"):
         raise ValueError(f"npm metadata for @factory/{name}@{version} has no sha512 integrity")
-    return dist["tarball"], dist["integrity"]
+    _SOURCES[version, target] = dist["tarball"], dist["integrity"]
+    return _SOURCES[version, target]
 
 
 async def cached_package(version: str, target: str) -> tuple[Path, str]:
@@ -155,14 +166,12 @@ def _check(result: SandboxExecResult) -> None:
 async def _upload_package(sandbox: AsyncSandbox, package: Path, directory: str, timeout: float) -> str:
     """Stream bounded pieces with a process-wide limit on staged bytes and uploads."""
     destination = directory + "/droid-package.tgz"
-    with TemporaryDirectory(prefix="droid-upload-") as staging:
+    # A piece write cancelled in its thread can outlive the directory; that must not replace the caller's error.
+    with TemporaryDirectory(prefix="droid-upload-", ignore_cleanup_errors=True) as staging:
 
-        async def upload(part: Path) -> None:
-            try:
-                await sandbox.upload(part, directory + "/" + part.name)
-            finally:
-                part.unlink(missing_ok=True)
-                _UPLOAD_SLOTS.release()
+        def uploaded(part: Path) -> None:
+            part.unlink(missing_ok=True)
+            _UPLOAD_SLOTS.release()
 
         parts = []
         async with asyncio.TaskGroup() as tasks:
@@ -181,7 +190,9 @@ async def _upload_package(sandbox: AsyncSandbox, package: Path, directory: str, 
                         _UPLOAD_SLOTS.release()
                         raise
                     parts.append(part)
-                    tasks.create_task(upload(part))
+                    upload = tasks.create_task(sandbox.upload(part, directory + "/" + part.name))
+                    # A done callback also runs for a piece the group cancels before it starts, so no slot leaks.
+                    upload.add_done_callback(lambda _, part=part: uploaded(part))
         if not parts:
             raise ValueError("Cannot upload an empty Droid package")
         sources = " ".join(quote(directory + "/" + part.name) for part in parts)

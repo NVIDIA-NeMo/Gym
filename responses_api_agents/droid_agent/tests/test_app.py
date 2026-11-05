@@ -2,9 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,12 +19,14 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    SandboxSession,
     check_agent_seed_rejected,
     shell_assignments,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.droid_agent import app
+from nemo_gym.sandbox import AsyncSandbox
+from responses_api_agents.droid_agent import app, runtime
 from responses_api_agents.droid_agent import sandbox as adapter
 
 
@@ -427,7 +431,9 @@ async def test_stage_and_collect_use_session_files(monkeypatch):
     monkeypatch.setattr(adapter, "upload_text", upload_text)
     monkeypatch.setattr(adapter, "read_text", read_text)
     session = adapter.DroidSandboxSession(
-        request=seed(), runtime="/r", session=SimpleNamespace(session_dir="/s", workdir="/app", sandbox=object())
+        request=seed(),
+        runtime="/r",
+        session=SimpleNamespace(session_dir="/s", workdir="/app", sandbox=object(), expired_before_launch=False),
     )
     payload = {"settings": {"customModels": []}, "prompt": "Q", "system": None, "command": ["droid"], "env": {}}
     command = await session.stage_activation(payload)
@@ -472,3 +478,259 @@ def test_droid_keeps_the_task_home_while_its_state_moves_to_the_session(tmp_path
     assert event["value"] == f"{home} {workdir} 1 exec --file {session_dir}/prompt.txt"
     assert not list(home.iterdir()) and not list(workdir.iterdir())
     assert (session_dir / "home" / ".factory" / "sessions").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_rollout_stop_before_launch_is_an_incomplete_response(monkeypatch):
+    receipt = {"cleanup_confirmed": True, "return_code": None, "timed_out": True, "error": None}
+
+    async def download(path, destination):
+        # Only the supervisor's receipt exists: Droid never started, so it wrote no events.
+        if path.endswith("/cleanup.json"):
+            Path(destination).write_text(json.dumps(receipt))
+
+    sandbox = AsyncMock(spec=AsyncSandbox, sandbox_id="box-1")
+    sandbox.exec.return_value = result()
+    sandbox.download.side_effect = download
+    session = SandboxSession(
+        sandbox=sandbox, session_dir="/tmp/nemo-gym-droid-sessions/s", workdir="/app", harness="Droid"
+    )
+    droid = adapter.DroidSandboxSession(request=seed(), runtime="/tmp/nemo-gym-droid-runtime-1.1.0", session=session)
+    # A stop that reaches the session during seed expires it before the activation launches Droid.
+    assert await session.expire(timeout=1, reason="budget")
+    response = await agent(monkeypatch)._sandbox_response(droid, body())
+    assert response.status == "incomplete" and response.output == []
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
+    assert "ng_agent_outcome" not in response.metadata
+    await session.close(timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("expired,probe", [(True, "absent"), (True, "present"), (True, ""), (False, "absent")])
+async def test_rollout_stop_before_droid_opens_its_stdout_keeps_an_empty_transcript(monkeypatch, expired, probe):
+    async def read_text(sandbox, *, path):
+        if path.endswith("/stderr.log"):
+            return "starting"
+        raise FileNotFoundError(path)
+
+    monkeypatch.setattr(adapter, "read_text", read_text)
+    checked = SimpleNamespace(stdout=probe + "\n", stderr="", return_code=0, error_type=None)
+    sandbox = SimpleNamespace(exec=AsyncMock(return_value=checked))
+    session = adapter.DroidSandboxSession(
+        request=seed(),
+        runtime="/r",
+        session=SimpleNamespace(
+            session_dir="/s",
+            sandbox=sandbox,
+            expired=expired,
+            expired_before_launch=False,
+            read_output_log=AsyncMock(return_value="runner log"),
+        ),
+    )
+    if expired and probe == "absent":
+        # Launched, then stopped before the runner opened events.jsonl: nothing to collect, not an error.
+        assert await session.collect_artifacts() == adapter.DroidArtifacts(events="", stderr="starting")
+    else:
+        # Events that may exist, or a run that was not stopped, still need a readable transcript.
+        with pytest.raises(RuntimeError, match="returned no events"):
+            await session.collect_artifacts()
+
+
+@pytest.mark.parametrize(
+    "probe,bootstrap,reason",
+    [
+        ("Linux\nx86_64\nmusl\navx2\n", result(), "musl"),
+        ("Linux\nriscv64\ngnu\nbaseline\n", result(), "architecture"),
+        (
+            "",
+            SimpleNamespace(
+                stdout="", stderr="Droid sandbox sessions require bash: x", return_code=78, error_type=None
+            ),
+            "require bash",
+        ),
+    ],
+)
+def test_sandbox_droid_cannot_run_in_is_refused_as_final(monkeypatch, probe, bootstrap, reason):
+    async def exec_(command, **kwargs):
+        if "uname" in command:
+            return SimpleNamespace(stdout=probe, stderr="", return_code=0, error_type=None)
+        return bootstrap if "command -v bash" in command else result()
+
+    remote = AsyncMock(spec=AsyncSandbox, sandbox_id="box")
+    remote.exec.side_effect = exec_
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(aclose=AsyncMock()))
+    download = AsyncMock()
+    monkeypatch.setattr(runtime, "cached_package", download)
+    instance = agent(monkeypatch)
+    assert reason in check_agent_seed_rejected(instance.setup_webserver(), seed())
+    download.assert_not_awaited()
+    assert not instance._session_records
+
+
+@pytest.mark.asyncio
+async def test_activation_after_close_started_is_refused(monkeypatch):
+    instance = agent(monkeypatch)
+    session = state()
+    session.session.closing = True
+    monkeypatch.setattr(instance, "_agent_session_id_from_request", lambda request: "session")
+    monkeypatch.setattr(instance, "_require_agent_session", lambda session_id: session)
+    request = SimpleNamespace(path_params={"rollout_id": seed().episode_id.capture_key})
+    with pytest.raises(HTTPException, match="closing") as error:
+        await instance.responses(request, body())
+    assert error.value.status_code == 409 and session.task is None
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_an_activation_waiting_for_a_slot(monkeypatch):
+    instance = agent(monkeypatch, concurrency=1)
+    session = state()
+    session.session.close = AsyncMock()
+    session.session.cleanup_confirmed = True
+    execute = AsyncMock()
+    monkeypatch.setattr(adapter.DroidSandboxSession, "execute", execute)
+    await instance.sem.acquire()  # another session's run holds the only slot
+    session.task = asyncio.create_task(instance._sandbox_response(session, body()))
+    await asyncio.sleep(0)
+    closed = await asyncio.wait_for(instance._close_agent_session_state(session), timeout=5)
+    execute.assert_not_awaited()
+    assert session.task.cancelled()
+    invocation = closed.agent_observations.records[0]
+    assert (invocation.status, invocation.error_type) == ("incomplete", "cancelled")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "metadata,deadline", [(None, 1800), ({"agent_timeout_sec": "60"}, 60), ({"agent_timeout_sec": "99999"}, 1800)]
+)
+async def test_task_timeout_bounds_the_supervised_run(monkeypatch, metadata, deadline):
+    execute = AsyncMock(return_value=adapter.DroidArtifacts(stdout(EVENTS)))
+    monkeypatch.setattr(adapter.DroidSandboxSession, "execute", execute)
+    await agent(monkeypatch)._sandbox_response(state(), body(metadata=metadata))
+    assert execute.await_args.kwargs["timeout"] == deadline
+
+
+@pytest.mark.asyncio
+async def test_error_event_fails_a_run_that_exits_zero(monkeypatch):
+    events = [EVENTS[0], {"type": "error", "source": "agent_loop", "message": "429 rate limited"}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    session = state()
+    response = await agent(monkeypatch)._sandbox_response(session, body())
+    assert response.status == "failed" and session.observations.records[0].error_type == "agent_error"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": 429,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {"input_tokens": 10, "output_tokens": 2},
+        {"input_tokens": True, "output_tokens": 2, "cache_read_input_tokens": 0},
+        {"input_tokens": 10, "output_tokens": -1, "cache_read_input_tokens": 0},
+        {"input_tokens": 10.0, "output_tokens": 2, "cache_read_input_tokens": 0},
+        {"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0, "cache_creation_input_tokens": None},
+    ],
+)
+async def test_incomplete_or_malformed_usage_stays_unknown(monkeypatch, usage):
+    events = [*EVENTS[:-1], {"type": "completion", "durationMs": 1, "usage": usage}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    session = state()
+    response = await agent(monkeypatch)._sandbox_response(session, body())
+    assert response.status == "completed" and response.usage is None
+    codes = {gap.code for gap in session.observations.gaps}
+    assert "model_call_usage_unavailable" in codes and "reasoning_token_usage_unavailable" not in codes
+
+
+def test_non_text_input_is_rejected(monkeypatch):
+    image = {"type": "input_image", "image_url": "data:image/png;base64,AA==", "detail": "auto"}
+    request = NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"role": "user", "content": [{"type": "input_text", "text": "Look:"}, image]}]
+    )
+    with pytest.raises(HTTPException, match="requires text messages") as error:
+        agent(monkeypatch)._validate_request(request)
+    assert error.value.status_code == 422
+
+
+def test_request_without_an_agent_session_is_refused_by_the_route(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    execute = AsyncMock()
+    monkeypatch.setattr(adapter.DroidSandboxSession, "execute", execute)
+    client = TestClient(agent(monkeypatch).setup_webserver(), raise_server_exceptions=False)
+    reply = client.post("/v1/responses", json={"input": "Question"})
+    assert reply.status_code == 409 and "agent session" in reply.json()["detail"]
+    execute.assert_not_awaited()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the harness runner needs bash")
+def test_tool_process_left_holding_stdout_does_not_hold_the_run(tmp_path):
+    runtime_dir, session_dir, workdir = tmp_path / "runtime", tmp_path / "session", tmp_path / "app"
+    for directory in (runtime_dir, session_dir, workdir):
+        directory.mkdir()
+    holder = tmp_path / "holder.pid"
+    (runtime_dir / "droid").write_text(
+        f'#!/usr/bin/env bash\nsleep 30 & echo $! > {holder}\necho \'{{"type": "completion", "usage": {{}}}}\'\n'
+    )
+    (runtime_dir / "droid").chmod(0o755)
+    params = {
+        "cwd": str(workdir),
+        "command": [str(runtime_dir / "droid"), "exec"],
+        "env": {"FACTORY_HOME_OVERRIDE": f"{session_dir}/home"},
+        "stdin": "/dev/null",
+        "stdout": f"{session_dir}/events.jsonl",
+        "stderr": f"{session_dir}/stderr.log",
+    }
+    (session_dir / "params.sh").write_text(shell_assignments(params))
+    try:
+        finished = subprocess.run(
+            ["bash", str(HARNESS_RUNNER_SCRIPT), str(session_dir / "params.sh")], capture_output=True, timeout=10
+        )
+        assert finished.returncode == 0
+        assert json.loads((session_dir / "events.jsonl").read_text())["type"] == "completion"
+    finally:
+        if holder.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(holder.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured,ttl", [({}, 3000), ({"ttl_s": None}, None)])
+async def test_owned_sandbox_has_a_lifetime_and_provider_labels(monkeypatch, configured, ttl):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(aclose=AsyncMock()))
+    monkeypatch.setattr(app, "install_sandbox_runtime", AsyncMock())
+    instance = agent(monkeypatch, sandbox_provider="sandbox", sandbox_config={"metadata": {"team": "x"}} | configured)
+    instance.server_client.global_config_dict = {"sandbox": {"opensandbox": {}, "default_metadata": {"owner": "gym"}}}
+    await instance._seed_agent_session_state(seed(borrowed=False))
+    spec = remote.start.await_args.args[0]
+    assert spec.ttl_s == ttl and spec.workdir == "/app"
+    assert spec.metadata == {
+        "owner": "gym",
+        "team": "x",
+        "gym-agent": "droid",
+        "gym-session": "session",
+        "gym-rollout": seed().episode_id.capture_key,
+    }
+
+
+@pytest.mark.asyncio
+async def test_failed_run_without_an_error_event_keeps_droid_stderr(monkeypatch, caplog):
+    marker = "FATAL: custom model rejected settings"
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession,
+        "execute",
+        AsyncMock(return_value=adapter.DroidArtifacts(events="", stderr=marker)),
+    )
+    session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
+    response = await agent(monkeypatch)._sandbox_response(session, body())
+    assert response.status == "failed"
+    [gap] = [gap for gap in session.observations.gaps if gap.code == "agent_startup_failed"]
+    assert gap.detail == marker and marker in caplog.text

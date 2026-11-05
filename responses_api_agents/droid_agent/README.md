@@ -15,6 +15,8 @@ custom-model support. It needs no Factory account, login or API key.
 - Model API: Chat Completions (streaming), through the rollout-prefixed Gym Model Server URL.
 - Tool grants: none. Required Resources tool grants are refused at seed; keep
   `resources_tool_transports: []`.
+- Validated pairings (smoke runs with Droid 1.1.0): reasoning_gym with an agent-owned sandbox, and
+  five Terminal-Bench 2.1 tasks with Resources-owned Docker sandboxes. No full benchmark evaluation.
 
 ## Configure and run
 
@@ -58,8 +60,14 @@ assistant history with an empty `reasoning_content` and the model's `<think>` te
 `reasoning_field: reasoning_content` on the `policy_model` server. The sandbox must
 reach the Model Server: set `++use_absolute_ip=true` when the Model Server would otherwise
 advertise a loopback address. Seed refuses a loopback Model Server URL for a remote provider.
-Terminal-Bench 2.1 does not list `droid_agent` in its `allowed_agents` yet; until it does, start
-the servers with `--allow-unsupported-pairing`.
+This configuration was validated with a five-task smoke run only. The full Terminal-Bench 2.1
+evaluation has not been run, so this adapter does not claim Terminal-Bench 2.1 support, and
+Terminal-Bench 2.1 does not list `droid_agent` in its `allowed_agents`: start the servers with
+`--allow-unsupported-pairing`.
+
+An agent-owned sandbox gets `ttl_s` of `sandbox_install_timeout_seconds + timeout + 600` seconds
+unless `sandbox_config` sets one. The lifetime starts at seed, so raise it (or set `ttl_s: null`)
+when episodes can wait for one of the `concurrency` slots after seeding.
 
 ## Runtime installation
 
@@ -75,7 +83,9 @@ unchanged. A lock serializes concurrent installers. The sandbox needs no network
 
 The task image needs bash, coreutils (`sha256sum`, `timeout`), `tar` and `gzip`, and glibc: Droid
 publishes no musl build, so Alpine images are refused at seed. A root image without bash gets it
-from `apt-get` or `apk`. The image needs no Python or Node.
+from `apt-get`; any other image without bash is refused at seed. The image needs no Python or Node.
+Installation needs about 500 MB free under `/tmp` (the package and the unpacked binary), and the
+installed runtime keeps about 325 MB.
 
 ## Requests and settings
 
@@ -84,8 +94,8 @@ with `--file`. The configured `system_prompt` and the request's system message a
 Droid's own system prompt with `--append-system-prompt-file`. `metadata.agent_timeout_sec` can lower
 the `timeout` ceiling for one task. Every other request field (sampling, `max_output_tokens`,
 `instructions`, `tools`, other metadata, history) is refused with HTTP 422 instead of being
-dropped. Keep sampling settings on the Model Server: Droid 1.1.0 sends `temperature: 1` and
-`max_tokens: <max_output_tokens>` on every call.
+dropped. Keep sampling settings on the Model Server (`sampling_overrides` on the vLLM Model
+Server): Droid 1.1.0 sends `temperature: 1` and `max_tokens: <max_output_tokens>` on every call.
 
 Each activation writes a runtime settings file (`--settings`) with one BYOK model:
 
