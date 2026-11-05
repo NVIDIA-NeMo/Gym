@@ -356,7 +356,9 @@ provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
 
 `network_access: model_only` limits a created sandbox's egress to the model server's host;
-`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The policy is
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port.
+Under `model_and_tools`, an MCP grant at an address the sandbox cannot reach, such as loopback, refuses the seed
+with a 422, even an optional one that `inherit` would skip; a required grant under `model_only` is refused too. The policy is
 set when the sandbox is created, so a session that borrows a task sandbox rejects any value other than `inherit`,
 and a `sandbox_config.provider_options.network_policy` cannot be combined with it. A created sandbox must reach
 the model server by address (`use_absolute_ip: true`). A borrowed sandbox relies on its owner's network policy,
