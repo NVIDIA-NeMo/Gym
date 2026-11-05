@@ -44,7 +44,7 @@ The shared defaults are:
 | Confirmed OOM in the agent's assigned sandbox during `agent` execution | `count_as_zero` | `model` |
 | Confirmed OOM during `seed` | `retry` | `evaluation` |
 | Inconclusive verification attempt, including confirmed OOM | `retry` | `evaluation` |
-| Verification failure reporting cancellation, shutdown, a kill-shaped exit or rejected credentials | `fail` ungraded | `evaluation` |
+| Verification failure reporting cancellation, shutdown, a process killed by a signal (such as SIGTERM or an out-of-memory kill) or rejected credentials | `fail` ungraded | `evaluation` |
 | Other failures, unknown stage or unknown ownership | `fail` ungraded | `unknown` |
 
 A `retry` decision never authorizes replaying an uncertain command. The caller retains its retry safety checks

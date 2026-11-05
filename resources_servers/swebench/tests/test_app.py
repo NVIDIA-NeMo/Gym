@@ -124,6 +124,7 @@ class TestApp:
             "provider": "test-provider",
             "sandbox_id": "sandbox-123",
             "outcome": "completed",
+            "stage": None,
             "exit_code": None,
             "cpu_time_s": None,
             "peak_memory_mib": None,
