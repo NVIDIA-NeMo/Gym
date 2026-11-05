@@ -15,7 +15,8 @@
 """Gym's request middleware calls the app directly, in the request's own task.
 
 These tests cover what a middleware written that way must still get right.
-That is the replies it settles or replaces before they start, failures after a reply starts, and the request's own cancellation.
+That is the replies it settles or replaces before they start, failures after a reply starts, and the request's own
+cancellation.
 It also covers context a route leaves behind on a reused connection.
 """
 
@@ -31,7 +32,7 @@ from unittest.mock import MagicMock
 
 import pytest
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.testclient import TestClient
 
@@ -86,6 +87,21 @@ def test_a_failed_request_under_a_new_session_hands_out_no_cookie() -> None:
     assert "set-cookie" not in response.headers
 
 
+def test_a_new_session_whose_route_replied_with_an_error_hands_out_no_cookie() -> None:
+    # The route's own error reply passes through the session layers, unlike a raised exception.
+    app = _app_with_gym_middleware()
+
+    @app.get("/refused")
+    async def refused(request: Request) -> None:
+        request.session[SESSION_ID_KEY]
+        raise HTTPException(status_code=404, detail="no such seed")
+
+    response = TestClient(app).get("/refused")
+
+    assert response.status_code == 404
+    assert "set-cookie" not in response.headers
+
+
 def test_a_new_session_takes_the_id_the_session_router_chose() -> None:
     app = _app_with_gym_middleware()
 
@@ -114,6 +130,20 @@ def test_a_failed_route_reply_keeps_its_partial_observations() -> None:
     assert response.status_code == 500
     assert response.json()["detail"] == "ValueError('policy failed')"
     assert response.json()["ng_agent_observations"]["source"] == "simple_agent"
+
+
+def test_a_failed_route_logs_its_own_traceback(capsys: pytest.CaptureFixture[str]) -> None:
+    app = _app_with_gym_middleware()
+
+    @app.get("/broken")
+    async def broken_route() -> None:
+        raise ValueError("broken")
+
+    TestClient(app).get("/broken")
+
+    logged = capsys.readouterr()
+    assert "in broken_route" in logged.out + logged.err
+    assert "NoneType: None" not in logged.out + logged.err
 
 
 def test_a_route_that_never_replies_gets_a_500() -> None:
@@ -271,6 +301,19 @@ def test_a_new_session_the_route_never_used_is_neither_claimed_nor_handed_out() 
     assert claims == []
 
 
+def test_a_named_session_the_route_never_used_keeps_its_vary_header() -> None:
+    claims = []
+    client = TestClient(_app_with_session_claim(True, claims))
+    client.get("/uses-session")
+    claims.clear()
+
+    response = client.get("/ignores-session")
+
+    assert response.status_code == 200
+    assert response.headers["vary"] == "Cookie"
+    assert claims == []
+
+
 _LEFT_BEHIND: ContextVar[str] = ContextVar("left_behind", default="unset")
 
 
@@ -327,10 +370,10 @@ def test_a_pipelined_request_does_not_inherit_what_the_previous_route_set() -> N
     assert _pipelined_replies(app) == ["set", "unset"]
 
 
-# Environment-specific bearer-token checks, to be converted separately.
+# Environment-specific bearer-token checks, to be converted separately, by how many each file registers.
 _ALLOWED_DECORATED_MIDDLEWARE = {
-    "resources_servers/osworld/app.py",
-    "resources_servers/osworld/worker.py",
+    "resources_servers/osworld/app.py": 1,
+    "resources_servers/osworld/worker.py": 1,
 }
 
 
@@ -338,8 +381,12 @@ def test_gym_servers_add_no_middleware_that_runs_the_app_in_another_task() -> No
     # `@app.middleware("http")` and `BaseHTTPMiddleware` run the rest of the app in a new task for every request.
     # They also relay each reply message through an in-memory stream, which adds event-loop work on every hop.
     # Write ASGI middleware instead.
-    pattern = re.compile(r"""\.middleware\(\s*["']http["']\s*\)|starlette\.middleware\.base\b""")
-    offending = []
+    pattern = re.compile(
+        r"""\.middleware\(\s*["']http["']\s*\)"""
+        r"|\bBaseHTTPMiddleware\b"
+        r"|starlette\.middleware\.base\b"
+    )
+    offending = {}
     for root in (
         "nemo_gym",
         "responses_api_agents",
@@ -349,9 +396,10 @@ def test_gym_servers_add_no_middleware_that_runs_the_app_in_another_task() -> No
     ):
         for path in sorted((REPO / root).rglob("*.py")):
             relative = path.relative_to(REPO).as_posix()
-            if "/tests/" in f"/{relative}" or relative in _ALLOWED_DECORATED_MIDDLEWARE:
+            if "/tests/" in f"/{relative}":
                 continue
-            if pattern.search(path.read_text(encoding="utf-8", errors="replace")):
-                offending.append(relative)
+            count = len(pattern.findall(path.read_text(encoding="utf-8", errors="replace")))
+            if count > _ALLOWED_DECORATED_MIDDLEWARE.get(relative, 0):
+                offending[relative] = count
 
-    assert offending == []
+    assert offending == {}

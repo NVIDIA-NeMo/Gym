@@ -41,7 +41,8 @@ def _add_failure_header(message: Message, report: FailureReport) -> None:
 def _is_cancelling_this_request(error: BaseException) -> bool:
     """Whether ``error`` is the cancellation of the task serving this request.
 
-    Gym cancels that task when a client disconnects, when a checkpoint retires an activation or a model call, and when uvicorn shuts down.
+    Gym cancels that task when a client disconnects, when a checkpoint retires an activation or a model call, and when
+    uvicorn shuts down.
     """
     task = asyncio.current_task()
     return isinstance(error, asyncio.CancelledError) and task is not None and task.cancelling() > 0
@@ -54,7 +55,8 @@ class ExceptionHandlingMiddleware:
     That response keeps the partial observations the route left in the request state.
     Every reply, successful or not, carries the failures observed while serving it in its failure header.
     Once a reply has started, its status is already sent, so a later failure propagates.
-    A cancelled request still gets the failure reply, and then the cancellation propagates to whoever cancelled the task.
+    A cancelled request still gets the failure reply, and then the cancellation propagates to whoever cancelled the
+    task.
     """
 
     # Direct MCP dispatch handles exceptions in the /mcp request itself.

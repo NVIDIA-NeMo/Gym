@@ -72,6 +72,7 @@ from nemo_gym.core import (
     rollout_context,
 )
 from nemo_gym.models import (
+    PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     ChatCompletionsConverter,
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
@@ -107,6 +108,7 @@ from responses_api_models.vllm_model.app import (
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
+    _ContextErrorMiddleware,
     _redacted_error_repr,
     _transport_images,
     _transport_log_context,
@@ -9112,3 +9114,25 @@ async def test_responses_notes_the_chat_finish_reason_for_model_call_capture(
     await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
 
     assert request.state.nemo_gym_model_execution["finish_reason"] == finish_reason
+
+
+async def test_a_context_refusal_after_the_reply_started_propagates() -> None:
+    # The status is already sent, so the error envelope cannot replace it.
+    error = ClientResponseError(MagicMock(real_url="http://vllm.test/v1/chat/completions"), (), status=400)
+    error.response_content = b'{"error":{"message":"maximum context length","code":400}}'
+    setattr(error, PROPAGATED_REFUSAL_CODE_ATTRIBUTE, "context_length_exceeded")
+
+    async def streams_then_refuses(scope, receive, send) -> None:
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        raise error
+
+    sent = []
+
+    async def send(message) -> None:
+        sent.append(message)
+
+    with raises(ClientResponseError) as raised:
+        await _ContextErrorMiddleware(streams_then_refuses)({"type": "http"}, AsyncMock(), send)
+
+    assert raised.value is error
+    assert [message["status"] for message in sent] == [200]
