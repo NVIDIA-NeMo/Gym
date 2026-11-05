@@ -25,12 +25,12 @@ import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, RequestFailureLog
 from responses_api_agents.anyswe_agent import agent_runner
 from responses_api_agents.anyswe_agent.agent_runner import _extract_patch, _snapshot_repo
 from responses_api_agents.anyswe_agent.app import (
@@ -528,3 +528,93 @@ class TestRunReportsMaskSample:
 
         assert dumped["mask_sample"] is False
         assert dumped["instance_config"]["mask_sample"] is False
+
+
+class TestSandboxGradingFailures:
+    @pytest.mark.parametrize(
+        "failure_kind,phase",
+        [
+            ("provider_unavailable", "grading"),
+            ("provider_command_outcome_unknown", "grading"),
+            ("model_transport_error", "grading"),
+            (None, "grading"),
+            ("provider_unavailable", "agent"),
+            ("provider_command_outcome_unknown", "agent"),
+        ],
+    )
+    async def test_grading_failure_is_excluded_and_preserves_evidence(
+        self, tmp_path, monkeypatch, failure_kind, phase
+    ) -> None:
+        with patch.object(AnySweAgent, "model_post_init", lambda self, context: None):
+            agent = AnySweAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        agent._server = AnySweServerConfig(
+            run_session_id="s",
+            base_results_dir=tmp_path,
+            model_server_url="http://model:9000",
+            resolved_sandbox_provider={"opensandbox": {}},
+            sandbox_default_metadata={},
+        )
+        agent._sem = asyncio.Semaphore(1)
+        monkeypatch.setattr(AnySweAgent, "rollout_id_from_run", lambda self, body: None)
+
+        class Sandbox:
+            async def start(self):
+                pass
+
+            async def stop(self):
+                pass
+
+            async def exec(self, command, **kwargs):
+                if phase == "agent" and "agent_runner.py" in command:
+                    raise error
+                return SimpleNamespace(
+                    return_code=1 if command == "test -f /trajectories_mount/response.json" else 0,
+                    error_type=None,
+                    stdout="",
+                    stderr="",
+                )
+
+            async def download(self, remote, local):
+                local.write_bytes(b"diff --git a/test.py b/test.py\n")
+
+        monkeypatch.setattr("responses_api_agents.anyswe_agent.app.AsyncSandbox", lambda *args: Sandbox())
+        error = None
+        if failure_kind is not None:
+            cause = ConnectionError("grading sandbox disappeared")
+            error = NgFailureEvent(
+                boundary="model" if failure_kind == "model_transport_error" else "sandbox",
+                failure_kind=failure_kind,
+                operation="exec",
+                failure_reason="Grading failed",
+            )
+            error.__cause__ = cause
+        grade = AsyncMock(side_effect=error if phase == "grading" else None, return_value=(False, None))
+        monkeypatch.setattr(AnySweAgent, "_grade_sandbox_patch", grade)
+        body = AnySweRunRequest(
+            responses_create_params={
+                "input": "fix it",
+                "metadata": {"instance_id": "repo__repo-1"},
+            }
+        )
+        if failure_kind == "model_transport_error":
+            with pytest.raises(NgFailureEvent) as caught:
+                await agent.run(body)
+            assert caught.value is error
+            return
+        with RequestFailureLog.capture() as log:
+            response = await agent.run(body)
+        if phase == "agent":
+            grade.assert_not_awaited()
+        else:
+            grade.assert_awaited_once()
+        assert response.reward == 0.0
+        assert response.mask_sample is (error is not None)
+        assert response.error_kind == ("sandbox" if error is not None else None)
+        assert response.instance_config["mask_sample"] is response.mask_sample
+        if error is not None:
+            event = log.report.events[error.event_id]
+            assert event.failure_kind == failure_kind
+            assert event.foreign_error.exception_type == "ConnectionError"
+            assert error.__cause__ is cause
+        else:
+            assert not log.report.events

@@ -21,7 +21,7 @@ from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, Rollou
 from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, RolloutStore, run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.trajectory.model_call_record import build_model_call_record
-from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, TrajectoryModelCall, TrajectoryRecord
 
 
 MODEL_CALL_CHECKS = {
@@ -1200,6 +1200,10 @@ _REASONING_ONLY = {
     "responses": {"output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "partial"}]}]},
     "chat": {"choices": [{"message": {"content": "", "reasoning_content": "partial"}}]},
     "messages": {"content": [{"type": "thinking", "thinking": "partial"}]},
+    "messages_redacted": {"content": [{"type": "redacted_thinking", "data": "opaque"}]},
+    "messages_signature_only": {"content": [{"type": "thinking", "thinking": "", "signature": "sig"}]},
+    # A chat content part typed as thinking is reasoning too, never an answer.
+    "chat_thinking_part": {"choices": [{"message": {"content": [{"type": "thinking", "thinking": "partial"}]}}]},
 }
 _ACTIONABLE = {
     "responses_function_call": {
@@ -1257,6 +1261,49 @@ def test_a_length_limited_call_with_only_reasoning_is_a_runaway_generation(
 
     flagged_calls = [f.locator["call_id"] for f in digest.findings if f.check == "model_call_runaway_generation"]
     assert flagged_calls == (["clipped"] if flagged else [])
+
+
+_MESSAGES_TURN_CONTENT = {
+    "thinking": ([{"type": "thinking", "thinking": "inspect first", "signature": ""}], False),
+    "redacted_thinking": ([{"type": "redacted_thinking", "data": "opaque"}], False),
+    "signature_only": ([{"type": "thinking", "thinking": "", "signature": "sig"}], False),
+    "text": ([{"type": "text", "text": "Answer: 18"}], False),
+    "tool_use": ([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}], False),
+    "no_content": ([], True),
+    "empty_thinking": ([{"type": "thinking", "thinking": "", "signature": ""}], True),
+    "empty_redacted_thinking": ([{"type": "redacted_thinking", "data": ""}], True),
+}
+
+
+@pytest.mark.parametrize(
+    ("content", "hollow"), list(_MESSAGES_TURN_CONTENT.values()), ids=list(_MESSAGES_TURN_CONTENT)
+)
+def test_a_messages_turn_with_only_thinking_is_not_hollow(tmp_path: Path, content: list[dict], hollow: bool) -> None:
+    """A turn built from a captured Anthropic Messages call counts its thinking blocks as content, the way a
+    Responses reasoning item counts; only a turn with nothing in it is hollow."""
+    response = {"type": "message", "role": "assistant", "content": content, "stop_reason": "end_turn"}
+    call = TrajectoryModelCall.model_validate(
+        {
+            "model_call_id": "c1",
+            "started_at": 1.0,
+            "request": {"messages": [{"role": "user", "content": "question"}]},
+            "response": response,
+            "response_metadata": {"response_id": "r1", "status_code": 200, "response_status": "completed"},
+        }
+    )
+    root = AgentInvocation.model_validate({"invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]})
+    turns = trajectory_builder._turns_from_model_calls("0", "0-0", [root], [call], resolved=True)
+    [turn] = turns
+    # The turn keeps the captured blocks: thinking is its reasoning, never its answer.
+    thinking = [block for block in content if block["type"] in ("thinking", "redacted_thinking")]
+    assert turn.reasoning_content == (thinking or None)
+    record = _record(0, 0)
+    record["ng_trajectory"]["turns"] = [turn.model_dump(mode="json")]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call(response=response, finish_reason="stop")])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert any(finding.check == "agent_turn_hollow" for finding in digest.findings) is hollow
 
 
 def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
