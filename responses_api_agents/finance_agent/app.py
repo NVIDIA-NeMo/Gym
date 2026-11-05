@@ -271,6 +271,20 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         """True when *exc* indicates the input exceeded the model's context window."""
         return _CONTEXT_OVERFLOW_RE.search(str(exc)) is not None
 
+    @classmethod
+    def _is_context_overflow_failure(cls, exc: BaseException) -> bool:
+        """True when a failed model call says the input exceeded the model's context window.
+
+        openai_model forwards a provider's 400 as a 500 by default, so the provider's text is only in the reply
+        body, which ``raise_for_status`` keeps on ``response_content``; ``str(exc)`` names only the status.
+        """
+        if isinstance(exc, Exception) and cls._is_context_overflow_error(exc):
+            return True
+        content = getattr(exc, "response_content", None)
+        if isinstance(content, bytes):
+            content = content.decode(errors="replace")
+        return isinstance(content, str) and _CONTEXT_OVERFLOW_RE.search(content) is not None
+
     @staticmethod
     def _is_model_output(item: Any) -> bool:
         """True for items that originated from a model response (not tool results or user messages)."""
@@ -624,7 +638,12 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             "stop_reason": stop_reason.value,
             "steps": str(step),
         }
-        if state is not None and model_failure is not None:
+        if state is not None and model_failure is not None and self._is_context_overflow_failure(model_failure):
+            # The model's own context ran out, so the episode is graded, as a legacy /run grades it and hermes_agent
+            # grades its context limit, instead of being dispatched again until a shorter attempt fits.
+            last_model_response.status = "incomplete"
+            last_model_response.error = None
+        elif state is not None and model_failure is not None:
             # A legacy /run verifies whatever the loop returns. In a session the Environment Server decides from the
             # cause whether to grade the episode, dispatch it again or fail it, instead of scoring an outage as 0.
             last_model_response.status = "failed"

@@ -25,10 +25,12 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from aiohttp import ClientConnectionError, ClientResponseError
+from aiohttp import ClientConnectionError, ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import OmegaConf
 from pydantic import ValidationError
+from yarl import URL
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentSeedSessionRequest, OutcomeAction, agent_outcome_policy
 from nemo_gym.client import ServerClient
@@ -1014,11 +1016,42 @@ def _tool_reply(body: str, *, cookies: dict | None = None, status: int = 200) ->
     return reply
 
 
+def _model_error_reply(status: int, body: bytes = b'{"error": "upstream"}') -> MagicMock:
+    """A model server reply that fails the agent's own ``raise_for_status`` with ``status`` and ``body``."""
+    url = URL("http://model/v1/responses")
+    reply = MagicMock()
+    reply.ok = False
+    reply.status = status
+    reply.content.read = AsyncMock(return_value=body)
+    reply.raise_for_status = MagicMock(
+        side_effect=ClientResponseError(
+            RequestInfo(url=url, method="POST", headers=CIMultiDictProxy(CIMultiDict()), real_url=url),
+            (),
+            status=status,
+            message="upstream",
+        )
+    )
+    return reply
+
+
+# What openai_model answers when the provider refuses a context overflow with a 400 and the model server does not
+# propagate that status: a 500 whose body carries the provider's text.
+_OVERFLOW_BODY = json.dumps(
+    "Hit an exception in SimpleModelServer___policy_model calling an inner server: "
+    '{"error": {"message": "This model\'s maximum context length is 128000 tokens."}}'
+).encode()
+
+
 def _session_client(model_mock, *, observability: bool = False, config: FinanceAgentConfig | None = None):
     agent, client = _make_agent_and_client(config)
     agent.server_client.global_config_dict = {"observability_enabled": observability}
     agent.server_client.post = AsyncMock(side_effect=_route(model_mock, AsyncMock()))
     return agent, client
+
+
+def _seed(client: TestClient) -> None:
+    seed = _session_seed(tool_accesses=[_GRANT])
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).is_success
 
 
 def _close(client: TestClient) -> dict:
@@ -1171,6 +1204,21 @@ class TestAgentSessions:
 
         assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
         assert agent_outcome_policy(response) == OutcomeAction.RETRY
+
+    @pytest.mark.parametrize("status", [500, 400])
+    def test_context_overflow_in_a_session_is_graded_at_any_status(self, status: int) -> None:
+        """An overflow is the model's own failure, so the episode is verified, not dispatched again until it fits."""
+        agent, client = _session_client(AsyncMock())
+        agent.server_client.post = AsyncMock(return_value=_model_error_reply(status, _OVERFLOW_BODY))
+        _seed(client)
+
+        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+
+        assert response.status == "incomplete"
+        assert response.error is None
+        assert response.metadata["stop_reason"] == "error"
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     def test_model_failure_without_a_session_is_still_verified(self) -> None:
         """A legacy /run verifies whatever the loop returns; only a session reports the cause."""

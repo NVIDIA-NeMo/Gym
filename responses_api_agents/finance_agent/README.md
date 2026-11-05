@@ -53,12 +53,13 @@ and the resources cookie jar, and close returns the updated jar. When model call
 calls, and a record per tool call.
 
 Outcomes differ from the legacy `/run`, which verifies every loop it finishes and turns any exception into reward 0.
-Under the Environment Server, a failed model call marks the response `failed` with its cause, and the Environment
-Server's `agent_outcome_policy` decides what happens:
+Under the Environment Server, a failed model call other than a context overflow marks the response `failed` with its
+cause, and the Environment Server's `agent_outcome_policy` decides what happens:
 
 | Event | Legacy `/run` | Environment Server, default policy |
 |-------|---------------|------------------------------------|
-| Model call fails with HTTP 400, 413 or 422, such as a context overflow the model server propagates | verified, usually 0 | `model_request_error`, verified |
+| Model call fails with a context overflow in its error text, at any HTTP status (`openai_model` answers a provider's 400 with a 500 unless `propagate_upstream_http_status_codes` lists it) | verified, usually 0 | response `incomplete`, no failure, verified |
+| Model call fails with another HTTP 400, 413 or 422 | verified, usually 0 | `model_request_error`, verified |
 | Model call fails with HTTP 408, 425, 429 or 5xx | verified, usually 0 | `model_request_error`, retryable failure |
 | Model call fails with another HTTP 4xx | verified, usually 0 | `model_request_error`, terminal failure |
 | Model call times out (`model_call_timeout`) or cannot connect | verified, usually 0 | `model_transport_error`, retryable failure |
