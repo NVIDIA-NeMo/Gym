@@ -1,7 +1,8 @@
 # finance_agent_v2 through the single_agent_turn_legacy Environment Server instead of the legacy_agent relay.
 # The Environment Server seeds the resources and agent sessions, grants the agent direct HTTP access to the tools,
-# runs the agent's loop once, closes the agent, verifies, then closes the resources session. A crash repeats only
-# the step it interrupted, and a failed model call is retried or failed by its cause instead of scored 0.
+# runs the agent's loop once, closes the agent, verifies, then closes the resources session. The agent and this
+# resources server export no checkpoint state (restart_only), so a crash still starts the episode over from its input;
+# what changes is that a failed model call, seed or judge becomes a classified failure instead of reward 0.
 # finance_agent_v2.yaml keeps the relay; load this file in its place.
 config_paths:
   - resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml

@@ -33,9 +33,10 @@ eval only — during training the full trajectory has to be preserved for reward
 # Running behind an Environment Server
 
 The loop also runs behind the `single_agent_turn_legacy` Environment Server, which seeds the resources session and an
-agent session, calls `/v1/responses` once, closes the agent session, verifies, and closes the resources session. A
-crash then repeats only the step it interrupted instead of the whole episode. Each relay config has a counterpart that
-does this; the relay configs are unchanged:
+agent session, calls `/v1/responses` once, closes the agent session, verifies, and closes the resources session. The
+agent and the finance resources servers export no checkpoint state (`restart_only`), so after a crash the episode
+still starts over from its input. What changes is that a failed model call, seed or judge becomes a classified failure
+instead of reward 0. Each relay config has a counterpart that does this; the relay configs are unchanged:
 
 | Relay config | Environment Server config |
 |--------------|---------------------------|
@@ -52,6 +53,10 @@ and the resources cookie jar, and close returns the updated jar. When model call
 (`observability_enabled`), close also returns the loop's observations: one invocation with its stop reason and model
 calls, and a record per tool call.
 
+`finance_agent` is registered in `AGENT_SESSION_AGENT_TYPES`, so composing it onto another environment keeps that
+environment's `single_agent_turn_legacy` Environment Server, which must then grant `direct_http` too; otherwise every
+seed gets 422.
+
 Outcomes differ from the legacy `/run`, which verifies every loop it finishes and turns any exception into reward 0.
 Under the Environment Server, a failed model call other than a context overflow marks the response `failed` with its
 cause, and the Environment Server's `agent_outcome_policy` decides what happens:
@@ -62,15 +67,16 @@ cause, and the Environment Server's `agent_outcome_policy` decides what happens:
 | Model call fails with another HTTP 400, 413 or 422 | verified, usually 0 | `model_request_error`, verified |
 | Model call fails with HTTP 408, 425, 429 or 5xx | verified, usually 0 | `model_request_error`, retryable failure |
 | Model call fails with another HTTP 4xx | verified, usually 0 | `model_request_error`, terminal failure |
-| Model call times out (`model_call_timeout`) or cannot connect | verified, usually 0 | `model_transport_error`, retryable failure |
+| Model call times out (`model_call_timeout`), or cannot connect before it does. Without `model_call_timeout`, a refused connection is resent without limit, so the episode runs into the Environment Server's deadline instead | verified, usually 0 | `model_transport_error`, retryable failure |
 | Seed, verify or the agent itself fails | reward 0 | failure classified by the Environment Server |
 | Tool error or timeout, or an error type in `abort_on_tool_error_types` | verified | verified, as before |
 | Context overflow that `vllm_model` answers itself (its default) | verified | verified, as before |
 
 A failure is not scored: rollout collection writes it to the failures sidecar instead of the rollouts file, and
 `--resume` dispatches a retryable one again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. So an outage no longer counts as a
-wrong answer, and the score covers fewer rollouts when episodes fail. To count failures as 0, as the legacy run did,
-pass `+count_failure_classes_as_zero=[<class>, ...]`.
+wrong answer, and the score covers fewer rollouts when episodes fail. To count these failures as 0, pass
+`+count_failure_classes_as_zero=[environment_server_failed]`. Like the legacy run, that also zeroes seed, judge and
+verify failures, which share the class.
 
 # Licensing information
 Code: Apache 2.0

@@ -111,10 +111,11 @@ Use `--limit 1` for a quick end-to-end check. For the web-search variant, use
 
 To run through the `single_agent_turn_legacy` Environment Server instead of the
 `legacy_agent` relay, load `config_no_web_search_single_agent_turn.yaml` (or
-`config_web_search_single_agent_turn.yaml`) in place of the benchmark name. A
-crash then repeats only the step it interrupted, and a failed model call is
-retried or failed by its cause instead of scored 0, so fewer rollouts may be
-scored (see
+`config_web_search_single_agent_turn.yaml`) in place of the benchmark name. The
+agent and the resources server export no checkpoint state (`restart_only`), so
+after a crash the episode still starts over from its input. What changes is that
+a failed model call, seed or judge becomes a classified failure instead of
+reward 0, so fewer rollouts may be scored (see
 [Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)):
 
 ```bash

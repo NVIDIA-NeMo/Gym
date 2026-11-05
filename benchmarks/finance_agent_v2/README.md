@@ -108,15 +108,16 @@ gym eval run --no-serve --agent finance_agent_v2_benchmark_agent \
 
 To run through the `single_agent_turn_legacy` Environment Server instead of the
 `legacy_agent` relay, load `config_single_agent_turn.yaml` in place of the
-benchmark name. A crash then repeats only the step it interrupted, and a failed
-model call is retried or failed by its cause instead of scored 0, so fewer
-rollouts may be scored (see
+benchmark name. The agent and the resources server export no checkpoint state
+(`restart_only`), so after a crash the episode still starts over from its input.
+What changes is that a failed model call, seed or judge becomes a classified
+failure instead of reward 0, so fewer rollouts may be scored (see
 [Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)):
 
 ```bash
 gym eval run --config benchmarks/finance_agent_v2/config_single_agent_turn.yaml \
   --split benchmark \
-  -c responses_api_models/openai_model/configs/openai_model.yaml \
+  --model-type openai_model \
   --output results/finance_agent_v2_27q.jsonl --concurrency 4
 ```
 
