@@ -4616,7 +4616,9 @@ executions → not run again (left to recovery)
         expected_rollouts = completion["expected"]
         scored_rollouts = completion["successful"] - completion["unscored"] + len(counted)
         store.write_coverage(
-            scored=scored_rollouts, failures_counted_as_zero=len(counted) - len(imputed), imputed=len(imputed)
+            scored=scored_rollouts,
+            failures_counted_as_zero=len(counted) - len(imputed) + store.coverage()["final_zeros_in_successful"],
+            imputed=len(imputed),
         )
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
@@ -4664,7 +4666,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
+            completed=completion["successful"]
+            - completion.get("masked_retryable", 0)
+            + completion["final_zeros"]
+            - completion.get("final_zeros_in_successful", 0),
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,
@@ -6149,7 +6154,10 @@ class RolloutAggregationHelper(BaseModel):
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
-            "failures_counted_as_zero": len(counted) - len(missing),
+            "failures_counted_as_zero": len(counted)
+            - len(missing)
+            + sum(c.get("final_zeros_in_successful", 0) for c in components),
+            "failures_by_kind": dict(sum((Counter(c.get("failures_by_kind", {})) for c in components), Counter())),
             "imputed": len(missing),
             "shards": components,
             "shards_without_inventory": [str(path) for path in legacy_paths],

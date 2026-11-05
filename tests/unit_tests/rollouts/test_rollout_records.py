@@ -160,6 +160,28 @@ def test_fully_masked_run_is_complete_without_unmasked_measurements(run):
     assert len(recovered.selected("success")) == 5
 
 
+def test_a_scored_count_as_zero_row_is_reported_as_a_final_zero_by_kind(run):
+    output, manifest, rows = run
+    with writer(run) as history:
+        for row in rows:
+            history.record_dispatch(row)
+        save(run, history, rows[0], reward=1.0)
+        save(
+            run,
+            history,
+            rows[1] | {"failure_outcome_action": "count_as_zero", "failure_kind": "provider_oom_killed"},
+            reward=0.0,
+        )
+        for row in rows[2:]:
+            save(run, history, row, reward=1.0)
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
+    report = recovered.coverage()
+    assert (report["successful"], report["failed"], report["failed_final"]) == (5, 0, 0)
+    assert (report["final_zeros"], report["final_zeros_in_successful"]) == (1, 1)
+    assert report["failures_by_kind"] == {"provider_oom_killed": 1}
+    assert report["complete"] and report["completion_fraction"] == 1.0
+
+
 def test_duplicate_inventory_cannot_conflate_distinct_tasks(run):
     _, manifest, rows = run
     with pytest.raises(ConfigError, match="Duplicate logical rollout"):

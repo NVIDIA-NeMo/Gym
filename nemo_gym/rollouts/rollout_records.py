@@ -62,6 +62,7 @@ from nemo_gym.rollouts.rollout_recovery import (
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
+COUNTS_AS_ZERO_ROW_KEY = "_ng_failure_counts_as_zero"
 RUN_ID_KEY = "_ng_run_id"
 # Names the saved judge failure a judge-only re-judgment settles; the result keeps that failure's attempt identity.
 REJUDGED_FAILURE_ID_KEY = "_ng_rejudged_failure_id"
@@ -204,6 +205,9 @@ class _Outcome:
     has_reward: bool
     elapsed_seconds: float | None
     final_zero: bool = False
+    # A scored result whose producer applied ``count_as_zero`` (a failure the policy settled as the model's zero): the
+    # failure kind. It is a success to selection, so only the coverage report singles it out.
+    counted_zero_kind: str | None = None
     interruption_cause_unknown: bool = False
     saved_answer: bool = False
     unclassified_execution_failure: bool = False
@@ -689,6 +693,12 @@ class RolloutRecords:
             # kept (the model's result, as recovery classifies it): final, so no policy reopens it.
             final_zero=(row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")))
             or is_answered_agent_deadline(row),
+            counted_zero_kind=(
+                str(row.get("failure_kind") or "unknown")
+                if failure_class is None
+                and (row.get("failure_outcome_action") == "count_as_zero" or row.get(COUNTS_AS_ZERO_ROW_KEY) is True)
+                else None
+            ),
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
@@ -980,6 +990,14 @@ class RolloutRecords:
         failures = self.selected_records("failure")
         # Settled final zeros are complete and in the denominator, and still failures for health.
         final_zeros = sum(self.payloads[key].final_zero for key in failures)
+        # Scored successes the policy counted as the model's zero are already in ``successful``: they are reported as
+        # final zeros and by kind, and left out of ``settled`` below so no consumer counts them twice.
+        scored_zeros = Counter(
+            self.payloads[(identity, self.latest[identity])].counted_zero_kind
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+            and self.payloads[(identity, self.latest[identity])].counted_zero_kind
+        )
         failed_final = sum(
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
@@ -1011,7 +1029,9 @@ class RolloutRecords:
             "failed": counts["failure"],
             "failed_final": failed_final,
             "failed_masked": failed_masked,
-            "final_zeros": final_zeros,
+            "final_zeros": final_zeros + sum(scored_zeros.values()),
+            "final_zeros_in_successful": sum(scored_zeros.values()),
+            "failures_by_kind": dict(sorted(scored_zeros.items())),
             "failed_not_final": len(failures) - failed_final,
             "failed_by_class": dict(sorted(Counter(self.payloads[key].failure_class for key in failures).items())),
             "intentionally_omitted": counts["omitted"],
