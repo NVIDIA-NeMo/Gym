@@ -157,7 +157,10 @@ model server by address, so the profile sets `use_absolute_ip: true` and keeps t
 on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
 harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
-instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`.
+instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`. It sets `network_access: model_only`,
+so the sandbox reaches only the model server; a search preset overrides it with `model_and_tools`. A restricted
+sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
+in the image.
 
 The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
 APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
