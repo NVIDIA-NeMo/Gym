@@ -439,6 +439,11 @@ class AsyncSandbox:
         return _sandbox_id(self._handle)
 
     @property
+    def provider_name(self) -> str:
+        """The name of this sandbox's runtime provider."""
+        return self._provider.name
+
+    @property
     def observed_client_interval_s(self) -> float | None:
         """Client-observed seconds from the provider's create return to its close return in this instance.
 

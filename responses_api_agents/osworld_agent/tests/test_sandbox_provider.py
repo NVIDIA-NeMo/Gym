@@ -525,6 +525,80 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
         upstream.server_close()
 
 
+@pytest.mark.parametrize(
+    ("env", "expected"),
+    [
+        (
+            {"REQUESTS_CA_BUNDLE": "/certs/gateway-ca.pem", "SSL_CERT_FILE": "/certs/other.pem"},
+            "/certs/gateway-ca.pem",
+        ),
+        ({"SSL_CERT_FILE": "/certs/gateway-ca.pem"}, "/certs/gateway-ca.pem"),
+        ({}, True),
+    ],
+    ids=["requests-bundle-first", "ssl-cert-file", "default-trust"],
+)
+def test_local_forwarder_verifies_with_the_configured_ca_bundle(monkeypatch, env, expected) -> None:
+    # The forwarder ignores proxy variables (trust_env = False); it must still honour the
+    # CA bundle the process names, or a gateway signed by a private CA fails verification
+    # and every readiness probe answers 502.
+    from responses_api_agents.osworld_agent import local_forwarder
+
+    for name in ("REQUESTS_CA_BUNDLE", "SSL_CERT_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    seen: list[tuple[object, object, str]] = []
+
+    class RecordingSession:
+        def __init__(self) -> None:
+            self.trust_env = True
+            self.verify = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc: object) -> None:
+            return None
+
+        def request(self, method, url, **kwargs):
+            seen.append((self.verify, self.trust_env, url))
+            response = requests.Response()
+            response.status_code = 204
+            response._content = b""
+            return response
+
+    monkeypatch.setattr(local_forwarder.requests, "Session", RecordingSession, raising=True)
+    real_session = requests.sessions.Session
+    forwarder, port = local_forwarder.start_forwarder("https://gateway.example.invalid/proxy/9222")
+    try:
+        with real_session() as session:
+            session.trust_env = False
+            response = session.get(f"http://127.0.0.1:{port}/json/version", timeout=10)
+        assert response.status_code == 204
+        assert seen == [(expected, False, "https://gateway.example.invalid/proxy/9222/json/version")]
+    finally:
+        forwarder.shutdown()
+        forwarder.server_close()
+
+
+def test_local_forwarder_websocket_tls_uses_the_configured_ca_bundle(monkeypatch) -> None:
+    from responses_api_agents.osworld_agent import local_forwarder
+
+    monkeypatch.delenv("REQUESTS_CA_BUNDLE", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", "/certs/gateway-ca.pem")
+    seen: dict[str, object] = {}
+
+    def create_default_context(*, cafile=None):
+        seen["cafile"] = cafile
+        raise RuntimeError("stop after the context")
+
+    monkeypatch.setattr(local_forwarder.socket, "create_connection", lambda *a, **k: object())
+    monkeypatch.setattr(local_forwarder.ssl, "create_default_context", create_default_context)
+    with pytest.raises(RuntimeError, match="stop after the context"):
+        local_forwarder._open_upstream_socket(scheme="https", host="gateway.example.invalid", port=443)
+    assert seen == {"cafile": "/certs/gateway-ca.pem"}
+
+
 def test_lifecycle_recreates_from_snapshot_and_close_is_idempotent(tmp_path, monkeypatch) -> None:
     FakeSandbox.instances.clear()
     monkeypatch.setattr(osworld_sandbox, "Sandbox", FakeSandbox)

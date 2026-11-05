@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.core.episode_types import ModelFailureDetails
+from nemo_gym.core.failure_records import ModelFailureDetails
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
@@ -50,7 +50,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
     import httpx
     from omegaconf import OmegaConf
 
-    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
+    from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()
     if empty_output:
@@ -131,7 +131,7 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
     from omegaconf import OmegaConf
 
     from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
-    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
+    from tests.helpers.single_agent_turn import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()
     environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(by_status_code={503: action})
