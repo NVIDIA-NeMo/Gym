@@ -622,7 +622,7 @@ async def _real_python_tool_server(
 
 
 class TestResourcesSessions:
-    async def test_cookie_reseed_waits_for_delegated_verify_and_keeps_replacement_state(self) -> None:
+    async def test_agent_run_reseed_waits_for_delegated_verify_and_keeps_replacement_state(self) -> None:
         manager = FakePythonToolManager()
         server, _ = _session_server(manager)
         request = MagicMock()
@@ -875,13 +875,13 @@ class TestResourcesSessions:
                 await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert tool.requests_to_sessions["rs-1"] == "python-session"
             assert tool._sandbox.session_histories["python-session"] == ["x = 1"]
-            assert server._fence.closed_episode("rs-1") is None
+            assert server._resources_session_fences.get("rs-1") is None
 
             status = deleted_status
             await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert "rs-1" not in tool.requests_to_sessions
             assert "python-session" not in tool._sandbox.session_histories
-            assert server._fence.closed_episode("rs-1") == EPISODE_ID
+            assert server._resources_session_fences.get("rs-1") == EPISODE_ID
             # Three attempts for the failed close, one for the close that succeeds.
             assert seen == [("python-session", "python-session")] * 4
         finally:
@@ -919,7 +919,7 @@ class TestResourcesSessions:
             # Refused connections and 5xx replies share one budget of three single-try attempts.
             assert tries_per_call == [1, 1, 1]
             assert tool.requests_to_sessions["rs-1"] == "python-session"
-            assert server._fence.closed_episode("rs-1") is None
+            assert server._resources_session_fences.get("rs-1") is None
         finally:
             await tool._sandbox.close()
             await http_client.close()
@@ -961,7 +961,7 @@ class TestResourcesSessions:
 
             assert sandbox.deletes == [python_session] * 4
             assert sandbox.sessions == set() and "rs-1" not in tool.requests_to_sessions
-            assert server._fence.closed_episode("rs-1") == EPISODE_ID
+            assert server._resources_session_fences.get("rs-1") == EPISODE_ID
 
     def test_failed_cleanup_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         tool_manager = FakePythonToolManager()
@@ -1026,13 +1026,13 @@ class TestResourcesSessions:
 
         tool_manager.cleanup_error = RuntimeError("sandbox unreachable")
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
-        assert server._fence.closed_episode("rs-1") is None
+        assert server._resources_session_fences.get("rs-1") is None
         assert "rs-1" in tool_manager.python_sessions
 
         tool_manager.cleanup_error = None
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
         assert "rs-1" not in tool_manager.python_sessions
-        assert server._fence.closed_episode("rs-1") == EPISODE_ID
+        assert server._resources_session_fences.get("rs-1") == EPISODE_ID
 
     def test_tool_call_after_close_is_a_lost_session(self) -> None:
         tool_manager = FakePythonToolManager()
@@ -1077,7 +1077,7 @@ class TestResourcesSessions:
             with pytest.raises(RuntimeError, match="sandbox unreachable"):
                 await close
             assert "rs-1" in tool_manager.python_sessions
-            assert server._fence.closed_episode("rs-1") is None
+            assert server._resources_session_fences.get("rs-1") is None
             tool_manager.cleanup_error = None
             await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
             assert tool_manager.python_sessions == {}
@@ -1129,7 +1129,7 @@ class TestResourcesSessions:
         assert tool_manager.python_sessions == {}
 
     @pytest.mark.parametrize("verified", [False, True])
-    def test_typed_seed_cannot_take_over_existing_cookie_state(self, verified: bool) -> None:
+    def test_episode_seed_cannot_take_over_existing_agent_run_state(self, verified: bool) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1156,7 +1156,7 @@ class TestResourcesSessions:
             assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         assert client.post("/verify", json=VERIFY_BODY).json()["num_tool_calls"] == (1 if verified else 2)
 
-    def test_cookie_reseed_keeps_id_and_replaces_verification_metrics(self) -> None:
+    def test_agent_run_reseed_keeps_id_and_replaces_verification_metrics(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1173,7 +1173,7 @@ class TestResourcesSessions:
         assert manager.python_sessions == {} and server._timing_by_session == {}
         assert client.post("/verify", json=VERIFY_BODY).json() == first.json()
 
-        # Deprecated cookie seeds reuse the ID but start a new run and discard the old retry record.
+        # Agent-run seeds reuse the ID but start a new run and discard the old retry record.
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 200
         assert first_session not in server._verified_sessions
         assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
@@ -1184,7 +1184,7 @@ class TestResourcesSessions:
         assert second.status_code == 200 and second.json()["num_tool_calls"] == 2
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
-    def test_failed_cookie_reseed_keeps_verification_metrics_and_python_ownership(self) -> None:
+    def test_failed_agent_run_reseed_keeps_verification_metrics_and_python_ownership(self) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app, raise_server_exceptions=False)
@@ -1241,7 +1241,7 @@ class TestResourcesSessions:
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
     @pytest.mark.parametrize("state", ["active", "verified", "closed"])
-    def test_legacy_seed_does_not_take_over_a_typed_cookie(self, state: str) -> None:
+    def test_agent_run_seed_does_not_take_over_an_episode_session(self, state: str) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1262,7 +1262,7 @@ class TestResourcesSessions:
         }
         assert manager.python_sessions == {}
 
-    def test_legacy_seed_keeps_working(self) -> None:
+    def test_agent_run_seed_keeps_working(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)
         client = TestClient(app)

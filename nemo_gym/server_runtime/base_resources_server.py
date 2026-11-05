@@ -149,7 +149,7 @@ class BaseResourcesServerConfig(BaseRunServerInstanceConfig):
             "With several workers, how long a session stays with the worker that created it "
             "after its last request, once it is closed, verified or failed to seed; "
             "cover the caller's retry horizon and the server's own close fences. "
-            "Servers that remember closed sessions with ClosedResourcesSessionRecords keep them this long, "
+            "Servers that fence closed sessions with ResourcesSessionFences keep each fence this long, "
             "with any number of workers."
         ),
     )
@@ -259,7 +259,7 @@ class ResourcesSeedSessionRequest(BaseModel):
 
     Repeating the same identifier and episode must return the existing session.
     Closing an unknown identifier must prevent a racing seed from creating it
-    for session_close_retry_window_seconds (see ClosedResourcesSessionRecords and ResourcesSessionFence);
+    for session_close_retry_window_seconds (see ResourcesSessionFences);
     callers must use unique IDs and finish seed retries within that window.
     External resources should use provider TTLs when available. Current process-local
     session records may remain until the server shuts down.
@@ -295,18 +295,18 @@ class ResourcesSeedSessionResponse(BaseModel):
 
 
 def reject_partial_typed_seed(value: object) -> object:
-    """Keep a malformed typed seed from falling through to a permissive cookie-seed request model.
+    """Keep a malformed episode seed from falling through to a permissive agent-run seed request model.
 
-    Use as a Pydantic ``BeforeValidator`` on the cookie-seed arm of a seed request union. A body that names a
-    ``resources_session_id``, which is how the session router recognises a typed seed, or carries both typed
-    ``episode_id`` and ``task_id`` objects, must validate as ``ResourcesSeedSessionRequest`` instead of creating a
-    cookie session. A dataset row's own scalar ``task_id`` does not make a body typed.
+    Use as a Pydantic ``BeforeValidator`` on the agent-run seed arm of a seed request union. A body that names a
+    ``resources_session_id``, which is how the session router recognises an episode seed, or carries both
+    ``episode_id`` and ``task_id`` objects, must validate as ``ResourcesSeedSessionRequest`` instead of creating an
+    agent-run session. A dataset row's own scalar ``task_id`` does not make a body an episode seed.
     """
     if isinstance(value, dict) and (
         "resources_session_id" in value
         or (isinstance(value.get("episode_id"), dict) and isinstance(value.get("task_id"), dict))
     ):
-        raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
+        raise ValueError("An episode seed must supply a valid resources session, episode, task and task_data")
     return value
 
 
@@ -405,7 +405,7 @@ def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) 
     return {"reward": 0.0, "mask_sample": True, "failure_kind": failure_kind, "failure_reason": reason}
 
 
-# A resources session is the cookie session: a typed seed or close names it by resources_session_id,
+# A resources session is the cookie session: an episode seed or close names it by resources_session_id,
 # which the cookie then carries as its SESSION_ID_KEY (see nemo_gym.server_runtime.request_handling.session_routing).
 RESOURCES_SESSIONS = SessionKind(
     cookie_key=SESSION_ID_KEY,
@@ -416,87 +416,87 @@ RESOURCES_SESSIONS = SessionKind(
 )
 
 
-ClosedRecordT = TypeVar("ClosedRecordT")
+FenceRecordT = TypeVar("FenceRecordT")
 
 
-class ClosedResourcesSessionRecords(Generic[ClosedRecordT]):
-    """The resources sessions this worker closed, each kept for a fixed window after its first close.
+class ResourcesSessionFences(Generic[FenceRecordT]):
+    """The fences of the resources sessions this worker closed, each lasting the close retry window.
 
-    A server uses it to refuse a late seed of a closed ``resources_session_id``, or to check a retried close.
+    A fence is the record a close leaves so that a seed arriving after the close (a retry, or a reply that raced
+    the close) is refused instead of creating the session again. Each fence holds a record of the server's choice,
+    such as the episode that first closed the session, which a retried close can check.
+    A fence expires ``close_retry_window_seconds`` after the first close; a retried close does not extend it.
     Construct it with the server's ``session_close_retry_window_seconds``.
-    With several workers, the routing claim on the ID ends that long after the last request for the session,
-    and the close is recorded before its reply is sent.
-    So the claim never ends before the record (see ``nemo_gym.server_runtime.request_handling.session_routing.ResourcesSessionLifetimes``).
-    While the claim lasts, a late seed reaches the worker that remembers the close and is refused.
-    After it ends, every worker treats the ID as new, so the answer does not depend on which worker gets it.
+
+    With several workers, the worker's ownership of the ID expires that long after the last request for the session,
+    and the fence is set before the close's reply is sent.
+    So ownership never expires before the fence
+    (see ``nemo_gym.server_runtime.request_handling.session_routing.ResourcesSessionLifetimes``).
+    While ownership lasts, a late seed reaches the worker that holds the fence and is refused.
+    After it expires, every worker treats the ID as new, so the answer does not depend on which worker gets it.
     """
 
-    def __init__(self, window_seconds: float) -> None:
-        if not window_seconds > 0:
-            raise ValueError(f"window_seconds must be positive, got {window_seconds!r}")
-        self._window_seconds = window_seconds
-        # Earliest expiry first: every record lasts the same window, and a record is never moved.
-        self._records: OrderedDict[str, tuple[float, ClosedRecordT]] = OrderedDict()
+    def __init__(self, close_retry_window_seconds: float) -> None:
+        if not close_retry_window_seconds > 0:
+            raise ValueError(f"close_retry_window_seconds must be positive, got {close_retry_window_seconds!r}")
+        self._close_retry_window_seconds = close_retry_window_seconds
+        # Earliest expiry first: every fence lasts the same window, and a fence is never moved.
+        self._fences: OrderedDict[str, tuple[float, FenceRecordT]] = OrderedDict()
 
-    def remember(self, resources_session_id: str, record: ClosedRecordT) -> None:
-        """Record a close; a retried close keeps the first record and its expiry."""
-        self._expire()
-        if resources_session_id not in self._records:
-            self._records[resources_session_id] = (monotonic() + self._window_seconds, record)
+    def fence(self, resources_session_id: str, record: FenceRecordT) -> None:
+        """Fence a closed session; call it only after its state was released.
 
-    def get(self, resources_session_id: str) -> Optional[ClosedRecordT]:
-        """Return the record of the session's close, or None if it is not closed or its window has passed."""
+        A retried close keeps the first close's record and expiry.
+        """
         self._expire()
-        entry = self._records.get(resources_session_id)
+        if resources_session_id not in self._fences:
+            self._fences[resources_session_id] = (monotonic() + self._close_retry_window_seconds, record)
+
+    def get(self, resources_session_id: str) -> Optional[FenceRecordT]:
+        """Return the record of the session's fence, or None if it is not fenced or its fence expired.
+
+        A fence may hold a None record, so test ``resources_session_id in fences`` to ask whether a session is fenced.
+        """
+        self._expire()
+        entry = self._fences.get(resources_session_id)
         return None if entry is None else entry[1]
 
-    def forget(self, resources_session_id: str) -> None:
-        """Drop the session's record before its window ends, for a server that starts the same ID again."""
-        self._records.pop(resources_session_id, None)
+    def raise_if_fenced(self, resources_session_id: str) -> None:
+        """Refuse a seed for a fenced session with 409, which the environment server treats as terminal."""
+        if resources_session_id in self:
+            raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
+
+    def clear(self) -> None:
+        """Delete every fence, for a server that drops all of its sessions at shutdown."""
+        self._fences.clear()
 
     def __contains__(self, resources_session_id: object) -> bool:
         self._expire()
-        return resources_session_id in self._records
+        return resources_session_id in self._fences
 
     def __len__(self) -> int:
         self._expire()
-        return len(self._records)
+        return len(self._fences)
 
     def _expire(self) -> None:
         now = monotonic()
-        while self._records and next(iter(self._records.values()))[0] <= now:
-            self._records.popitem(last=False)
+        while self._fences and next(iter(self._fences.values()))[0] <= now:
+            self._fences.popitem(last=False)
 
 
-class ResourcesSessionFence:
-    """Serialize seed and close per resources session, and refuse a seed for a session closed within the window.
+class ResourcesSessionLocks:
+    """Lock each resources session so that its seed and close never interleave.
 
-    A seed that arrives after its session closed (a retry, or a reply that raced the close) must not create the
-    session again, so the fence remembers each closed ``resources_session_id`` and the episode that first closed it,
-    in ``ClosedResourcesSessionRecords``. Construct it with the server's ``session_close_retry_window_seconds``, so a
-    record lasts exactly as long as the session's routing claim with several workers. A per-session lock exists only
-    while a request holds or waits for it.
-
-    It also decides what a seed or close may do: ``check_typed_seed`` says whether a typed seed reuses, creates or is
-    refused, ``check_close`` checks which episode owns the session, and ``check_cookie_seed`` refuses a cookie seed of a
-    closed or typed session. They take the caller's identity and verification facts as arguments and keep none, so the
-    owning server stays the single place that stores them.
-
-    TODO: also expire sessions that are never closed, as when the Environment Server dies before its close. Planned
-    rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
-    and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
+    A session's lock exists only while a request holds or waits for it.
     """
 
-    def __init__(self, window_seconds: float) -> None:
-        self._window_seconds = window_seconds
-        self._locks: dict[str, _FenceLock] = {}
-        self._closed: ClosedResourcesSessionRecords[EpisodeId] = ClosedResourcesSessionRecords(window_seconds)
-        self._cookie_seed_warning_emitted = False
+    def __init__(self) -> None:
+        self._locks: dict[str, _SessionLock] = {}
 
     @asynccontextmanager
     async def locked(self, resources_session_id: str) -> AsyncIterator[None]:
-        """Hold the lock for ``resources_session_id`` so its seed and close never interleave."""
-        entry = self._locks.setdefault(resources_session_id, _FenceLock())
+        """Hold the lock for ``resources_session_id``."""
+        entry = self._locks.setdefault(resources_session_id, _SessionLock())
         entry.users += 1
         try:
             async with entry.lock:
@@ -506,88 +506,59 @@ class ResourcesSessionFence:
             if entry.users == 0:
                 del self._locks[resources_session_id]
 
-    def closed_episode(self, resources_session_id: str) -> EpisodeId | None:
-        """Return the episode that first closed ``resources_session_id`` within the window, else ``None``."""
-        return self._closed.get(resources_session_id)
-
-    def raise_if_closed(self, resources_session_id: str) -> None:
-        """Refuse a seed for a closed session with 409, which the Environment Server does not retry."""
-        if self.closed_episode(resources_session_id) is not None:
-            raise ResourcesSessionConflictError(f"Resources session is already closed: {resources_session_id}")
-
-    def check_cookie_seed(self, session_id: str, *, identity: tuple[EpisodeId, TaskId] | None) -> None:
-        """Check a cookie-based seed and warn once that the path is deprecated.
-
-        Deprecated compatibility path: migrate callers to typed ``ResourcesSeedSessionRequest`` seeds.
-        Call while holding ``locked(session_id)``. Pass the active or retained verification identity, if any.
-        A closed or typed session cannot be seeded through its cookie. Any other session keeps its ID, so the new
-        state replaces the previous run's, as a cookie seed always did, and ``seed_session`` drops that run's
-        verify retry record.
-        """
-        self.raise_if_closed(session_id)
-        if identity is not None:
-            raise ResourcesSessionConflictError("A cookie seed cannot replace a typed session")
-        if not self._cookie_seed_warning_emitted:
-            logger.warning(
-                "Cookie-based /seed_session is deprecated. Migrate to an Environment Server that sends "
-                "ResourcesSeedSessionRequest with resources_session_id, episode_id, task_id, and task_data."
-            )
-            self._cookie_seed_warning_emitted = True
-
-    def check_typed_seed(
-        self,
-        body: ResourcesSeedSessionRequest,
-        *,
-        identity: tuple[EpisodeId, TaskId] | None,
-        has_state: bool,
-        verified: bool,
-    ) -> bool:
-        """Validate a typed seed; return whether the caller must initialize state.
-
-        Call under ``locked(body.resources_session_id)`` with the active identity and live-state presence.
-        An open session with the same episode and task is reused; verified and closed sessions cannot reopen.
-        The caller validates task data, constructs state, and records the identity only after success.
-        """
-        self.raise_if_closed(body.resources_session_id)
-        if verified:
-            raise ResourcesSessionConflictError("resources session has already been verified")
-        if identity is None:
-            if has_state:
-                raise ResourcesSessionConflictError("A typed seed cannot replace a cookie-seeded session")
-            return True
-        if identity != (body.episode_id, body.task_id):
-            raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
-        return False
-
-    def check_close(self, body: ResourcesCloseSessionRequest, *, identity: tuple[EpisodeId, TaskId] | None) -> None:
-        """Check close ownership against the active, verified, or already-closed session.
-
-        Call under ``locked(body.resources_session_id)`` with the active or retained verification identity.
-        Unknown sessions and retries by the same episode are allowed. This does not record a close: release
-        the environment's resources first, then call ``mark_closed`` so a failed cleanup remains retryable.
-        """
-        closed_episode = self.closed_episode(body.resources_session_id)
-        if closed_episode is not None and closed_episode != body.episode_id:
-            raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-        if identity is not None and identity[0] != body.episode_id:
-            raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
-
-    def mark_closed(self, resources_session_id: str, episode_id: EpisodeId) -> None:
-        """Record ``resources_session_id`` as closed; call it only after its state was released.
-
-        A retried close keeps the first close's episode and expiry.
-        """
-        self._closed.remember(resources_session_id, episode_id)
-
-    def clear(self) -> None:
-        """Forget every record, for a server that drops all of its sessions at shutdown."""
-        self._closed = ClosedResourcesSessionRecords(self._window_seconds)
-
 
 @dataclass
-class _FenceLock:
+class _SessionLock:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     users: int = 0
+
+
+SessionRecordT = TypeVar("SessionRecordT")
+
+
+class ExpiringResourcesSessionRecords(Generic[SessionRecordT]):
+    """Keep non-close session records until their fixed lifetime expires.
+
+    Verifiers may save results for retries, and servers may track why an idle session expired. These records do
+    not fence a session. Use ``ResourcesSessionFences`` for close fences, which cannot be forgotten early.
+    The first ``remember`` sets the record and expiry; retries preserve both. ``forget`` allows a successful
+    agent-run reseed or checkpoint retirement to discard the previous run's result before it expires.
+    """
+
+    def __init__(self, lifetime_seconds: float) -> None:
+        if not lifetime_seconds > 0:
+            raise ValueError(f"lifetime_seconds must be positive, got {lifetime_seconds!r}")
+        self._lifetime_seconds = lifetime_seconds
+        self._results: OrderedDict[str, tuple[float, SessionRecordT]] = OrderedDict()
+
+    def remember(self, session_id: str, result: SessionRecordT) -> None:
+        """Save the first result and expiry, preserving both if the request is retried."""
+        self._expire()
+        if session_id not in self._results:
+            self._results[session_id] = (monotonic() + self._lifetime_seconds, result)
+
+    def get(self, session_id: str) -> SessionRecordT | None:
+        """Return an unexpired result; use membership to distinguish a saved ``None`` from no result."""
+        self._expire()
+        entry = self._results.get(session_id)
+        return None if entry is None else entry[1]
+
+    def forget(self, session_id: str) -> None:
+        """Discard a record before its lifetime expires, without affecting close fences."""
+        self._results.pop(session_id, None)
+
+    def __contains__(self, session_id: object) -> bool:
+        self._expire()
+        return session_id in self._results
+
+    def __len__(self) -> int:
+        self._expire()
+        return len(self._results)
+
+    def _expire(self) -> None:
+        now = monotonic()
+        while self._results and next(iter(self._results.values()))[0] <= now:
+            self._results.popitem(last=False)
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
@@ -598,17 +569,18 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     """
 
     config: BaseResourcesServerConfig
-    # Validates a typed seed's ``task_data`` and a cookie seed's body. Only servers that implement the three state
+    # Validates an episode seed's ``task_data`` and an agent-run seed's body. Only servers that implement the three state
     # hooks use it; a stateless server's seed accepts any body.
     seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = BaseSeedSessionRequest
-    # Typed sessions' identities. An "exported" server that uses the state hooks exports each session's identity and
-    # restores it as its continuation's (``next_attempt``), or the continuation's typed seed is refused.
+    # Episode sessions' identities. An "exported" server that uses the state hooks exports each session's identity and
+    # restores it as its continuation's (``next_attempt``), or the continuation's episode seed is refused.
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
-    # The identity is protocol state; the retained verification payload is owned and interpreted by each verifier.
-    # A verifier that releases its state at ``/verify`` first masks a session ``_fence`` has closed, then ``remember``s
-    # its identity (popped from ``_session_episodes``) and payload here, so a retried verify still scores.
-    _verified_sessions: ClosedResourcesSessionRecords[tuple[tuple[EpisodeId, TaskId] | None, Any]] = PrivateAttr()
-    _fence: ResourcesSessionFence = PrivateAttr()
+    # A verifier releases live state and saves its identity and verifier-owned result for bounded retries.
+    # A close fence always takes precedence over these results; retirement must never create a close fence.
+    _verified_sessions: ExpiringResourcesSessionRecords[tuple[tuple[EpisodeId, TaskId] | None, Any]] = PrivateAttr()
+    _resources_session_locks: ResourcesSessionLocks = PrivateAttr()
+    _resources_session_fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
+    _agent_run_seed_warning_emitted: bool = PrivateAttr(default=False)
     # How this server's sessions take part in partial-rollout checkpoints. "exported" servers implement the
     # ResourcesSessionHooks methods.
     # The default fails closed: its sessions' rollouts are restarts, which never hold up a checkpoint,
@@ -640,8 +612,72 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} must implement all session state hooks; missing {sorted(missing)}"
                 )
-            self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
-            self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+            self._verified_sessions = ExpiringResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+            self._resources_session_locks = ResourcesSessionLocks()
+            self._resources_session_fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
+
+    def _check_agent_run_seed(self, session_id: str, *, identity: tuple[EpisodeId, TaskId] | None) -> None:
+        """Check an agent-run seed and warn once that the path is deprecated.
+
+        Deprecated compatibility path: migrate callers to episode ``ResourcesSeedSessionRequest`` seeds.
+        Call while holding ``_resources_session_locks.locked(session_id)``. Pass the active or saved
+        verification identity, if any.
+        A closed or episode session cannot be seeded through its cookie. Any other session keeps its ID, so the new
+        state replaces the previous run's, as an agent-run seed always did, and ``seed_session`` drops that run's
+        saved verification result.
+        """
+        self._resources_session_fences.raise_if_fenced(session_id)
+        if identity is not None:
+            raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
+        if not self._agent_run_seed_warning_emitted:
+            logger.warning(
+                "Agent-run /seed_session is deprecated. Migrate to an Environment Server that sends "
+                "ResourcesSeedSessionRequest with resources_session_id, episode_id, task_id, and task_data."
+            )
+            self._agent_run_seed_warning_emitted = True
+
+    def _check_episode_seed(
+        self,
+        body: ResourcesSeedSessionRequest,
+        *,
+        identity: tuple[EpisodeId, TaskId] | None,
+        has_state: bool,
+        verified: bool,
+    ) -> bool:
+        """Validate an episode seed; return whether the caller must initialize state.
+
+        Call under ``_resources_session_locks.locked(body.resources_session_id)`` with the active identity and
+        live-state presence.
+        An open session with the same episode and task is reused; verified and closed sessions cannot reopen.
+        The caller validates task data, constructs state, and records the identity only after success.
+        """
+        self._resources_session_fences.raise_if_fenced(body.resources_session_id)
+        if verified:
+            raise ResourcesSessionConflictError("resources session has already been verified")
+        if identity is None:
+            if has_state:
+                raise ResourcesSessionConflictError("An episode seed cannot replace an agent-run session")
+            return True
+        if identity != (body.episode_id, body.task_id):
+            raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+        return False
+
+    def _check_session_close(
+        self, body: ResourcesCloseSessionRequest, *, identity: tuple[EpisodeId, TaskId] | None
+    ) -> None:
+        """Check close ownership against the active, verified, or already-closed session.
+
+        Call under ``_resources_session_locks.locked(body.resources_session_id)`` with the active or saved
+        verification identity.
+        Unknown sessions and retries by the same episode are allowed. This does not record a close: release
+        the environment's resources first, then call ``_resources_session_fences.fence`` so failed cleanup
+        remains retryable.
+        """
+        closed_episode = self._resources_session_fences.get(body.resources_session_id)
+        if closed_episode is not None and closed_episode != body.episode_id:
+            raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+        if identity is not None and identity[0] != body.episode_id:
+            raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
 
     def _manages_session_state(self) -> bool:
         return type(self).initialize_session_state is not SimpleResourcesServer.initialize_session_state
@@ -649,29 +685,29 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     def has_session_state(self, session_id: str) -> bool:
         """Whether live state exists for ``session_id``; keep it synchronous and cheap.
 
-        The base uses it only to refuse a typed seed that would replace the live state of a cookie session it holds
+        The base uses it only to refuse an episode seed that would replace the live state of an agent-run session it holds
         no identity for. Implement it together with initialization and release to use the shared lifecycle.
         """
         return False
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Create state from validated task data, replacing a previous cookie-seeded run if needed.
+        """Create state from validated task data, replacing a previous agent-run session if needed.
 
-        A typed retry with an existing binding never calls this hook. Publish live state only after construction
+        An episode seed retry with an existing binding never calls this hook. Publish live state only after construction
         succeeds. Keep partial resources separately, reachable by ``release_session_state``, if cleanup fails.
         """
 
     async def release_session_state(self, session_id: str) -> None:
         """Release live and partially created resources; succeed if none remain.
 
-        Raise on cleanup failure and retain what a later call needs to retry. This base removes the active
-        identity and records a close only after the hook succeeds.
+        Raise on cleanup failure and retain what a later call needs to retry. On close, this base removes the active
+        identity and fences the session only after the hook succeeds. Retirement releases without fencing.
         """
 
-    def claimed_session_routing(self) -> dict[str, Any]:
+    def owned_session_routing(self) -> dict[str, Any]:
         return {
             "kind": RESOURCES_SESSIONS,
-            "close_window_seconds": self.config.session_close_retry_window_seconds,
+            "close_retry_window_seconds": self.config.session_close_retry_window_seconds,
             "session_starts": tuple(self.checkpoint_session_starts),
             "session_ends": ("/verify",),
             "close_follows_header": CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -773,7 +809,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
         )
-        # Innermost, so the session middleware has already resolved the cookie session ID.
+        # Innermost, so the session middleware has already resolved the agent-run session ID.
         mcp_token_claims = self._mcp_token_claims if self.config.expose_tools_over_mcp else None
         app.user_middleware.append(
             Middleware(
@@ -838,8 +874,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         session_id = request.session.get(SESSION_ID_KEY)
         if self._checkpoint is not None and session_id is not None:
             self._checkpoint.ended(session_id)
-        # With several workers, the session's routing claim ends a window after its last request from now on.
-        # A request without an app, such as a test's stand-in, has no routing and so no claim to end.
+        # With several workers, this worker's ownership of the session ends a window after its last request from now on.
+        # A request without an app, such as a test's stand-in, has no routing and so no ownership to end.
         app = getattr(request, "app", None)
         lifetimes = getattr(getattr(app, "state", None), "nemo_gym_resources_session_lifetimes", None)
         if lifetimes is not None and session_id is not None:
@@ -856,17 +892,17 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def retire_session_state(self, session_id: str) -> None:
         """Discard a session whose attempt was retired; called in every checkpoint mode.
 
-        A retired session's late requests, a terminal step among them, are refused, so nothing else frees its state.
+        A retired session's late requests, a terminal step among them, are refused, so nothing else releases its state.
         A server that uses the state hooks inherits this: it releases the session through ``release_session_state``
-        and drops the active identity only if that succeeded, so a failed release can be retried. It records no
-        close: the checkpoint participant refuses a retired attempt's requests until it forgets the rollout, and the
+        and drops the active identity only if that succeeded, so a failed release can be retried. It creates no
+        fence: the checkpoint participant refuses a retired attempt's requests until it forgets the rollout, and the
         participant also calls this hook to undo a restore (``delete_restored``) or drop an unclaimed session, after
         which the same session may be installed again. Other servers that keep per-session state override it; the
         default does nothing.
         """
         if not self._manages_session_state():
             return
-        async with self._fence.locked(session_id):
+        async with self._resources_session_locks.locked(session_id):
             await self.release_session_state(session_id)
             self._session_episodes.pop(session_id, None)
 
@@ -903,7 +939,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ``ResourcesSessionConflictError`` (409). Resource construction failures remain retryable server errors.
 
         A server that overrides this method instead of using the hooks must refuse a seed that no retry can make
-        succeed with a final 4xx, never a plain exception (HTTP 500), which the Environment Server retries by
+        succeed with a terminal 4xx, never a plain exception (HTTP 500), which the Environment Server retries by
         dispatching the whole episode again: ``ResourcesSeedRejectedError`` (422) for input that fails validation,
         such as ``task_data`` or a ``TaskId`` that does not match the task row, and ``ResourcesSessionConflictError``
         (409) for an ID bound to another episode or task, or a closed session. A failure that a retry may fix, such as
@@ -920,9 +956,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             raise TypeError("Stateful seed_session requires request= to bind the session cookie")
         if not isinstance(body, ResourcesSeedSessionRequest):
             session_id = request.session[SESSION_ID_KEY]
-            async with self._fence.locked(session_id):
+            async with self._resources_session_locks.locked(session_id):
                 verified = self._verified_sessions.get(session_id)
-                self._fence.check_cookie_seed(
+                self._check_agent_run_seed(
                     session_id,
                     identity=self._session_episodes.get(session_id) or (verified[0] if verified is not None else None),
                 )
@@ -932,8 +968,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            if self._fence.check_typed_seed(
+        async with self._resources_session_locks.locked(session_id):
+            if self._check_episode_seed(
                 body,
                 identity=self._session_episodes.get(session_id),
                 has_state=self.has_session_state(session_id),
@@ -962,13 +998,13 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if not self._manages_session_state():
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
+        async with self._resources_session_locks.locked(session_id):
             verified = self._verified_sessions.get(session_id)
             identity = self._session_episodes.get(session_id) or (verified[0] if verified is not None else None)
-            self._fence.check_close(body, identity=identity)
+            self._check_session_close(body, identity=identity)
             await self.release_session_state(session_id)
             self._session_episodes.pop(session_id, None)
-            self._fence.mark_closed(session_id, body.episode_id)
+            self._resources_session_fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     @abstractmethod

@@ -69,7 +69,7 @@ _DELETE_RETRY_DELAY_SECONDS = 2.0
 async def _delete_python_session(url: str, session_id: str) -> None:
     """Delete a sandbox Python session, raising if the sandbox does not acknowledge it."""
     # A transport error and a 5xx reply (a sandbox worker restarting behind its proxy) share one budget of bounded
-    # attempts, so an unreachable sandbox cannot hold the session's fence for long.
+    # attempts, so an unreachable sandbox cannot hold the session's lock for long.
     for attempt in range(1, _DELETE_ATTEMPTS + 1):
         try:
             response = await http_request(
@@ -420,7 +420,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """Run the tool before close can acknowledge releasing its Python session."""
         # Skills records ownership only when execution returns. Close must wait for that record instead of
         # fencing an empty session and relying on a later, unreported best-effort cleanup.
-        async with self._fence.locked(request.session[SESSION_ID_KEY]):
+        async with self._resources_session_locks.locked(request.session[SESSION_ID_KEY]):
             return await self._execute_tool(tool_name, request)
 
     async def _execute_tool(self, tool_name: str, request: Request) -> PlainTextResponse:
@@ -441,7 +441,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
 
         # The session middleware always sets the session ID, which keys the stateful python session.
         session_id = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(session_id) is not None or session_id in self._verified_sessions:
+        if self._resources_session_fences.get(session_id) is not None or session_id in self._verified_sessions:
             raise ResourcesSessionLostError(f"ns_tools session {session_id} is closed")
 
         if session_id not in self._timing_by_session:
@@ -513,7 +513,7 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         return session_id in self._timing_by_session
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Release a prior cookie run; Skills still creates Python state on the first tool call."""
+        """Release state from a prior agent-run seed; Skills still creates Python state on the first tool call."""
         if self.has_session_state(session_id) or session_id in self._verified_sessions:
             await self.release_session_state(session_id)
 
@@ -570,14 +570,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
         """
         session_id = request.session.get(SESSION_ID_KEY) if request else None
         if session_id:
-            # Cookie reseeds keep their ID. Do not let an old delegated verify release a replacement run.
-            async with self._fence.locked(session_id):
+            # Agent-run reseeds keep their ID. Do not let an old delegated verify release a replacement run.
+            async with self._resources_session_locks.locked(session_id):
                 return await self._verify(request, body)
         return await self._verify(request, body)
 
     async def _verify(self, request: Request, body: NSToolsVerifyRequest) -> NSToolsVerifyResponse:
         session_id = request.session.get(SESSION_ID_KEY) if request else None
-        if session_id is not None and self._fence.closed_episode(session_id) is not None:
+        if session_id is not None and self._resources_session_fences.get(session_id) is not None:
             # Close released the session's tool timings, so its metrics would read as a rollout without tool calls.
             return NSToolsVerifyResponse(
                 **(body.model_dump() | lost_session_verification(f"ns_tools session {session_id} is closed"))
