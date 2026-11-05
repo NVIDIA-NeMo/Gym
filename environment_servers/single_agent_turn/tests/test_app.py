@@ -52,7 +52,7 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
-from tests.single_agent_turn_helpers import _agent_response, _Client, _environment_server, _request, _Response
+from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
