@@ -133,6 +133,8 @@ def render_suite_markdown(result: SuiteComparisonResult) -> str:
         lines.append("")
         for role, run in (("Candidate", cell.candidate), ("Baseline", cell.baseline)):
             lines.append(f"- {role}: `{_text(run.aggregate_metrics)}`; agent `{_text(run.agent)}`.")
+            if run.environment_server is not None:
+                lines.append(f"  Environment server: `{_text(run.environment_server)}`.")
             lines.append(
                 f"  Coverage: {run.coverage.status}; recorded tasks: {run.coverage.recorded_task_count}; "
                 f"planned tasks: {run.coverage.planned_task_count if run.coverage.planned_task_count is not None else 'unverified'}."

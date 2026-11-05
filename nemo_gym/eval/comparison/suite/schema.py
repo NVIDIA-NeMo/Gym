@@ -79,6 +79,7 @@ class SuiteRunSource(_SuiteModel):
     rollouts: Path
     aggregate_metrics: Path | None = None
     agent: str | None = None
+    environment_server: str | None = None
     materialized_inputs: Path | None = None
 
 
@@ -125,6 +126,7 @@ class SuiteRunSummary(_SuiteModel):
     aggregate_metrics: Path
     materialized_inputs: Path | None = None
     agent: str
+    environment_server: str | None = None
     repeat_count: int | None
     repeat_indices: list[int] = Field(default_factory=list)
     repeat_scores: list[float] = Field(default_factory=list)
@@ -189,8 +191,7 @@ class SuiteAggregateResult(_SuiteModel):
 class SuiteComparisonResult(_SuiteModel):
     """Separate schema for suite_compare_report.json; run reports remain unchanged."""
 
-    schema_version: Literal["2"] = "2"
-    level: Literal["suite"] = "suite"
+    schema_version: Literal["1"] = "1"
     generated_at: str
     nemo_gym_version: str
     command: str

@@ -185,7 +185,7 @@ gym eval compare-suite \
     --output-dir results/suite-95
 ```
 
-`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command defaults to 95% difference intervals. For `compare-suite`, sources and agent selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
+`--confidence-level` accepts a fraction strictly between zero and one; the default is `0.90`. The separate `gym eval compare` command defaults to 95% difference intervals. For `compare-suite`, sources and aggregate-entry selection come from the YAML. See the [CLI reference](/main/reference/cli-commands#gym-eval-compare-suite) for all command options.
 
 ### Source options
 
@@ -195,10 +195,28 @@ Each `baseline` or `candidate` mapping supports:
 | --- | --- |
 | `rollouts` | Required run identity. Its aggregate-metrics sibling is read. |
 | `aggregate_metrics` | Optional explicit path when the aggregate file has a different name or location. |
-| `agent` | Optional when the aggregate contains one agent. Required if it contains several agents. |
+| `agent` | Optional selector matching an aggregate entry's `agent_ref.name`. This is usually the agent name; entries for several environment servers sharing an agent can use server names as labels. |
+| `environment_server` | Optional selector matching an aggregate entry's `_ng_environment_server`. Use the server's configuration instance name. Older aggregate files can lack this field. |
 | `materialized_inputs` | Optional path to the collection inputs used to verify planned task/repeat coverage. The usual sibling is discovered automatically when present. |
 
-Referencing the same run and agent more than once is rejected because this method assumes independent source observations.
+Selection happens independently for every baseline and candidate source. If neither selector is set, the aggregate must contain exactly one entry. If a selector is set, exactly one entry must match; when both are set, that entry must match both. Missing or ambiguous matches are errors that list the available choices.
+
+For example, baseline and candidate may use different environment servers and agents for the same benchmark:
+
+```yaml
+baseline:
+  rollouts: runs/birdbench/baseline/rollouts.jsonl
+  agent: bird_sql_agent
+  environment_server: birdbench_simple_env
+candidate:
+  rollouts: runs/birdbench/candidate/rollouts.jsonl
+  agent: bird_hermes_agent
+  environment_server: birdbench_hermes_env
+```
+
+Gym retains both identities from the selected entry. To verify planned coverage, rows stamped with `_ng_environment_server` are matched to that server; unstamped rows use `agent_ref.name` when available. This supports inputs containing both taskset-routed and agent-routed rows without counting another server's planned tasks. Server and agent names need not match between baseline and candidate; their task coverage and selected metrics must still be comparable.
+
+Referencing the same run and selected aggregate entry more than once is rejected because this method assumes independent source observations.
 
 ## Normalize metrics and preserve benchmark weights
 
@@ -262,7 +280,9 @@ Recorded task sets must agree across repeats and sides. When materialized inputs
 | File | Contents |
 | --- | --- |
 | `suite_compare_report.md` | Candidate and baseline scores, per-model and overall deltas (`candidate - baseline`), intervals for delta, effective membership, metric scales, source runs, and coverage notes. |
-| `suite_compare_report.json` | Schema version `"2"`: raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, and provenance. |
+| `suite_compare_report.json` | Raw/scaled repeat metrics, composite scores, repeat counts, means, `delta` (`candidate - baseline`), variances, SE, effective degrees of freedom, variance contributions, and provenance. |
+
+The suite JSON report has its own versioned format with `"schema_version": "1"`. Its filename identifies the report type; it has no `level` field.
 
 Use `--report-format md`, `json`, or `both` (default). After quantifying the differences, use [Diagnose Results](/main/evaluation/diagnose-results) to investigate task-level causes and possible improvements.
 
