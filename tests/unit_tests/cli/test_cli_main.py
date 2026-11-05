@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
@@ -1590,6 +1590,74 @@ class TestAgentSelector:
     """`--agent-type NAME[/FLAVOR]` resolves a named harness to its config and adds it to `+config_paths`."""
 
     HERMES = "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+
+    def _resolve_langgraph_selection(
+        self, monkeypatch: MonkeyPatch, *selection: str, overrides: tuple[str, ...] = ()
+    ) -> DictConfig:
+        _, hydra_overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "run", "--benchmark", "aime24", "--model-type", "openai_model", *selection, *overrides],
+        )
+        monkeypatch.setattr(sys, "argv", ["gym", *hydra_overrides])
+        return gc.GlobalConfigDictParser().parse(
+            gc.GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "policy_base_url": "https://example.invalid/v1",
+                        "policy_api_key": "test-placeholder",
+                        "policy_model_name": "test-model",
+                    }
+                ),
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+
+    @pytest.mark.parametrize("flavor", ["reflection", "parallel_thinking", "orchestrator", "rewoo"])
+    def test_langgraph_flavor_replaces_the_benchmark_agent(self, monkeypatch: MonkeyPatch, flavor: str) -> None:
+        original = self._resolve_langgraph_selection(monkeypatch)
+        resolved = self._resolve_langgraph_selection(monkeypatch, "--agent-type", f"langgraph_agent/{flavor}_agent")
+        old_name = "aime24_math_with_judge_simple_agent"
+        new_name = "aime24_math_with_judge_langgraph_agent"
+        instances = gc.GlobalConfigDictParser()._agent_instances(resolved)
+        assert [(instance.name, instance.agent_type) for instance in instances] == [(new_name, "langgraph_agent")]
+        agent = resolved[new_name].responses_api_agents.langgraph_agent
+        assert agent.entrypoint == f"{flavor}_agent.py"
+        assert agent.num_workers == 1
+        for binding in ("resources_server", "model_server", "datasets"):
+            assert agent[binding] == original[old_name].responses_api_agents.simple_agent[binding]
+        environment = resolved.aime24_math_with_judge_environment_server.environment_servers
+        assert list(environment) == ["single_agent_turn_legacy"]
+        assert environment.single_agent_turn_legacy.agent_server.name == new_name
+        assert environment.single_agent_turn_legacy.resources_tool_transports == []
+        assert resolved.agent_map[old_name] == new_name
+        assert "_selected_langgraph_config" not in resolved
+        assert (
+            len([value for value in resolved.values() if OmegaConf.is_dict(value) and "environment_servers" in value])
+            == 1
+        )
+
+    def test_langgraph_selection_preserves_composed_name_overrides(self, monkeypatch: MonkeyPatch) -> None:
+        resolved = self._resolve_langgraph_selection(
+            monkeypatch,
+            "--agent-type",
+            "langgraph_agent/reflection_agent",
+            overrides=(
+                "++aime24_math_with_judge_langgraph_agent.responses_api_agents.langgraph_agent.max_reflections=4",
+            ),
+        )
+        agent = resolved.aime24_math_with_judge_langgraph_agent.responses_api_agents.langgraph_agent
+        assert agent.max_reflections == 4
+        assert agent.resources_server.name == "aime24_math_with_judge_resources_server"
+
+    def test_loading_langgraph_config_does_not_swap_the_benchmark_agent(self, monkeypatch: MonkeyPatch) -> None:
+        resolved = self._resolve_langgraph_selection(
+            monkeypatch, "--config", "responses_api_agents/langgraph_agent/configs/reflection_agent.yaml"
+        )
+        assert resolved.reflection_agent.responses_api_agents.langgraph_agent.resources_server is None
+        environment = resolved.aime24_math_with_judge_environment_server.environment_servers.single_agent_turn_legacy
+        assert environment.agent_server.name == "aime24_math_with_judge_simple_agent"
+        assert environment.resources_tool_transports == ["direct_http"]
 
     @pytest.mark.parametrize(
         "command",
