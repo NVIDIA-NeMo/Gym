@@ -873,7 +873,7 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     assert response.failure_report.events == body.failure_report.events
     assert response.failure_report.failure_id == (None if counted else original_id)
     fields = response.model_dump(mode="json")
-    from nemo_gym.core.failure_transport import FailureReportRow
+    from nemo_gym.core import FailureReportRow
     from nemo_gym.orchestration.recovery import _scored_kind, status_fault_kind
 
     # Persist the applied decision without changing canonical facts or inferring model fault.
