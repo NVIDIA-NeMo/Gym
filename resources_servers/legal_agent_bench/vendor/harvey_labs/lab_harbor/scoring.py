@@ -4,7 +4,7 @@
 """Rubric scoring adapted from Harvey LAB at the pinned source revision.
 
 Upstream source:
-https://github.com/harveyai/harvey-labs/blob/f46ef86e4788545622db25dcffa3aebb7a139929/evaluation/scoring.py
+https://github.com/harveyai/harvey-labs/blob/1da4750171bc5a534960b3d82d15ba7fd2cf653f/evaluation/scoring.py
 
 Intentional differences from upstream:
 - uses the configured OpenAI-compatible judge instead of provider SDKs;

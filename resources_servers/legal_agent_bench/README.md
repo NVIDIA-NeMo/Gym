@@ -1,9 +1,9 @@
 # Legal Agent Bench
 
 This resource server runs the public
-[Legal Agent Benchmark (LAB)](https://github.com/harveyai/harvey-labs/tree/f46ef86e4788545622db25dcffa3aebb7a139929)
+[Legal Agent Benchmark (LAB)](https://github.com/harveyai/harvey-labs/tree/1da4750171bc5a534960b3d82d15ba7fd2cf653f)
 through NeMo Gym and Harbor. The integration is pinned to upstream commit
-`f46ef86e4788545622db25dcffa3aebb7a139929`: 1,749 tasks and the public
+`1da4750171bc5a534960b3d82d15ba7fd2cf653f`: 1,760 tasks and the public
 `docx`, `pptx`, and `xlsx` skills.
 
 NeMo Gym schedules rollouts, the custom Harbor agent works with each task's
@@ -56,7 +56,7 @@ python resources_servers/legal_agent_bench/prepare.py
 
 The command downloads the pinned LAB source archive from GitHub with retries and visible
 progress, verifies SHA-256
-`e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c`,
+`6386827e88b363fb1d9546745681386f36fe7167acf8c24510c9052dd7d23a0c`,
 rejects unsafe archive entries, generates deterministic Harbor tasks, and
 builds each cache in staging before replacing the previous valid cache. A
 handled preparation failure leaves the previous cache in place.
@@ -84,7 +84,7 @@ gym dataset collate \
   --mode example_validation
 ```
 
-Preparation generates the full 1,749-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
+Preparation generates the full 1,760-row task index inside the task cache. Prepare the assets before collating the full validation dataset:
 
 ```bash
 python resources_servers/legal_agent_bench/prepare.py
