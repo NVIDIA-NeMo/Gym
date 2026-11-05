@@ -18,7 +18,6 @@ import re
 from asyncio import sleep
 from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
 from time import time
@@ -314,13 +313,8 @@ def select_provider_domains(
     return ordered[:limit]
 
 
-class TavilyEpisodeSeedSessionRequest(TaskData, BaseSeedSessionRequest):
-    """Validate episode search tasks without narrowing the legacy tool-service seed."""
-
-
-@dataclass
-class _VerificationMetrics:
-    metrics: Optional[TavilySearchMetrics]
+class TavilyTypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
+    """Validate typed search tasks without narrowing the legacy tool-service seed."""
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
@@ -329,7 +323,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _async_tavily_clients: Optional[List[AsyncTavilyClient]] = PrivateAttr(default=None)
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
-    seed_request_model = TavilyEpisodeSeedSessionRequest
+    seed_request_model = TavilyTypedSeedSessionRequest
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
@@ -415,7 +409,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Keep permissive legacy tool-service seeds; the base validates episode tasks and owns the lifecycle."""
+        """Keep permissive legacy tool-service seeds; the base validates typed tasks and owns the lifecycle."""
         return await super().seed_session(body, request=request)
 
     def has_session_state(self, session_id: str) -> bool:
@@ -429,18 +423,15 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         """Release active and retry metrics, except the explicit metrics archive used by the exit dump."""
         if not self.config.dump_session_id_to_metrics_on_exit:
             self._session_id_to_metrics.pop(session_id, None)
-        verified = self._verified_sessions.get(session_id)
-        if verified is not None:
-            verified[1].metrics = None
 
     def _session_metrics(self, request: Request) -> TavilySearchMetrics:
         """The metrics of the calling session.
 
         The tools keep no task state, so a session nobody seeded, such as an MCP client's, gets its record on first
-        use. A session closed within the close retry window does not: a late call would recreate what its close released.
+        use. A session closed within the fence window does not: a late call would recreate what its close released.
         """
         session_id = request.session[SESSION_ID_KEY]
-        if session_id in self._resources_session_fences or session_id in self._verified_sessions:
+        if self.session_is_closed(session_id) or self.session_is_verified(session_id):
             raise ResourcesSessionLostError("This tavily_search session has already ended")
         return self._session_id_to_metrics[session_id]
 
@@ -614,66 +605,51 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
-        # The session lock is held across the whole judge call, its retries included, so a seed (episode or cookie),
-        # close or checkpoint retirement of this session waits until verification finishes. That keeps this verify
-        # from releasing the next run's metrics and lets close check the identity verification retains. Tool calls
-        # take no lock and are not blocked.
-        async with self._resources_session_locks.locked(request.session[SESSION_ID_KEY]):
-            return await self._verify_session(request, body)
-
-    async def _verify_session(self, request: Request, body: TavilySearchVerifyRequest) -> TavilySearchVerifyResponse:
+        """Score each request while the shared lifecycle retains an isolated metrics snapshot for retries."""
         session_id = request.session[SESSION_ID_KEY]
         num_tool_calls = sum(o.type == "function_call" for o in body.response.output)
-        if session_id in self._resources_session_fences:
-            # Masked although the score reads only the response, so every server under the resources session contract
-            # treats a closed session alike. single_agent_turn verifies before it closes, so only an out-of-order verify
-            # lands here. A session nobody seeded, such as an MCP client's, holds no state and is scored as usual.
-            lost = lost_session_verification("This tavily_search session is already closed")
-            return TavilySearchVerifyResponse(
-                **(body.model_dump() | lost),
-                reasoning="",
-                extracted_final_answer="",
-                num_tool_calls=num_tool_calls,
-                metrics=TavilySearchMetrics(),
+        # Tool-service callers can verify without seeding; close still fences them. Holding the session lock across
+        # the judge stops a cookie reseed or close from replacing metrics before this run's release and snapshot.
+        async with self.verifying(session_id, allow_missing=True) as verification:
+            if verification.is_lost:
+                lost = lost_session_verification("This tavily_search session is already closed")
+                return TavilySearchVerifyResponse(
+                    **(body.model_dump() | lost),
+                    reasoning="",
+                    extracted_final_answer="",
+                    num_tool_calls=num_tool_calls,
+                    metrics=TavilySearchMetrics(),
+                )
+            metrics = (
+                verification.retained.model_copy(deep=True)
+                if isinstance(verification.retained, TavilySearchMetrics)
+                else self._session_id_to_metrics.get(session_id) or TavilySearchMetrics()
             )
-        verified = self._verified_sessions.get(session_id)
-        metrics = (
-            (verified[1].metrics if verified is not None else None)
-            or self._session_id_to_metrics.get(session_id)
-            or TavilySearchMetrics()
-        )
-        try:
-            question = body.question
-            ground_truth = body.ground_truth
-            last_assistant_response = body.response.output_text
+            try:
+                question = body.question
+                ground_truth = body.ground_truth
+                last_assistant_response = body.response.output_text
 
-            judge_error = None
-            if self.config.use_judge:
-                judge_evaluation, judge_error = await self._verify_answer_with_judge(
-                    question, ground_truth, last_assistant_response
+                judge_error = None
+                if self.config.use_judge:
+                    judge_evaluation, judge_error = await self._verify_answer_with_judge(
+                        question, ground_truth, last_assistant_response
+                    )
+                else:
+                    judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
+                response = TavilySearchVerifyResponse(
+                    **body.model_dump(),
+                    **judge_evaluation.model_dump(),
+                    num_tool_calls=num_tool_calls,
+                    metrics=metrics,
                 )
-            else:
-                judge_evaluation = self._verify_answer_with_regex(ground_truth, last_assistant_response)
-            response = TavilySearchVerifyResponse(
-                **body.model_dump(),
-                **judge_evaluation.model_dump(),
-                num_tool_calls=num_tool_calls,
-                metrics=metrics,
-            )
-            if judge_error is not None:
-                raise judge_error
-            return response
-        finally:
-            # A wait-style verify ends checkpoint tracking even when the caller intends to close afterwards.
-            # Preserve only bounded retry evidence; the judge still evaluates each request as before.
-            if session_id not in self._resources_session_fences:
-                self._verified_sessions.remember(
-                    session_id,
-                    (self._session_episodes.get(session_id), _VerificationMetrics(metrics.model_copy(deep=True))),
-                )
-            self._session_episodes.pop(session_id, None)
-            if not self.config.dump_session_id_to_metrics_on_exit:
-                self._session_id_to_metrics.pop(session_id, None)
+                if judge_error is not None:
+                    raise judge_error
+                return response
+            finally:
+                # Keep the finished run's metrics separate from the mutable exit-dump archive. The base releases
+                # state and saves this snapshot even when judging fails, without caching the judge's score.
+                verification.retain(metrics.model_copy(deep=True))
 
     ###### UTILITY FUNCTIONS ######
 
