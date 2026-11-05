@@ -148,6 +148,35 @@ def export_requirements(repo: Path, destination: Path, *, uv: str = "uv") -> Non
         (destination / f"{resolve}.requirements.txt").write_text(result.stdout)
 
 
+def native_coverage_config(project: str, *, finder: str | None) -> str:
+    """Keep sampled coverage policy, excluding only our generated import plumbing."""
+    original = tomllib.loads(project)["tool"]["coverage"]
+    data_file_setting = 'data_file = "results/.coverage"'
+    if project.count(data_file_setting) != 1:
+        raise ValueError("Coverage output configuration changed; inspect native coverage parity before continuing")
+    config = project.replace(data_file_setting, 'data_file = ".coverage"')
+    section = re.search(r"(?ms)^\[tool\.coverage\.run\]\s*\n(.*?)(?=^\[|\Z)", config)
+    if section is None:
+        raise ValueError("Missing sampled coverage run configuration")
+    # These files are produced only by our runtime plugins. Real source and all
+    # sampled omit/report/branch/context settings remain unchanged.
+    additions = [".native-child-site/*", *([finder] if finder else [])]
+    body = section[1]
+    values = ", ".join(json.dumps(value) for value in additions)
+    if "omit" in original["run"]:
+        body, count = re.subn(r"(?m)^(omit\s*=\s*\[)", lambda match: match[1] + values + ", ", body, count=1)
+        if count != 1:
+            raise ValueError("Unsupported sampled coverage omit configuration")
+    else:
+        body = f"omit = [{values}]\n" + body
+    config = config[: section.start(1)] + body + config[section.end(1) :]
+    expected = dict(original, run=dict(original["run"], data_file=".coverage"))
+    expected["run"]["omit"] = additions + original["run"].get("omit", [])
+    if tomllib.loads(config)["tool"]["coverage"] != expected:
+        raise ValueError("Native coverage preparation changed sampled coverage policy")
+    return config
+
+
 def write_build_configuration(repo: Path, *, incremental: bool = False) -> dict[str, object]:
     """Declare all test files and broad explicit assets without removing import edges."""
     native = repo / "scripts/pants/native_core"
@@ -216,11 +245,13 @@ def write_build_configuration(repo: Path, *, incremental: bool = False) -> dict[
         + "\n"
     )
     uv_config = tomllib.loads((repo / "pyproject.toml").read_text())["tool"]["uv"]
-    coverage_config = (repo / "pyproject.toml").read_text()
-    data_file_setting = 'data_file = "results/.coverage"'
-    if coverage_config.count(data_file_setting) != 1:
-        raise ValueError("Coverage output configuration changed; inspect native coverage parity before continuing")
-    (native / "coverage.toml").write_text(coverage_config.replace(data_file_setting, 'data_file = ".coverage"'))
+    editable_manifest = native / "distribution/editable.json"
+    finder = json.loads(editable_manifest.read_text())["finder"] if editable_manifest.exists() else None
+    if any(path.startswith(".native-child-site/") for path in tracked):
+        raise ValueError("Generated child site overlaps sampled source")
+    if finder and (finder in tracked or Path(finder).name != finder):
+        raise ValueError("Generated editable finder overlaps sampled source or escapes the checkout")
+    (native / "coverage.toml").write_text(native_coverage_config((repo / "pyproject.toml").read_text(), finder=finder))
     excludes = uv_config.get("exclude-dependencies", [])
     overrides = uv_config.get("override-dependencies", [])
     config = f"""{HEADER}[GLOBAL]

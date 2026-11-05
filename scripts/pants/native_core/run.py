@@ -166,6 +166,9 @@ def execute_batch(
     pytest_args = [
         "-m",
         "not sandbox" if args.group == "core" else "sandbox",
+        # Reset Pants-inferred source roots and match both sampled CI commands.
+        "--cov-reset",
+        "--cov=.",
         "--cov-fail-under=0",
         "-p",
         "scripts.pants.native_core.incremental_runtime" if cacheable else "scripts.pants.native_core.runtime",
