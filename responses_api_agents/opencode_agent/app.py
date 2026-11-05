@@ -37,6 +37,7 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
@@ -54,10 +55,12 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    verification_failure_fields,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
@@ -71,6 +74,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    SandboxFailureDetails,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -83,6 +89,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import (
+    NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -118,6 +125,7 @@ from responses_api_agents.opencode_agent.runtime import (
     TASK_ENVIRONMENT_PLUGIN_FILE,
     TASK_ENVIRONMENT_PLUGIN_SOURCE,
     apply_observability_patch,
+    command_failure_reason,
 )
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, cli_environment, format_error_message
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
@@ -342,6 +350,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    report_agent_sandbox_oom: bool = False
     # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 
@@ -761,7 +770,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             state = self._require_agent_session(session_id)
             assert isinstance(state, OpenCodeSandboxSession)
             if state.is_continuation:
-                return await self.activate_agent_session(request, body)
+                response = await self.activate_agent_session(request, body)
+                verification_failure_fields(response)
+                return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
             prompt, system = self._session_input(body)
@@ -772,7 +783,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
-            return (await asyncio.shield(state.task)).model_copy(deep=True)
+            response = (await asyncio.shield(state.task)).model_copy(deep=True)
+            verification_failure_fields(response)
+            return response
         # Only genuinely unseeded calls reach local execution; invalid or closed
         # session markers are rejected above, never retried on the host.
         path_params = getattr(request, "path_params", None)
@@ -831,7 +844,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
-                json=body.model_dump() | {"response": agent_resp_json},
+                json=body.model_dump()
+                | {"response": agent_resp_json}
+                | verification_failure_fields(NeMoGymResponse.model_validate(agent_resp_json)),
                 cookies=cookies,
             )
             await raise_for_status(verify_resp)
@@ -972,10 +987,22 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
                 workspace = await sandbox.exec(f"mkdir -p -- {shlex.quote(workdir)}", cwd="/", timeout_s=30)
                 if workspace.return_code != 0 or workspace.error_type:
-                    raise RuntimeError(
-                        f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
+                    raise NgFailureEvent(
+                        boundary="harness",
+                        failure_kind=AGENT_ROUTE_FAILED,
+                        operation="opencode.setup",
+                        stage="seed",
+                        failure_reason=f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}",
                     )
             state.sandbox_id = sandbox.sandbox_id
+            if state.sandbox_id is None:
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="opencode.setup",
+                    stage="seed",
+                    failure_reason="OpenCode sandbox provider did not return a sandbox_id",
+                )
             command = _sandbox_prepare_command(workdir, directory, runtime, export_dir=self.config.export_dir)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
@@ -1210,9 +1237,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if pinned is not None and result.return_code == _INPUT_REJECTED and result.error_type is None:
             raise AgentSeedRejectedError(format_error_message(f"Pinned {pinned} rejected", stderr=result.stderr or ""))
         if result.return_code != 0 or result.error_type is not None:
-            raise RuntimeError(
-                f"OpenCode setup failed: command={command!r}, exit={result.return_code}, "
-                f"error={result.error_type}; stderr={result.stderr}; stdout={result.stdout}"
+            raise NgFailureEvent(
+                boundary="harness",
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.setup",
+                stage="seed",
+                failure_reason=command_failure_reason(f"OpenCode setup failed: command={command!r}", result),
             )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
@@ -1514,7 +1544,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     else None,
                 }
             )
-        return response
+        fields = verification_failure_fields()
+        return response.model_copy(update=fields) if fields["failure_report"] is not None else response
 
     async def _session_response(
         self,
@@ -1649,8 +1680,24 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             failure = exc
         observations = state.activation_observations if state.is_continuation else state.observations
         if observations is None:
+            confirmed_oom = isinstance(failure, NgFailureEvent) and state.session.execution_oom is failure
+            invocation_id = state.invocation_prefix if state.is_continuation else state.request.episode_id.capture_key
+            if state.is_continuation and state.harness_session_id is not None:
+                invocation_id += f":{state.harness_session_id}"
             observations = AgentObservationBundle(
-                source="opencode", gaps=[ObservationGap(code="observation_capture_failed")]
+                source="opencode",
+                records=(
+                    [
+                        AgentInvocation(
+                            invocation_id=invocation_id,
+                            activation_id=state.activation_id if state.is_continuation else None,
+                            harness_session_id=state.harness_session_id if state.is_continuation else None,
+                        )
+                    ]
+                    if confirmed_oom
+                    else []
+                ),
+                gaps=[ObservationGap(code="observation_capture_failed")],
             )
         if state.is_continuation:
             state.activation_observations = observations
@@ -1761,6 +1808,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             observations.records.append(
                 SandboxObservation(
                     role="agent",
+                    stage="agent",
                     provider=(
                         self.config.sandbox_provider
                         if state.session.owns_sandbox
@@ -1768,19 +1816,50 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     ),
                     sandbox_id=state.sandbox_id,
                     outcome=sandbox_outcome,
-                    exit_code=result["return_code"],
+                    exit_code=result["return_code"] if not timed_out else None,
                     # The same category the root invocation carries for the stop or failure.
                     error_type="process_exit"
                     if reported_error
                     else {"cancelled": "cancelled", "failed": "server_error"}.get(sandbox_outcome),
                 )
             )
+        execution_oom = (
+            failure
+            if self.config.report_agent_sandbox_oom
+            and isinstance(failure, NgFailureEvent)
+            and state.session.execution_oom is failure
+            else None
+        )
+        if execution_oom is not None:
+            observe_failure(execution_oom)
+            details = execution_oom.details
+            observation = SandboxObservation(
+                role="agent",
+                provider=details.provider if isinstance(details, SandboxFailureDetails) else None,
+                sandbox_id=details.sandbox_id if isinstance(details, SandboxFailureDetails) else None,
+                outcome="oom",
+                stage=execution_oom.stage or "agent",
+                failure_id=execution_oom.event_id,
+            )
+            observations.records.append(observation)
         observations.gaps.append(
             ObservationGap(
                 code="model_usage_reconciliation_unavailable",
                 detail="Usage comes from OpenCode persisted assistant messages; compare against captured Gym model calls.",
             )
         )
+        if execution_oom is not None:
+            response = self._make_session_response(
+                state,
+                body,
+                timeout=timeout,
+                outcome=OpenCodeRunOutcome(status="failed", error_type="server_error"),
+            )
+            response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json(exclude_none=True)
+            response.metadata[AGENT_OUTCOME_METADATA_KEY] = AgentOutcome(
+                failure_kind=execution_oom.failure_kind
+            ).model_dump_json()
+            return response
         if failure is not None:
             raise failure
         if error and not reported_error:
