@@ -78,6 +78,13 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
+    from nemo_gym.core.outcome_policy import (
+        OutcomeAttribution,
+        OutcomeDecision,
+        StageOutcomePolicyConfig,
+        StagePolicyConfig,
+        choose_stage_outcome,
+    )
     from nemo_gym.core.responses_api_types import (
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
         REQUIRED_TOKEN_METADATA_FIELDS,
@@ -158,6 +165,11 @@ _PUBLIC_API = {
     "FailureReport": "failure_records",
     "FailureReportRow": "failure_transport",
     "FailureStage": "failure_kinds",
+    "OutcomeAttribution": "outcome_policy",
+    "OutcomeDecision": "outcome_policy",
+    "StageOutcomePolicyConfig": "outcome_policy",
+    "StagePolicyConfig": "outcome_policy",
+    "choose_stage_outcome": "outcome_policy",
     "HARNESS_TERMINATION_UNCONFIRMED": "failure_kinds",
     "JUDGE_FAILED": "failure_kinds",
     "JUDGE_UNPARSEABLE": "failure_kinds",

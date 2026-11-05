@@ -42,7 +42,10 @@ from typing import Literal
 logger = logging.getLogger(__name__)
 
 
-# Where an episode failed, independently of its kind and retry policy.
+# The single execution-stage vocabulary for failure events, sandbox observations
+# and stage-specific outcome policy. Seed prepares the task; preparation done for
+# verification belongs to verification. Preserve the originating stage on forwarding.
+# Where an episode failed is independent of its kind and retry policy.
 # Admission precedes seed. Collector-observed transport failures leave the stage
 # unset: delivery evidence and failure_kind describe the observation without
 # claiming to know where execution stopped inside the Environment Server.
