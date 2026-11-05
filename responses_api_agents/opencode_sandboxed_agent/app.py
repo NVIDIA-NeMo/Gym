@@ -73,7 +73,7 @@ from nemo_gym.core import (
     NeMoGymSummary,
     NgFailureEvent,
 )
-from nemo_gym.models import ResponsesConverter
+from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -1067,7 +1067,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 ):
                     continue
 
-                converter = ResponsesConverter(return_token_id_information=True)
+                converter = ChatCompletionsConverter(return_token_id_information=True)
                 for part in message["parts"]:
                     if part["type"] == "text":
                         output_items = converter.postprocess_assistant_message_dict(
