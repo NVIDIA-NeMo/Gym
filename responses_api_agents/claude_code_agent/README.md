@@ -271,7 +271,7 @@ be combined with `sandbox_config.provider_options.network_policy`. Claude uses n
 tool grants, so `model_and_tools` is rejected. Each of these refusals fails the seed
 with HTTP 422. Under `model_only` the image must already include `bash`: the step that
 installs a missing one on a root image runs after the sandbox starts, when the package
-mirrors are out of reach.
+mirrors are out of reach. A borrowed sandbox relies on its owner's network policy.
 
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
 the endpoint must be reachable from the sandbox. With `model_server`, only
@@ -333,6 +333,8 @@ Messages API, with an empty `anthropic_api_key`, and pins `claude_code_version`,
 profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after 10 minutes. Supply the image
 in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `claude_code_agent.responses_api_agents.claude_code_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; the image must
+include `bash`.
 
 The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
 APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
