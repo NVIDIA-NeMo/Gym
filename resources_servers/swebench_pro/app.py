@@ -253,6 +253,8 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
     image_template: str | None = None  # Local SIF path with a checked provenance manifest.
+    # Egress policy for the agent sandbox only; the grading sandbox keeps default network access.
+    agent_network_policy: dict[str, Any] | None = None
     sandbox_provider: str
     sandbox_config: dict[str, Any]
     task_network_policy: SWEBenchProTaskNetworkPolicy | None = None
@@ -325,7 +327,10 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
+    instance_request_cls = SWEBenchProInstanceRequest
     config: SWEBenchProResourcesServerConfig
+    # Subclasses (e.g. SWE-bench Pro v2) swap in their own verifier workspace.
+    workspace_assembler = staticmethod(assemble_workspace_files)
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -434,6 +439,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
         provider_options = self.config.sandbox_config.get("provider_options", {})
+        if files is None and self.config.agent_network_policy:
+            provider_options = provider_options | {"network_policy": self.config.agent_network_policy}
         if task and self.config.task_network_policy is not None:
             model_url = sandbox_server_url(self.config.task_network_policy.model_server.name, require_reachable=True)
             # Replace rather than extend any baseline allowlist. Grading keeps the original options.
@@ -502,7 +509,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 request.session[SESSION_ID_KEY] = session_id
                 return response
             try:
-                task = SWEBenchProInstanceRequest.model_validate(body.task_data)
+                task = self.instance_request_cls.model_validate(body.task_data)
             except ValidationError as error:
                 raise ResourcesSeedRejectedError(f"task_data is not a SWE-bench Pro instance: {error}") from error
             if body.task_id.task_id != task.instance_id:
@@ -519,14 +526,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return response
 
     async def _typed_seed_response(self, session_id: str) -> ResourcesSeedSessionResponse:
+        sandbox = self._session_id_to_sandbox[session_id]
         return ResourcesSeedSessionResponse(
             resources_session_id=session_id,
             sandbox_access=SandboxAccess(
                 connection=DirectSandboxConnection(
                     provider_config_ref=self.config.sandbox_provider,
-                    descriptor=await self._session_id_to_sandbox[session_id].serialize(),
+                    descriptor=await sandbox.serialize(),
                 ),
-                workdir="/app",
+                workdir=await self._repository_dir(sandbox),
             ),
         )
 
@@ -584,10 +592,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         except Exception:
             print(f"Failed to normalize sandbox environment for {instance_id}", format_exc(), file=sys.stderr)
 
+    async def _repository_dir(self, sandbox: AsyncSandbox) -> str:
+        """The directory holding the task's git repository."""
+        return "/app"
+
     async def pristine_untracked_files(self, sandbox: AsyncSandbox) -> frozenset[str]:
-        """List the untracked files ``/app`` holds before the agent touches it."""
+        """List the untracked files the repository holds before the agent touches it."""
         try:
-            result = await sandbox.exec("git -C /app ls-files --others --exclude-standard")
+            repo_dir = await self._repository_dir(sandbox)
+            result = await sandbox.exec(f"git -C {quote(repo_dir)} ls-files --others --exclude-standard")
             if result.return_code != 0:
                 print(f"Failed to list pristine untracked files: {result.stderr}", file=sys.stderr)
                 return frozenset()
@@ -601,13 +614,14 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
         patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
+            repo_dir = quote(await self._repository_dir(original_sandbox))
             # Only a connect failure is retried. After a request may have been sent, the first git process could
             # still hold the index lock while a second one starts.
             try:
                 result, exec_attempts = await _retry_patch_capture_step(
                     "git diff exec",
                     lambda: original_sandbox.exec(
-                        f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                        f"umask 077; git -C {repo_dir} add -N . && git -C {repo_dir} --no-pager diff {quote(base_commit)}"
                         f" > {quote(patch_path)}"
                     ),
                     idempotent=False,
@@ -677,7 +691,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 extraction_error = f"Failed to extract model patch: {exc}"
 
         inputs = self._verification_inputs(body, model_patch)
-        workspace_files, _ = assemble_workspace_files(body.instance_id, None, model_patch, asdict(inputs))
+        workspace_files, _ = self.workspace_assembler(body.instance_id, None, model_patch, asdict(inputs))
         sandbox_files = {
             f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
         }
@@ -703,6 +717,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                         inputs=inputs,
                         log_dir=run_log_dir,
                         timeout_s=self.config.evaluation_timeout,
+                        assemble=self.workspace_assembler,
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
