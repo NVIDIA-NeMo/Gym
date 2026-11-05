@@ -8,7 +8,7 @@ the working directory, the entrypoint launch and the stop flags, with the phased
 Harbor's collection order needs. Next to it live the workspace layout constants for the log
 and artifact folders, the task context file the agent harness reads, and the host template
 resolver for whole-value ${VAR} entries in task environments. The mixin holds the server
-methods that prepare the working directory, write the task context, place the reference
+methods that prepare the working directory, upload the task's skills, write the task context, place the reference
 solution for the oracle and describe sandbox access to the agent. The module sits below the
 verifier so that verifier code can be typed on HarborSession without importing the server.
 """
@@ -16,6 +16,7 @@ verifier so that verifier code can be typed on HarborSession without importing t
 import json
 import logging
 import os
+import posixpath
 import re
 import shlex
 from collections.abc import Iterator, Mapping
@@ -186,7 +187,7 @@ class HarborSessionMixin:
     Harbor's collection order needs. Next to it live the workspace layout constants for the log
     and artifact folders, the task context file the agent harness reads, and the host template
     resolver for whole-value ${VAR} entries in task environments. The mixin holds the server
-    methods that prepare the working directory, write the task context, place the reference
+    methods that prepare the working directory, upload the task's skills, write the task context, place the reference
     solution for the oracle and describe sandbox access to the agent. The module sits below the
     verifier so that verifier code can be typed on HarborSession without importing the server.
 
@@ -293,6 +294,25 @@ class HarborSessionMixin:
         overlay's ``mcp_servers`` merged in by name, the overlay's winning, as Harbor merges the task's with the
         job's ``agents[].mcp_servers`` (:func:`~nemo_gym.data.tasks.harbor.compose_overlay.merged_mcp_servers`)."""
         return merged_mcp_servers(task.config.environment.mcp_servers, self.config.compose_overlay)
+
+    async def _upload_task_skills(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
+        """Put the task's ``environment/skills/`` at its ``skills_dir``, as root, before anything of the task runs.
+
+        Harbor reads ``skills_dir`` as a folder the image already holds, which a Dockerfile ``COPY skills ...``
+        line fills. A task that runs a prebuilt or pulled image keeps its skills only in the build context, where
+        runtime-deploying runners (BenchFlow's SkillsBench) take them from; uploading that folder at seed covers
+        both shapes, and an image that already holds the same files gets them again unchanged. A task without the
+        folder uploads nothing, so a ``skills_dir`` the image provides on its own stays as built. A relative
+        ``skills_dir`` is read from the working directory. The uploaded tree is opened to every user (``chmod -R
+        a+rX``); the folders above it keep the image's modes, so a task user other than root also needs a
+        ``skills_dir`` it can reach (a ``/root/...`` one is not, where ``/root`` is ``0700``).
+        """
+        skills_dir = task.config.environment.skills_dir
+        source = task.path / "environment" / "skills"
+        if not skills_dir or not source.is_dir():
+            return
+        target = posixpath.join(workdir, skills_dir)
+        await upload_dir(sandbox, source, target, make_readable=True, ignore=is_ignored)
 
     async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
         """Leave the task's in-sandbox tool declarations where a harness can read them.

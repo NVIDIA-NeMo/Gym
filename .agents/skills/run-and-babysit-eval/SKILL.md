@@ -369,12 +369,16 @@ report yourself.
   SkillsBench keep nothing typed about it.
 - **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
   names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept that
-  zero. Other sandbox deaths there are `infrastructure_error` and are retried. In SkillsBench a sandbox
-  that dies mid-trial is `harbor_failed` and is retried, not scored; it scores 0 only when it ended at the
-  agent deadline with no test result.
-- **SkillsBench agent timeouts.** The row is final and scored. Many are zeros without a verifier result
-  (the sandbox was discarded before verification, or the verifier produced nothing). Report the score over
-  the rows the verifier graded beside the headline score.
+  zero. Other sandbox deaths there are `infrastructure_error` and are retried. On SkillsBench's OpenHands
+  path (`skillsbench/harbor*`) a sandbox that dies mid-trial is `harbor_failed` and is retried, not scored;
+  it scores 0 only when it ended at the agent deadline with no test result. On the `harbor` environment
+  server a sandbox lost before the reward is read is an infrastructure failure (`mask_sample`), not a score.
+- **SkillsBench agent timeouts.** On the OpenHands path the row is final and scored. Many are zeros
+  without a verifier result (the sandbox was discarded before verification, or the verifier produced
+  nothing). Report the score over the rows the verifier graded beside the headline score. On the `harbor`
+  environment server a harness that stops at the task's `[agent].timeout_sec` reports `agent_limit` and the
+  row is verified and scored as usual; an episode that overruns the task's whole budget fails with
+  `harbor:task_deadline` and is retried.
 - **AutomationBench rows that ended on a serving timeout or a 5xx.** They are graded on the partial world.
   Count them from `rollout_error` before you publish a score; its `kind_candidate` is a candidate
   (`http_5xx`, `http_429`, `timeout`, `connection`, among others), and the verifier's own time limit leaves no

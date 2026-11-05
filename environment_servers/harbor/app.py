@@ -1994,6 +1994,9 @@ class HarborEnvironmentServer(
             # Compose group the adapter already created the /logs paths main bound, before its command; this mkdir
             # is idempotent there and still makes the whole tree.
             session.workdir = await self._prepare_workdir(sandbox, task, task.workdir)
+            # The task's skills are in place before its entrypoint, healthcheck and agent, as a Dockerfile `COPY`
+            # would leave them; a Compose group's main was already started by the adapter.
+            await self._upload_task_skills(sandbox, task, session.workdir)
             # A Compose group's main was started by the adapter, its entrypoint run and its image healthcheck waited.
             managed = compose is not None
             launch = session.entrypoint = await self._start_entrypoint(
