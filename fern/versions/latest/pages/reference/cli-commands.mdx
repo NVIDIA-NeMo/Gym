@@ -278,7 +278,15 @@ The JSON output includes three path fields:
 All non-null paths are absolute with symlinks resolved. A path reached through a symlink therefore uses its target's location in the output.
 For example, the config for `aalcr/config_v1_1` is `benchmarks/aalcr/config_v1_1.yaml`, beside its entry directory `benchmarks/aalcr/config_v1_1/`.
 
-The inspect view and `--json` report the resources server and agent an entry runs with. An entry with a manifest takes them from the manifest. Otherwise Gym resolves which servers the config wires, without the dataset rules a manifest adds. For agent-owned datasets, this follows the taskset route, explicit flat-row route, or unique Environment Server fronting the agent. Session-based Environment Servers supply their own resources binding; `legacy_agent` relays use the agent's binding. Ambiguous routes or routes selecting different resources leave the resources field unknown. Resource-owned datasets retain their selected owner. When the config does not resolve on its own, because it needs values that only a run supplies, such as a judge model server, or because it is malformed, Gym uses the names written in the config file, each only when the file names exactly one. A server that none of these identifies is omitted from the inspect view and `null` in `--json`.
+The inspect view and `--json` report server **implementation names**, such as `simple_agent`, rather than config instance names, such as `demo_agent`. This differs from `agent_name` in `gym list benchmarks --json`, which identifies an instance.
+
+Names come from the manifest when present. Otherwise Gym resolves the config's server wiring. Resolution still requires an unambiguous dataset owner and agent, but skips manifest-only dataset checks such as requiring a benchmark preparation script.
+
+For agent-owned datasets, Gym follows the dataset's taskset route, the explicit flat-row route (`environment_routing_mode: legacy` with `environment_server_name`), or the unique Environment Server fronting the agent. Session-based Environment Servers supply their own resources binding; `legacy_agent` relays use the agent's binding. Resource-owned datasets retain their selected owner. Ambiguous routes, routes selecting different resources, or routes without a resources binding leave the resources field unknown.
+
+If resolution fails, Gym falls back to the implementation names written directly in the file, separately for each server kind and only when exactly one distinct name is present. A server that remains unknown is omitted from inspect output and `null` in `--json`; Gym does not pick the first of several names.
+
+Resolving configs without manifests adds work to `--json` listing. Table output and the Python `discover_environment_catalog()` function retain lightweight discovery: entries without manifests still have `None` for their `resources_server` and `agent_server` attributes. The CLI views resolve names separately without updating those objects.
 
 ### `gym list agents`
 

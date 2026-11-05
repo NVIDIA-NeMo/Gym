@@ -3,6 +3,8 @@
 
 import ast
 import json
+import logging
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -199,6 +201,51 @@ def test_resolve_config_servers_checks_every_taskset_binding(tmp_path: Path, sec
     assert resolve_config_servers(config_path) == (expected, "simple_agent")
 
 
+@pytest.mark.parametrize("route", [None, "other_environment", "missing", "demo_resources"])
+def test_resolve_config_servers_rejects_routes_that_do_not_front_the_selected_agent(
+    tmp_path: Path, route: str | None
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    other_agent = deepcopy(config["demo_agent"])
+    other_agent["responses_api_agents"]["simple_agent"].pop("datasets")
+    config["other_agent"] = other_agent
+    config["other_resources"] = {"resources_servers": {"other": {"entrypoint": "app.py", "domain": "math"}}}
+    config["other_environment"] = {
+        "environment_servers": {
+            "single_agent_turn_legacy": {
+                "entrypoint": "app.py",
+                "agent_server": {"type": "responses_api_agents", "name": "other_agent"},
+                "resources_server": {"type": "resources_servers", "name": "other_resources"},
+            }
+        }
+    }
+    if route is not None:
+        config.update(environment_routing_mode="legacy", environment_server_name=route)
+    config_path.write_text(yaml.safe_dump(config))
+
+    # An unrelated environment does not make the agent's implicit route ambiguous, but cannot be its explicit route.
+    expected = "demo" if route is None else None
+    assert resolve_config_servers(config_path) == (expected, "simple_agent")
+
+
+@pytest.mark.parametrize("include_taskset", [False, True])
+def test_resolve_config_servers_keeps_resources_unknown_for_unroutable_flat_datasets(
+    tmp_path: Path, include_taskset: bool
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["environment_routing_mode"] = "taskset"
+    if include_taskset:
+        datasets = config["demo_agent"]["responses_api_agents"]["simple_agent"]["datasets"]
+        datasets.insert(0, dict(datasets[0], name="routed", taskset="demo:test"))
+        config["environment_server_routes"] = {"demo:test": "demo_environment_server"}
+    config_path.write_text(yaml.safe_dump(config))
+
+    # A successful first route must not hide the next dataset's missing route or permit the raw-name fallback.
+    assert resolve_config_servers(config_path) == (None, "simple_agent")
+
+
 def test_resolve_config_servers_does_not_guess_between_environment_routes(tmp_path: Path) -> None:
     config_path = _asset(tmp_path).with_name("config.yaml")
     config = yaml.safe_load(config_path.read_text())
@@ -282,6 +329,63 @@ def test_resolve_config_servers_is_unknown_for_a_field_of_the_wrong_type(
     config_path.write_text(yaml.safe_dump(config), encoding="utf-8")
 
     assert resolve_config_servers(config_path) is None
+
+
+@pytest.mark.parametrize(
+    ("case", "error_type"),
+    [("policy_model_port", StopIteration), ("unknown_home", RuntimeError), ("recursive_alias", RecursionError)],
+)
+def test_resolve_config_servers_logs_unresolvable_configs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    case: str,
+    error_type: type[Exception],
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    if case == "policy_model_port":
+        config["policy_model"] = {"port": 12345}
+    elif case == "unknown_home":
+        config["results_dir"] = "~nemo_gym_missing_user/out"
+        original_expanduser = Path.expanduser
+
+        def expanduser(path: Path) -> Path:
+            # Exercise the parser's home expansion without depending on the machine's user directory service.
+            if str(path) == config["results_dir"]:
+                raise RuntimeError("Could not determine home directory.")
+            return original_expanduser(path)
+
+        monkeypatch.setattr(Path, "expanduser", expanduser)
+    else:
+        config["recursive"] = config
+    config_path.write_text(yaml.safe_dump(config))
+
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.environment.validation"):
+        assert resolve_config_servers(config_path) is None
+    [record] = [record for record in caplog.records if record.name == "nemo_gym.environment.validation"]
+    assert record.levelno == logging.DEBUG
+    assert str(config_path) in record.getMessage()
+    assert record.exc_info is not None and record.exc_info[0] is error_type
+    # Only best-effort catalog lookup catches these failures; manifest composition stays strict.
+    with pytest.raises(error_type):
+        _resolve_manifest_composition(config_path)
+
+
+@pytest.mark.parametrize("error_on_almost_servers", [True, False])
+def test_resolve_config_servers_rejects_unreferenced_almost_servers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], error_on_almost_servers: bool
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config = yaml.safe_load(config_path.read_text())
+    config["unreferenced_resources"] = {
+        "resources_servers": {"other": {"entrypoint": "app.py", "domain": "not_a_domain"}}
+    }
+    config["error_on_almost_servers"] = error_on_almost_servers
+    config_path.write_text(yaml.safe_dump(config))
+
+    assert resolve_config_servers(config_path) is None
+    assert capsys.readouterr() == ("", "")
 
 
 def test_resolve_config_servers_prints_nothing_for_a_server_block_that_fails_validation(

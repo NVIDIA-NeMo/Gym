@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import os
 import tempfile
 from collections.abc import Iterator
@@ -16,7 +17,7 @@ from typing import Any
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import InterpolationResolutionError, OmegaConfBaseException
+from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ValidationError
 from yaml import YAMLError
 
@@ -43,6 +44,9 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class EnvironmentValidationError(ConfigError):
@@ -198,7 +202,11 @@ class _ConfigWiring:
 
 
 class _ServerLookupParser(GlobalConfigDictParser):
-    """Fails on an almost-server without printing the run-time warning, since a lookup starts nothing."""
+    """Reject partially valid server configs before the parser prints its almost-server banner.
+
+    Catalog lookup remains strict even with ``error_on_almost_servers: false``: its caller falls back to raw names
+    rather than selecting from only the valid blocks. Other parser warnings and metadata fallback are unaffected.
+    """
 
     def detect_and_report_almost_servers(self, global_config_dict: DictConfig) -> list[tuple[str, ValidationError]]:
         almost_servers = super().detect_and_report_almost_servers(global_config_dict)
@@ -360,21 +368,6 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
     )
 
 
-# What a config file can raise while its wiring is resolved: unreadable or malformed YAML, OmegaConf syntax and key
-# errors, server blocks Gym's models reject, wiring that needs values only a run supplies, and fields of the wrong
-# type, such as `config_paths: 1` or a server block that is a string, which the config parser uses as written.
-_CONFIG_LOOKUP_ERRORS = (
-    ConfigError,
-    OmegaConfBaseException,
-    ValidationError,
-    YAMLError,
-    UnicodeError,
-    OSError,
-    TypeError,
-    AttributeError,
-)
-
-
 def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
     """The resources binding selected by all dataset routes, or unknown when they do not identify one instance."""
     if wiring.dataset_rs is not None:
@@ -427,17 +420,21 @@ def _catalog_resources_server(wiring: _ConfigWiring) -> str | None:
 def resolve_config_servers(config_path: Path) -> tuple[str | None, str | None] | None:
     """The resources server and agent selected by a workload config's runtime routes.
 
-    Only the wiring is resolved, so datasets need not meet manifest rules, and nothing is printed. Returns ``None``
-    when the config does not resolve on its own: for example, it references a judge model or an environment
-    variable that only a run supplies, or the file is malformed. A resolved config with ambiguous or
-    differing resources routes returns ``(None, agent)`` so the catalog does not guess from raw names.
+    Wiring resolution still needs an unambiguous dataset owner and agent, but skips manifest-only dataset checks
+    such as requiring a benchmark preparation script. Returns ``None`` when the config does not resolve on its own:
+    for example, it needs runtime-only values or contains invalid server blocks, even with
+    ``error_on_almost_servers: false``. Parser compatibility warnings can still go to stderr, and the caller's
+    metadata fallback may emit its own diagnostics. A resolved config with ambiguous or differing resources routes
+    returns ``(None, agent)`` so the catalog does not guess from raw names.
     """
     try:
         wiring = _resolve_config_wiring(config_path, parser=_ServerLookupParser())
         resources_server = _catalog_resources_server(wiring)
-    except _CONFIG_LOOKUP_ERRORS:
+        return resources_server, _implementation_name(wiring.selected_agent)
+    except Exception:
+        # A single config must not abort best-effort catalog discovery; retain unexpected failures for debugging.
+        logger.debug("Could not resolve servers for catalog config %s", config_path, exc_info=True)
         return None
-    return resources_server, _implementation_name(wiring.selected_agent)
 
 
 def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:

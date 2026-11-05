@@ -1747,11 +1747,22 @@ class TestListEnvironments:
             (["simple_agent", "harness_agent"], None),
         ],
     )
+    @pytest.mark.parametrize(
+        ("resources", "expected_resources"),
+        [(["beta"], "beta"), (["beta", "beta"], "beta"), (["beta", "other"], None)],
+    )
     def test_servers_fall_back_to_the_names_a_config_file_states(
-        self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path, agents: list[str], expected_agent: str | None
+        self,
+        monkeypatch: MonkeyPatch,
+        capsys,
+        tmp_path: Path,
+        agents: list[str],
+        expected_agent: str | None,
+        resources: list[str],
+        expected_resources: str | None,
     ) -> None:
         config_path = tmp_path / "config.yaml"
-        config = {"beta_resources": {"resources_servers": {"beta": {}}}}
+        config = {f"beta_resources_{index}": {"resources_servers": {name: {}}} for index, name in enumerate(resources)}
         for index, agent in enumerate(agents):
             config[f"beta_agent_{index}"] = {"responses_api_agents": {agent: {}}}
         config_path.write_text(json.dumps(config))
@@ -1763,7 +1774,16 @@ class TestListEnvironments:
         list_environments()
 
         [payload] = json.loads(capsys.readouterr().out)
-        assert (payload["resources_server"], payload["agent_server"]) == ("beta", expected_agent)
+        assert (payload["resources_server"], payload["agent_server"]) == (expected_resources, expected_agent)
+        self._mock_catalog(
+            monkeypatch,
+            overrides={"json": True, "component_name": "beta"},
+            entries=(replace(self._BETA, config_path=config_path),),
+        )
+        list_environments()
+        details = json.loads(capsys.readouterr().out)["details"]
+        assert details.get("resources servers") == expected_resources
+        assert details.get("agent") == expected_agent
 
     def test_inspect_shows_resolved_servers_the_config_file_does_not_state(
         self, monkeypatch: MonkeyPatch, capsys
@@ -1797,14 +1817,16 @@ class TestListEnvironments:
         # A benchmark whose data already exists may omit prepare_script: Gym runs it, though a manifest would not
         # accept it. A malformed config is still discovered by its location, whether its syntax is broken or a
         # field has the wrong type.
-        for name, config_paths, datasets in (
+        for name, preamble, datasets in (
             ("paths_not_a_list", "config_paths: 1\n", "[]"),
             ("datasets_not_a_list", "", "1"),
+            ("policy_model_port", "policy_model: {port: 12345}\n", "[]"),
+            ("recursive_alias", "recursive: &loop {child: *loop}\n", "[]"),
         ):
             config = tmp_path / "environments" / name / "config.yaml"
             config.parent.mkdir(parents=True)
             config.write_text(
-                f"{config_paths}"
+                f"{preamble}"
                 f"{name}_resources:\n"
                 "  resources_servers:\n"
                 f"    {name}:\n"
@@ -1861,6 +1883,8 @@ class TestListEnvironments:
             # Gym cannot resolve these, so the names the file states are shown.
             "paths_not_a_list": ("paths_not_a_list", "simple_agent"),
             "datasets_not_a_list": ("datasets_not_a_list", "simple_agent"),
+            "policy_model_port": ("policy_model_port", "simple_agent"),
+            "recursive_alias": (None, None),
         }
 
         for name in servers:
@@ -1873,6 +1897,8 @@ class TestListEnvironments:
         assert "The malformed environment" in out
         assert "resources servers: paths_not_a_list" in out
         assert "resources servers: datasets_not_a_list" in out
+        assert "resources servers: policy_model_port" in out
+        assert "The recursive_alias environment" in out
 
     @pytest.mark.parametrize("case", ["environment_only", "stale_agent_binding", "ambiguous"])
     def test_catalog_views_follow_environment_resources(
