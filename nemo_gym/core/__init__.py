@@ -88,8 +88,8 @@ if TYPE_CHECKING:
     )
     from nemo_gym.core.outcome_policy import (
         OutcomeAction,
-        OutcomePolicyConfig,
         OutcomeDecision,
+        OutcomePolicyConfig,
         StageOutcomePolicyConfig,
         StagePolicyConfig,
         choose_action,
