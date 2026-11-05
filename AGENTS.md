@@ -17,6 +17,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
+- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
+  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
+  synonyms.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
@@ -216,6 +219,9 @@ gym env resolve --config ...
   would silently stop running. `tests/unit_tests/benchmarks/` holds core-suite tests of benchmark and resources server
   code.
 - Only tests of the `nemo_gym/` root modules and repository-wide checks stay flat in `tests/unit_tests/`.
+- `tests/` itself holds only the suites (`unit_tests/`, `functional_tests/`, `e2e/`), the shared `conftest.py`, and
+  `tests/helpers/`: setup and assertions that tests in several places import, such as core unit tests and server
+  tests, or the tests of several servers. A helper used by one folder's tests stays beside them.
 - Every folder of test modules has an `__init__.py`, so pytest imports each test under its package name and test
   modules in different folders can share a file name.
 - A fixture lives in a `fixtures/` folder beside the tests that read it. A fixture that tests in several packages

@@ -627,7 +627,7 @@ class TestApp:
             ),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         server, _ = _make_agent(False)
         body = AgentSeedSessionRequest(
             agent_session_id="agent-session",
@@ -2587,7 +2587,7 @@ async def test_an_activation_without_an_index_keeps_no_reply() -> None:
 async def test_a_restored_session_answered_with_its_reply_survives_a_commit_that_leaves_its_episode_out(
     tmp_path,
 ) -> None:
-    """The replayed reply claims the restored session for the live episode, so a commit no longer frees it."""
+    """The replayed reply claims the restored session for the live episode, so a commit no longer releases it."""
     server, server_client = _make_agent(False)
     request = await _restored_session(server, activations=1, boundary=None)
     participant = server.checkpoint_participant
@@ -2725,7 +2725,7 @@ async def test_a_close_cancelled_while_it_stops_the_activation_runs_the_cleanup_
     assert server.events.count("cleanup") == 1
 
 
-async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_receipt_behind(
+async def test_a_retire_that_releases_a_session_while_its_close_waits_leaves_no_fence_behind(
     monkeypatch: MonkeyPatch,
 ) -> None:
     server, server_client = _make_agent(False)
@@ -2758,7 +2758,7 @@ async def test_a_retire_that_frees_a_session_while_its_close_waits_leaves_no_rec
 
     assert retiring.done() and retiring.exception() is None
     assert isinstance(closing.exception(), StaleAttemptError)
-    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._closed_session_records
+    assert _SESSION_ID not in server._session_records and _SESSION_ID not in server._fenced_session_records
     assert seeded.agent_session_id == "other-session"
 
 
