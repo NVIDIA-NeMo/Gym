@@ -299,8 +299,8 @@ class TestSbatchScript:
 
     @staticmethod
     def _install_extras(script: str) -> list[str]:
-        """Read the extras requested by the driver's locked sync command."""
-        match = re.search(r"\buv sync --locked([^\n]*)", script)
+        """Read the extras the driver install requests; it drops those the checkout does not declare."""
+        match = re.search(r"_gym_declared_extras((?: --extra [\w-]+)+)\)", script)
         return re.findall(r"--extra ([\w-]+)", match.group(1)) if match else []
 
     def test_in_process_exporters_add_their_extra_to_the_gym_install_once(self) -> None:
