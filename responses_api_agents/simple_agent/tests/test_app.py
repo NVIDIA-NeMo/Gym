@@ -3441,7 +3441,8 @@ class TestServerQueueTimeout:
         )
 
     async def test_run_retries_a_queued_timeout_even_when_timeouts_count_as_zero(self) -> None:
-        server, server_client = _timeout_agent(count_timeouts_as_zero=True)
+        server, server_client = _timeout_agent(final_on_model_timeout=True)
+        assert server.config.outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == "count_as_zero"
         queued = NgFailureEvent(
             boundary=FailureBoundary.AGENT,
             failure_kind=MODEL_SERVER_QUEUE_TIMEOUT,
