@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -122,6 +122,18 @@ async def test_a_failed_evaluation_is_masked_as_a_verifier_error(tmp_path, extra
     assert dumped["failure_kind"] == "verifier_error"
     assert dumped["failure_reason"] == "OSWorld evaluation raised RuntimeError: evaluator crashed"
     server._manager.close_session.assert_awaited_once_with("s1")
+
+
+async def test_a_failed_evaluation_is_recorded_as_a_verifier_failure(tmp_path) -> None:
+    server = _verify_server(tmp_path, AsyncMock(side_effect=RuntimeError("evaluator crashed")))
+
+    with patch("resources_servers.osworld.app.observe_failure") as observed:
+        await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "s1"}), _verify_request())
+
+    [failure] = [call.args[0] for call in observed.call_args_list]
+    assert (failure.failure_kind, failure.operation, failure.stage) == ("verifier_error", "verify", "verification")
+    assert failure.failure_reason == "OSWorld evaluation raised RuntimeError: evaluator crashed"
+    assert isinstance(failure.__cause__, RuntimeError)
 
 
 # The request accepts extra fields; one that already carries the failure fields still gets a masked result.

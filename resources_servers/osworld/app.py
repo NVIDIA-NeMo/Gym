@@ -12,7 +12,13 @@ from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.server_runtime import SimpleResourcesServer, lost_session_verification
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
@@ -170,6 +176,19 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                 }
             )
         except Exception as error:
+            reason = f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}"
+            # The masked row also goes into the run's failure record, tied to this verifier invocation.
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=reason,
+                operation="verify",
+                operation_id=current_verifier_invocation_id(),
+                stage="verification",
+                exception_type=type(error).__name__,
+            )
+            failure.__cause__ = error
+            observe_failure(failure)
             return OSWorldVerifyResponse(
                 **{
                     **body.model_dump(),
@@ -177,7 +196,7 @@ class OSWorldResourcesServer(SimpleResourcesServer):
                     "osworld_score": 0.0,
                     "mask_sample": True,
                     "failure_kind": VERIFIER_ERROR,
-                    "failure_reason": f"OSWorld evaluation raised {type(error).__name__}: {str(error)[-2000:]}",
+                    "failure_reason": reason,
                 }
             )
         finally:

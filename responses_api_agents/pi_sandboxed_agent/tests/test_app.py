@@ -396,3 +396,23 @@ async def test_terminal_stop_controls_scoring_without_observations(
     receipt = json.loads((Path(result.pi_results_dir) / "generation.json").read_text())
     assert receipt["pi_failed"] is failed and receipt["response"]["output"]
     assert receipt["response"]["status"] == result.response.status
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        RuntimeError("provider unavailable"),
+        SimpleNamespace(return_code=-1, error_type=None),
+        SimpleNamespace(return_code=1, error_type="sandbox_error"),
+    ],
+)
+async def test_sandbox_infrastructure_failure_is_typed_and_never_verified(agent, outcome):
+    from nemo_gym.core import AGENT_ROUTE_FAILED, NgFailureEvent
+
+    server, sandbox = agent
+    sandbox.exec.side_effect = [SimpleNamespace(return_code=0, error_type=None), outcome]
+    with pytest.raises(NgFailureEvent) as raised:
+        await server.run(SimpleNamespace(cookies={}), request_body())
+    assert raised.value.failure_kind == AGENT_ROUTE_FAILED
+    assert server.server_client.post.await_count == 1  # seed only: the verifier is not called
+    sandbox.stop.assert_awaited_once()
