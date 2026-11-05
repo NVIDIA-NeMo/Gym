@@ -136,11 +136,15 @@ Data (`SciCode1/SciCode`, `test_data.h5`): Apache 2.0
 
 ## Grading environment
 
-The resources server prepares an isolated Python 3.11 environment using `uv` and
+For local grading without explicit `grading_interpreters`, the resources server
+prepares an isolated Python 3.11 environment using `uv` and
 `resources_servers/scicode/grading-requirements.lock`, including resolved transitive
 dependencies. SciPy 1.10.1 provides
 `scipy.integrate.simps`, which the problem dependencies require. Gym keeps its
 own Python interpreter and does not install the grading packages into it.
+
+Sandbox grading uses the interpreters and test data in the configured image and
+does not prepare this local environment.
 
 The first start requires Python/package download access and a writable
 `grading_venv_path` (default `resources_servers/scicode/.grading_venv`). Set this

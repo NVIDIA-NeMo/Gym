@@ -893,6 +893,25 @@ class TestApp:
 
 
 class TestGradingEnvironment:
+    def test_sandbox_startup_does_not_prepare_local_environment(self):
+        config = ScicodeResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            test_data_fpath="/image-only/test_data.h5",
+            test_data_md5="0" * 32,
+            sandbox={"image": "test-image"},
+            grading_interpreters=[{"name": "pinned", "python_executable": "/image-only/bin/python"}],
+        )
+        with (
+            patch.object(app, "ensure_grading_env", side_effect=AssertionError("local environment setup")),
+            patch.object(app, "preflight_grading_interpreter", side_effect=AssertionError("local preflight")),
+        ):
+            server = ScicodeResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+            assert server._resolve_grading_interpreters() == [("pinned", "/image-only/bin/python")]
+            assert server._resolve_test_data() == "/image-only/test_data.h5"
+
     def test_pinned_environment_selected_at_startup(self, tmp_path):
         python = tmp_path / "bin" / "python"
         config = ScicodeResourcesServerConfig(

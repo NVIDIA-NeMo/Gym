@@ -33,13 +33,17 @@ exit code 0 = pass. The HDF5 target-loading and comparison helpers (`process_hdf
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
-Generated code runs in a separate Python 3.11 environment with the scientific
+By default, generated code runs in a separate local Python 3.11 environment with the scientific
 stack frozen in `grading-requirements.lock`, including SciPy 1.10.1 and
 `scipy.integrate.simps`. The server needs `uv` and download access when creating
 or updating that environment; a matching prebuilt environment can be reused
 offline. A changed lock or Python version recreates the environment and applies
 `uv pip sync`, removing obsolete packages. Explicit `grading_interpreters`
 (such as SciCode-Verified's 2024/2025 environments) take precedence.
+
+When `sandbox` is configured, grading uses the explicitly configured interpreters
+and test data inside the image. The server skips local environment creation,
+interpreter preflight, and test-data checksum checks; the sandbox runner checks the data.
 
 After editing `grading-requirements.txt`, regenerate the lock with:
 

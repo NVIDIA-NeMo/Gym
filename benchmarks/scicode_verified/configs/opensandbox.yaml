@@ -1,0 +1,20 @@
+config_paths:
+  - benchmarks/scicode_verified/config.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+scicode_verified_resources_server:
+  resources_servers:
+    scicode:
+      num_processes: 64
+      test_data_fpath: /data/test_data_cleaned.h5
+      grading_interpreters:
+        - name: "2024"
+          python_executable: /opt/scicode/2024/bin/python
+        - name: "2025"
+          python_executable: /opt/scicode/2025/bin/python
+      sandbox:
+        provider: sandbox
+        image: ${oc.env:SCICODE_SANDBOX_IMAGE}
+        cpu: 1
+        memory_mib: 8192
+        ready_timeout_secs: 300
