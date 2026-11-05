@@ -683,9 +683,9 @@ class ClineAgent(SimpleResponsesAPIAgent):
 
         ``--json`` selects the newline-delimited JSON event stream (and implies headless);
         ``--auto-approve true`` runs the tools without prompting; ``--cwd`` scopes the run to the
-        per-request project dir; ``--timeout`` lets Cline wind the session down itself just before
-        the subprocess deadline. The prompt goes last, after ``--``, so one starting with ``-`` is
-        not parsed as a flag.
+        per-request project dir; ``--timeout`` is passed, but Cline 3.0.55 does not bound a ``--json``
+        run with it, so the subprocess deadline ends the run. The prompt goes last, after ``--``, so
+        one starting with ``-`` is not parsed as a flag.
         """
         cmd = [
             *self.config.command_parts,
