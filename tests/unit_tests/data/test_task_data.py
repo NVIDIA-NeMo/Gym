@@ -43,6 +43,13 @@ class TestNormalizeTaskFields:
         assert fields == {"question": "q"}
         assert conflicts == []
 
+    def test_agent_context_is_not_task_data(self):
+        """A row's agent_context goes to the agent, so a server's TaskData schema never reports it as unknown."""
+        fields, _ = normalize_task_fields(
+            {"verifier_metadata": {"label": "safe"}, "agent_context": {"artifacts": {"media": {"path": "figs/1"}}}}
+        )
+        assert fields == {"label": "safe"}
+
     def test_splices_verifier_metadata_contents(self):
         fields, conflicts = normalize_task_fields(
             {"responses_create_params": {}, "verifier_metadata": {"label": "safe", "type": "homonyms"}}

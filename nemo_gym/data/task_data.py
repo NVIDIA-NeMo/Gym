@@ -64,6 +64,8 @@ RESERVED_ROW_KEYS = frozenset(
         "responses_create_params",
         # A multi-turn row's requests, one per turn beside ``task_data`` (the Harbor materializer's ``turns``).
         "turns",
+        # What the agent session receives (nemo_gym.server_runtime.agent_context); the Resources Server never sees it.
+        "agent_context",
         "agent_ref",
         "task_source",
         "_ng_task_index",
