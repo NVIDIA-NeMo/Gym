@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME, AgentContext
 from nemo_gym.server_runtime.base_resources_server import BaseVerifyResponse
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 
@@ -21,6 +22,8 @@ class SingleAgentTurnTaskInput(BaseModel):
 
     responses_create_params: NeMoGymResponseCreateParamsNonStreaming
     task_data: dict[str, JsonValue]
+    # What the agent session receives beyond its model input. Kept out of task_data, which the Resources Server gets.
+    agent_context: AgentContext | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="before")
     @classmethod
@@ -28,6 +31,7 @@ class SingleAgentTurnTaskInput(BaseModel):
         """Accept flat task input while preserving the canonical ``task_data`` container.
 
         ``task_data`` is reserved for that container; non-conflicting flat fields are merged into it.
+        A row's ``agent_context`` moves out of it into its own field.
         """
         if not isinstance(value, Mapping):
             return value
@@ -39,7 +43,11 @@ class SingleAgentTurnTaskInput(BaseModel):
         for key in fields.keys() & task_data.keys():
             if fields[key] != task_data[key]:
                 raise ValueError(f"Conflicting task field {key!r} inside and outside task_data")
-        return {"responses_create_params": response_params, "task_data": dict(task_data) | fields}
+        task_data = dict(task_data) | fields
+        task_input = {"responses_create_params": response_params, "task_data": task_data}
+        if (agent_context := task_data.pop(AGENT_CONTEXT_KEY_NAME, None)) is not None:
+            task_input[AGENT_CONTEXT_KEY_NAME] = agent_context
+        return task_input
 
 
 class SingleAgentTurnResult(BaseVerifyResponse):

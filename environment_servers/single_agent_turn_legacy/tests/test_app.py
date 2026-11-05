@@ -22,7 +22,7 @@ from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLega
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ResourcesServerRef
 from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
-from nemo_gym.server_runtime import SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.server_runtime import AgentContext, SimpleServer, SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
 class _Cookie:
@@ -209,7 +209,13 @@ def test_legacy_adapter_preserves_task_identity_and_data():
         "run_script": "verifier\nscript\n",
         "verifier_metadata": {"answer": "expected"},
     }
+    assert request.task.task_input.agent_context is None
     assert request.episode_id.attempt == 1
+
+    # A row's agent_context is the agent's, kept apart from the task data the Resources Server gets.
+    request = adapter._episode_request_from_row({**row, "agent_context": {"values": {"tag": "figqa2"}}})
+    assert request.task.task_input.agent_context == AgentContext(values={"tag": "figqa2"})
+    assert "agent_context" not in request.task.task_input.task_data
 
 
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])

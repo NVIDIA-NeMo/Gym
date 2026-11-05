@@ -3,13 +3,14 @@
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities
 from nemo_gym.agents.base_responses_api_agent import (
@@ -30,6 +31,7 @@ from nemo_gym.agents.testing.agent_session_conformance import check_agent_seed_r
 from nemo_gym.agents.utils.sandbox_session import ExpiryUnsupportedError
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.agent_context import AgentContext, AgentContextArtifact
 from nemo_gym.server_runtime.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, TrajectoryTurn
 
@@ -42,12 +44,13 @@ class _Agent(SimpleResponsesAPIAgent):
         raise NotImplementedError
 
 
-def _seed_request(*, tool_accesses=None) -> AgentSeedSessionRequest:
+def _seed_request(*, tool_accesses=None, agent_context=None) -> AgentSeedSessionRequest:
     return AgentSeedSessionRequest(
         agent_session_id="agent-session",
         episode_id=EpisodeId(rollout_id="rollout", attempt=2),
         task_id=TaskId(taskset="test", task_id="task"),
         tool_accesses=tool_accesses or [],
+        agent_context=agent_context,
     )
 
 
@@ -282,6 +285,89 @@ def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
     assert timed.agent_timeout_sec == 900.0
     with pytest.raises(ValidationError):
         AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 0})
+
+
+class _MediaContext(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    media: AgentContextArtifact
+    tag: str = ""
+
+
+@dataclass
+class _MediaState(AgentSessionState):
+    context: _MediaContext | None = None
+
+
+class _MediaAgent(_Agent):
+    """Declares the context it reads: a required media artifact and an optional tag."""
+
+    agent_context_model = _MediaContext
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+        return _MediaState(request=body, context=self.parse_agent_context(body))
+
+
+def _context_agent(agent_class: type[_Agent]) -> _Agent:
+    return agent_class.model_construct(config=MagicMock(num_workers=1), server_client=MagicMock())
+
+
+def test_a_seed_without_agent_context_keeps_its_wire_form() -> None:
+    assert "agent_context" not in _seed_request().model_dump(mode="json")
+    seed = _seed_request(agent_context=AgentContext(values={"tag": "figqa2"}))
+    assert AgentSeedSessionRequest.model_validate(seed.model_dump(mode="json")) == seed
+
+
+def test_an_agent_that_declares_no_context_refuses_one() -> None:
+    agent = _context_agent(_GrantCheckingAgent)
+    app = agent.setup_webserver()
+
+    detail = check_agent_seed_rejected(
+        app, _seed_request(agent_context=AgentContext(artifacts={"media": {"path": "figs/1"}}))
+    )
+
+    assert detail == "This agent does not accept agent_context; it was sent ['media']"
+    assert agent._session_records == {}
+    # An empty context sends nothing, so the agent still seeds.
+    seed = _seed_request(agent_context=AgentContext())
+    assert TestClient(app).post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+
+
+def test_an_agent_reads_the_context_it_declares() -> None:
+    agent = _context_agent(_MediaAgent)
+    seed = _seed_request(agent_context=AgentContext(values={"tag": "figqa2"}, artifacts={"media": {"path": "figs/1"}}))
+
+    response = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+
+    assert response.status_code == 200
+    state = agent._session_state("agent-session")
+    assert state.context == _MediaContext(media=AgentContextArtifact(path="figs/1"), tag="figqa2")
+
+
+@pytest.mark.parametrize(
+    ("context", "detail"),
+    [
+        (None, "agent_context does not satisfy _MediaContext: media: Field required"),
+        (
+            AgentContext(values={"tag": "figqa2"}),
+            "agent_context does not satisfy _MediaContext: media: Field required",
+        ),
+        (
+            AgentContext(values={"dpi": 170}, artifacts={"media": {"path": "figs/1"}}),
+            "This agent does not accept agent_context keys ['dpi']",
+        ),
+        (
+            AgentContext(values={"media": "figs/1"}),
+            "agent_context does not satisfy _MediaContext: media: Input should be a valid dictionary or instance of "
+            "AgentContextArtifact",
+        ),
+    ],
+)
+def test_an_agent_refuses_missing_unknown_or_mistyped_context(context, detail) -> None:
+    agent = _context_agent(_MediaAgent)
+
+    assert check_agent_seed_rejected(agent.setup_webserver(), _seed_request(agent_context=context)) == detail
+    assert agent._session_records == {}
 
 
 class _StoppableAgent(_Agent):
