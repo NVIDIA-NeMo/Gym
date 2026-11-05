@@ -1,0 +1,36 @@
+polar:
+  responses_api_agents:
+    polar:
+      entrypoint: app.py
+      domain: coding
+      description: SWE-Gym inference through ProRL-Agent-Server Polar simple_inference.
+      value: Run Polar inference from Gym rollout collection.
+
+      # direct: use an already-running OpenAI-compatible SGLang server at base_url.
+      # slurm: submit ProRL-Agent-Server/examples/swegym_slime_grpo/submit_simple_inference.sh.
+      mode: direct
+      prorl_root: ../ProRL-Agent-Server
+      inference_script: examples/swegym_slime_grpo/simple_inference.py
+      submit_script: examples/swegym_slime_grpo/submit_simple_inference.sh
+
+      base_url: http://127.0.0.1:19000
+      model_name: Qwen/Qwen3.5-4B
+      max_tokens: 768
+      temperature: 0.2
+      scenario: tool_multi_turn
+      top_logprobs: 3
+      return_token_ids: true
+      out_dir: ../ProRL-Agent-Server/tmp/gym_polar_inference
+      concurrency: 1
+      request_timeout: 3600
+      poll_interval: 10.0
+      success_reward: 0.0
+
+      env: {}
+      slurm_env:
+        JOB_NAME: gym-polar-infer
+
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: responses_api_agents/polar/data/example.jsonl
