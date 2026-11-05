@@ -8,7 +8,15 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator
 
-from nemo_gym.core.failure_kinds import FAILURE_KINDS, PROVIDER_OOM_KILLED, FailureStage
+from nemo_gym.core.failure_kinds import (
+    CANCELLED,
+    FAILURE_KINDS,
+    KILL_SHAPED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_OOM_KILLED,
+    SHUTDOWN,
+    FailureStage,
+)
 
 
 if TYPE_CHECKING:
@@ -25,6 +33,13 @@ class OutcomeAction(StrEnum):
     RETRY = "retry"
     FAIL = "fail"
     COUNT_AS_ZERO = "count_as_zero"
+
+
+def _require_registered_kinds[T](value: dict[str, T]) -> dict[str, T]:
+    invalid = value.keys() - FAILURE_KINDS - {"unknown"}
+    if invalid:
+        raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
+    return value
 
 
 class OutcomePolicyConfig(BaseModel):
@@ -48,10 +63,7 @@ class OutcomePolicyConfig(BaseModel):
     @classmethod
     def require_registered_kinds(cls, value: dict[str, OutcomeAction]) -> dict[str, OutcomeAction]:
         """Reject misspelled failure names at configuration load, before starting an evaluation."""
-        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
-        if invalid:
-            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
-        return value
+        return _require_registered_kinds(value)
 
 
 def choose_action(*, failure_kind: str, http_status: int | None, config: OutcomePolicyConfig) -> OutcomeAction:
@@ -97,10 +109,7 @@ class StagePolicyConfig(OutcomePolicyConfig):
     def require_registered_attribution_kinds(
         cls, value: dict[str, OutcomeAttribution]
     ) -> dict[str, OutcomeAttribution]:
-        invalid = value.keys() - FAILURE_KINDS - {"unknown"}
-        if invalid:
-            raise ValueError(f"Unregistered failure kinds: {sorted(invalid)}")
-        return value
+        return _require_registered_kinds(value)
 
 
 def _default_stage_policies() -> dict[FailureStage, StagePolicyConfig]:
@@ -114,6 +123,12 @@ def _default_stage_policies() -> dict[FailureStage, StagePolicyConfig]:
             attribution_by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAttribution.EVALUATION},
         ),
         "verification": StagePolicyConfig(
+            by_failure_kind={
+                CANCELLED: OutcomeAction.FAIL,
+                SHUTDOWN: OutcomeAction.FAIL,
+                KILL_SHAPED: OutcomeAction.FAIL,
+                PROVIDER_CREDENTIALS_REJECTED: OutcomeAction.FAIL,
+            },
             default_action=OutcomeAction.RETRY,
             default_attribution=OutcomeAttribution.EVALUATION,
         ),

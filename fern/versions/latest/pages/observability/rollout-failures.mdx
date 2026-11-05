@@ -1,6 +1,6 @@
 ---
 title: Failure observations
-description: Boundary failures, their explicit causes and the failure report, without changing outcome policy.
+description: Failure evidence, explicit causes, reports and shared outcome policies.
 ---
 
 Gym records an observed failure as one `NgFailureEvent` exception. The same object
@@ -24,6 +24,51 @@ The flow for one failure:
    path for callers whose retry or routing logic depends on `ClientResponseError`.
 5. Collection saves the report beside the existing result or failure record
    (`_ng_failure_events`, `_ng_failure_id`).
+
+## Policy by execution stage
+
+`FailureStage` in [failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py)
+is the shared vocabulary for failure events, sandbox observations and outcome policies. Use `stage`, including
+in sandbox observations; do not introduce a separate `phase` vocabulary. Task preparation uses `seed`;
+preparing or running a verifier uses `verification`. Preserve the originating stage when forwarding a failure:
+an agent failure caught by a verifier still belongs to `agent`. Leave the stage unset when it is unknown.
+
+`StageOutcomePolicyConfig` selects rules by stage, then uses the existing HTTP-status, failure-kind and default-action
+precedence. The caller establishes the failure's origin and sandbox ownership before applying these rules;
+a provider cannot infer them. Unknown ownership must not enter the agent OOM policy.
+
+The shared defaults are:
+
+| Admitted failure | Action | Attribution |
+| --- | --- | --- |
+| Confirmed OOM in the agent's assigned sandbox during `agent` execution | `count_as_zero` | `model` |
+| Confirmed OOM during `seed` | `retry` | `evaluation` |
+| Inconclusive verification attempt, including confirmed OOM | `retry` | `evaluation` |
+| Verification failure reporting cancellation, shutdown, a kill-shaped exit or rejected credentials | `fail` ungraded | `evaluation` |
+| Other failures, unknown stage or unknown ownership | `fail` ungraded | `unknown` |
+
+A `retry` decision never authorizes replaying an uncertain command. The caller retains its retry safety checks
+and existing attempt/deadline budget; exhaustion stays ungraded. Task cancellation continues to propagate. Verification rules apply to inconclusive attempts,
+not ordinary verifier scores. `count_as_zero` ends the episode without retry and includes its zero in the denominator.
+
+Policies are configurable. This fragment is a `StageOutcomePolicyConfig` value; place it under the consuming
+server's field of that type. It overrides the agent OOM action without replacing the other stages:
+
+```yaml
+by_stage:
+  agent:
+    by_failure_kind:
+      provider_oom_killed: fail
+```
+
+This override fails ungraded while retaining the explicit `model` attribution. To change that attribution too,
+set `attribution_by_failure_kind: {provider_oom_killed: unknown}` in the same `agent` block.
+
+Partial overrides retain other defaults. `choose_stage_outcome` returns one `OutcomeDecision` with `action` and
+`attribution`. Attribution is configured independently through `attribution_by_failure_kind` and `default_attribution`;
+changing an action, including via `by_status_code`, does not change attribution. Consumers must preserve and use the
+selected decision for scoring and health instead of interpreting the failure evidence again. Provider-operation retry
+policies remain separate from these episode decisions.
 
 ## Recovered failures
 

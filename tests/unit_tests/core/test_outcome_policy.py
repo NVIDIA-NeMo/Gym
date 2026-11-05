@@ -7,7 +7,15 @@ from typing import get_args
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.core.failure_kinds import PROVIDER_IO_TIMEOUT, PROVIDER_OOM_KILLED, FailureStage
+from nemo_gym.core.failure_kinds import (
+    CANCELLED,
+    KILL_SHAPED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_IO_TIMEOUT,
+    PROVIDER_OOM_KILLED,
+    SHUTDOWN,
+    FailureStage,
+)
 from nemo_gym.core.outcome_policy import (
     OutcomeAction,
     OutcomeAttribution,
@@ -141,3 +149,11 @@ def test_seed_does_not_gain_unsafe_general_retries():
     )
     assert decision.action == OutcomeAction.FAIL
     assert decision.attribution == OutcomeAttribution.UNKNOWN
+
+
+@pytest.mark.parametrize("kind", [CANCELLED, SHUTDOWN, KILL_SHAPED, PROVIDER_CREDENTIALS_REJECTED])
+def test_verification_does_not_retry_stop_or_credentials_failures(kind):
+    config = StageOutcomePolicyConfig(by_stage={"verification": {"by_failure_kind": {PROVIDER_OOM_KILLED: "retry"}}})
+    decision = choose_stage_outcome(failure_kind=kind, http_status=None, stage="verification", config=config)
+    assert decision.action == OutcomeAction.FAIL
+    assert decision.attribution == OutcomeAttribution.EVALUATION
