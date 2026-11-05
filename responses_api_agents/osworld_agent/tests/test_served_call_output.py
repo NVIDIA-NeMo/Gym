@@ -17,7 +17,7 @@ import pytest
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models import ChatCompletionsConverter
-from nemo_gym.models.token_capture import completion_items, output_item_fingerprint
+from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
 from responses_api_agents.osworld_agent.app import (
     OSWorldRunRequest,
     _build_messages_model_fn,

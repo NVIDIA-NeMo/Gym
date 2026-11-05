@@ -55,7 +55,6 @@ if TYPE_CHECKING:
         project_main_chain_response,
         run_builder,
     )
-    from nemo_gym.models.token_capture.completion import completion_items, output_item_fingerprint
     from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_config
     from nemo_gym.models.token_capture.conformance import ConformanceError, ConformanceWarning, run_conformance
     from nemo_gym.models.token_capture.consumer import (
@@ -190,7 +189,6 @@ _PUBLIC_API = {
     "capture_tokens": "sink",
     "clear_token_captures_for_rollouts": "consumer",
     "commit_entry": "sink",
-    "completion_items": "completion",
     "compute_digest": "records",
     "cumulative_tokens": "records",
     "current_capture_context": "sink",
@@ -206,7 +204,6 @@ _PUBLIC_API = {
     "make_token_store": "store",
     "mark_external_staging_committed": "sink",
     "mask_incomplete_when_attributed_from_config": "consumer",
-    "output_item_fingerprint": "completion",
     "prefix_merging": "builder",
     "project_chain_to_output_items": "builder",
     "project_main_chain_response": "builder",
