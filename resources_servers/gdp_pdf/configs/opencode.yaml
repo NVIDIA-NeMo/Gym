@@ -1,6 +1,6 @@
 config_paths:
 - resources_servers/gdp_pdf/configs/gdp_pdf.yaml
-- responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+- responses_api_agents/opencode_agent/configs/permissions/default.yaml
 gdp_pdf_simple_agent: null
 gdp_pdf_simple_environment_server: null
 gdp_pdf_sandbox:
@@ -26,6 +26,11 @@ gdp_pdf_opencode:
   _inherit_from: opencode_agent
   responses_api_agents:
     opencode_agent:
+      entrypoint: app.py
+      model: ${policy_model_name}
+      model_server:
+        type: responses_api_models
+        name: policy_model
       opencode_version: 1.17.11
       supports_images: true
       max_output_tokens: 16384
@@ -36,6 +41,9 @@ gdp_pdf_opencode:
       opencode_config:
         permission:
           task: deny
+          webfetch: deny
+          websearch: deny
+          skill: deny
 gdp_pdf_opencode_environment:
   environment_servers:
     single_agent_turn_legacy:
