@@ -791,6 +791,8 @@ async def test_agent_step_limit_records_tool_calls_without_tool_simulation(monke
     assert state.terminal_error == "The maximum number of agent steps of 50 has been reached"
     verified = await server.verify(request, make_verify_request())
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
 
 
 async def test_agent_step_limit_after_text_and_user_reply_preserves_messages() -> None:
@@ -861,6 +863,8 @@ async def test_tool_argument_enum_is_validated_by_jsonschema() -> None:
     assert verified.trajectory_invalid_reasons == ["invalid_agent_tool_call"]
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.result.trajectory.messages[-1].tool_name == "update_subscription"
 
 
@@ -1233,6 +1237,8 @@ async def test_transfer_ground_truth_mismatch_zeroes_reward_and_skips_judge(
     assert verified.reward == 0.0
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.transfer_ground_truth_enforced is True
     assert verified.transfer_ground_truth_mismatch is True
     assert verified.judge_skipped_for_transfer_mismatch is True
@@ -1385,6 +1391,8 @@ async def test_combined_verification_type_uses_single_judge_shape(monkeypatch) -
     assert verified.trajectory_invalid_reasons == []
     assert verified.failure_labels == [VerificationFailureLabel.AGENT_FAILURE]
     assert verified.mask_sample is False
+    assert verified.failure_kind is None
+    assert verified.failure_reason is None
     assert verified.judge_diagnostics["verification_type"] == "complete_trajectory_combined_evaluation"
     assert verified.judge_diagnostics["conversation_verification_result"]["reward"] == 0
     trajectory_result = verified.result.trajectory
