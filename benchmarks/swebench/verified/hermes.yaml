@@ -18,6 +18,10 @@ swebench_verified_hermes_resources_server:
       num_workers: 1
       # For SWE Bench Verified, the repos are already clean.
       apply_anti_cheating: false
+      sandbox_config:
+        # Outlive the episode (default_episode_timeout_seconds, 21600), patch extraction, and final cleanup. The
+        # resources session expires with the sandbox, and a verify after that is masked as SESSION_EXPIRED.
+        ttl_s: 25200
       datasets:
         - name: swebench_verified
           type: benchmark

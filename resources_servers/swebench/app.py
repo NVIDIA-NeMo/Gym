@@ -380,9 +380,9 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
                 raise ResourcesSessionConflictError("A legacy seed cannot replace a typed resources session")
             await self._stop_task_sandbox(session_id)
             try:
-                await self._start_task_sandbox(session_id, body)
+                record.workdir = await self._start_task_sandbox(session_id, body)
             except BaseException:
-                await self._stop_task_sandbox(session_id)
+                await self._stop_failed_seed_sandbox(session_id)
                 raise
             return SWEBenchSeedSessionResponse(
                 sandbox_handle=self._session_id_to_sandbox[session_id]._handle.sandbox_id
@@ -458,8 +458,12 @@ Stderr:
                         raise RuntimeError("Could not resolve the task sandbox workdir for patch capture")
                 seed_head = self._session_id_to_seed_head.get(session_id) or test_spec.base_commit
                 result = await original_sandbox.exec(patch_extraction_command(workdir, seed_head))
-                if result.error_type is not None or result.return_code != 0:
+                if result.error_type is not None:
                     raise RuntimeError("Failed to extract the model patch from the task sandbox")
+                if result.return_code != 0:
+                    # The agent can break the repository this runs in (removing .git, pruning the seed commit), so
+                    # a git failure is its graded result: the empty patch fails to apply and scores 0, unmasked.
+                    print(f"Patch extraction exited {result.return_code}: {result.stderr}", file=sys.stderr)
                 return strip_binary_diffs(result.stdout or "")
 
             try:
@@ -468,8 +472,8 @@ Stderr:
                 patch_extraction_failed = True
                 model_patch = ""
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            # A failed stop retains the handle and captured patch for a retry; close uses the same lock.
-            await self._stop_task_sandbox(session_id)
+            # A failed stop of a typed session retains the handle and captured patch for a retry.
+            await self.stop_task_sandbox_after_capture(session_id)
 
         verifier_sandbox_lifecycle_started_at = monotonic()
         eval_sandbox = await self._create_sandbox(test_spec, verifier_session_id=session_id)
