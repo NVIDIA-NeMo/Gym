@@ -5,10 +5,13 @@
 # the model and the tool servers and every web access goes through the search tools and their exclusion
 # policy. Only the OpenSandbox provider enforces that policy; the agent fails closed on any other.
 #
+# Like opencode_search.yaml, an opencode_agent session in a sandbox the agent creates, its egress set by
+# network_access, and the Tavily tools granted by the Environment Server from the agent's tool_servers.
+#
 # The agent is renamed (hle_diamond_opencode_reference_agent) so that sandbox_docker_local.yaml cannot
 # turn the policy off silently: its block for hle_diamond_opencode_agent no longer applies, and its block
 # for this agent refuses to compose unless HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS is set (see that file).
-# Gym's _inherit_from is a single-step rename, so the agent inherits opencode_benchmark_agent directly and
+# Gym's _inherit_from is a single-step rename, so the agent inherits opencode_agent directly and
 # restates the hle_diamond keys of opencode.yaml and opencode_search.yaml; a test holds the two agents
 # equal apart from the image and the environment note. Not a benchmark of its own (no dataset redeclared),
 # exactly like opencode_search.yaml: selectable with --benchmark, not listed.
@@ -19,9 +22,11 @@ config_paths:
 - benchmarks/hle_diamond/opencode_search.yaml
 hle_diamond_opencode_agent: null
 hle_diamond_opencode_reference_agent:
-  _inherit_from: opencode_benchmark_agent
+  _inherit_from: opencode_agent
   responses_api_agents:
-    opencode_sandboxed_agent:
+    opencode_agent:
+      num_workers: 4
+      concurrency: 512
       resources_server:
         type: resources_servers
         name: hle_diamond_equivalence_llm_judge_resources_server
@@ -33,27 +38,41 @@ hle_diamond_opencode_reference_agent:
         prepare_script: benchmarks/hle_diamond/prepare_text.py
         num_repeats: 1
       # Diamond's "reasoning high" on this harness, as in opencode.yaml.
+      reasoning_effort: high
+      timeout: 14400
+      output_token_policy: remaining_context
+      declare_model_limits: false
       opencode_config:
-        provider:
-          nemo_gym:
-            models:
-              dummy_model:
-                options:
-                  reasoningEffort: high
+        tools:
+          task: false
       network_access: model_and_tools
       tool_servers:
       - type: resources_servers
         name: tavily
+      # The reference image installs the same OpenCode release and checks the same digest (hle_reference_image/Dockerfile).
+      sandbox_executable_path: /usr/local/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
+      # Only what the reference protocol allows: no SageMath, Lean or /opt/science/README.md.
+      system_prompt: |
+        Direct internet access is disabled on this machine: no downloads and no package installation. The web search and page-reading tools offered to you are the only way to reach the web; use them if useful for the task.
+        Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
       sandbox_config:
         # The reference image, never OPENCODE_SANDBOX_IMAGE (the science image of the other presets).
         image: ${oc.env:OPENCODE_REFERENCE_SANDBOX_IMAGE,gym-opencode-hle-reference:local}
-        files:
-          # Only what the reference protocol allows: no SageMath, Lean or /opt/science/README.md.
-          /tmp/nemo-gym-environment.txt: |
-            Direct internet access is disabled on this machine: no downloads and no package installation. The web search and page-reading tools offered to you are the only way to reach the web; use them if useful for the task.
-            Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
+        workdir: /workspace
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          OPENCODE_DISABLE_AUTOUPDATE: '1'
+          OPENCODE_DISABLE_SHARE: '1'
+          OPENCODE_DISABLE_MODELS_FETCH: 'true'
+          EXECD_API_GRACE_SHUTDOWN: 50ms
 hle_diamond_equivalence_llm_judge_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: hle_diamond_opencode_reference_agent
