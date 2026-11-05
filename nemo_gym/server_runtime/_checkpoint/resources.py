@@ -170,6 +170,11 @@ class ResourcesParticipant(CheckpointParticipant):
         self._rollout_sessions: dict[str, set[str]] = {}
         # Seeds admitted and not finished, by attempt: a retire waits for them, so a session they create is freed too.
         self._seeding: Counter[EpisodeId] = Counter()
+        # The first seeds of rollouts in flight when admission closed, until resume: restarts of that checkpoint, as
+        # on a restart_only server. Such a seed has done no work of the episode worth saving, so prepare does not wait
+        # for it and the commit leaves its episode out; after a crash the rollout starts over from its input. A seed
+        # is refused while admission is closed, so these do not change before the commit.
+        self._seed_restarts: set[EpisodeId] = set()
         # Sessions a restore installed, until they end.
         # A request on one must name its attempt, since the attempt the restore replaced holds the same cookie.
         self._restored_sessions: set[str] = set()
@@ -301,8 +306,13 @@ class ResourcesParticipant(CheckpointParticipant):
             # only its seeds wait, so the restarts it reports do not change during the checkpoint.
             return
         self.accepting = False
+        # Only a rollout's first seed: a seed that claims a restored session still blocks prepare.
+        self._seed_restarts = {
+            episode_id for episode_id in self._seeding if episode_id.rollout_id not in self._rollout_sessions
+        }
 
     async def open_admission(self) -> None:
+        self._seed_restarts = set()
         self.accepting = True
         self._open.set()
 
@@ -320,7 +330,7 @@ class ResourcesParticipant(CheckpointParticipant):
                 | {episode_id.capture_key for episode_id in self._seeding}
             )
             if self.mode == "restart_only"
-            else []
+            else sorted(episode_id.capture_key for episode_id in self._seed_restarts)
         )
         # A session whose retire was cut short is still being freed: a checkpoint waits for a retried retire.
         blockers = sorted(
@@ -331,7 +341,9 @@ class ResourcesParticipant(CheckpointParticipant):
             }
         )
         # A restart_only server's requests are never captured, so none of them holds up a checkpoint.
-        inflight = 0 if self.mode == "restart_only" else self.inflight - self._carried_inflight()
+        inflight = (
+            0 if self.mode == "restart_only" else self.inflight - self._carried_inflight() - self._restarted_seeds()
+        )
         return PrepareReport(
             ready=inflight == 0 and not blockers,
             blockers=blockers,
@@ -340,10 +352,22 @@ class ResourcesParticipant(CheckpointParticipant):
         )
 
     def ready(self) -> bool:
-        if self.mode != "restart_only" and self.inflight > self._carried_inflight():
+        if self.mode != "restart_only" and self.inflight > self._carried_inflight() + self._restarted_seeds():
             return False
         # Retired sessions not yet freed are few; scanning them, not every session, keeps each prepare wake cheap.
         return not any(session_id in self._sessions for session_id in self._retired_session_rollouts)
+
+    def _restarted_seeds(self) -> int:
+        """Seed requests still in flight that the open checkpoint reports as restarts, so it does not wait for them.
+
+        A seed's request is counted in ``inflight`` from its start until it ends, and so is it in ``_seeding``.
+        One whose episode an earlier stage carried is already left out by ``_carried_inflight``.
+        """
+        return sum(
+            self._seeding[episode_id]
+            for episode_id in self._seed_restarts
+            if episode_id.capture_key not in self.carried_restarts
+        )
 
     def _carried_inflight(self) -> int:
         """Requests in flight on the sessions of episodes an earlier prepare stage reported as restarts.
@@ -522,7 +546,10 @@ class ResourcesParticipant(CheckpointParticipant):
         sessions = [
             (session_id, episode_id)
             for session_id, episode_id in self._checkpointed_sessions()
-            if (scope is None or episode_id in scope) and session_id not in carried
+            if (scope is None or episode_id in scope)
+            and session_id not in carried
+            # Nor a session a seed of the open checkpoint created: that seed's episode restarts.
+            and episode_id not in self._seed_restarts
         ]
         if self.mode == "stateless":
             # No state, only which sessions continue, so a restore places them where their requests are routed.

@@ -20,6 +20,7 @@ A reply the model server delivered before its own prepare can still reach the ag
 The session then holds that reply and stays parked at the boundary before the call until resume,
 so a session that prepare counted at its boundary never leaves it.
 Prepare is ready once no activation is between boundaries.
+A rollout's first seed in progress when admission closes does not count either: it is a restart of that checkpoint.
 An activation of an episode that an earlier prepare stage reported as a restart does not count:
 the commit leaves that episode out, so its session is not exported and prepare does not wait for it.
 It still parks at its next boundary until resume.
@@ -245,9 +246,15 @@ class AgentSessionParticipant(CheckpointParticipant):
         self._sessions: dict[str, _Session] = {}
         self.legacy_episodes = EpisodeSteps(self.notify)
         self._restored_episodes: dict[str, Boundary] = {}
-        # Seeds in progress, counted by session key and attempt; each blocks prepare until its session is registered.
+        # Seeds in progress, counted by session key and attempt.
         # A retire waits for the seeds of its attempts, so a seed it refuses frees what it built first.
         self._seeding: dict[str, Counter[EpisodeId]] = {}
+        # The first seeds of rollouts in progress when admission closed, by session key, until resume: restarts of
+        # that checkpoint. Such a seed has done no agent work worth saving, so prepare does not wait for it and the
+        # commit leaves its episode out; after a crash the rollout starts over from its input. No seed starts while
+        # admission is closed, so these are all the seeds of the checkpoint, and its restarts do not change before
+        # the commit.
+        self._seed_restarts: dict[str, set[EpisodeId]] = {}
         # The same seeds and the sessions, by rollout, so a retire touches only its own rollout's.
         # An entry leaves with the last seed or session of its rollout.
         self._rollout_seeds: dict[str, Counter[EpisodeId]] = {}
@@ -293,8 +300,10 @@ class AgentSessionParticipant(CheckpointParticipant):
         so a seed can meet a checkpoint either way, and the agent's session must match the environment's boundary.
         A seed that arrives while a checkpoint is open waits for resume: the environment's step is still in flight,
         so its boundary precedes the seed, and after a crash it seeds again.
-        A seed already in progress when admission closes blocks prepare until its session is registered,
-        and is then exported: the environment may record its boundary after the seed before the commit.
+        A rollout's first seed already in progress when admission closes is a restart of that checkpoint: prepare does
+        not wait for it, and the commit leaves its episode out, including the session it registers before resume.
+        It has done no agent work worth saving; after a crash the rollout starts over from its input.
+        A seed of a session that exists, such as one re-binding a restored session, blocks prepare until it ends.
         The same session can be seeded more than once at a time,
         for example by a retried request; each seed is counted.
         A seed whose attempt is retired before its session is registered frees the state it built.
@@ -355,9 +364,14 @@ class AgentSessionParticipant(CheckpointParticipant):
         """Whether ``session``'s episode starts over after a crash, so no checkpoint waits for or exports it."""
         return (
             session.key in self._restart_sessions
+            or session.key in self._seed_restarts
             or session.episode_id.capture_key in self.carried_restarts
             or session.key in self.legacy_episodes.restarts()
         )
+
+    def _restart_keys(self) -> set[str]:
+        """The session keys that restart: legacy restarts, restart sessions, and the open checkpoint's seeds."""
+        return set(self.legacy_episodes.restarts()) | self._restart_sessions | set(self._seed_restarts)
 
     def require_open(self, session: _Session) -> None:
         """Refuse to continue an activation of a session that was retired or closed."""
@@ -639,8 +653,17 @@ class AgentSessionParticipant(CheckpointParticipant):
         for session in self._sessions.values():
             session.park_requested = True
             session.park_event.set()
+        # Only a rollout's first seed: a seed of a session that exists, such as one re-binding a restored session to
+        # its rebuilt sandbox, still blocks prepare, so the restored progress stays in the checkpoint.
+        self._seed_restarts = {
+            key: set(seeds)
+            for key, seeds in self._seeding.items()
+            if key not in self._sessions and not any(seed.rollout_id in self._rollout_sessions for seed in seeds)
+        }
 
     async def open_admission(self) -> None:
+        # After resume a session that one of these seeds registered is checkpointed like any other.
+        self._seed_restarts = {}
         self.accepting = True
         self._open.set()
         self.legacy_episodes.open()
@@ -660,7 +683,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             self._sessions[key].episode_id.capture_key if key in self._sessions else key
             for key in self.legacy_episodes.blockers(self.legacy_episodes.blocker_count())
         }
-        restart_keys = set(self.legacy_episodes.restarts()) | self._restart_sessions
+        restart_keys = self._restart_keys()
         # A session being retired or closed blocks until its activation has stopped, whatever its state.
         # A restart's running session does not: nothing of it is in the checkpoint, and neither is a restart call.
         # Nor does anything of an episode an earlier prepare stage reported as a restart,
@@ -674,7 +697,12 @@ class AgentSessionParticipant(CheckpointParticipant):
                     if session.retired or session.closing or (session.state == "running" and key not in restart_keys)
                 }
                 | legacy_blockers
-                | {episode_id.capture_key for seeds in self._seeding.values() for episode_id in seeds}
+                | {
+                    episode_id.capture_key
+                    for key, seeds in self._seeding.items()
+                    for episode_id in seeds
+                    if episode_id not in self._seed_restarts.get(key, ())
+                }
             )
             - self.carried_restarts
         )
@@ -685,6 +713,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             counts={"sessions": len(self._sessions), "at_boundary": at_boundary},
             restarts=sorted(
                 {self._sessions[key].episode_id.capture_key for key in restart_keys if key in self._sessions}
+                | {episode_id.capture_key for seeds in self._seed_restarts.values() for episode_id in seeds}
                 | set(self._restart_calls.keys())
             ),
         )
@@ -694,7 +723,9 @@ class AgentSessionParticipant(CheckpointParticipant):
             # An earlier stage reported restarts, which may be any of the blockers below: check each one.
             return self.readiness().ready
         # A prepare asks after every change, so stop at the first blocker instead of listing and sorting them all.
-        if self._seeding or self.legacy_episodes.blocker_count():
+        if self.legacy_episodes.blocker_count() or any(
+            not set(seeds) <= self._seed_restarts.get(key, set()) for key, seeds in self._seeding.items()
+        ):
             return False
         restart_keys: Optional[set[str]] = None
         for key, session in self._sessions.items():
@@ -702,7 +733,7 @@ class AgentSessionParticipant(CheckpointParticipant):
                 return False
             if session.state == "running":
                 if restart_keys is None:
-                    restart_keys = set(self.legacy_episodes.restarts()) | self._restart_sessions
+                    restart_keys = self._restart_keys()
                 if key not in restart_keys:
                     return False
         return True
@@ -749,7 +780,7 @@ class AgentSessionParticipant(CheckpointParticipant):
         # another participant may report one of these episodes as a restart,
         # and unclaimed restored sessions outside it are retired by the commit.
         scope = None if episode_ids is None else set(episode_ids)
-        restart_keys = set(self.legacy_episodes.restarts()) | self._restart_sessions
+        restart_keys = self._restart_keys()
         sessions = [
             session
             for key, session in self._sessions.items()
