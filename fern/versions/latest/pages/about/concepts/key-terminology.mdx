@@ -79,7 +79,7 @@ Resources servers and agent servers keep per-episode state in sessions. Use thes
 | **Owner** | With several workers, the worker that holds a session's state and serves its requests; its owner file names it. | claim, claimant |
 | **Claim** | Checkpoint restore only: a replacement attempt takes the restored record; one nobody took is **unclaimed**. | claim for routing ownership |
 | **Terminal** | A refusal the environment server does not retry. | final |
-| **Conflict** | A 409 refusal of a session request: resources servers raise `ResourcesSessionConflictError` and agent servers raise `AgentSessionConflictError`. Session routing answers its own 409s, such as a cookie and body that name different sessions, before a handler runs. | `HTTPException(409, ...)` in session code |
+| **Conflict** | A 409 refusal of a session request: resources servers raise `ResourcesSessionConflictError` and agent servers raise `AgentSessionConflictError`. Session routing answers its own 409s without these errors, such as for a cookie and body that name different sessions, or for a session ID another worker already owns. | `HTTPException(409, ...)` in session code |
 
 Other features use some of these words in their own senses and keep them:
 
