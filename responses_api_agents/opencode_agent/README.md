@@ -17,12 +17,11 @@ and apply to local calls too. Subagents (`task`) are intentionally enabled for t
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
 profile still disables them. Use explicit tool overrides when comparing scores.
 
-Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
-and configuration for their Resources-owned lifecycle.
-
-The old `opencode_sandboxed_agent` package remains separate; only its shell PATH
-quoting is fixed for directories containing spaces. No benchmark recipes or
-Resources allowlists are migrated by this integration.
+[SWE-bench Multimodal](../../benchmarks/swebench/README.md#multimodal-with-opencode-sessions)
+uses this adapter through `single_agent_turn` with a Resources-owned task sandbox.
+Its recipe declares the pairing and routes the `swebench:multimodal` taskset.
+Other existing flat-row benchmark recipes retain their `opencode_sandboxed_agent`
+entrypoint and configuration.
 
 ## EnvironmentServer sessions
 
