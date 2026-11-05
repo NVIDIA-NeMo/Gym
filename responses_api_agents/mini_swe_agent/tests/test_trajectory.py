@@ -202,6 +202,16 @@ def test_usage_stays_unknown_when_one_model_call_reported_none() -> None:
     assert project(trajectory, []).usage is None
 
 
+def test_usage_stays_unknown_when_a_model_call_saved_no_response() -> None:
+    # mini-SWE counts a model call before making it; a stop or a failure during the call leaves no response.
+    trajectory = native_trajectory()
+    trajectory["info"]["model_stats"] = {"api_calls": 3}
+    assert project(trajectory, []).usage.total_tokens == 45
+
+    trajectory["info"]["model_stats"] = {"api_calls": 4}
+    assert project(trajectory, []).usage is None
+
+
 def test_a_malformed_saved_response_stops_the_projection() -> None:
     trajectory = native_trajectory()
     trajectory["messages"][5] = step({**model_response("resp_2"), "output": "not a list"}, "call_2")

@@ -152,9 +152,10 @@ A required server, and every server a task declares, must connect before the fir
 activation fails without inference. An optional server that does not connect is left out of the prompt. Each MCP
 call is placed in the response after the bash call that made it, as `mcp__<server>__<tool>` with its result, so
 verifiers that read tool calls see it. It is not a tool-call observation of its own: the model requested the bash call.
-The CLI's call records are written inside the sandbox by the user that runs the agent's commands, so only records for
-the run's MCP servers are reported; a line that is not one is left out and declared as an `mcp_call_record_invalid`
-gap, and a run without MCP servers reports no MCP call.
+The CLI's call records are written inside the sandbox by the user that runs the agent's commands, so a model command
+can append records too. A line that is not a call record is left out and declared as an `mcp_call_record_invalid`
+gap, and a run without MCP servers reports no MCP call. A call to a server the run was not granted is reported as the
+failed call the CLI recorded.
 mini-SWE saves no observation for its submission command; the runner keeps that command's output, which ends the
 response and the reported conversation.
 

@@ -86,8 +86,8 @@ class MiniSWEArtifacts:
 
     ``trajectory`` is mini-SWE's native transcript, saved after every step; ``None`` when the run saved none.
     ``output`` is the runner's account of how the run ended; ``None`` when the runner was killed before writing it.
-    ``invalid_mcp_calls`` counts the lines of ``mcp_calls.jsonl`` that are not a call record for one of the run's
-    MCP servers; they are left out of ``mcp_calls``.
+    ``invalid_mcp_calls`` counts the lines of ``mcp_calls.jsonl`` that are not a call record; they are left out of
+    ``mcp_calls``.
     """
 
     trajectory: dict[str, JsonValue] | None
@@ -216,14 +216,14 @@ class MiniSWESession(AgentSessionState):
         )
 
     async def _read_mcp_calls(self, path: str) -> tuple[list[dict[str, JsonValue]], int]:
-        """The MCP call records for the run's servers, and how many lines were not one.
+        """The MCP call records, and how many lines were not one.
 
         The model's commands run as the user that appends to the file, so a line can be partial, malformed or written
-        by the model itself. A run without MCP servers made no calls, and its file is not read.
+        by the model itself. A run without MCP servers made no calls, and its file is not read. A call to a server the
+        run was not granted is kept: the CLI records it as a failed call.
         """
         if not self.mcp_servers:
             return [], 0
-        names = {server["name"] for server in self.mcp_servers}
         calls: list[dict[str, JsonValue]] = []
         invalid = 0
         for line in (await self._read_optional(path) or "").splitlines():
@@ -237,7 +237,6 @@ class MiniSWESession(AgentSessionState):
             if (
                 isinstance(call, dict)
                 and isinstance(call.get("server"), str)
-                and call["server"] in names
                 and isinstance(call.get("tool"), str)
                 and isinstance(call.get("output"), str)
                 and isinstance(call.get("tool_call_id"), str | None)

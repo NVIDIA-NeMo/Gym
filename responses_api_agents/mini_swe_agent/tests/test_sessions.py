@@ -761,6 +761,7 @@ async def test_a_submitted_run_that_raced_close_keeps_its_own_outcome(agent) -> 
     ("exit_status", "error", "failure_kind", "status_code"),
     [
         ("RateLimitError", "litellm.RateLimitError: 429", "model_request_error", 429),
+        ("PaymentRequiredError", "litellm.PaymentRequiredError: 402", "model_request_error", 402),
         ("InternalServerError", "litellm.InternalServerError: 500", "model_request_error", 500),
         ("APIConnectionError", "Connection refused", "model_transport_error", None),
         ("RepeatedFormatError", "", "agent_invalid_output", None),

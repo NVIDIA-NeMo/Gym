@@ -110,6 +110,7 @@ LIMIT_EXIT_STATUSES = frozenset({"LimitsExceeded", "TimeExceeded", "ContextWindo
 MODEL_ERROR_STATUS_CODES = {
     "BadRequestError": 400,
     "AuthenticationError": 401,
+    "PaymentRequiredError": 402,
     "PermissionDeniedError": 403,
     "NotFoundError": 404,
     "UnprocessableEntityError": 422,

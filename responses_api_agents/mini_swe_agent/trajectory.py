@@ -77,11 +77,18 @@ class Projection:
     rejected: set[int] = field(default_factory=set)
     # A saved model response that is not a valid Responses API object; projection stops before it.
     invalid_response: bool = False
+    # The model calls mini-SWE started, counted before each call; ``None`` when the trajectory does not say.
+    model_calls: int | None = None
 
     @property
     def usage(self) -> NeMoGymResponseUsage | None:
-        """Total usage, only when every model call reported its own; a subtotal would undercount."""
+        """Total usage, only when every model call reported its own; a subtotal would undercount.
+
+        A call that a stop or a failure interrupted is counted by mini-SWE but saved no response, so it has no usage.
+        """
         if not self.responses or any(response.usage is None for response in self.responses):
+            return None
+        if self.model_calls is not None and self.model_calls > len(self.responses):
             return None
         return NeMoGymResponseUsage.sum_from_list([response.usage for response in self.responses])
 
@@ -140,7 +147,10 @@ def mcp_call_id(number: int, call: dict) -> str:
 
 def project(trajectory: dict | None, mcp_calls: list[dict]) -> Projection:
     """Project saved decisions and observations without inventing timings."""
-    projection = Projection(mcp_calls=list(mcp_calls))
+    model_calls = (((trajectory or {}).get("info") or {}).get("model_stats") or {}).get("api_calls")
+    projection = Projection(
+        mcp_calls=list(mcp_calls), model_calls=model_calls if isinstance(model_calls, int) else None
+    )
     conversation: list[dict] = []
     for message in (trajectory or {}).get("messages", []):
         extra = message.get("extra", {})
@@ -214,9 +224,11 @@ def observation_records(
     a tool call record of its own; the response carries it for verifiers.
     """
     gaps: list[ObservationGap] = []
-    for index, (entry, response) in enumerate(zip(projection.history, projection.responses), start=1):
-        invocation.conversation = _INPUT_ITEMS.validate_python(entry["input"])
-        invocation.conversation.extend(response.output)
+    if projection.responses:
+        # Each request extends the one before it, so the last request and its response hold the whole conversation.
+        invocation.conversation = _INPUT_ITEMS.validate_python(projection.history[-1]["input"])
+        invocation.conversation.extend(projection.responses[-1].output)
+    for index, response in enumerate(projection.responses, start=1):
         if response.id:
             invocation.model_calls.append(ModelCallRef(model_ref=model_server, response_id=response.id))
         else:

@@ -201,6 +201,15 @@ def build_agent(payload: dict[str, Any], *, attribute_calls: bool):
             self.save(self.config.output_path)
             return super().execute_actions(message)
 
+        def serialize(self, *extra_dicts: dict) -> dict:
+            data = super().serialize(*extra_dicts)
+            # The model's commands can read the saved trajectory, which the runner's input is unlinked to protect:
+            # leave out the rollout's model URL, its capture key and the API key.
+            model_kwargs = data["info"]["config"]["model"].get("model_kwargs", {})
+            for key in ("api_base", "api_key", "extra_headers"):
+                model_kwargs.pop(key, None)
+            return data
+
         def save(self, path: Path | None, *extra_dicts: dict) -> dict:
             data = self.serialize(*extra_dicts)
             if path:

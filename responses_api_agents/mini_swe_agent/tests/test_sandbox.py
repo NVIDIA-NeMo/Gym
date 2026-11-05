@@ -278,7 +278,7 @@ async def test_a_run_without_mcp_servers_reports_no_mcp_calls_whatever_its_comma
     assert (artifacts.mcp_calls, artifacts.invalid_mcp_calls) == ([], 0)
 
 
-async def test_collect_keeps_only_records_for_the_runs_mcp_servers(state, monkeypatch) -> None:
+async def test_collect_keeps_every_mcp_call_record(state, monkeypatch) -> None:
     state.mcp_servers = [{"name": "task_tools"}]
     stage_mcp_calls(
         state,
@@ -287,6 +287,7 @@ async def test_collect_keeps_only_records_for_the_runs_mcp_servers(state, monkey
             mcp_record(),
             # A call from a process the model left running in the background, outside any bash call.
             mcp_record(tool_call_id=None),
+            # The CLI records a call to a server the run was not granted as a failed call; the model made it.
             mcp_record(server="example_single_tool_call"),
         ],
     )
@@ -296,8 +297,9 @@ async def test_collect_keeps_only_records_for_the_runs_mcp_servers(state, monkey
     assert [(call["server"], call["tool_call_id"]) for call in artifacts.mcp_calls] == [
         ("task_tools", "call_1"),
         ("task_tools", None),
+        ("example_single_tool_call", "call_1"),
     ]
-    assert artifacts.invalid_mcp_calls == 1
+    assert artifacts.invalid_mcp_calls == 0
 
 
 async def test_malformed_mcp_records_are_counted_without_failing_the_run(state, monkeypatch) -> None:

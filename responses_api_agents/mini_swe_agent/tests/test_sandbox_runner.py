@@ -377,6 +377,10 @@ def test_real_mini_swe_runs_the_task_through_the_rollout_url_and_submits(tmp_pat
     assert str(home) in observation["output"] and observation["extra"]["duration_ms"] >= 0
     assert list(home.iterdir()) == []
     assert not (session_dir / "input.json").exists()
+    # The trajectory stays where the model's commands can read it, so it keeps no rollout URL, capture key or API key.
+    saved = (session_dir / "trajectory.json").read_text()
+    assert model.base_url not in saved and "rollout-7" not in saved
+    assert {"api_base", "api_key", "extra_headers"}.isdisjoint(trajectory["info"]["config"]["model"]["model_kwargs"])
 
 
 @needs_runtime
@@ -397,6 +401,9 @@ def test_real_mini_swe_saves_its_steps_when_the_supervisor_stops_it(tmp_path, sc
     assert trajectory["info"]["exit_status"] == ""
     assert [m.get("type") for m in trajectory["messages"] if m.get("type")] == ["function_call_output"]
     assert json.loads((session_dir / "output.json").read_text())["stop_reason"] == "wall_time"
+    # mini-SWE counted the interrupted call, so the first call's usage is not reported as the run's.
+    assert trajectory["info"]["model_stats"]["api_calls"] == 2
+    assert project(trajectory, []).usage is None
 
 
 @needs_runtime
