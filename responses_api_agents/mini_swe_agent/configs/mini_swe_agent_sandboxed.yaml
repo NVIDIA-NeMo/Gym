@@ -4,11 +4,11 @@
 # mini-SWE 2.4.6 in the task sandbox, through agent sessions. The Environment Server binds the benchmark: its
 # Resources Server lends the sandbox (sandbox_access), or this agent starts one from sandbox_provider. The step
 # limit and command timeout follow the Terminal Bench 4 profile (Artificial Analysis settings).
-# For the SWE-Gym /run path, use mini_swe_agent.yaml.
+# sessions_app.py serves agent sessions without Ray; for the SWE-Gym /run path, use mini_swe_agent.yaml.
 mini_swe_agent:
   responses_api_agents:
     mini_swe_agent:
-      entrypoint: app.py
+      entrypoint: sessions_app.py
       num_workers: 1
       resources_server: null
       model_server:

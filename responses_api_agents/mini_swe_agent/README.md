@@ -41,8 +41,9 @@ gym eval run terminal_bench_4 --agent mini_swe_agent/mini_swe_agent_sandboxed --
   --model-type vllm_model --model <model> --model-url <url>
 ```
 
-The agent class declares `ray_enabled` for `/run`, so Gym starts Ray for it on either path: the environment that
-runs `gym` needs the `ray` extra (`pip install "nemo-gym[ray]"`). Agent sessions do not use Ray otherwise.
+The config starts [`sessions_app.py`](sessions_app.py), which serves agent sessions without Ray and refuses `/run`.
+`app.py` serves both paths and declares `ray_enabled` for `/run`, so Gym starts Ray for it and the environment that
+runs `gym` needs the `ray` extra (`pip install "nemo-gym[ray]"`).
 
 The step limit (500) and command timeout (30 seconds) in that config follow the Terminal Bench 4 profile. The
 template's `step_limit` and `step_timeout` set mini-SWE's `agent.step_limit` and the environment's command timeout;
