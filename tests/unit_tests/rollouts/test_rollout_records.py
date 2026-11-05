@@ -519,6 +519,8 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
     exported = []
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", exported.append)
+    recorded = []
+    monkeypatch.setattr(collection, "record_run_summary", lambda summary, run_id: recorded.append((summary, run_id)))
     merged = output.with_name("merged.jsonl")
     await RolloutAggregationHelper().run_from_config(
         RolloutAggregationConfig(
@@ -576,6 +578,9 @@ async def test_offline_aggregation_uses_newest_attempt_and_full_inventory(
         "coverage/missing_outcomes": 1,
         "coverage/failure_budget_exhausted": 0,
     }
+    # One shard with attempt history: its summary goes to OTel under that shard's run id.
+    run_id = RunManifest.model_validate_json(manifest_path_for(output).read_bytes()).run_id
+    assert recorded == [(exported[-1], run_id)]
     assert report["coverage_known"] and not report["complete"]
     assert len(list(read_records(output))) == 2  # Aggregating does not rewrite history.
     health = orjson.loads((merged.parent / "quality_summary.json").read_bytes())["run"]
