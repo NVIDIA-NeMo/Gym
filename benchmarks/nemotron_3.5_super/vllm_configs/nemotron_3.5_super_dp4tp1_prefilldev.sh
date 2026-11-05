@@ -11,6 +11,12 @@ PROFILE_PREFILL="${PROFILE_PREFILL:-0}"
 PREFILL_PROFILE_STEPS="${PREFILL_PROFILE_STEPS:-20}"
 PREFILL_PROFILE_DELAY_SECONDS="${PREFILL_PROFILE_DELAY_SECONDS:-300}"
 
+# Optional operation input/output dumps; choose a directory on a mounted volume.
+# The launcher enables eager execution only on prefill workers when this is set.
+# Captures ten calls per FlashInfer API in real forwards above 16,384 tokens.
+# Example: export PREFILL_FLASHINFER_DUMP_DIR=/lustre/path/to/flashinfer-dumps
+PREFILL_FLASHINFER_DUMP_DIR="${PREFILL_FLASHINFER_DUMP_DIR:-}"
+
 GYM_MODEL_PARAMS=(
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.temperature=1.0"
     "++policy_model.responses_api_models.vllm_model.sampling_overrides.top_p=0.95"
@@ -60,6 +66,7 @@ VLLM_COMMON_ARGS=(
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
 VLLM_PREFILL_ARGS=(
+    --enable-prefill-batching-metrics
     --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":${NUM_SPECULATIVE_TOKENS},\"num_speculative_tokens_per_batch_size\":[[1,1024,0]]}"
     # MRV2 captures a one-token graph for the zero-draft schedule, but Mamba's
     # full-graph capture requires 1 + num_speculative_tokens. Keep prefill
@@ -90,7 +97,7 @@ VLLM_PREFILL_ARGS=(
         }
     }'
     --max-cudagraph-capture-size 1200
-    --max-num-batched-tokens 16960
+    --max-num-batched-tokens 33920
     --max-num-seqs 256
 )
 # @bxyu-nvidia: We set "enable_lookup": false for the Mooncake store connector because the prefill worker handles the prefix cache lookup and decode just needs to receive the transferred kv cache.
