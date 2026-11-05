@@ -22,12 +22,14 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId, TaskId
 from resources_servers.vibench.app import (
     PlanResult,
     VibenchResourcesServer,
     VibenchResourcesServerConfig,
     VibenchVerifyRequest,
+    _BuildSession,
     add_evaluation_tags,
 )
 
@@ -39,7 +41,7 @@ def make_server(tmp_path: Path, **overrides) -> VibenchResourcesServer:
         entrypoint="",
         name="vibench_resources_server",
         vibench_repo_root=str(tmp_path),
-        artifact_dir=str(tmp_path / "artifacts"),
+        sandbox_provider="sandbox",
         **overrides,
     )
     return VibenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -52,7 +54,6 @@ def make_verify_request(**overrides) -> VibenchVerifyRequest:
         "prd_files": ["prds/notes/prd/mvp.txt"],
         "test_plans": ["prds/notes/tests/mvp/test1.txt", "prds/notes/tests/mvp/test2.txt"],
         "asset_dirs": [],
-        "artifact_path": "/tmp/vibench-artifacts/app.tar",
         "test_assets_dir": None,
         "responses_create_params": {"input": [{"role": "user", "content": "build it"}]},
         "response": {
@@ -127,23 +128,15 @@ class TestArtifactUnpacking:
         assert not (tmp_path / "escaped.txt").exists()
 
     @pytest.mark.asyncio
-    async def test_rejected_artifact_path_is_not_deleted(self, tmp_path):
-        """A rejected path must not be unlinked: deleting an unvalidated, agent-supplied
-        path is arbitrary file deletion, and the rejection branch used to do exactly that."""
+    async def test_an_unpackable_archive_is_a_build_failure(self, tmp_path):
         server = make_server(tmp_path)
-        victim = tmp_path / "IMPORTANT_FILE"
-        victim.write_text("do not delete")
+        archive = self._tar_with(tmp_path, "../escaped.txt")
+        _register_session(server, tmp_path, archive)
 
-        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(victim)))
+        response = await server.verify(_FakeRequest(), make_verify_request())
 
         assert response.build_failed is True
-        assert victim.exists(), "verify deleted a file outside artifact_dir"
-
-    def test_rejects_artifact_path_outside_artifact_dir(self, tmp_path):
-        server = make_server(tmp_path)
-        # A compromised agent must not be able to point the verifier at arbitrary host files.
-        with pytest.raises(ValueError):
-            server._resolve_artifact("/etc/passwd")
+        assert response.reward == 0.0
 
 
 class _FakeProc:
@@ -683,14 +676,15 @@ class TestGradeOneTestPlan:
 
 
 class TestVerifyRewardAggregation:
-    """verify() is exercised with the sandbox and grading steps stubbed out; the Docker path
+    """verify() is exercised with the harvest and grading steps stubbed out; the Docker path
     is covered by the end-to-end smoke test in README.md, not by unit tests."""
 
     @pytest.mark.asyncio
     async def test_missing_artifact_scores_zero_and_flags_build_failure(self, tmp_path, monkeypatch):
         server = make_server(tmp_path)
+        _register_session(server, tmp_path, archive=None)
 
-        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=None))
+        response = await server.verify(_FakeRequest(), make_verify_request())
 
         assert response.reward == 0.0
         assert response.build_failed is True
@@ -758,7 +752,19 @@ class TestVerifyRewardAggregation:
 
 class _FakeRequest:
     def __init__(self, session_id: str = "session-1"):
-        self.session = {"session_id": session_id}
+        self.session = {SESSION_ID_KEY: session_id}
+
+
+def _register_session(server: VibenchResourcesServer, tmp_path: Path, archive: Path | None) -> None:
+    """A live session whose app was already harvested into ``archive`` (None: nothing came out)."""
+    server._sessions["session-1"] = _BuildSession(
+        episode_id=EpisodeId(rollout_id="0-0"),
+        task_id=TaskId(taskset="vibench:example", task_id="notes-mvp"),
+        sandbox=None,
+        scratch_dir=tmp_path / "scratch",
+        harvested=True,
+        archive=archive,
+    )
 
 
 def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
@@ -769,5 +775,5 @@ def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
         (dest / "setup-environment.sh").write_text("#!/bin/bash\n")
         (dest / "start-server.sh").write_text("#!/bin/bash\n")
 
+    _register_session(server, server._repo_root, Path("app.tar"))
     monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)
-    monkeypatch.setattr(server, "_resolve_artifact", lambda p: Path(p))

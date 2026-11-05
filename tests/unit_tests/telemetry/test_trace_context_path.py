@@ -329,7 +329,7 @@ def test_every_agent_that_hands_a_model_url_to_a_sandbox_builds_it_with_the_help
         "resolve_model_base_url(",
         "apply_rollout_prefix(",
         "trace_context_path_segment(",
-        "_create_opencode_config(",  # vibench rewrites the host of the URL opencode's builder made
+        "_create_opencode_config(",  # an agent that adjusts the URL opencode's builder made
     )
     missing = []
     for app in sorted(agents_dir.glob("*/app.py")):
