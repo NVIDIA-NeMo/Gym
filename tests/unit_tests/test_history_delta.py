@@ -485,9 +485,7 @@ async def test_history_eviction_preserves_ownership_until_the_active_response_fi
     assert list((worker_socket_dir / "session-owners").iterdir()) == []
 
 
-def test_append_after_ownership_expiry_resyncs_before_model_dispatch(
-    make_client, model_apps, envelope, read_events
-):
+def test_append_after_ownership_expiry_resyncs_before_model_dispatch(make_client, model_apps, envelope, read_events):
     client_a = make_client(num_workers=2, model_name="worker-a")
     client_b = make_client(num_workers=2, model_name="worker-b")
     url = "/ng-rollout/expired/v1/responses"
@@ -523,7 +521,9 @@ def test_forwarded_request_enters_only_the_owners_admission_gate(make_client, en
     # The first request establishes A as the owner and enters A's real admission gate.
     headers = {"x-gym-history-transport": "v1"}
     first_response = client_a.post(
-        url, json=envelope([{"role": "user", "content": "first call"}], identity="first", field="input"), headers=headers
+        url,
+        json=envelope([{"role": "user", "content": "first call"}], identity="first", field="input"),
+        headers=headers,
     )
     assert first_response.status_code == 200
     gate_a.admit.assert_awaited_once_with("rollout-1")

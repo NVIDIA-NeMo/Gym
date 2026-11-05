@@ -743,7 +743,9 @@ class RolloutRouter(WorkerForwarder):
                 return _replay_body(body, receive) if body is not None else receive
             if owner is None or scope.get(_FORWARDED_SCOPE_KEY):
                 # A forwarded request must never bounce between workers.
-                await _conflict("The rollout's worker ownership changed while routing the request.", scope, receive, send)
+                await _conflict(
+                    "The rollout's worker ownership changed while routing the request.", scope, receive, send
+                )
                 return None
             try:
                 await self.forward(owner, scope, receive, send, body=body)
