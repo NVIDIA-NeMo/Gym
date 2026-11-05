@@ -331,7 +331,8 @@ ACKNOWLEDGE_JUDGE_JOBS_FLAGS = "--acknowledge-failed-judge-jobs --acknowledge-re
 
 
 def _judge_job_unsettled(entry: Mapping[str, Any]) -> bool:
-    return entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+    # A failed job that settled a saved answer before it failed made progress, as a completed one does.
+    return entry.get("state") in ("failed", "completed") and not entry.get("settled")
 
 
 def failed_judge_jobs_blocking(
@@ -5616,10 +5617,17 @@ def judge_job_note(job: Mapping[str, Any]) -> str:
         return note
     if state == "failed":
         if job.get("ended_at"):
-            return (
-                f"{name}{where} failed: {job.get('error') or 'no error recorded'}; the saved answers it was to grade "
-                "again stay as they were"
-            )
+            note = f"{name}{where} failed: {job.get('error') or 'no error recorded'}; "
+            settled, withdrawn = job.get("settled") or 0, job.get("withdrawn") or 0
+            if not settled and not withdrawn:
+                return note + "the saved answers it was to grade again stay as they were"
+            # A grade it settled before it failed stays, and is progress (``_judge_job_unsettled``).
+            note += f"before it failed it settled {settled} of {job.get('selected') or 0} selected saved answer(s)"
+            if settled:
+                note += ", which counts as progress"
+            if withdrawn:
+                note += f"{',' if settled else ''} and withdrew {withdrawn}, left as they were"
+            return note + "; the others stay as they were"
         return (
             f"{name}{where} ended {job.get('scheduler_state') or 'in an unknown state'} with no receipt; the saved "
             "answers it was to grade again stay as they were"
