@@ -381,7 +381,6 @@ async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
     sock.bind(("127.0.0.1", 0))
     # Keep the unlistening port reserved so another service cannot reuse it.
     services.client._server_base_urls["judge"] = f"http://127.0.0.1:{sock.getsockname()[1]}"
-    services.resource.config.judge_request_timeout_s = 0.2
     try:
         started = time.monotonic()
         results = await asyncio.gather(*(run(services, i) for i in range(4)))

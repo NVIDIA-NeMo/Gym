@@ -309,6 +309,36 @@ async def test_a_restored_attempt_record_evicted_before_its_cohort_takes_its_res
     await restored.aclose()
 
 
+async def test_replayed_restored_group_refuses_finished_attempt_after_result_expiry(config, monkeypatch):
+    """A replay consumes the restore mark, so expiring its result keeps the refreshed attempt record."""
+    config = config.model_copy(update={"cohort_result_ttl_s": 10.0, "cohort_collection_timeout_s": 0.01})
+    server, participant = seeded(config)
+    await finish_cohort(server)
+    records = await participant.export(None)
+    await server.aclose()
+
+    now = [100.0]
+    monkeypatch.setattr(genrm, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    restored, restored_participant = await restore(config, records)
+    try:
+        now[0] = 105.0
+        replay = await verify_as(restored, SESSIONS[1], member(1))
+        assert replay.reward == 3.0
+        restored_participant.ended(SESSIONS[1])
+        # The result expires while the attempt record refreshed by the replay is still retained.
+        now[0] = 111.0
+        restored._prune_terminal_cohorts()
+        assert restored._verify_cohorts == {}
+
+        with pytest.raises(genrm.HTTPException) as refused:
+            await verify_as(restored, "stray", member(0))
+        assert refused.value.status_code == 409 and "already finished" in refused.value.detail
+        assert restored._verify_cohorts == {}
+        restored._run_single_comparison.assert_not_awaited()
+    finally:
+        await restored.aclose()
+
+
 async def finished_states(config, attempt: int) -> dict:
     """Export a finished group attempt whose members verified in separate sessions."""
     server, participant = participant_server(config)

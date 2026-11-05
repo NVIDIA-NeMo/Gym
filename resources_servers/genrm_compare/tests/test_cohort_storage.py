@@ -13,7 +13,7 @@ import pytest
 from fastapi import HTTPException
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym.core import TOKEN_METADATA_FIELDS, NeMoGymResponse
+from nemo_gym.core import TOKEN_METADATA_FIELDS, NeMoGymResponse, NgFailureEvent
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import comparison_result, member
 from resources_servers.genrm_compare.utils import extract_from_response_obj
@@ -451,6 +451,40 @@ async def test_conversion_failure_fails_identified_group_and_releases_peers(
     assert cohort.phase == "failed" and all(not m.waiters for m in cohort.members.values())
     assert_cohort_indices_match(server)
     assert cohort.collection_timeout_task is None and cohort.evaluation_task is None
+
+
+@pytest.mark.parametrize("conversion,existing_peer", [("history", False), ("response", False), ("response", True)])
+async def test_conversion_failure_preserves_cause_for_every_member(server, monkeypatch, conversion, existing_peer):
+    """The failing request and an already-waiting peer receive the same structured failure cause."""
+    cause = NgFailureEvent(
+        boundary="model", failure_kind="provider_unavailable", failure_reason="conversion", operation="model_request"
+    )
+    peer = asyncio.create_task(server.verify(request_with_session(), member(0))) if existing_peer else None
+    if peer is not None:
+        await asyncio.sleep(0)
+
+    def fail(*args):
+        raise ValueError("bad request conversion") from cause
+
+    if conversion == "history":
+        monkeypatch.setattr(genrm, "_input_to_conversation_history", fail)
+    else:
+        monkeypatch.setattr(server, "_comparison_response", fail)
+    with pytest.raises(HTTPException) as refused:
+        await server.verify(request_with_session(), member(1 if existing_peer else 0))
+    failures = [refused.value]
+    if peer is not None:
+        with pytest.raises(HTTPException) as peer_refused:
+            await asyncio.wait_for(peer, 0.5)
+        failures.append(peer_refused.value)
+
+    for failure in failures:
+        assert failure.status_code == 503
+        assert isinstance(failure.__cause__, NgFailureEvent)
+        assert failure.__cause__.event == cause.event
+    [cohort] = server._verify_cohorts.values()
+    assert cohort.failure_report.failure_id == cause.event_id
+    assert cohort.failure_report.events == {cause.event_id: cause.event}
 
 
 def test_pruning_retained_records_does_not_scan_the_full_registry(server, clock):

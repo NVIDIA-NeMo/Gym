@@ -55,6 +55,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     RequestFailureLog,
+    failure_report_for,
     rebuild_failure,
 )
 from nemo_gym.server_runtime import (
@@ -588,6 +589,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         f"GenRM cohort input conversion failed: {type(error).__name__}: {str(error)[:1000]}",
                         "collecting",
                         "cohort",
+                        failure_report=failure_report_for(error),
                     )
                     self._raise_cohort_failure(body, cohort)
                 cohort.members[rollout_index] = _CohortMember(
