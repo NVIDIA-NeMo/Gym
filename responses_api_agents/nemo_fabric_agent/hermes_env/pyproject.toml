@@ -9,10 +9,12 @@ version = "0.0.0"
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "nemo-fabric-adapters-hermes[relay]==0.6.1",
+    "nemo-relay==0.11.1",
     "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@b200f5bc60e31588ba2cb60e288029c4a54ba5fa",
 ]
 
 [tool.uv]
+# Installed with `uv pip install -r pyproject.toml`, so every direct dependency is pinned exactly.
 package = false
 # Hermes Agent refuses package builds unless its packager sets this, and it has no PyPI release after 0.19.
 extra-build-variables = { hermes-agent = { HERMES_NIX_BUILD = "1" } }

@@ -531,8 +531,14 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
         if self.config.adapter_project:
             project = Path(__file__).parent / self.config.adapter_project
-            subprocess.run(["uv", "sync", "--locked", "--project", str(project)], check=True)
             self._adapter_python = str(project / ".venv" / "bin" / "python")
+            # The project pins its packages exactly instead of keeping a lock, so install it as plain requirements.
+            subprocess.run(["uv", "venv", "--allow-existing", ".venv"], cwd=project, check=True)
+            subprocess.run(
+                ["uv", "pip", "install", "--python", self._adapter_python, "-r", "pyproject.toml"],
+                cwd=project,
+                check=True,
+            )
 
     def _resources_server_base_url(self) -> str:
         config = get_first_server_config_dict(
