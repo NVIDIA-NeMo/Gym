@@ -34,6 +34,7 @@ holds Gym's raw `/run` responses, whose keys can change: depend on `rewards`, an
 
 import json
 import tempfile
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -43,17 +44,19 @@ from typing import Any, Optional
 from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import BaseServerConfig, ConfigError
+from nemo_gym.config.config_types import BaseServerConfig, ConfigError, ignoring_command_line
 from nemo_gym.config.global_config import (
     HEAD_SERVER_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    scoped_global_config_dict,
 )
+from nemo_gym.core.episode_types import is_materialized_task_row
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
 from nemo_gym.eval.eval_plan import EvalPlan
-from nemo_gym.orchestration.server_supervisor import RunHelper
+from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
 
@@ -109,14 +112,18 @@ def plan_benchmark(
     `overrides` are config keys merged on top, as a nested dict like the config file's; a dotted key is refused
     (`ConfigError`), because it would be one literal key here but a path on the command line.
     `work_dir` receives the collated files; a temporary directory is used when it is None.
+
+    The caller's command line and active exporters are left alone. The benchmark's prepare script sees
+    `overrides` as its Gym configuration, which is this process's configuration only while it runs.
     """
     global_config_dict = _benchmark_config(asset_config_path("benchmark", benchmark), overrides)
-    plan = plan_for_config(global_config_dict, PrepareBenchmarkConfig.model_validate(global_config_dict), task_ids)
-    if work_dir is None:
-        with tempfile.TemporaryDirectory(prefix="gym-collate-") as directory:
-            rows = _collated_rows(global_config_dict, Path(directory))
-    else:
-        rows = _collated_rows(global_config_dict, work_dir)
+    with ignoring_command_line(), scoped_global_config_dict(global_config_dict):
+        plan = plan_for_config(global_config_dict, PrepareBenchmarkConfig.model_validate(global_config_dict), task_ids)
+        if work_dir is None:
+            with tempfile.TemporaryDirectory(prefix="gym-collate-") as directory:
+                rows = _collated_rows(global_config_dict, Path(directory))
+        else:
+            rows = _collated_rows(global_config_dict, work_dir)
     if task_ids is not None:
         rows = [row for row in rows if row_task_id(row) in set(task_ids)]
     return PlannedBenchmark(plan=plan, rows=rows)
@@ -140,8 +147,9 @@ def serve_benchmark(
     server's port, so a caller that serves from another process can know the address before the servers start;
     Gym chooses the port when it is None.
 
-    Returns once every server is ready; raises `ConfigError` if a server or a model endpoint is not. Like
-    `gym env start`, it sets this process's Gym configuration, so serve one benchmark per process.
+    Returns once every server is ready; raises `ConfigError` if a server or a model endpoint is not, or if
+    `registry_port` is in use. Like `gym env start`, it sets this process's Gym configuration, so serve one
+    benchmark per process.
     """
     config_paths = [asset_config_path("benchmark", benchmark), asset_config_path("model-type", model_type)]
     initial = OmegaConf.merge({"config_paths": config_paths}, _checked_overrides(overrides))
@@ -150,9 +158,22 @@ def serve_benchmark(
             raise ConfigError(f"registry_port must be a port number from 1 to 65535, got {registry_port!r}")
         initial = OmegaConf.merge(initial, {HEAD_SERVER_KEY_NAME: {"port": registry_port}})
     helper = RunHelper()
-    helper.start(GlobalConfigDictParserConfig(initial_global_config_dict=initial, skip_load_from_cli=True))
     try:
-        yield ServerClient.load_head_server_config()
+        with ignoring_command_line():
+            helper.start(
+                GlobalConfigDictParserConfig(
+                    initial_global_config_dict=initial, skip_load_from_cli=True, skip_exporters=True
+                )
+            )
+    except (ServerSpinupTimeoutError, ServerStartFailedError) as error:
+        raise ConfigError(f"Servers of benchmark {benchmark!r} did not start: {error}") from error
+    try:
+        registry_server = ServerClient.load_head_server_config()
+        if registry_port is not None and registry_server.port != registry_port:
+            raise ConfigError(
+                f"registry_port {registry_port} is in use: the registry server started on port {registry_server.port}"
+            )
+        yield registry_server
     finally:
         helper.shutdown()
 
@@ -187,7 +208,7 @@ def _benchmark_config(config_path: str, overrides: Optional[Mapping[str, Any]]) 
         _checked_overrides(overrides),
     )
     return GlobalConfigDictParser().parse(
-        GlobalConfigDictParserConfig(initial_global_config_dict=initial, skip_load_from_cli=True)
+        GlobalConfigDictParserConfig(initial_global_config_dict=initial, skip_load_from_cli=True, skip_exporters=True)
     )
 
 
@@ -215,6 +236,9 @@ class TaskRunner:
         self._helper = RolloutCollectionHelper()
         self._registry_server = registry_server
         self._row_of_task = _first_row_of_each_task(rows)
+        for task_id, row in self._row_of_task.items():
+            if is_materialized_task_row(row):
+                raise ConfigError(f"Task {task_id!r} is a materialized task row; TaskRunner runs flat task rows only.")
 
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
@@ -223,18 +247,21 @@ class TaskRunner:
         """Run `num_repeats` rollouts of one task.
 
         `rollout_id` names the rollouts for Gym's rollout correlation (e.g. verification events); repeats
-        get `<rollout_id>-r<n>`.
+        get `<rollout_id>-r<n>`. It must differ between concurrent calls; a fresh one is made when it is None.
         """
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
-        rows = self._helper.preprocess_examples(
-            [self._row_of_task[task_id]], task_ids=[task_id], num_repeats=num_repeats
-        )
-        if rollout_id is not None:
-            rows = [_with_rollout_id(row, rollout_id, index, num_repeats) for index, row in enumerate(rows)]
-        completed = [
-            await rollout for rollout in self._helper.run_examples(rows, head_server_config=self._registry_server)
-        ]
+        with ignoring_command_line():
+            rows = self._helper.preprocess_examples(
+                [self._row_of_task[task_id]], task_ids=[task_id], num_repeats=num_repeats
+            )
+        rollout_id = rollout_id or uuid.uuid4().hex
+        rows = [_with_rollout_id(row, rollout_id, index, num_repeats) for index, row in enumerate(rows)]
+        completions = self._helper.run_examples(rows, head_server_config=self._registry_server)
+        try:
+            completed = [await rollout for rollout in completions]
+        finally:
+            await completions.aclose()
         results = [result for _, result in completed]
         return TaskResult(task_id=task_id, rewards=[result["reward"] for result in results], results=results)
 
