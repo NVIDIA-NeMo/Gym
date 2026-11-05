@@ -55,7 +55,7 @@ def create_entryscript(sample: dict[str, Any]) -> str:
     """
     return f"""
 {SCRUB_HARNESS_ENV}
-cd /app 2>/dev/null || cd /testbed
+if [ ! -e /app/.git ] && [ -e /testbed/.git ]; then cd /testbed; else cd /app; fi
 {APPLY_PATCH_FUNCTION}
 apply_patch
 printf '%s\\n' "$?" > /workspace/patch_apply_status

@@ -17,12 +17,53 @@
 
 from dataclasses import asdict
 
-from resources_servers.swebench_pro.app import SWEBenchProInstanceRequest, SWEBenchProResourcesServer
+from fastapi import Request
+
+from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ResourcesSeedSessionResponse
+from resources_servers.swebench_pro.app import (
+    SWEBenchProInstanceRequest,
+    SWEBenchProResourcesServer,
+    SWEBenchProSeedSessionRequest,
+    SWEBenchProSeedSessionResponse,
+    SWEBenchProVerifyRequest,
+    SWEBenchProVerifyResponse,
+)
 from resources_servers.swebench_pro_v2.verification import VerificationInputsV2, assemble_workspace_files
 
 
+class SWEBenchProV2InstanceRequest(SWEBenchProInstanceRequest):
+    docker_image: str
+    test_sh: str
+    test_config: str
+
+
+class SWEBenchProV2SeedSessionRequest(SWEBenchProV2InstanceRequest, SWEBenchProSeedSessionRequest):
+    pass
+
+
+class SWEBenchProV2VerifyRequest(SWEBenchProV2InstanceRequest, SWEBenchProVerifyRequest):
+    pass
+
+
 class SWEBenchProV2ResourcesServer(SWEBenchProResourcesServer):
+    instance_request_cls = SWEBenchProV2InstanceRequest
     workspace_assembler = staticmethod(assemble_workspace_files)
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: SWEBenchProV2SeedSessionRequest | ResourcesSeedSessionRequest,
+    ) -> SWEBenchProSeedSessionResponse | ResourcesSeedSessionResponse:
+        return await super().seed_session(request, body)
+
+    async def verify(self, request: Request, body: SWEBenchProV2VerifyRequest) -> SWEBenchProVerifyResponse:
+        return await super().verify(request, body)
+
+    async def _repository_dir(self, sandbox: AsyncSandbox) -> str:
+        # Some v2 images keep the repository in /testbed; /app is only used when it is the repository.
+        result = await sandbox.exec("[ ! -e /app/.git ] && [ -e /testbed/.git ] && echo /testbed || echo /app")
+        return (result.stdout or "").strip() or "/app"
 
     def _image(self, body: SWEBenchProInstanceRequest) -> str:
         # v2 images live on GHCR and are named by the dataset's ``docker_image`` column.

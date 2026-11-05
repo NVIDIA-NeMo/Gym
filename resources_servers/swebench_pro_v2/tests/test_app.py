@@ -13,16 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import yaml
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
 from resources_servers.swebench_pro.app import SWEBenchProInstanceRequest, SWEBenchProResourcesServerConfig
 from resources_servers.swebench_pro.verification import VerificationResult, grade_output
-from resources_servers.swebench_pro_v2.app import SWEBenchProV2ResourcesServer
+from resources_servers.swebench_pro_v2.app import SWEBenchProV2InstanceRequest, SWEBenchProV2ResourcesServer
+from resources_servers.swebench_pro_v2.task_data import TaskData
 from resources_servers.swebench_pro_v2.verification import (
     TEST_FILES,
     VerificationInputsV2,
@@ -34,8 +37,8 @@ from resources_servers.swebench_pro_v2.verification import (
 POLICY = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "model.example.com"}]}
 
 
-def instance_request() -> SWEBenchProInstanceRequest:
-    return SWEBenchProInstanceRequest.model_validate(
+def instance_request() -> SWEBenchProV2InstanceRequest:
+    return SWEBenchProV2InstanceRequest.model_validate(
         {
             "repo": "example/repo",
             "instance_id": "instance_example",
@@ -155,3 +158,72 @@ async def test_agent_network_policy_applies_to_the_agent_sandbox_only(
     options = started[0].provider_options
     assert options.get("network_policy") == expected
     assert options["resource_requests"] == {"cpu": 1}
+
+
+@pytest.mark.parametrize("field", ["docker_image", "test_sh", "test_config"])
+def test_missing_or_non_string_v2_fields_are_rejected_with_the_field_name(field: str) -> None:
+    row = instance_request().model_dump()
+    for bad in (None, 1):
+        row[field] = bad
+        for model in (SWEBenchProV2InstanceRequest, TaskData):
+            with pytest.raises(ValueError, match=field):
+                model.model_validate(row)
+    del row[field]
+    with pytest.raises(ValueError, match=field):
+        SWEBenchProV2InstanceRequest.model_validate(row)
+
+
+def test_task_data_requires_exactly_what_the_runtime_request_requires() -> None:
+    required = lambda model: {name for name, info in model.model_fields.items() if info.is_required()}  # noqa: E731
+
+    assert required(TaskData) - {"evaluator_commit", "dataset_revision"} == required(SWEBenchProV2InstanceRequest)
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [("/testbed\n", "/testbed"), ("/app\n", "/app"), ("", "/app")],
+)
+@pytest.mark.asyncio
+async def test_repository_dir_follows_the_git_repository(stdout: str, expected: str) -> None:
+    sandbox = MagicMock()
+    sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout=stdout))
+
+    assert await make_server()._repository_dir(sandbox) == expected
+    assert "/app/.git" in sandbox.exec.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_patch_extraction_and_pristine_snapshot_use_the_repository_dir(tmp_path: Path) -> None:
+    commands: list[str] = []
+
+    async def exec_(command: str, **kwargs: object) -> SimpleNamespace:
+        commands.append(command)
+        return SimpleNamespace(return_code=0, stdout="/testbed\n" if "echo /testbed" in command else "", stderr="")
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_bytes(b"diff --git a/f b/f\n")
+
+    sandbox = MagicMock(exec=exec_, download=download, stop=AsyncMock())
+    server = make_server()
+    server._session_id_to_sandbox["s"] = sandbox
+
+    assert await server.pristine_untracked_files(sandbox) == frozenset()
+    assert await server._extract_model_patch("s", "abc123") == "diff --git a/f b/f\n"
+    repo_commands = [c for c in commands if "git -C" in c]
+    assert repo_commands and all("git -C /testbed" in c and "/app" not in c for c in repo_commands)
+
+
+def test_entryscript_enters_testbed_only_when_it_is_the_repository() -> None:
+    script = create_entryscript({})
+
+    assert "if [ ! -e /app/.git ] && [ -e /testbed/.git ]; then cd /testbed; else cd /app; fi" in script
+
+
+def test_opencode_preset_matches_the_v2_agent_and_verifier_budgets() -> None:
+    root = Path(__file__).parents[3]
+    preset = yaml.safe_load((root / "benchmarks/swebench/pro_v2/opencode.yaml").read_text())
+    server = yaml.safe_load((root / "resources_servers/swebench_pro_v2/configs/swebench_pro_v2.yaml").read_text())
+
+    agent = preset["swebench_pro_v2_opencode_sandboxed_agent"]["responses_api_agents"]["opencode_sandboxed_agent"]
+    verifier = server["swebench_pro_v2_resources_server"]["resources_servers"]["swebench_pro_v2"]
+    assert agent["sandbox_timeout"] == verifier["evaluation_timeout"] == 3000
