@@ -216,6 +216,9 @@ gym env resolve --config ...
   would silently stop running. `tests/unit_tests/benchmarks/` holds core-suite tests of benchmark and resources server
   code.
 - Only tests of the `nemo_gym/` root modules and repository-wide checks stay flat in `tests/unit_tests/`.
+- `tests/` itself holds only the suites (`unit_tests/`, `functional_tests/`, `e2e/`), the shared `conftest.py`, and
+  `tests/helpers/`: setup and assertions that tests in several places import, such as core unit tests and server
+  tests, or the tests of several servers. A helper used by one folder's tests stays beside them.
 - Every folder of test modules has an `__init__.py`, so pytest imports each test under its package name and test
   modules in different folders can share a file name.
 - A fixture lives in a `fixtures/` folder beside the tests that read it. A fixture that tests in several packages
