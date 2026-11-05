@@ -13,11 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import re
+from pathlib import Path
+from types import SimpleNamespace
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import pytest
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
@@ -27,8 +32,16 @@ from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, c
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxAccess,
+    SandboxSpec,
+    get_provider_class,
+    register_provider,
+)
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from responses_api_agents.langchain_deepagents_agent import app as app_module
 from responses_api_agents.langchain_deepagents_agent.app import DeepAgentsAgent
 from responses_api_agents.langchain_deepagents_agent.reasoning_search_agent import (
     ReasoningSearchDeepAgent,
@@ -38,6 +51,7 @@ from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge 
     GymResponsesChatModel,
     to_responses,
 )
+from responses_api_agents.langchain_deepagents_agent.sandbox_backend import TaskSandboxError
 
 
 def _config(**kwargs) -> ReasoningSearchDeepAgentConfig:
@@ -560,9 +574,19 @@ def test_config_rejects_execute_tools_false():
                 "sandbox_access": SandboxAccess(
                     connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
                     workdir="/work",
+                    user="agent",
                 )
             },
-            "DeepAgents agent does not support sandbox access",
+            "DeepAgents agent does not support a sandbox user override",
+        ),
+        (
+            {
+                "sandbox_access": SandboxAccess(
+                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
+                    workdir="work",
+                )
+            },
+            "DeepAgents agent requires an absolute sandbox workdir",
         ),
     ],
 )
@@ -658,3 +682,265 @@ def test_checkpointing_restarts_deepagents_rollouts_instead_of_exporting_them():
 
     assert agent.checkpoint_participant is None
     assert agent._restart_only is not None
+
+
+# --- borrowed task sandbox -------------------------------------------------------------------------------
+
+
+class _LendableLocalProvider(get_provider_class("local")):
+    """The local provider, made connectable by sandbox id so a test can lend its sandbox to the agent, as a
+    Resources Server lends a Docker or OpenSandbox sandbox. Records each provider close of a sandbox."""
+
+    name = "lendable_local"
+    handles: ClassVar[dict] = {}
+    closed: ClassVar[list] = []
+
+    async def serialize_handle(self, handle, *, scope=None) -> dict:
+        self.handles[handle.sandbox_id] = handle
+        return {"sandbox_id": handle.sandbox_id}
+
+    async def connect(self, descriptor):
+        return self.handles[descriptor["sandbox_id"]]
+
+    async def close(self, handle) -> None:
+        self.closed.append(handle.sandbox_id)
+        await super().close(handle)
+
+
+@pytest.fixture
+async def lent_sandbox(tmp_path):
+    """A running task sandbox owned by the test (the Resources Server's role), with a task file in its workdir."""
+    register_provider("lendable_local", _LendableLocalProvider, override=True)
+    workdir = tmp_path / "task"
+    workdir.mkdir()
+    (workdir / "input.txt").write_text("from the task image\n")
+    owner = AsyncSandbox(_LendableLocalProvider())
+    await owner.start(SandboxSpec(workdir=str(workdir)))
+    access = SandboxAccess(
+        connection=DirectSandboxConnection(provider_config_ref="lender", descriptor=await owner.serialize()),
+        workdir=str(workdir),
+    )
+    yield owner, access
+    await owner.stop()
+
+
+def _sandbox_agent() -> ReasoningSearchDeepAgent:
+    agent = _make_agent()
+    agent.server_client.global_config_dict = {"lender": {"lendable_local": {}}}
+    return agent
+
+
+def _request(rollout_id: str = "rollout") -> SimpleNamespace:
+    return SimpleNamespace(session={}, cookies={}, path_params={"rollout_id": rollout_id})
+
+
+def _close_body() -> AgentCloseSessionRequest:
+    return AgentCloseSessionRequest(agent_session_id="agent-session", episode_id=EpisodeId(rollout_id="rollout"))
+
+
+def _tool_names(post: AsyncMock, call: int) -> set[str]:
+    return {tool["name"] for tool in post.call_args_list[call].kwargs["json"]["tools"]}
+
+
+@pytest.mark.asyncio
+async def test_borrowed_sandbox_runs_the_graph_tools_there_and_close_leaves_it_running(lent_sandbox):
+    owner, access = lent_sandbox
+    workdir = access.workdir
+    agent = _sandbox_agent()
+    post = AsyncMock(
+        side_effect=[
+            _model_response(
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "execute", "args": {"command": "pwd && cp input.txt copied.txt"}, "id": "call_exec"},
+                        {
+                            "name": "write_file",
+                            "args": {"file_path": f"{workdir}/note.txt", "content": "written by the graph"},
+                            "id": "call_write",
+                        },
+                        {"name": "read_file", "args": {"file_path": f"{workdir}/input.txt"}, "id": "call_read"},
+                    ],
+                )
+            ),
+            _model_response("done"),
+        ]
+    )
+    agent.server_client.post = post
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body(sandbox_access=access))
+
+    result = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+
+    outputs = {item.call_id: item.output for item in result.output if item.type == "function_call_output"}
+    # The shell runs in the lent sandbox's workdir; the file tools read and write its files.
+    assert outputs["call_exec"].startswith(f"{workdir}\n") and "exit code 0" in outputs["call_exec"]
+    assert "from the task image" in outputs["call_read"]
+    assert Path(workdir, "copied.txt").read_text() == "from the task image\n"
+    assert Path(workdir, "note.txt").read_text() == "written by the graph"
+    # The sandbox graph offers deepagents' execute tool, and every model call takes the rollout-prefixed route.
+    assert "execute" in _tool_names(post, 0)
+    assert {call.kwargs["url_path"] for call in post.call_args_list} == {"/ng-rollout/rollout/v1/responses"}
+
+    close = await agent.close_agent_session(request, _close_body())
+
+    [sandbox] = [record for record in close.agent_observations.records if record.kind == "sandbox"]
+    assert (sandbox.role, sandbox.provider, sandbox.outcome) == ("agent", "lendable_local", "completed")
+    assert sandbox.sandbox_id == owner.sandbox_id
+    # Close disconnected without stopping: the owner still runs commands in it and stops it itself.
+    assert owner.sandbox_id not in _LendableLocalProvider.closed
+    assert (await owner.exec("cat copied.txt")).stdout == "from the task image\n"
+
+
+@pytest.mark.asyncio
+async def test_in_process_session_keeps_files_in_graph_state_without_an_execute_tool(tmp_path):
+    agent = _make_agent()
+    path = str(tmp_path / "in_process.txt")
+    post = AsyncMock(
+        side_effect=[
+            _model_response(
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "write_file", "args": {"file_path": path, "content": "kept"}, "id": "w"}],
+                )
+            ),
+            _model_response(
+                AIMessage(content="", tool_calls=[{"name": "read_file", "args": {"file_path": path}, "id": "r"}])
+            ),
+            _model_response("done"),
+        ]
+    )
+    agent.server_client.post = post
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body())
+
+    result = await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="go"))
+
+    outputs = {item.call_id: item.output for item in result.output if item.type == "function_call_output"}
+    assert "kept" in outputs["r"]
+    # deepagents' StateBackend keeps the file in graph state, never on the Agent Server's disk.
+    assert not (tmp_path / "in_process.txt").exists()
+    assert "execute" not in _tool_names(post, 0)
+    close = await agent.close_agent_session(request, _close_body())
+    assert close.agent_observations.records == []
+
+
+def _hanging_graph(started: asyncio.Event, order: list[str]) -> MagicMock:
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            order.append("cancelled")
+            raise
+
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=ainvoke)
+    return graph
+
+
+async def _seed_with_borrowed_stub(monkeypatch, agent: ReasoningSearchDeepAgent, graph: MagicMock, order: list[str]):
+    async def disconnect() -> None:
+        order.append("disconnect")
+
+    sandbox = SimpleNamespace(disconnect=disconnect, sandbox_id="sb-1", provider_name="docker")
+    monkeypatch.setattr(app_module, "create_provider", lambda config: MagicMock())
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", AsyncMock(return_value=sandbox))
+    # After the agent's in-process graph is built: the seed builds the sandbox session's graph.
+    monkeypatch.setattr(type(agent), "build_agent", lambda self, model, backend=None: graph)
+    access = SandboxAccess(
+        connection=DirectSandboxConnection(provider_config_ref="lender", descriptor={"sandbox_id": "sb-1"}),
+        workdir="/app",
+    )
+    request = _request()
+    await agent.seed_agent_session(request, _seed_body(sandbox_access=access))
+    return request
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_the_running_graph_before_releasing_the_borrowed_sandbox(monkeypatch):
+    agent = _sandbox_agent()
+    started, order = asyncio.Event(), []
+    request = await _seed_with_borrowed_stub(monkeypatch, agent, _hanging_graph(started, order), order)
+    activation = asyncio.create_task(
+        agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="x"))
+    )
+    await asyncio.wait_for(started.wait(), 5)
+
+    close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 5)
+
+    assert order == ["cancelled", "disconnect"]
+    [sandbox] = [record for record in close.agent_observations.records if record.kind == "sandbox"]
+    assert (sandbox.sandbox_id, sandbox.outcome) == ("sb-1", "cancelled")
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(activation, 5)
+
+
+@pytest.mark.asyncio
+async def test_activation_retries_join_one_graph_run_and_conflicting_requests_are_refused(monkeypatch):
+    agent = _sandbox_agent()
+    release, runs = asyncio.Event(), []
+
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        runs.append(state["messages"][0].content)
+        await release.wait()
+        return {"messages": [*state["messages"], AIMessage(content="ran once")]}
+
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=ainvoke)
+    request = await _seed_with_borrowed_stub(monkeypatch, agent, graph, [])
+    body = NeMoGymResponseCreateParamsNonStreaming(input="do it")
+    first = asyncio.create_task(agent.responses(request, Response(), body))
+    await asyncio.sleep(0)
+    # A client resending the same POST after a lost reply joins the run in flight.
+    second = asyncio.create_task(agent.responses(request, Response(), body.model_copy(deep=True)))
+    with pytest.raises(HTTPException) as different:
+        await asyncio.wait_for(
+            agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="other")), 5
+        )
+    with pytest.raises(HTTPException) as other_rollout:
+        other_route = SimpleNamespace(session=request.session, cookies={}, path_params={"rollout_id": "other"})
+        await asyncio.wait_for(agent.responses(other_route, Response(), body), 5)
+    release.set()
+
+    replies = await asyncio.wait_for(asyncio.gather(first, second), 5)
+
+    assert [reply.output[0].content[0].text for reply in replies] == ["ran once", "ran once"]
+    assert runs == ["do it"]
+    assert (different.value.status_code, other_rollout.value.status_code) == (409, 409)
+
+
+@pytest.mark.asyncio
+async def test_a_sandbox_runtime_failure_fails_the_activation_and_close_reports_it(monkeypatch):
+    agent = _sandbox_agent()
+
+    async def ainvoke(state: dict, config: RunnableConfig) -> dict:
+        raise TaskSandboxError("sandbox sb-1 could not run a command (sandbox): gone")
+
+    graph = MagicMock()
+    graph.ainvoke = AsyncMock(side_effect=ainvoke)
+    request = await _seed_with_borrowed_stub(monkeypatch, agent, graph, [])
+
+    with pytest.raises(TaskSandboxError):
+        await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="x"))
+    close = await agent.close_agent_session(request, _close_body())
+
+    [sandbox] = [record for record in close.agent_observations.records if record.kind == "sandbox"]
+    assert (sandbox.outcome, sandbox.error_type) == ("failed", "TaskSandboxError")
+
+
+@pytest.mark.asyncio
+async def test_a_failed_connect_releases_the_provider_client(monkeypatch):
+    agent = _sandbox_agent()
+    provider = MagicMock(aclose=AsyncMock())
+    monkeypatch.setattr(app_module, "create_provider", lambda config: provider)
+    monkeypatch.setattr(app_module.AsyncSandbox, "connect", AsyncMock(side_effect=RuntimeError("unreachable")))
+    access = SandboxAccess(
+        connection=DirectSandboxConnection(provider_config_ref="lender", descriptor={"sandbox_id": "sb-1"}),
+        workdir="/app",
+    )
+
+    with pytest.raises(RuntimeError, match="unreachable"):
+        await agent.seed_agent_session(_request(), _seed_body(sandbox_access=access))
+
+    provider.aclose.assert_awaited_once()

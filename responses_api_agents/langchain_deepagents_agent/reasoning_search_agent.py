@@ -22,6 +22,7 @@ second resources server yet).
 from typing import Optional
 
 from deepagents import create_deep_agent
+from deepagents.backends.protocol import BackendProtocol
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_tavily import TavilySearch
 
@@ -40,12 +41,13 @@ class ReasoningSearchDeepAgentConfig(DeepAgentsAgentConfig):
 class ReasoningSearchDeepAgent(DeepAgentsAgent):
     config: ReasoningSearchDeepAgentConfig
 
-    def build_agent(self, model: BaseChatModel):
+    def build_agent(self, model: BaseChatModel, backend: BackendProtocol | None = None):
         # BaseChatModel.profile is a plain, already-inherited field (langchain_core) — deepagents reads
         # model.profile["max_input_tokens"] when computing its summarization trigger/keep thresholds.
         model.profile = {"max_input_tokens": self.config.max_input_tokens}
         return create_deep_agent(
             model=model,
+            backend=backend,
             tools=[
                 TavilySearch(max_results=self.config.max_search_results, tavily_api_key=self.config.tavily_api_key)
             ],
