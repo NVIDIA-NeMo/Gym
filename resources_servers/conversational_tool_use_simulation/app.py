@@ -30,6 +30,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    JUDGE_FAILED,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -43,6 +44,12 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 
+
+# Environment-prefixed failure kinds for masked results; see nemo_gym.core.failure_kinds.
+SIMULATOR_CALL_FAILED = "conversational_tool_use:simulator_call_failed"
+USER_VERDICT_FAILED = "conversational_tool_use:user_message_failed_verification"
+TOOL_VERDICT_FAILED = "conversational_tool_use:tool_result_failed_verification"
+FAILURE_REASON_MAX_CHARS = 2000
 
 TRAJECTORY_COMPLETE_INDICATOR = "###STOP###"
 AGENT_TRANSFER_INDICATOR = "###TRANSFER###"
@@ -1397,6 +1404,9 @@ Return type in JSON Schema format: {return_type}
                 "result": self._trajectory_result(state),
             }
         )
+        failure_kind, failure_reason = self._masked_failure(state)
+        if failure_kind is not None:
+            response_payload.update(failure_kind=failure_kind, failure_reason=failure_reason)
         verified_response = ConversationalToolUseVerifyResponse.model_validate(response_payload)
         self.session_id_to_state.pop(session_id, None)
         return verified_response
@@ -2400,6 +2410,31 @@ Return type in JSON Schema format: {return_type}
             VerificationFailureLabel.TRAJECTORY_FAILURE in failure_labels
             and state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR
         )
+
+    def _masked_failure(self, state: ConversationSessionState) -> tuple[Optional[str], Optional[str]]:
+        """Name why a masked sample was masked, from evidence already on the state.
+
+        Mirrors ``_should_mask_sample`` and never changes its decision. A simulator call that
+        failed is told apart from a judge verdict that blamed the user or tool simulation.
+        """
+        if not self._should_mask_sample(state):
+            return None, None
+        failure_labels = set(state.failure_labels)
+        if state.generation_invalid_reason == TrajectoryInvalidReason.MESSAGE_GENERATION_ERROR:
+            simulator = "tool" if VerificationFailureLabel.TOOL_FAILURE in failure_labels else "user"
+            detail = f"{simulator} simulator call failed: {state.terminal_error or 'no error text recorded'}"
+            return SIMULATOR_CALL_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        if VerificationFailureLabel.VERIFICATION_GENERATION_ERROR in failure_labels:
+            detail = f"Judge call failed: {state.judge_generation_error or 'no error text recorded'}"
+            return JUDGE_FAILED, detail[:FAILURE_REASON_MAX_CHARS]
+        reasons = ", ".join(state.invalid_reasons) or "no invalid reason recorded"
+        if VerificationFailureLabel.USER_FAILURE in failure_labels:
+            return USER_VERDICT_FAILED, f"Judge marked the simulated user message invalid: {reasons}"[
+                :FAILURE_REASON_MAX_CHARS
+            ]
+        return TOOL_VERDICT_FAILED, f"Judge marked the simulated tool result invalid: {reasons}"[
+            :FAILURE_REASON_MAX_CHARS
+        ]
 
     def _dedupe_strings(self, values: List[Any]) -> List[str]:
         deduped = []
