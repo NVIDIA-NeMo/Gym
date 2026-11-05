@@ -14,10 +14,10 @@
 # limitations under the License.
 """Validate coverage and assemble statistical inputs from stored suite artifacts."""
 
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     BenchmarkSamples,
     MetricScale,
@@ -27,7 +27,7 @@ from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     normalize_score,
     summarize_sample,
 )
-from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
+from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun, _repeat_count
 from nemo_gym.eval.comparison.suite.schema import (
     SuiteAggregateResult,
     SuiteCellResult,
@@ -37,6 +37,7 @@ from nemo_gym.eval.comparison.suite.schema import (
     SuiteSampleSummary,
     SuiteStatistics,
 )
+from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES
 
 
 def _task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str], bool]:
@@ -83,9 +84,41 @@ def _task_indices(tasks: set[int]) -> str:
     return f"{preview}, ... (+{len(tasks) - 10} more)" if len(tasks) > 10 else preview
 
 
+def _select_metric_repeats(run: LoadedSuiteRun, metrics: list[SuiteMetricResult]) -> LoadedSuiteRun:
+    """Omit token-only rows lacking selected estimates; score rows need not have sample_count."""
+    selected_names = {metric.name for metric in metrics}
+    token_names = set(COMPLETION_TOKEN_METRIC_NAMES)
+    omitted = set()
+    for row in run.repeat_rows:
+        measurement_names = row.keys() - {AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
+        if measurement_names and measurement_names <= token_names and not selected_names <= row.keys():
+            omitted.add(int(row[ROLLOUT_INDEX_KEY_NAME]))
+    if not omitted:
+        return run
+    rows = tuple(row for row in run.repeat_rows if row[ROLLOUT_INDEX_KEY_NAME] not in omitted)
+    recorded, _, complete_identities = _task_sets(run)
+    # A valid single-repeat run also has only token summaries. Its scored task records
+    # distinguish that case from repeats with no usable measurements.
+    unscored = omitted - recorded.keys() if complete_identities else omitted
+    return replace(
+        run,
+        repeat_rows=rows,
+        repeat_count=_repeat_count(
+            rows=rows, groups=run.groups, agent_metrics=run.agent_metrics, path=run.aggregate_metrics, agent=run.agent
+        ),
+        unscored_repeat_indices=tuple(sorted(unscored)),
+    )
+
+
 def _coverage(run: LoadedSuiteRun) -> SuiteCoverage:
     recorded, notes, complete_identities = _task_sets(run)
     incomplete = bool(notes)
+    if run.unscored_repeat_indices:
+        incomplete = True
+        indices = ", ".join(map(str, run.unscored_repeat_indices))
+        notes.append(
+            f"Repeats with no scored task observations are excluded from score calculations (indices: {indices})."
+        )
     for metric in ("coverage/masked_rollouts", "coverage/fully_masked_tasks"):
         count = run.agent_metrics.get(metric, 0)
         if isinstance(count, (int, float)) and count > 0:
@@ -94,7 +127,7 @@ def _coverage(run: LoadedSuiteRun) -> SuiteCoverage:
     reported_repeats = run.agent_metrics.get("num_repeats")
     if isinstance(reported_repeats, int) and reported_repeats != run.repeat_count:
         incomplete = True
-        notes.append("Reported repeat count differs from the number of stored repeat metric rows.")
+        notes.append("Reported repeat count differs from the number of scored repeats available for comparison.")
     sample_counts = {row["sample_count"] for row in run.repeat_rows if isinstance(row.get("sample_count"), int)}
     if len(sample_counts) > 1:
         incomplete = True
@@ -230,6 +263,7 @@ def _run_summary(run: LoadedSuiteRun, coverage: SuiteCoverage, scores: tuple[flo
         repeat_count=run.repeat_count,
         repeat_indices=[int(row[ROLLOUT_INDEX_KEY_NAME]) for row in run.repeat_rows],
         repeat_scores=list(scores),
+        unscored_repeat_indices=list(run.unscored_repeat_indices),
         summary=summary,
         coverage=coverage,
     )
@@ -266,6 +300,8 @@ def compare_suite_cell(
     confidence_level: float,
 ) -> SuiteCellResult:
     """Build one benchmark comparison, excluding single-repeat sources as a pair."""
+    baseline = _select_metric_repeats(baseline, metrics)
+    candidate = _select_metric_repeats(candidate, metrics)
     baseline_coverage = _coverage(baseline)
     candidate_coverage = _coverage(candidate)
     _check_paired_coverage(baseline, candidate, baseline_coverage, candidate_coverage)

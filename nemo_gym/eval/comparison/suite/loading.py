@@ -55,6 +55,7 @@ class LoadedSuiteRun:
     agent_metrics: Mapping[str, object]
     repeat_count: int
     planned_tasks_by_repeat: Mapping[int, frozenset[int]] | None
+    unscored_repeat_indices: tuple[int, ...] = ()
 
 
 def load_suite_manifest(path: Path) -> SuiteManifest:
@@ -213,6 +214,29 @@ def _read_planned_tasks(path: Path, agent: str, *, environment_server: str | Non
     return {repeat: frozenset(indices) for repeat, indices in tasks.items()}
 
 
+def _repeat_count(
+    *,
+    rows: tuple[Mapping[str, object], ...],
+    groups: tuple[Mapping[str, object], ...],
+    agent_metrics: Mapping[str, object],
+    path: Path,
+    agent: str,
+) -> int:
+    """Retain verified zero/single-repeat counts when no repeat estimates are stored."""
+    if rows:
+        return len(rows)
+    masked = agent_metrics.get("coverage/masked_rollouts")
+    if agent_metrics.get("coverage/measured_rollouts") == 0 and isinstance(masked, (int, float)) and masked > 0:
+        return 0
+    expected = [group.get("expected_num_rollouts") for group in groups]
+    if agent_metrics.get("num_repeats") == 1 or (expected and all(value == 1 for value in expected)):
+        return 1
+    raise ConfigError(
+        f"'{path}' agent '{agent}' has no stored repeat rows and no verified single-repeat count. "
+        "Regenerate aggregate metrics with `gym eval aggregate`."
+    )
+
+
 def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun:
     """Select one aggregate entry by agent and/or server, retaining its recorded repeat rows."""
     rollouts = _resolve_path(source.rollouts, directory)
@@ -240,17 +264,7 @@ def load_suite_run(source: SuiteRunSource, *, directory: Path) -> LoadedSuiteRun
     agent_metrics = entry.get("agent_metrics") or {}
     if not isinstance(agent_metrics, dict):
         raise ConfigError(f"'{metrics}' agent_metrics must be an object.")
-    count = len(rows)
-    if not rows:
-        recorded_count = agent_metrics.get("num_repeats")
-        expected = [group.get("expected_num_rollouts") for group in groups]
-        if recorded_count == 1 or (expected and all(value == 1 for value in expected)):
-            count = 1
-        else:
-            raise ConfigError(
-                f"'{metrics}' agent '{agent}' has no stored repeat rows and no verified single-repeat count. "
-                "Regenerate aggregate metrics with `gym eval aggregate`."
-            )
+    count = _repeat_count(rows=rows, groups=groups, agent_metrics=agent_metrics, path=metrics, agent=agent)
     inputs = (
         _resolve_path(source.materialized_inputs, directory)
         if source.materialized_inputs is not None
