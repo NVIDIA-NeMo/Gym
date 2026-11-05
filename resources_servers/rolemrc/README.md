@@ -120,8 +120,8 @@ pre-downloaded file instead of fetching from the Hub.
 
 `include_bertscore: true` (default) completes the reported metric set but
 downloads a roberta-large checkpoint on first use. Set it to `false` (and drop
-`bert-score` from `requirements.txt`) for a lightweight ROUGE/BLEU/METEOR-only
-reward signal.
+`bert-score` from `pyproject.toml`, regenerate `uv.lock`, and commit both files)
+for a lightweight ROUGE/BLEU/METEOR-only reward signal.
 
 ## Judge model
 
