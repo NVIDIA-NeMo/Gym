@@ -32,6 +32,7 @@ from resources_servers.swebench_pro.verification import (
     APPLY_PATCH_FUNCTION,
     SCRUB_HARNESS_ENV,
     VerificationInputs,
+    build_environment_repairs,
     strip_binary_hunks,
 )
 
@@ -59,6 +60,7 @@ if [ ! -e /app/.git ] && [ -e /testbed/.git ]; then cd /testbed; else cd /app; f
 {APPLY_PATCH_FUNCTION}
 apply_patch
 printf '%s\\n' "$?" > /workspace/patch_apply_status
+{build_environment_repairs(sample.get("environment_repairs", ()))}
 mkdir -p {TESTS_DIR} /logs/verifier
 cp {" ".join(f"/workspace/{name}" for name in TEST_FILES)} {TESTS_DIR}/
 bash {TESTS_DIR}/test.sh > /workspace/test_sh.log 2>&1

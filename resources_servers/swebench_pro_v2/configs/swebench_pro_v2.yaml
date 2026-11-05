@@ -15,7 +15,9 @@ swebench_pro_v2_resources_server:
       apply_anti_cheating: false
       is_verifying_golden_patch: false
       prefetch_go_modules: false
-      environment_repairs: []
+      # Only this v1 repair is kept: redis files an agent's test run leaves in the repo break redis start-up
+      # in the verifier sandbox (e.g. NodeBB tasks).
+      environment_repairs: [stale_database_state]
 
       # Upstream runs the agent offline except for the model endpoint. Set this for the
       # OpenSandbox provider to reproduce that, e.g.
