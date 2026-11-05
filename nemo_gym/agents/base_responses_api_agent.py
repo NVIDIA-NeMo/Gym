@@ -915,8 +915,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Fence the session and keep the close's saved reply, observations included, for the close retry window.
 
         Failed release keeps state for retry. Closing an unknown ID prevents a delayed seed
-        within the same window. No timer cancels active sessions: the episode owner and sandbox
-        provider retain responsibility for normal and crash cleanup.
+        within the same window. No timer cancels active sessions: the environment server that drives the episode
+        and the sandbox provider retain responsibility for normal and crash cleanup.
         """
         if type(self)._close_agent_session_state is SimpleResponsesAPIAgent._close_agent_session_state:
             raise NotImplementedError("This agent does not implement episode sessions")
@@ -1108,7 +1108,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         """Validate grants and initialize harness state.
 
         Raise AgentSeedRejectedError for a seed this agent cannot serve, such as a sandbox or a required grant it
-        does not support: the seed answers a final 422 and binds nothing. An HTTPException keeps its explicit status;
+        does not support: the seed answers a terminal 422 and binds nothing. An HTTPException keeps its explicit status;
         any other, unexpected exception answers 500, which an Environment Server retries as transient.
         If setup fails and cleanup cannot finish, raise AgentSessionSetupError with the
         partial state and original error. The base retains it for close, never activation.

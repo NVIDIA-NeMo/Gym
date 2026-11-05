@@ -182,7 +182,7 @@ class InteractiveBrowserResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self,
         request: Request,
-        # Typed first and left to right: the legacy model allows extra fields, so it would
+        # Episode seed first and left to right: the agent-run seed model allows extra fields, so it would
         # otherwise swallow an episode body and answer it with an empty response.
         body: Annotated[
             Union[ResourcesSeedSessionRequest, BrowserSeedSessionRequest],

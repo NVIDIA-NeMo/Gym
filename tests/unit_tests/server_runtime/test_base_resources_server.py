@@ -234,6 +234,14 @@ EPISODE = EpisodeId(rollout_id="rollout", attempt=0)
 
 
 class TestResourcesSessionFences:
+    def test_a_fence_with_a_none_record_still_refuses_a_late_seed(self) -> None:
+        fences = ResourcesSessionFences[EpisodeId | None](300.0)
+        fences.fence("retired", None)
+
+        assert "retired" in fences and fences.get("retired") is None
+        with pytest.raises(ResourcesSessionConflictError, match="already closed: retired"):
+            fences.raise_if_fenced("retired")
+
     def test_a_closed_session_is_refused_until_its_fence_expires(self, monkeypatch) -> None:
         clock = [100.0]
         monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])

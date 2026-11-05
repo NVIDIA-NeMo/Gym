@@ -193,7 +193,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
     # The cookie session each resources session was seeded under, so a close that carries no cookie, as after a
     # lost seed reply, still finds and releases the seed.
     resources_session_id_to_session_id: dict[str, str] = {}
-    # Each closed resources session, with the episode that closed it and when the record expires.
+    # The fence of each closed resources session: the episode that closed it and when the fence expires.
     fenced_resources_session_ids: dict[str, tuple[EpisodeId, float]] = {}
     # The cookie sessions whose seed outlived session_ttl_seconds, so their verify reports session_expired. Expires
     # like a fence.
@@ -466,8 +466,8 @@ class UserSimResourcesServer(SimpleResourcesServer):
         body: ResourcesCloseSessionRequest,
     ) -> ResourcesCloseSessionResponse:
         self._expire_sessions()
-        closed = self.fenced_resources_session_ids.get(body.resources_session_id)
-        if closed is not None and closed[0] != body.episode_id:
+        fenced = self.fenced_resources_session_ids.get(body.resources_session_id)
+        if fenced is not None and fenced[0] != body.episode_id:
             raise HTTPException(status_code=409, detail="Resources session was closed by another episode")
         # The Environment Server closes by resources_session_id and may not hold the seed's cookie.
         session_id = self.resources_session_id_to_session_id.get(

@@ -627,7 +627,7 @@ class TestApp:
             ),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         server, _ = _make_agent(False)
         body = AgentSeedSessionRequest(
             agent_session_id="agent-session",

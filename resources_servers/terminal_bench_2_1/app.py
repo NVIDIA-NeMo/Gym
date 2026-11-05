@@ -246,7 +246,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 if record.episode_id is not None and record.episode_id != close_episode_id:
                     raise HTTPException(409, "episode_id does not match the resources session")
                 record.episode_id = close_episode_id
-                # Fence setup before waiting: a timed-out close must not leave a late allocation running.
+                # Mark the session as closing before waiting: a timed-out close must not leave a late allocation running.
                 record.closing = True
             async with record.lock:
                 # An expired fence can drop a record while a caller is waiting on its lock.
@@ -290,7 +290,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             self._session_id_to_sandbox.pop(session_id, None)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Fence setup immediately, stop the owned sandbox, and fence the session for the close retry window.
+        """Mark the session as closing, stop the owned sandbox, and fence the session for the close retry window.
 
         Failed or pending cleanup does not expire. The close retry window starts only
         after teardown succeeds, including when a late seed performs the teardown.

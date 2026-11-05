@@ -74,14 +74,21 @@ Resources servers and agent servers keep per-episode state in sessions. Use thes
 | **Close retry window** | How long a fence lasts: `session_close_retry_window_seconds`. | close window, retry window, retention window |
 | **Expire** | A timed lifetime runs out: a fence, a failed seed's record, or an open session (`session_expired`). | forgotten |
 | **Saved reply** | The first close's response, which an agent server returns to a retried close. | close receipt, retained close response |
-| **Release** | Give up what a session or an episode holds, such as its sandbox and in-memory state. | free |
-| **Lost** | The server no longer holds the session: a 404 on a tool call, or a masked verify with `session_lost`. | — |
+| **Release** | Give up what a session or an episode holds, such as its sandbox and in-memory state. A worker also releases its ownership of a session ID, the opposite of acquiring it. | free |
+| **Lost** | The server no longer holds the session: a 404 on a tool call, or a masked verify with `session_lost`. An agent seed or close whose cookie names a lost agent session is refused with 409: the session is no longer available. | — |
 | **Owner** | With several workers, the worker that holds a session's state and serves its requests; its owner file names it. | claim, claimant |
 | **Claim** | Checkpoint restore only: a replacement attempt takes the restored record; one nobody took is **unclaimed**. | claim for routing ownership |
 | **Terminal** | A refusal the environment server does not retry. | final |
-| **Conflict** | A 409 refusal: `ResourcesSessionConflictError` or `AgentSessionConflictError`. | `HTTPException(409, ...)` in session code |
+| **Conflict** | A 409 refusal of a session request. The shared session code (`ResourcesSessionFences` and `SimpleResponsesAPIAgent`) raises `ResourcesSessionConflictError` or `AgentSessionConflictError`, and new session code should too; many existing servers and agents still raise a plain 409 `HTTPException`. | `HTTPException(409, ...)` in new session code |
 
-Other features use some of these words in their own senses and keep them: the process supervisor's termination and cleanup receipts, export receipts, and the tombstones of `gdpval`'s journal and `genrm_compare`'s cohorts.
+Other features use some of these words in their own senses and keep them:
+
+- **Receipt:** the process supervisor's termination and cleanup receipts, export receipts, capture receipts, and `agentic_if`'s plugin and hook receipts.
+- **Tombstone:** the tombstones of `gdpval`'s journal and `genrm_compare`'s cohorts.
+- **Fence:** token capture fences a retired rollout until it is deleted, and the process supervisor fences a delayed harness launch.
+- **Claim:** MCP token claims (`MCPTokenClaims`) and the supervisor's `launch.claim` file.
+- **Terminal:** the checkpoint stack's terminal step.
+- **Expire:** `SandboxSession.expire()` ends a harness as if its time limit had passed.
 
 ### Agent & model
 

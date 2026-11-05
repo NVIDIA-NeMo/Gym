@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Actual verifier/lifecycle/typed verify, environment HTTP and Collection/Store boundaries; no services."""
+"""Actual verifier/lifecycle/episode-session verify, environment HTTP and Collection/Store boundaries; no services."""
 
 import asyncio
 import io

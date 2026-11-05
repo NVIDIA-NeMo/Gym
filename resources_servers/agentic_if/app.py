@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 """The agentic IF Resources Server: it owns each episode's task sandbox, lends it to the harness and grades it.
 
-Seed borrows the task sandbox from the row's task backend (Scale-SWE or Terminal-Bench 2.1, through their typed
-resources sessions), prepares the actor's workspace, stages the IF OpenCode plugins and lends the sandbox to the agent.
+Seed borrows the task sandbox from the row's task backend (Scale-SWE or Terminal-Bench 2.1, through their episode
+sessions), prepares the actor's workspace, stages the IF OpenCode plugins and lends the sandbox to the agent.
 Verify reads what OpenCode and the plugins recorded, has the task backend verify the task, persists the episode and
 grades instruction following against the row's checks. Close releases the task backend's session, which stops the
 sandbox.
@@ -340,7 +340,7 @@ class AgenticIFResourcesServer(SimpleResourcesServer):
             episode_id=body.episode_id,
             task_id=body.task_id,
         )
-        # Typed backend seed, connection, and the agent_user gate.
+        # Backend episode seed, connection, and the agent_user gate.
         await task.prepare()
         _closing(episode)
         sandbox = task.sandbox

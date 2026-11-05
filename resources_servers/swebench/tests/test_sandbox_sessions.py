@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Typed resources sessions over a task sandbox, driven through a minimal server's HTTP routes."""
+"""Episode sessions over a task sandbox, driven through a minimal server's HTTP routes."""
 
 import asyncio
 from types import SimpleNamespace
@@ -154,7 +154,7 @@ _VERIFY = {
 }
 
 
-def test_typed_seed_hands_the_agent_the_task_sandbox_and_close_stops_it_once() -> None:
+def test_episode_seed_hands_the_agent_the_task_sandbox_and_close_stops_it_once() -> None:
     server = _server()
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=_seed())
@@ -315,7 +315,7 @@ def test_closed_session_fences_expire(monkeypatch: MonkeyPatch) -> None:
         assert client.post("/seed_session", json=_seed("s-0")).status_code == 200
 
 
-def test_typed_seed_allows_runtime_session_routing_with_multiple_workers() -> None:
+def test_episode_seed_allows_runtime_session_routing_with_multiple_workers() -> None:
     server = _server(num_workers=2)
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=_seed()).status_code == 200

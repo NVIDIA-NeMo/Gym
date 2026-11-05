@@ -216,7 +216,7 @@ def _use_real_create_sandbox(consumer, monkeypatch):
     return module, fixtures, server, created
 
 
-def test_a_typed_episode_stops_every_sandbox_the_real_create_sandbox_started(consumer, monkeypatch):
+def test_an_episode_session_stops_every_sandbox_the_real_create_sandbox_started(consumer, monkeypatch):
     _, fixtures, server, created = _use_real_create_sandbox(consumer, monkeypatch)
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=fixtures._seed().model_dump(mode="json"))
@@ -309,7 +309,7 @@ def test_a_failed_stop_of_an_inconclusive_attempt_keeps_the_handle_and_close_ret
 
 
 @pytest.mark.parametrize("closed_first", [False, True], ids=["open", "closed"])
-async def test_a_legacy_seed_cannot_replace_a_typed_session(consumer, closed_first):
+async def test_an_agent_run_seed_cannot_replace_an_episode_session(consumer, closed_first):
     module, fixtures, server, sandboxes, _ = consumer
     agent_run_type = module.SWEGymSeedSessionRequest if module is swe_app else module.R2EGymSeedSessionRequest
     episode_seed = fixtures._seed()
@@ -345,7 +345,7 @@ def test_a_failed_task_stop_after_capture_still_grades_a_session_seeded_through_
     assert sandboxes[0].stop.await_count == 2 and not server._session_id_to_sandbox
 
 
-def test_a_failed_task_stop_after_capture_keeps_a_typed_session_retryable_on_the_saved_patch(consumer):
+def test_a_failed_task_stop_after_capture_keeps_an_episode_session_retryable_on_the_saved_patch(consumer):
     module, fixtures, server, sandboxes, _ = consumer
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=fixtures._seed().model_dump(mode="json")).status_code == 200

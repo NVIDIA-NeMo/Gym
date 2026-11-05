@@ -343,7 +343,7 @@ def test_an_environment_server_episode_runs_under_its_resources_session_id(
     assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
 
 
-def test_a_seed_binds_its_id_to_one_episode_and_close_frees_an_unverified_world(
+def test_a_seed_binds_its_id_to_one_episode_and_close_releases_an_unverified_world(
     client: TestClient, server: OfficeEnvResourcesServer
 ) -> None:
     seed = seed_request()
@@ -369,7 +369,7 @@ def test_a_refused_episode_seed_keeps_officeenvs_code_and_leaves_the_id_free(
     assert client.post("/seed_session", json=seed_request().model_dump(mode="json")).status_code == 200
 
 
-def test_retiring_a_session_frees_its_world(client: TestClient, server: OfficeEnvResourcesServer) -> None:
+def test_retiring_a_session_releases_its_world(client: TestClient, server: OfficeEnvResourcesServer) -> None:
     cookies = client.post("/seed_session", json=gym_row(SPEC, PROMPT)).cookies
     (session_id,) = server.service.store.sessions
     asyncio.run(server.retire_session_state(session_id))

@@ -416,10 +416,6 @@ class ResourcesSessionFences(Generic[FenceRecordT]):
     (see ``nemo_gym.server_runtime.request_handling.session_routing.ResourcesSessionLifetimes``).
     While ownership lasts, a late seed reaches the worker that holds the fence and is refused.
     After it expires, every worker treats the ID as new, so the answer does not depend on which worker gets it.
-
-    TODO: also expire sessions that are never closed, as when the environment server dies before its close. Planned
-    rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next request
-    and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
     """
 
     def __init__(self, close_retry_window_seconds: float) -> None:
@@ -439,7 +435,10 @@ class ResourcesSessionFences(Generic[FenceRecordT]):
             self._fences[resources_session_id] = (monotonic() + self._close_retry_window_seconds, record)
 
     def get(self, resources_session_id: str) -> Optional[FenceRecordT]:
-        """Return the record of the session's fence, or None if it is not fenced or its fence expired."""
+        """Return the record of the session's fence, or None if it is not fenced or its fence expired.
+
+        A fence may hold a None record, so test ``resources_session_id in fences`` to ask whether a session is fenced.
+        """
         self._expire()
         entry = self._fences.get(resources_session_id)
         return None if entry is None else entry[1]
@@ -755,6 +754,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         ID instead, so release by ``body.resources_session_id`` to be correct either way.
 
         ``nemo_gym.server_runtime.testing.session_conformance.check_resources_session_contract`` checks these rules from a server's tests.
+
+        TODO: also expire sessions that are never closed, as when the environment server dies before its close. Planned
+        rule: a fixed lifetime from the seed (the sandbox ``ttl_s`` when set, else 24 hours), checked on the next
+        request and at shutdown; an expired session is released, fenced, and verifies as ``SESSION_EXPIRED``.
         """
         return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
 

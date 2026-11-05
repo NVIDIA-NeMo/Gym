@@ -268,7 +268,7 @@ These sandbox-session settings are off by default; unset, sessions behave as des
 above. Local calls do not use them. Each is general-purpose: the sandbox owner (usually
 the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
 checks or reads them without any benchmark-specific logic. Seed refuses an unusable
-setting or owner-supplied input with `AgentSeedRejectedError`, a final 422, so the
+setting or owner-supplied input with `AgentSeedRejectedError`, a terminal 422, so the
 episode fails once with the reason; a failure a retry can fix stays a 5xx. In the
 sandbox, their checks, staging, import and export need only a POSIX shell and coreutils
 (`sha256sum`, and `tar` for an archive); the agent server reads OpenCode's session store

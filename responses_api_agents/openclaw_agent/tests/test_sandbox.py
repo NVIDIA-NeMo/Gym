@@ -813,7 +813,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     assert sandbox.disconnect.await_count == 66
 
 
-async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
+async def test_fence_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -855,7 +855,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -878,7 +878,7 @@ async def test_concurrent_closes_share_receipt(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
+async def test_seed_prunes_expired_fences(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1786,7 +1786,7 @@ async def test_seed_rejects_malformed_sandbox_cookie_before_connecting(setup, ma
     sandbox.exec.assert_not_awaited()
 
 
-async def test_stale_cookie_cannot_recreate_session_or_close_receipt_after_full_retention(setup, monkeypatch):
+async def test_stale_cookie_cannot_recreate_session_or_fence_after_the_close_retry_window(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])

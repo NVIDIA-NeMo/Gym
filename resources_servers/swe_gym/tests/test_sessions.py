@@ -100,7 +100,7 @@ def _seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
     )
 
 
-def test_typed_episode_hands_over_the_task_sandbox_grades_it_and_closes(monkeypatch: MonkeyPatch) -> None:
+def test_episode_session_hands_over_the_task_sandbox_grades_it_and_closes(monkeypatch: MonkeyPatch) -> None:
     server, sandboxes = _server(monkeypatch)
     seed = _seed().model_dump(mode="json")
     close = {"resources_session_id": "resources-session", "episode_id": {"rollout_id": "rollout"}}
@@ -129,7 +129,7 @@ def test_typed_episode_hands_over_the_task_sandbox_grades_it_and_closes(monkeypa
     assert server._session_id_to_sandbox == {} and server._session_id_to_pristine_untracked == {}
 
 
-def test_legacy_seed_still_returns_the_sandbox_handle(monkeypatch: MonkeyPatch) -> None:
+def test_agent_run_seed_still_returns_the_sandbox_handle(monkeypatch: MonkeyPatch) -> None:
     server, sandboxes = _server(monkeypatch)
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=_ROW)

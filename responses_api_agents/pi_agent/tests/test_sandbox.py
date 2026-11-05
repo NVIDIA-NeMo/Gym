@@ -1116,7 +1116,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
     assert all(record.state is None for record in agent._session_records.values())
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id

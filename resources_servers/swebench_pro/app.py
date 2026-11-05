@@ -661,7 +661,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         body: SWEBenchProVerifyRequest,
     ) -> SWEBenchProVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        # A session with no task sandbox (an earlier verify released it, a close released it, or the server never held
+        # A session with no task sandbox (an earlier verify stopped it, a close released it, or the server never held
         # it) has nothing left to grade: grading would score an empty patch as a policy that changed nothing, so the
         # sample is masked. So is an extraction whose git diff exec reported no exit code. Any other failed extraction
         # from a live sandbox stays an unmasked failure, since the agent can cause it.

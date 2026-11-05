@@ -1277,7 +1277,7 @@ class TestAgentStage:
     @pytest.mark.parametrize(
         ("path", "status", "stage", "terminal"),
         [
-            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a final 422.
+            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a terminal 422.
             ("/v1/agent_sessions", 422, "agent", True),
             ("/ng-rollout/r1/v1/responses", 422, "agent", True),
             ("/v1/agent_sessions/close", 503, "cleanup", False),

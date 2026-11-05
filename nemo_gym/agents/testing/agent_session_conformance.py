@@ -24,7 +24,7 @@ def check_agent_seed_rejected(app: FastAPI, seed: AgentSeedSessionRequest) -> st
     client = TestClient(app, raise_server_exceptions=False)
     response = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
     assert response.status_code == 422, (
-        f"unsupported seed must fail with a final 422 from AgentSeedRejectedError, got {response.status_code}: "
+        f"unsupported seed must fail with a terminal 422 from AgentSeedRejectedError, got {response.status_code}: "
         f"{response.text}"
     )
     try:
