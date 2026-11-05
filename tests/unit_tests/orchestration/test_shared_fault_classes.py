@@ -164,6 +164,9 @@ def test_policy_counted_zero_stays_measured_incomplete_without_reinspecting_evid
         assert report["evaluation"]["kinds"] == {kind: 1}
         assert passed is False and report["status"] == "FAIL", reason
     assert recovery._scored_kind(row) == kind
+    facts = recovery.failure_facts(decision, collected)
+    assert facts["response_failures"]["count"] == 0
+    assert facts["trial_failures"]["count"] == 1
     assert task["failures"]["metric_coverage"]["trials"] == 1
 
 

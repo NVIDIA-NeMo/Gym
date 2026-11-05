@@ -3929,9 +3929,10 @@ def final_zero_trials(
     *,
     classification: FailureClassificationConfig | None = None,
 ) -> dict[Identity, str]:
-    """Scored identities whose rollout ended on a failed policy request and was scored zero, with the failure kind.
+    """Scored zeros with a saved policy decision or a failed final policy request, with their failure kinds.
 
-    The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
+    A consistent saved counted-zero decision retains its own registered failure kind. Otherwise, the last
+    policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
     has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
     (it has no invocation, or its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
@@ -3952,6 +3953,9 @@ def final_zero_trials(
             continue
         if _identity(row) in infrastructure:
             continue  # Counted once, as its agent timeout's server-side fault.
+        if (kind := _policy_zero_kind(row)) is not None:
+            found[_identity(row)] = kind
+            continue
         ended = _ended_on_failed_request(row, classification=classification)
         if ended is not None:
             found[_identity(row)] = ended[0]
@@ -4648,6 +4652,12 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
+def _policy_zero_kind(row: Mapping[str, Any]) -> str | None:
+    """A consistent applied zero keeps its own kind, without reinterpreting diagnostic requests."""
+    kind = row.get("failure_kind")
+    return kind if is_policy_counted_zero(row) and _known_kind(kind) else None
+
+
 def _scored_kind(row: Mapping[str, Any], *, classification: FailureClassificationConfig | None = None) -> str | None:
     """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
     (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result.
@@ -4655,6 +4665,8 @@ def _scored_kind(row: Mapping[str, Any], *, classification: FailureClassificatio
     A persisted outcome decision governs metric admission, independently of fault attribution and the existing
     evaluation-health threshold. Counting a provider failure as zero does not make it a model fault or healthy.
     """
+    if (kind := _policy_zero_kind(row)) is not None:
+        return kind
     kind, status = _policy_evidence(row)
     return status_fault_kind(kind, status, classification=classification) if _known_kind(kind) else None
 
@@ -4995,8 +5007,12 @@ def _row_fault_class(
     if (applied := _applied_class(row)) is not None:
         return applied
     kind, status = _policy_evidence(row)
+    zero = _policy_zero_kind(row)
+    kind = zero or kind
     # Only selected final evidence may provide stage/status; unrelated recovered events cannot classify a verdict.
-    if _known_kind(kind) and status_fault_kind(kind, status, classification=classification) == fault:
+    if zero == fault or (
+        _known_kind(kind) and status_fault_kind(kind, status, classification=classification) == fault
+    ):
         return classify_failure(failure_kind=kind, stage=_policy_stage(row), http_status=status, config=classification)
     ended = _ended_on_failed_request(row, classification=classification)
     if ended is not None and ended[0] == fault:
