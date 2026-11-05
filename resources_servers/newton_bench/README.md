@@ -7,7 +7,7 @@ NeMo Gym environment for [NewtonBench](https://github.com/HKUST-KnowComp/NewtonB
 ### Automatic Setup
 The resources server automatically clones the [NewtonBench](https://github.com/HKUST-KnowComp/NewtonBench) repository into the NeMo Gym repository root on the first launch or test run. You do not need to clone it manually.
 
-> Note: After the first launch, you should set up the required API keys (see below) and restart the resources server to enable the `verify` functionality.
+> Note: The resources server refuses to start until an API key for the symbolic judge is set (see below). The first launch still clones NewtonBench before it stops, so you can put the key in NewtonBench's `.env` file and start the server again.
 
 ### API Keys for Symbolic Judge
 The `verify` process uses NewtonBench's internal LLM judge (defaulting to `gpt41`) to compare the agent's proposed law with the ground truth symbolically. 
@@ -20,6 +20,8 @@ This requires an API key for either OpenAI or OpenRouter. Providing either one o
 You should set this in your shell or in a `.env` file inside the cloned `NewtonBench` directory. Remember to restart the resources server after setting the environment variable so that it can be accessed by the process.
 
 > Note: These are separate from the agent's model keys and must be accessible to the resources server process.
+
+If the judge still gives no verdict because its API calls fail (for example a rate limit or an outage), `verify` masks the sample (`mask_sample: true`, `failure_kind: judge_failed`) instead of scoring the law as not equivalent.
 
 ## Dataset Generation
 
