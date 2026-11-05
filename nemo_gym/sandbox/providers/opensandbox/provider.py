@@ -111,9 +111,10 @@ class _SandboxDeathNotice:
     provider_status_reason: str | None = None
 
 
-# The runtime's refusal when the exec daemon runs as the image's user and cannot switch identity (the markers
-# ``nemo_gym.sandbox.transfer`` degrades on, kept in step with it).
-_NO_ROOT_MARKERS = ("CAP_SETUID", "identity switch", "switching to uid=0", "operation not permitted")
+# execd reports os/exec launch errors through CommandExecError, before a child runs.
+# Older servers omit the credential hint; both shapes must retain the fork/exec prefix.
+# https://github.com/opensandbox-group/OpenSandbox/blob/c9df3df530464b9ae2a7580856f6b9bd52b507cc/components/execd/pkg/runtime/command.go#L265-L277
+_ROOT_LAUNCH_REFUSAL = re.compile(r"fork/exec [^\r\n]+: operation not permitted(?: \(switching to uid=0\b[^\r\n]*\))?")
 
 
 def _inspect_oom_evidence(inspect: str) -> str | None:
@@ -401,6 +402,28 @@ def _execution_outcome(
         failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
         reason=reason,
     )
+
+
+def _root_launch_refusal(execution: Any, *, uid: int | None) -> SandboxExecResult | None:
+    """Recognize execd's pre-launch refusal, never user stdout/stderr or exception prose."""
+    error = getattr(execution, "error", None)
+    message = getattr(error, "value", None)
+    name = getattr(error, "name", None)
+    # Background launch failures use the controller's SSE RuntimeError envelope.
+    prefix = "error running commands failed to start commands: "
+    if name == "RuntimeError" and isinstance(message, str) and message.startswith(prefix):
+        message = message.removeprefix(prefix)
+    elif name != "CommandExecError":
+        return None
+    if (
+        uid == 0
+        and getattr(execution, "exit_code", None) is None
+        and isinstance(message, str)
+        and _ROOT_LAUNCH_REFUSAL.fullmatch(message)
+    ):
+        # 125 is a non-process sentinel: there was no child to return an exit status.
+        return SandboxExecResult(None, message, 125, error_type="user_switch_unavailable")
+    return None
 
 
 def _log_create_retry(retry_state: Any) -> None:
@@ -1588,19 +1611,10 @@ class OpenSandboxProvider:
         runs (``nemo_gym.sandbox.transfer.exec_as_root`` degrades the same way), so a command written to no-op where
         it does not apply gets to no-op, and one that needs root there fails on its own result, as before.
         """
-        try:
-            result = await self.exec(handle, command, user="root", timeout_s=self._setup.timeout_s)
-        except Exception as exc:
-            if not any(marker in str(exc) for marker in _NO_ROOT_MARKERS):
-                raise
-            result = None
-        if result is not None:
-            if result.return_code == 0:
-                return result
-            text = f"{result.stderr or ''} {result.stdout or ''}"
-            if not any(marker in text for marker in _NO_ROOT_MARKERS):
-                return result
-        LOGGER.warning(
+        result = await self.exec(handle, command, user="root", timeout_s=self._setup.timeout_s)
+        if result.error_type != "user_switch_unavailable":
+            return result
+        LOGGER.debug(
             "Sandbox %r cannot switch to root; running setup command as the image's user: %s",
             handle.sandbox_id,
             command.strip().splitlines()[0][:80] if command.strip() else command,
@@ -2217,6 +2231,8 @@ class OpenSandboxProvider:
                 timeout_s=sdk_timeout_s,
                 retries=effective_retries,
             )
+            if refusal := _root_launch_refusal(execution, uid=opts_kwargs.get("uid")):
+                return refusal
             stdout = "\n".join(msg.text for msg in execution.logs.stdout) or None
             stderr_parts = [msg.text for msg in execution.logs.stderr]
             if execution.error is not None:
@@ -2413,6 +2429,8 @@ class OpenSandboxProvider:
             timeout_s=sdk_timeout_s,
             retries=retries,
         )
+        if refusal := _root_launch_refusal(execution, uid=opts_kwargs.get("uid")):
+            return refusal
         execution_id = getattr(execution, "id", None)
         if not execution_id:
             raise opensandbox_failure(
@@ -2522,6 +2540,17 @@ class OpenSandboxProvider:
                 delay = min(delay, max(0, min(limits) - loop.time()))
             await asyncio.sleep(delay)
             poll_interval = min(poll_interval * 1.5, self._operations.background_poll_interval_s)
+
+        # A background launch refusal may be available only in command status.
+        # execd sets 255 and its fork/exec error before a child exists; a child
+        # exiting 255 instead has status.error="exit status 255".
+        if (
+            opts_kwargs.get("uid") == 0
+            and status.exit_code == 255
+            and isinstance(message := getattr(status, "error", None), str)
+            and _ROOT_LAUNCH_REFUSAL.fullmatch(message)
+        ):
+            return SandboxExecResult(None, message, 125, error_type="user_switch_unavailable")
 
         # The execution has finished, so one call returns its whole buffer; the
         # cursor this endpoint reports back is the end offset rather than a

@@ -4092,9 +4092,171 @@ NO_ROOT_REFUSAL = (
 )
 
 
-@pytest.mark.parametrize("surfaced_as", ["result", "exception"])
+@pytest.mark.parametrize("caller", ["setup", "transfer", "background"])
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        NO_ROOT_REFUSAL,
+        "fork/exec /usr/bin/bash: operation not permitted",
+        "fork/exec /usr/bin/bash: operation not permitted (switching to uid=0 requires CAP_SETUID)",
+    ],
+)
+async def test_root_refusal_chooses_default_user_without_a_failure_event(caller: str, refusal: str) -> None:
+    from opensandbox.models.execd import Execution, ExecutionError
+
+    from nemo_gym.sandbox.transfer import exec_as_root
+
+    commands = SimpleNamespace(
+        run=AsyncMock(
+            side_effect=[
+                Execution(error=ExecutionError(name="CommandExecError", value=refusal, timestamp=0)),
+                Execution(exit_code=0),
+            ]
+        )
+    )
+    raw = SimpleNamespace(commands=commands, get_info=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("root-refusal", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"background_exec": caller == "background"}, probe={"command": None}
+    )
+
+    class Sandbox:
+        async def exec(self, command, **kwargs):
+            return await provider.exec(handle, command, **kwargs)
+
+    with RequestFailureLog.capture() as log:
+        if caller == "setup":
+            result = await provider._exec_setup_command(handle, "true")
+        elif caller == "transfer":
+            result = await exec_as_root(Sandbox(), "true", timeout_s=1)
+        else:
+            result = await provider.exec(handle, "true", user="root", timeout_s=1)
+        assert not log.reply_report(None).events
+
+    assert result.error_type == ("user_switch_unavailable" if caller == "background" else None)
+    assert result.return_code == (125 if caller == "background" else 0)
+    assert [call.kwargs["opts"].uid for call in commands.run.await_args_list] == (
+        [0] if caller == "background" else [0, None]
+    )
+    raw.get_info.assert_not_awaited()
+
+
+@pytest.mark.parametrize("caller", ["setup", "transfer"])
+@pytest.mark.parametrize("refusal_at", ["submit", "status"])
+async def test_background_root_fallback_uses_runtime_launch_evidence(caller: str, refusal_at: str) -> None:
+    from opensandbox.models.execd import Execution, ExecutionError
+
+    from nemo_gym.sandbox.transfer import exec_as_root
+
+    refused = Execution(id="refused")
+    if refusal_at == "submit":
+        refused.error = ExecutionError(
+            name="RuntimeError",
+            value="error running commands failed to start commands: " + NO_ROOT_REFUSAL,
+            timestamp=0,
+        )
+
+    async def status(execution_id):
+        return SimpleNamespace(
+            running=False,
+            exit_code=255 if execution_id == "refused" else 0,
+            error=NO_ROOT_REFUSAL if execution_id == "refused" else None,
+        )
+
+    commands = SimpleNamespace(
+        run=AsyncMock(side_effect=[refused, Execution(id="ok")]),
+        get_command_status=AsyncMock(side_effect=status),
+        get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content="ready")),
+    )
+    handle = opensandbox_provider.SandboxHandle("root-refusal", "opensandbox", SimpleNamespace(commands=commands))
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"background_exec": True}, probe={"command": None})
+
+    class Sandbox:
+        async def exec(self, command, **kwargs):
+            return await provider.exec(handle, command, **kwargs)
+
+    with RequestFailureLog.capture() as log:
+        result = (
+            await provider._exec_setup_command(handle, "true")
+            if caller == "setup"
+            else await exec_as_root(Sandbox(), "true", timeout_s=1)
+        )
+        assert not log.reply_report(None).events
+    assert result.return_code == 0 and result.error_type is None
+    assert [call.kwargs["opts"].uid for call in commands.run.await_args_list] == [0, None]
+    commands.get_background_command_logs.assert_awaited_once_with("ok")
+
+
+async def test_background_exit_255_with_refusal_text_in_output_does_not_retry() -> None:
+    from opensandbox.models.execd import Execution
+
+    from nemo_gym.sandbox.transfer import exec_as_root
+
+    commands = SimpleNamespace(
+        run=AsyncMock(return_value=Execution(id="ran")),
+        get_command_status=AsyncMock(
+            return_value=SimpleNamespace(running=False, exit_code=255, error="exit status 255")
+        ),
+        get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content=NO_ROOT_REFUSAL)),
+    )
+    handle = opensandbox_provider.SandboxHandle("already-ran", "opensandbox", SimpleNamespace(commands=commands))
+    provider = opensandbox_provider.OpenSandboxProvider(operations={"background_exec": True}, probe={"command": None})
+
+    class Sandbox:
+        async def exec(self, command, **kwargs):
+            return await provider.exec(handle, command, **kwargs)
+
+    result = await exec_as_root(Sandbox(), "echo side-effect", timeout_s=1)
+    assert result.return_code == 255 and result.error_type is None
+    commands.run.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "shape", ["stdout", "other-error", "process-exited", "timeout", "exception-text", "other-uid"]
+)
+async def test_root_fallback_does_not_replay_an_ambiguous_command(shape: str) -> None:
+    from opensandbox.models.execd import Execution, ExecutionError, ExecutionLogs, OutputMessage
+
+    from nemo_gym.sandbox.transfer import exec_as_root
+
+    if shape == "stdout":
+        execution = Execution(
+            exit_code=1, logs=ExecutionLogs(stderr=[OutputMessage(text=NO_ROOT_REFUSAL, timestamp=0)])
+        )
+    else:
+        execution = Execution(
+            error=ExecutionError(
+                name="OtherError" if shape == "other-error" else "CommandExecError",
+                value=NO_ROOT_REFUSAL,
+                timestamp=0,
+            ),
+            exit_code=1 if shape == "process-exited" else None,
+        )
+    error = TimeoutError(NO_ROOT_REFUSAL) if shape == "timeout" else RuntimeError(NO_ROOT_REFUSAL)
+    commands = SimpleNamespace(
+        run=AsyncMock(side_effect=error if shape in ("timeout", "exception-text") else None, return_value=execution)
+    )
+    handle = opensandbox_provider.SandboxHandle("uncertain", "opensandbox", SimpleNamespace(commands=commands))
+    provider = opensandbox_provider.OpenSandboxProvider(diagnostics={"timeout_s": 0.001}, probe={"command": None})
+
+    class Sandbox:
+        async def exec(self, command, **kwargs):
+            return await provider.exec(handle, command, **kwargs)
+
+    if shape in ("stdout", "process-exited"):
+        result = await exec_as_root(Sandbox(), "echo side-effect", timeout_s=1)
+        assert result.return_code == 1
+    else:
+        with pytest.raises(NgFailureEvent):
+            if shape == "other-uid":
+                await provider.exec(handle, "echo side-effect", user=5, timeout_s=1)
+            else:
+                await exec_as_root(Sandbox(), "echo side-effect", timeout_s=1)
+    commands.run.assert_awaited_once()
+
+
 async def test_setup_commands_run_as_the_images_user_in_a_sandbox_that_cannot_switch_to_root(
-    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, surfaced_as: str
+    fake_opensandbox_sdk: None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """A Compose sidecar whose image runs as a non-root ``USER`` (alibaba-ctf's ``softHash`` runtime image, ``User:
     ctf``) cannot switch identity on a cell that drops ``CAP_SETUID``: the runtime refuses the exec before the command
@@ -4107,13 +4269,13 @@ async def test_setup_commands_run_as_the_images_user_in_a_sandbox_that_cannot_sw
     async def exec_(handle, command, **kwargs):
         calls.append((command, kwargs.get("user")))
         if kwargs.get("user") == "root":
-            if surfaced_as == "exception":
-                raise RuntimeError(NO_ROOT_REFUSAL)
-            return opensandbox_provider.SandboxExecResult(stdout=None, stderr=NO_ROOT_REFUSAL, return_code=255)
+            return opensandbox_provider.SandboxExecResult(
+                stdout=None, stderr=NO_ROOT_REFUSAL, return_code=125, error_type="user_switch_unavailable"
+            )
         return opensandbox_provider.SandboxExecResult(stdout=None, stderr=None, return_code=0)
 
     monkeypatch.setattr(provider, "exec", exec_)
-    with caplog.at_level(logging.WARNING, logger="nemo_gym.sandbox.providers.opensandbox.provider"):
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.sandbox.providers.opensandbox.provider"):
         handle = await provider.create(SandboxSpec(image="quay.io/alibaba-aaig/alibaba-ctf-bench:runtime.softHash"))
     assert handle.sandbox_id == "sandbox-1"
     assert calls == [("true", "root"), ("true", None)]
@@ -4128,7 +4290,9 @@ async def test_a_setup_command_that_fails_as_the_images_user_still_fails_the_cre
 
     async def exec_(handle, command, **kwargs):
         if kwargs.get("user") == "root":
-            return opensandbox_provider.SandboxExecResult(stdout=None, stderr=NO_ROOT_REFUSAL, return_code=255)
+            return opensandbox_provider.SandboxExecResult(
+                stdout=None, stderr=NO_ROOT_REFUSAL, return_code=125, error_type="user_switch_unavailable"
+            )
         return opensandbox_provider.SandboxExecResult(stdout=None, stderr="sed: Permission denied", return_code=4)
 
     async def cleanup(handle):

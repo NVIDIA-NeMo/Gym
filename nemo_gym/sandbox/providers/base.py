@@ -229,6 +229,10 @@ class SandboxExecResult:
     command. Providers may use a non-process sentinel with ``error_type`` set
     when the sandbox runtime reports an execution failure without a process
     exit code.
+
+    ``error_type="user_switch_unavailable"`` means the provider confirmed that
+    credential switching prevented process launch. Helpers that allow the image's
+    default user can choose that branch without reporting a failure event.
     """
 
     stdout: str | None
