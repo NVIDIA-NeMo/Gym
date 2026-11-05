@@ -14,6 +14,7 @@
 # limitations under the License.
 import json
 import os
+import shlex
 import subprocess
 import sys
 import textwrap
@@ -30,6 +31,7 @@ from nemo_gym.artifacts.exporters.base import ExportState
 from nemo_gym.artifacts.exporters.evalrdl import EvalRDLExportConfig, EvalRDLExporter, _without_resume_identity
 from nemo_gym.artifacts.exporters.isolated import ensure_exporter_environment
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
+from nemo_gym.orchestration.executors.utils import flatten_export_args
 
 
 # A stand-in for the `evalrdl` SDK with the same names and signatures, driven by environment variables. The worker
@@ -171,6 +173,49 @@ class TestConfig:
         assert config.tags == ["a", "b"] and type(config.tags) is list
         assert config.meta == {"k": "v", "n": 3} and type(config.meta) is dict
         json.dumps({"tags": config.tags, "meta": config.meta})
+
+    def test_nested_meta_becomes_dotted_annotation_keys(self) -> None:
+        overrides = OmegaConf.from_dotlist(
+            [
+                "rollouts_jsonl_fpath=r.jsonl",
+                "meta.model.version=v1",
+                "meta.model.name=the-best-model-ever",
+                "meta.settings.reasoning.effort=high",
+            ]
+        )
+
+        config = EvalRDLExportConfig.model_validate(overrides)
+
+        assert config.meta == {
+            "model.version": "v1",
+            "model.name": "the-best-model-ever",
+            "settings.reasoning.effort": "high",
+        }
+
+    def test_meta_a_submit_renders_as_overrides_reaches_the_exporter_as_dotted_keys(self) -> None:
+        arguments = flatten_export_args(
+            {
+                "meta": {
+                    "model": {"version": "v1", "name": "the-best-model-ever"},
+                    "settings": {"reasoning": {"effort": "high"}},
+                }
+            }
+        )
+        dotlist = [shlex.split(argument)[0].removeprefix("+") for argument in arguments]
+
+        config = EvalRDLExportConfig.model_validate(OmegaConf.from_dotlist(["rollouts_jsonl_fpath=r.jsonl", *dotlist]))
+
+        assert config.meta == {
+            "model.version": "v1",
+            "model.name": "the-best-model-ever",
+            "settings.reasoning.effort": "high",
+        }
+
+    def test_a_dotted_key_and_its_nested_form_are_refused_as_one_annotation_set_twice(self) -> None:
+        with pytest.raises(ValueError, match="model.version"):
+            EvalRDLExportConfig(
+                rollouts_jsonl_fpath=Path("r.jsonl"), meta={"model": {"version": "v1"}, "model.version": "v2"}
+            )
 
     @pytest.mark.parametrize("settings", [{"parallel": 0}, {"timeout": 0}])
     def test_nonpositive_numbers_are_rejected(self, settings: dict[str, Any]) -> None:
@@ -398,6 +443,24 @@ class TestUpload:
             "parallel": 2,
             "wait": False,
             "timeout": 60,
+        }
+
+    def test_dotted_annotation_keys_reach_the_sdk(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
+        artifacts = _make_run(tmp_path)
+
+        _exporter(
+            artifacts,
+            tmp_path,
+            meta={
+                "model": {"version": "v1", "name": "the-best-model-ever"},
+                "settings": {"reasoning": {"effort": "high"}},
+            },
+        ).export(artifacts)
+
+        assert _sdk_call(fake_sdk)["meta"] == {
+            "model.version": "v1",
+            "model.name": "the-best-model-ever",
+            "settings.reasoning.effort": "high",
         }
 
     def test_unset_settings_leave_the_sdk_to_its_own_defaults(self, tmp_path: Path, fake_sdk: dict[str, Any]) -> None:
