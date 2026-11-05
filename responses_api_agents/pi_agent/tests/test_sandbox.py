@@ -29,6 +29,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
@@ -2475,8 +2476,10 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     sandbox.exec.side_effect = report_version
     request = Request({"type": "http", "session": {}})
     if reported != agent.config.pi_version:
-        with pytest.raises(RuntimeError, match="does not run pi_version 0.80.2"):
+        # Another version fails the same way on every attempt, so the seed is refused with a final 422.
+        with pytest.raises(AgentSeedRejectedError, match="does not run pi_version 0.80.2") as refused:
             await agent.seed_agent_session(request, seed())
+        assert refused.value.status_code == 422
         return
     await agent.seed_agent_session(request, seed())
     state = agent._session_records["pi-session"].state
@@ -2484,6 +2487,46 @@ async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, repor
     assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
     commands = [call.args[0] for call in sandbox.exec.await_args_list]
     assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+
+
+async def test_preinstalled_runtime_check_that_cannot_run_stays_retryable(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_dir = "/opt"
+    execute = sandbox.exec.side_effect
+
+    async def time_out(command, **kwargs):
+        if command.endswith("/dist/cli.js --version"):
+            return SimpleNamespace(return_code=None, error_type="timeout", stdout="", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = time_out
+    # A transport failure or timeout may pass on another attempt, so it is not a seed refusal.
+    with pytest.raises(RuntimeError, match="could not check the runtime") as failed:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    assert not isinstance(failed.value, AgentSeedRejectedError)
+
+
+async def test_tool_egress_ignores_optional_grants_that_are_not_mcp(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.start = AsyncMock()
+    direct = {"kind": "direct_http", "name": "unused", "base_url": "http://direct.example", "required": False}
+    body = seed_with_tools(mcp_grant("resources"), direct)
+    body.sandbox_access = None
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    # Pi uses only MCP grants, so an optional direct HTTP grant opens no host.
+    policy = sandbox.start.await_args.args[0].provider_options["network_policy"]
+    assert policy == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
 
 
 def test_runtime_dir_must_be_absolute():

@@ -8,7 +8,7 @@ from typing import Literal
 
 from nemo_gym.agents.agent_tools import restricted_network_policy
 from nemo_gym.agents.base_responses_api_agent import AgentSeedRejectedError
-from nemo_gym.sandbox.providers.base import SandboxSpec
+from nemo_gym.sandbox.providers.base import SandboxProvider, SandboxSpec
 
 
 SandboxNetworkAccess = Literal["inherit", "model_only", "model_and_tools"]
@@ -18,7 +18,7 @@ def restrict_sandbox_network(
     spec: SandboxSpec,
     *,
     network_access: SandboxNetworkAccess,
-    provider_name: str,
+    provider: SandboxProvider,
     model_base_url: str,
     tool_urls: Sequence[str] = (),
 ) -> SandboxSpec:
@@ -38,7 +38,7 @@ def restrict_sandbox_network(
         raise AgentSeedRejectedError("Set network_access or sandbox_config.provider_options.network_policy, not both")
     urls = [model_base_url, *(tool_urls if network_access == "model_and_tools" else ())]
     try:
-        policy = restricted_network_policy(provider_name, urls)
+        policy = restricted_network_policy(provider.name, urls)
     except ValueError as error:
         raise AgentSeedRejectedError(str(error)) from error
     return replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
