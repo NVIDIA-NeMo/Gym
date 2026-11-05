@@ -25,6 +25,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSessionConflictError,
     SimpleResourcesServer,
 )
+from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
 
 class TaskSeed(BaseSeedSessionRequest):
@@ -58,9 +59,11 @@ class AsyncResourceServer(SimpleResourcesServer):
         return BaseVerifyResponse(**body.model_dump(), reward=0)
 
 
-def _server() -> AsyncResourceServer:
+def _server(*, expose_tools_over_mcp: bool = False) -> AsyncResourceServer:
     return AsyncResourceServer(
-        config=BaseResourcesServerConfig(host="", port=0, entrypoint="", name="async-resource"),
+        config=BaseResourcesServerConfig(
+            host="", port=0, entrypoint="", name="async-resource", expose_tools_over_mcp=expose_tools_over_mcp
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
 
@@ -139,14 +142,43 @@ async def test_close_releases_what_a_failed_initialization_left_behind() -> None
 async def test_typed_seed_after_verification_is_refused_and_does_not_reinitialize() -> None:
     server = _server()
     await server.seed_session(SEED, request=_request())
-    # What a verifier does: release the live state, keep the identity with its receipt.
-    server.state.clear()
-    server._session_episodes.pop("session")
-    server._verified_sessions.remember("session", ((SEED.episode_id, SEED.task_id), "receipt"))
+    _verify_and_release(server)
 
     with pytest.raises(ResourcesSessionConflictError):
         await server.seed_session(SEED, request=_request())
     assert server.state == {}
+
+
+def _verify_and_release(server: AsyncResourceServer) -> None:
+    """What a verifier that releases at /verify does: drop the live state, keep the identity with its receipt."""
+    server.state.clear()
+    server._session_episodes.pop("session")
+    server._verified_sessions.remember("session", ((SEED.episode_id, SEED.task_id), "receipt"))
+
+
+async def test_close_after_verification_checks_the_verified_episode() -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    _verify_and_release(server)
+
+    with pytest.raises(ResourcesSessionConflictError):
+        await server.close_resources_session(CLOSE.model_copy(update={"episode_id": EpisodeId(rollout_id="other")}))
+    assert server._fence.closed_episode("session") is None
+
+    await server.close_resources_session(CLOSE)
+    assert server._fence.closed_episode("session") == SEED.episode_id
+
+
+async def test_cookie_seed_cannot_replace_a_verified_typed_session() -> None:
+    server = _server()
+    request = _request()
+    await server.seed_session(SEED, request=request)
+    _verify_and_release(server)
+
+    with pytest.raises(ResourcesSessionConflictError):
+        await server.seed_session(TaskSeed(value=2), request=request)
+    assert server.state == {}
+    assert server._verified_sessions.get("session") == ((SEED.episode_id, SEED.task_id), "receipt")
 
 
 async def test_cookie_seed_after_verification_keeps_the_session_id_and_starts_fresh_state() -> None:
@@ -242,14 +274,20 @@ def test_inherited_seed_route_validates_task_data_and_preserves_retries() -> Non
         assert client.post("/seed_session", json=seed).status_code == 409
 
 
+@pytest.mark.parametrize("expose_tools_over_mcp", [False, True])
 @pytest.mark.parametrize("missing", ["resources_session_id", "episode_id", "task_id", "task_data"])
-def test_inherited_seed_route_rejects_partial_typed_requests(missing: str) -> None:
-    server = _server()
+def test_inherited_seed_route_rejects_partial_typed_requests(missing: str, expose_tools_over_mcp: bool) -> None:
+    # MCP auto-exposure wraps /seed_session; the cookie arm's validator must survive the wrapper.
+    server = _server(expose_tools_over_mcp=expose_tools_over_mcp)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
     seed = SEED.model_dump(mode="json") | {"value": 7}
     del seed[missing]
-    with TestClient(server.setup_webserver()) as client:
+    with TestClient(app) as client:
         assert client.post("/seed_session", json=seed).status_code == 422
-    assert server.state == {}
+        assert server.state == {}
+        assert client.post("/seed_session", json=SEED.model_dump(mode="json")).status_code == 200
+    assert server.state == {"session": 42}
 
 
 class StatelessResourceServer(SimpleResourcesServer):
