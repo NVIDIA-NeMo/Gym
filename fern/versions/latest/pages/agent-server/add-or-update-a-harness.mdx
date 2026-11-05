@@ -361,7 +361,7 @@ try:
     spec = restrict_sandbox_network(
         spec,
         network_access=self.config.network_access,
-        provider_name=provider.name,
+        provider=provider,
         model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
         tool_urls=[str(access.connection.url) for access in mcp_grants_the_harness_uses],
     )

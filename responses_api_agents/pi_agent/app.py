@@ -780,7 +780,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 spec = restrict_sandbox_network(
                     spec,
                     network_access=self.config.network_access,
-                    provider_name=provider.name,
+                    provider=provider,
                     model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
                     # Only the grants Pi keeps; activation leaves out the optional ones listed in `problems`.
                     tool_urls=[

@@ -81,7 +81,10 @@ model server by address, so the profile sets `use_absolute_ip: true` and keeps t
 on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
 harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
-instance name, `pi_agent.responses_api_agents.pi_agent.sandbox_config`.
+instance name, `pi_agent.responses_api_agents.pi_agent.sandbox_config`. Like `pi_sandboxed_agent`'s profile, it sets
+`network_access: model_only`, so the sandbox reaches only the model server; a search preset overrides it with
+`model_and_tools`. A restricted sandbox cannot download Pi, so supply `sandbox_runtime_dir`, or set it to `null` for
+an image prebaked at the default path.
 
 The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
 APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
@@ -356,7 +359,9 @@ Resources-owned sandbox, since agent-owned sandboxes are gone before verificatio
 `model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The policy is
 set when the sandbox is created, so a session that borrows a task sandbox rejects any value other than `inherit`,
 and a `sandbox_config.provider_options.network_policy` cannot be combined with it. A created sandbox must reach
-the model server by address (`use_absolute_ip: true`).
+the model server by address (`use_absolute_ip: true`). A borrowed sandbox relies on its owner's network policy,
+and the owner never learns which endpoints the agent needs: a deny-by-default owner must allow the model server
+itself, and a profile that sets `model_only` cannot be reused for a benchmark that supplies task sandboxes.
 
 A restricted sandbox cannot download Pi, so pair it with `sandbox_runtime_dir`, or with an image that already holds
 the runtime at the default path, `/tmp/nemo-gym-pi-node-22.19.0-<pi_version>`, with its `ready` marker.
