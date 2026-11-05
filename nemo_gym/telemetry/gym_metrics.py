@@ -158,7 +158,7 @@ by ``nemo.gym.checkpoint.event``:
 
 import logging
 import threading
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any, Literal, Optional
 
 
@@ -187,6 +187,10 @@ HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.
 HTTP_CONNECTION_POOL_QUEUE_CONSTRAINT_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_constraint"
 HTTP_CONNECTION_POOL_QUEUE_OUTCOME_ATTRIBUTE = "nemo.gym.http.connection_pool.queue_outcome"
 HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE = "nemo.gym.http.destination.server.name"
+RUN_METRIC_PREFIX = "gym.run."
+RUN_ID_ATTRIBUTE = "nemo.gym.run.id"
+# The last segment of a three-part run metric, such as the failure class in `coverage/failed/<class>`.
+RUN_METRIC_BUCKET_ATTRIBUTE = "nemo.gym.run.bucket"
 ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
 ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
 FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
@@ -493,6 +497,29 @@ def record_http_connection_pool_connect_duration(duration_ms: float, *, outcome:
         {HTTP_CONNECTION_POOL_CONNECT_OUTCOME_ATTRIBUTE: outcome, HTTP_DESTINATION_SERVER_NAME_ATTRIBUTE: server_name},
         boundaries=HTTP_CONNECTION_POOL_QUEUE_DURATION_BOUNDARIES_MS,
     )
+
+
+def record_run_summary(summary: Mapping[str, float], *, run_id: str) -> None:
+    """Record a finished run's coverage and retry counts as gauges, one per key, under its run id.
+
+    ``coverage/scored`` becomes ``gym.run.coverage.scored``. A three-part key such as ``coverage/failed/<class>`` or
+    ``retries/by_kind/<kind>`` becomes ``gym.run.coverage.failed`` with the last part as the bucket attribute; those
+    parts are failure classes, kinds and attempt counts, all bounded.
+    """
+    meter = _meter()
+    if meter is None:
+        return
+    for key, value in summary.items():
+        parts = key.split("/")
+        attributes: dict[str, Any] = {RUN_ID_ATTRIBUTE: run_id}
+        if len(parts) > 2:
+            attributes[RUN_METRIC_BUCKET_ATTRIBUTE] = "/".join(parts[2:])
+        name = RUN_METRIC_PREFIX + ".".join(parts[:2])
+        try:
+            gauge = _get_or_create(meter, name, lambda name=name: meter.create_gauge(name, unit="1"))
+            gauge.set(value, attributes=attributes)
+        except Exception:
+            logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
 
 
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:
