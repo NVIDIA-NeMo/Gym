@@ -174,3 +174,19 @@ def test_a_tool_name_longer_than_the_limit_counts_as_other(telemetry) -> None:
 
     [count] = metrics()[gym_metrics.TOOL_CALLS_INSTRUMENT]
     assert count.attributes[gym_metrics.TOOL_NAME_ATTRIBUTE] == gym_metrics.TOOL_NAME_OTHER
+
+
+@pytest.mark.parametrize("child_first", [False, True])
+def test_a_child_of_an_untimed_tool_goes_under_its_nearest_timed_ancestor_in_any_order(telemetry, child_first) -> None:
+    dispatch, spans, _ = telemetry
+    tools = [
+        _tool("grandparent", name="task"),
+        _tool("parent", parent="grandparent") | {"timings": []},
+        _tool("child", parent="parent", start=100.1, end=100.2),
+    ]
+
+    tool_telemetry.record_tool_telemetry(_result(*(reversed(tools) if child_first else tools)), dispatch)
+
+    finished = {span.attributes[gym_metrics.TOOL_SPAN_ID_ATTRIBUTE]: span for span in spans.get_finished_spans()}
+    assert set(finished) == {"grandparent", "child"}
+    assert finished["child"].parent.span_id == finished["grandparent"].context.span_id

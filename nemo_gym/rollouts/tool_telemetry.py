@@ -69,7 +69,8 @@ def _emit_tool_spans(tools: list[TrajectoryToolCall], dispatch_span_context: "Sp
     tracer = otel_trace.get_tracer("nemo.gym")
     # A span id is unique within its agent instance, and a parent is resolved within the same instance.
     by_key = {(tool.agent_instance, tool.span_id): tool for tool in tools if tool.span_id}
-    emitted: dict[tuple, Optional["SpanContext"]] = {}
+    # The span context each tool's children go under: its own span, or its nearest emitted ancestor's.
+    emitted: dict[tuple, "SpanContext"] = {}
 
     def emit(tool: TrajectoryToolCall, parent: "SpanContext") -> Optional["SpanContext"]:
         timing = _span_timing(tool)
@@ -96,9 +97,10 @@ def _emit_tool_spans(tools: list[TrajectoryToolCall], dispatch_span_context: "Sp
             current = by_key.get((current.agent_instance, current.parent_span_id)) if current.parent_span_id else None
         parent = dispatch_span_context
         if current is not None:
-            parent = emitted.get((current.agent_instance, current.span_id)) or dispatch_span_context
+            parent = emitted.get((current.agent_instance, current.span_id), dispatch_span_context)
         for link in reversed(chain):
-            context = emit(link, parent)
+            # A tool without endpoints has no span; its children go under its nearest emitted ancestor instead,
+            # the same whichever order the record lists them in.
+            parent = emit(link, parent) or parent
             if link.span_id:
-                emitted[(link.agent_instance, link.span_id)] = context
-            parent = context or parent
+                emitted[(link.agent_instance, link.span_id)] = parent
