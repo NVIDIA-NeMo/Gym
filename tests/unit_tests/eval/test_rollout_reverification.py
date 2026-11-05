@@ -2080,6 +2080,30 @@ class TestCallAggregateMetrics:
         assert returned_path == tmp_path / "my_run_rollouts_aggregate_metrics.json"
         assert returned_path.exists()
 
+    @pytest.mark.parametrize("usage", [None, {"input_tokens": 10, "output_tokens": 32768}])
+    async def test_preserves_incomplete_details_even_without_usage(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, usage: dict | None
+    ) -> None:
+        """Context-window rejections lack usage; both they and truncated generations must retain their reason."""
+        client = self._patch(monkeypatch, {"agent_a": "rs_a"})
+        response = {
+            "output": [{"type": "message", "content": "large partial answer"}],
+            "usage": usage,
+            "incomplete_details": {"reason": "max_output_tokens"},
+        }
+        results = [{"response": response, "games": [], TASK_INDEX_KEY_NAME: 0}]
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+
+        await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
+
+        sent = client.post.call_args.kwargs["json"].verify_responses[0]
+        expected = {"incomplete_details": {"reason": "max_output_tokens"}}
+        if usage is not None:
+            expected["usage"] = usage
+        assert sent["response"] == expected
+        assert "output" not in sent["response"]
+        assert response["output"]  # Aggregation must not mutate the saved response.
+
     async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No results → no aggregate file written and None returned."""
         self._patch(monkeypatch, {"agent_a": "rs_a"})
