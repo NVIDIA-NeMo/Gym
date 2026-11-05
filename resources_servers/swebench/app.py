@@ -278,6 +278,7 @@ class DockerContainer(BaseModel):
 
         return SandboxObservation(
             role="verifier",
+            stage="verification",
             provider=handle.provider_name if handle is not None else None,
             sandbox_id=handle.sandbox_id if handle is not None else None,
             outcome=outcome,

@@ -48,7 +48,7 @@ The shared defaults are:
 | Confirmed OOM in the agent's assigned sandbox during `agent` execution | `count_as_zero` | `model` |
 | Confirmed OOM during `seed` | `retry` | `evaluation` |
 | Inconclusive verification attempt, including confirmed OOM | `retry` | `evaluation` |
-| Verification failure reporting cancellation, shutdown, a process killed by a signal (such as SIGTERM or an out-of-memory kill) or rejected credentials | `fail` ungraded | `evaluation` |
+| Verification failure reporting cancellation, shutdown, a SIGTERM interruption or lost worker (`kill_shaped`) or rejected credentials | `fail` ungraded | `evaluation` |
 | OOM without an established stage or ownership | `fail` ungraded | `unknown` |
 
 Other failures use the shared classification defaults and the selected stage's action rules. For example, a
@@ -69,7 +69,7 @@ by_stage:
 ```
 
 This override fails ungraded while retaining the `model` classification. To change the classification,
-configure the shared mapper separately:
+set `classification` in the same `StageOutcomePolicyConfig` value:
 
 ```yaml
 classification:
@@ -79,14 +79,15 @@ classification:
         provider_oom_killed: unknown
 ```
 
-Each stage can also select actions through `by_failure_class`, for example `{evaluation: retry}` where
-that boundary supports retry. More-specific HTTP-status and failure-kind actions take precedence.
+This configures the shared mapper for this boundary. Other boundaries have their own configuration;
+readers of an applied result preserve its recorded class. Each stage can also select actions through
+`by_failure_class`, for example `{evaluation: retry}` where that boundary supports retry.
 Partial overrides retain unspecified defaults. Changing an action does not change the class.
 
 `choose_stage_outcome` returns an `OutcomeDecision` containing the selected `action` and its shared
 `FailureClass` in `attribution`. Keep the applied action and class available with the final result and
-attempt identity. Existing result fields can carry them; a second nested record is not required.
-This preserves configured choices after save/reload. Results and failure events remain separate:
+attempt identity. DeepSWE uses `failure_outcome_action` and `failure_outcome_attribution` on its result
+for these choices, including after save/reload. Results and failure events remain separate:
 a completed result can carry failures recovered along the way, without becoming a failed result.
 Provider-operation retry policies remain separate from episode decisions.
 
