@@ -79,6 +79,13 @@ jobs:
           key: pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
           restore-keys: |
             pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-
+      - name: Restore ARC Pants launcher
+        id: launcher-cache
+        if: inputs.engine == 'pants' && matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: pants-full-launcher-v1-arc-${{ runner.os }}-${{ runner.arch }}-2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0-pants-2.30.2
       - name: Restore compatible Pants artifacts
         id: pants-cache
         if: inputs.engine == 'pants'
@@ -88,10 +95,9 @@ jobs:
             ~/.cache/pants/full-ci
             ~/.cache/pants/named_caches
             ~/.cache/pants/lmdb_store
-            ~/.cache/nce
-          key: pants-full-engine-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          key: pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
           restore-keys: |
-            pants-full-engine-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+            pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
       - name: Install system test dependencies
         if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
         working-directory: sample
@@ -147,16 +153,23 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      # Shared job-type keys have one writer; other shards must not compress losing archives.
+      # Share one launcher archive across ARC jobs; hosted jobs bootstrap independently.
+      - name: Save ARC Pants launcher
+        if: success() && inputs.engine == 'pants' && matrix.job == 'core' && matrix.shard == 3 && steps.launcher-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: ${{ steps.launcher-cache.outputs.cache-primary-key }}
+
+      # Core shard 3 writes away from the measured critical path; other job types use shard 0.
       - name: Save compatible Pants artifacts
-        if: success() && inputs.engine == 'pants' && matrix.shard == 0 && steps.pants-cache.outputs.cache-hit != 'true'
+        if: success() && inputs.engine == 'pants' && ((matrix.job == 'core' && matrix.shard == 3) || (matrix.job != 'core' && matrix.shard == 0)) && steps.pants-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
         with:
           path: |
             ~/.cache/pants/full-ci
             ~/.cache/pants/named_caches
             ~/.cache/pants/lmdb_store
-            ~/.cache/nce
           key: ${{ steps.pants-cache.outputs.cache-primary-key }}
 
   other:
@@ -198,6 +211,13 @@ jobs:
           key: pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
           restore-keys: |
             pants-full-v2-uv-${{ inputs.engine }}-${{ runner.os }}-
+      - name: Restore ARC Pants launcher
+        id: launcher-cache
+        if: inputs.engine == 'pants' && matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: pants-full-launcher-v1-arc-${{ runner.os }}-${{ runner.arch }}-2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0-pants-2.30.2
       - name: Restore compatible Pants artifacts
         id: pants-cache
         if: inputs.engine == 'pants'
@@ -207,10 +227,9 @@ jobs:
             ~/.cache/pants/full-ci
             ~/.cache/pants/named_caches
             ~/.cache/pants/lmdb_store
-            ~/.cache/nce
-          key: pants-full-engine-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          key: pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
           restore-keys: |
-            pants-full-engine-v3-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+            pants-full-engine-v4-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
       - name: Install system test dependencies
         if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
         working-directory: sample
@@ -271,7 +290,6 @@ jobs:
             ~/.cache/pants/full-ci
             ~/.cache/pants/named_caches
             ~/.cache/pants/lmdb_store
-            ~/.cache/nce
           key: ${{ steps.pants-cache.outputs.cache-primary-key }}
 
   coverage:

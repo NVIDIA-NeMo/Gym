@@ -107,14 +107,21 @@ jobs, with an OS-level restore prefix. Baseline and Pants use separate namespace
 so one arm cannot warm the other. The `pants-full-v2-uv-` namespace starts cold
 for both arms and excludes earlier experiment caches. Pants engine caches are shared by shards of the same job type. Their keys include
 the implementation/dependency contract and sampled source commit. Every shard
-restores, but only shard zero of each job type saves after a primary-key miss.
-This avoids compressing duplicate archives that would lose the shared-key race.
-The `pants-full-engine-v3-` archive layout includes the pinned launcher's actual
-`~/.cache/nce` bootstrap directory alongside Pants work, named and content stores.
-The saved contents therefore come from shard zero; other shards rebuild any
-missing content-addressed entries. If shard zero fails, that job type does not
-refresh its engine cache. The monitor bounds
-branch-scoped experiment caches to 5 GiB and removes obsolete experiment entries.
+restores, but only core shard three (or shard zero of other job types) saves after
+a primary-key miss. Core shard three finished substantially before the critical
+core shard zero in measured runs, so it owns cache compression and upload.
+Missing content-addressed entries on other shards rebuild normally; if the
+writer fails, that job type does not refresh its cache.
+
+The `pants-full-engine-v4-` layout stores Pants work, named and content stores.
+The launcher's `~/.cache/nce` directory has a separate exact-key archive shared
+only by ARC runners, keyed by runner platform, launcher checksum and Pants
+version. Successful core shard three is its sole writer. Routed runs without
+that shard may restore an existing archive but do not refresh it. Hosted lint
+and session-routing jobs bootstrap the launcher independently. This avoids
+copying the launcher into every job-type archive and keeps its original ARC
+absolute paths. The monitor bounds branch-scoped experiment caches to 5 GiB and
+removes obsolete experiment entries.
 Actual cache hits must be inspected: matching policies alone do not establish
 matching cache warmth.
 
