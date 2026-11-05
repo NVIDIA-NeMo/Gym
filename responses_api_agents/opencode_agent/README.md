@@ -148,11 +148,17 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools`, `compaction.auto` and
+`agent.build.steps`, preserving Gym capture.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
 adapter then omits `tools` and passes `permission` exactly as given.
+Setting `compaction.auto: false` keeps OpenCode from
+summarizing the session and continuing from the summary, in model calls that training cannot join
+to the scored call; a run that fills the context then ends with a context-limit error.
+`agent.build.steps` caps the model calls of the `build` agent, which the session runs; on the last
+allowed call OpenCode adds a message to the request that asks for a final answer.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
