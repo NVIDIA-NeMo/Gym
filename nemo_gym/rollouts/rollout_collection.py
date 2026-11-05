@@ -4005,7 +4005,7 @@ executions → not run again (left to recovery)
         token_source = None
         owned_token_source = None
         token_capture_config = TokenCaptureConfig.model_validate(global_config)
-        if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
+        if token_capture_config.enabled and token_capture_config.token_capture.rebuild_response:
             token_source = installed_token_source()
 
         # Clear only the attempts about to be dispatched. Recovery allocates a new
@@ -4027,14 +4027,14 @@ executions → not run again (left to recovery)
 
         token_capture_rows = [row for row in input_rows if token_capture_enabled_for_row(row)]
         if (
-            token_capture_config.token_id_capture.rebuild_response
+            token_capture_config.token_capture.rebuild_response
             and token_capture_rows
             and token_source is None
             and not token_capture_dirs
         ):
             raise ValueError(
                 "Token capture response rebuilding requires a TokenSource in the rollout-collector process. "
-                "Call install_token_source before starting collection or configure token_id_capture.dir."
+                "Call install_token_source before starting collection or configure token_capture.dir."
             )
         if token_capture_dirs and token_capture_rows:
             # Token stores append under deterministic rollout ids.
@@ -4118,7 +4118,7 @@ executions → not run again (left to recovery)
                 token_source is None
                 and token_capture_dirs
                 and token_capture_config.enabled
-                and token_capture_config.token_id_capture.rebuild_response
+                and token_capture_config.token_capture.rebuild_response
             ):
                 token_source = TokenCaptureStore(token_capture_dirs[0])
                 owned_token_source = token_source
@@ -4283,7 +4283,7 @@ executions → not run again (left to recovery)
                             build_error = token_capture_build.get("error") or build_metrics.get("error")
                             if build_error:
                                 mask_reasons[str(build_error)] += 1
-                        settings = token_capture_config.token_id_capture
+                        settings = token_capture_config.token_capture
                         if (
                             settings.max_mask_fraction is not None
                             and finalized_count >= settings.mask_fraction_min_samples
@@ -4292,7 +4292,7 @@ executions → not run again (left to recovery)
                             raise RuntimeError(
                                 f"{masked_count}/{finalized_count} finalized rollouts "
                                 f"({masked_count / finalized_count:.1%}) are masked, exceeding "
-                                f"token_id_capture.max_mask_fraction={settings.max_mask_fraction}. "
+                                f"token_capture.max_mask_fraction={settings.max_mask_fraction}. "
                                 f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
                                 "mostly token-less data."
                             )

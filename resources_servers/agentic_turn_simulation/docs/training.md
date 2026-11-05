@@ -130,7 +130,7 @@ penalty can also make the ask-the-user shortcut cheaper, so watch the stop-tool 
 agentic_turn_simulation_agent:
   responses_api_agents:
     agentic_turn_simulation_agent:
-      token_id_capture: true      # required when the trainer captures token ids
+      token_capture: true      # required when the trainer captures token ids
       max_time_seconds: 1800      # tens of minutes, well below the evaluation default
 ```
 

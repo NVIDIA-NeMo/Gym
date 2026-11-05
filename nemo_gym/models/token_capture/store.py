@@ -597,7 +597,7 @@ def make_token_store(global_config_dict: Any) -> TokenCaptureStore | None:
     from nemo_gym.models.token_capture.config import TokenCaptureConfig
 
     config = TokenCaptureConfig.model_validate(global_config_dict)
-    if not config.enabled or config.token_id_capture.sink is not None:
+    if not config.enabled or config.token_capture.sink is not None:
         return None
     directory = config.resolved_dir()
     return TokenCaptureStore(directory) if directory is not None else None

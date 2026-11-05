@@ -18,9 +18,9 @@
 ```yaml
 env:
   nemo_gym:
-    token_id_capture:
+    token_capture:
       enabled: true
-      dir: /tmp/nemo_gym_token_id_captures  # The writer and consumer share this node-local directory.
+      dir: /tmp/nemo_gym_token_captures  # The writer and consumer share this node-local directory.
       sink: my_pkg.sinks:MyDataPlaneSink   # This optional sink replaces the file store.
       lineage_store: my_pkg.sinks:MyResolver  # Required with a custom sink (same backend namespace).
       delta_records: true                  # Store RESOLVED continuations as parent-relative suffixes.
@@ -29,7 +29,7 @@ env:
 my_model:
   responses_api_models:
     custom_model:
-      token_id_capture_non_generating_requests:
+      token_capture_non_generating_requests:
         - method: GET
           path: /custom/metadata
 ```
@@ -82,6 +82,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from nemo_gym.config.renamed_keys import (
+    RENAMED_TOKEN_CAPTURE_AGENT_KEYS,
+    RENAMED_TOKEN_CAPTURE_BLOCK_KEYS,
+    renamed_attribute,
+    with_renamed_keys,
+)
 from nemo_gym.models.token_capture.protocols import (
     LineageResolver,
     ParentResolutionMode,
@@ -93,7 +99,7 @@ from nemo_gym.models.token_capture.protocols import (
 
 logger = logging.getLogger(__name__)
 
-TOKEN_CAPTURE_BLOCK = "token_id_capture"
+TOKEN_CAPTURE_BLOCK = "token_capture"
 ExternalStagingBackend = Literal["vllm_worker", "megatron_worker"]
 
 
@@ -126,13 +132,13 @@ class NonGeneratingRequest(BaseModel):
 
 
 class TokenCaptureSettings(BaseModel):
-    """The ``token_id_capture`` block."""
+    """The ``token_capture`` block."""
 
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     # Capture model calls from every agent.
-    # The default keeps capture scoped by each agent's ``token_id_capture`` setting.
+    # The default keeps capture scoped by each agent's ``token_capture`` setting.
     all_agents: bool = False
     # Where the default file store writes.
     # Falls back to ``model_call_capture_dir``.
@@ -192,7 +198,7 @@ class TokenCaptureSettings(BaseModel):
         token = os.environ.get(self.control_auth_token_env)
         if not token:
             raise ValueError(
-                "token_id_capture.external_staging requires a control bearer in "
+                "token_capture.external_staging requires a control bearer in "
                 f"environment variable {self.control_auth_token_env}"
             )
         return token
@@ -203,26 +209,32 @@ class TokenCaptureConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    token_id_capture: TokenCaptureSettings = TokenCaptureSettings()
+    token_capture: TokenCaptureSettings = TokenCaptureSettings()
     # Shared with evaluation capture, which owns it, so it stays top-level.
     model_call_capture_dir: Path | None = None
 
+    # Extra keys are ignored, so without this a block under its old name would silently disable capture.
+    _accept_renamed_block = model_validator(mode="before")(
+        classmethod(lambda cls, data: with_renamed_keys(data, RENAMED_TOKEN_CAPTURE_BLOCK_KEYS))
+    )
+    token_id_capture = renamed_attribute("token_id_capture", "token_capture", owner="TokenCaptureConfig")
+
     @model_validator(mode="after")
     def _validate(self) -> "TokenCaptureConfig":
-        block = self.token_id_capture
+        block = self.token_capture
         if block.parent_resolution == "source_history" and (
             not block.external_staging or block.external_staging_backend != "vllm_worker"
         ):
             raise ValueError("parent_resolution=source_history requires external vLLM staging")
         if block.external_staging and not block.enabled:
-            raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
+            raise ValueError("token_capture.external_staging requires token_capture.enabled")
         if block.external_staging and block.rebuild_response:
             raise ValueError(
-                "token_id_capture.external_staging requires rebuild_response=false because the "
+                "token_capture.external_staging requires rebuild_response=false because the "
                 "framework owns staged-record finalization"
             )
         if block.external_staging_backend == "megatron_worker" and not block.external_staging:
-            raise ValueError("token_id_capture.external_staging_backend requires external_staging=true")
+            raise ValueError("token_capture.external_staging_backend requires external_staging=true")
         if not block.enabled:
             # Keep inactive settings for templated configurations.
             # A run may toggle only ``enabled``.
@@ -232,7 +244,7 @@ class TokenCaptureConfig(BaseModel):
                 # The custom sink replaces the configured directory.
                 # Warn because no files will appear there.
                 logger.warning(
-                    "token_id_capture.dir is set alongside token_id_capture.sink. The sink replaces "
+                    "token_capture.dir is set alongside token_capture.sink. The sink replaces "
                     "the file store, so %s will not be written to.",
                     block.dir,
                 )
@@ -247,7 +259,7 @@ class TokenCaptureConfig(BaseModel):
                 return self
             if not block.rebuild_response:
                 return self
-            raise ValueError("token_id_capture requires a directory or sink")
+            raise ValueError("token_capture requires a directory or sink")
         if not directory.is_absolute():
             raise ValueError("training-token capture directory must be an absolute path")
         return self
@@ -263,23 +275,23 @@ class TokenCaptureConfig(BaseModel):
             return
         if block.allow_unresolved_continuations:
             logger.warning(
-                "token_id_capture has a custom sink and no lineage_store: every continuation "
+                "token_capture has a custom sink and no lineage_store: every continuation "
                 "will resolve UNRESOLVED and multi-call rollouts will be masked."
             )
             return
         raise ValueError(
-            "token_id_capture has a custom sink but no lineage_store, so no continuation can "
+            "token_capture has a custom sink but no lineage_store, so no continuation can "
             "resolve its parent and every multi-call rollout will be masked. Configure "
-            "token_id_capture.lineage_store on the same backend as the sink, or set "
-            "token_id_capture.allow_unresolved_continuations: true to accept the loss."
+            "token_capture.lineage_store on the same backend as the sink, or set "
+            "token_capture.allow_unresolved_continuations: true to accept the loss."
         )
 
     @property
     def enabled(self) -> bool:
-        return self.token_id_capture.enabled
+        return self.token_capture.enabled
 
     def resolved_dir(self) -> Path | None:
-        return self.token_id_capture.dir or self.model_call_capture_dir
+        return self.token_capture.dir or self.model_call_capture_dir
 
     def build_sink(self) -> TokenSink | None:
         """Construct the configured sink.
@@ -288,19 +300,19 @@ class TokenCaptureConfig(BaseModel):
         Call this once in each server process.
         Launcher-installed sinks do not reach spawned workers.
         """
-        target = self.token_id_capture.sink
-        if not self.token_id_capture.enabled or target is None:
+        target = self.token_capture.sink
+        if not self.token_capture.enabled or target is None:
             return None
-        return self._build_endpoint(target, self.token_id_capture.sink_kwargs, TokenSink, "sink")
+        return self._build_endpoint(target, self.token_capture.sink_kwargs, TokenSink, "sink")
 
     def build_lineage_store(self) -> LineageResolver | None:
         """Construct the configured request-time lineage store."""
-        target = self.token_id_capture.lineage_store
-        if not self.token_id_capture.enabled or target is None:
+        target = self.token_capture.lineage_store
+        if not self.token_capture.enabled or target is None:
             return None
         return self._build_endpoint(
             target,
-            self.token_id_capture.lineage_store_kwargs,
+            self.token_capture.lineage_store_kwargs,
             LineageResolver,
             "lineage_store",
         )
@@ -308,24 +320,24 @@ class TokenCaptureConfig(BaseModel):
     @staticmethod
     def _build_endpoint(target: str, kwargs: dict[str, Any], protocol: type, kind: str):
         if ":" not in target:
-            raise ValueError(f"token_id_capture.{kind} must be 'module.path:ClassName' (got {target!r})")
+            raise ValueError(f"token_capture.{kind} must be 'module.path:ClassName' (got {target!r})")
         module_path, _, class_name = target.partition(":")
         try:
             factory = getattr(import_module(module_path), class_name)
         except (ImportError, AttributeError) as error:
-            raise ValueError(f"could not load token_id_capture.{kind} {target!r}: {error}") from error
+            raise ValueError(f"could not load token_capture.{kind} {target!r}: {error}") from error
         try:
             endpoint = factory(**kwargs)
         except TypeError as error:
             raise ValueError(
-                f"could not construct token_id_capture.{kind} {target!r} with {kind}_kwargs={sorted(kwargs)}: {error}"
+                f"could not construct token_capture.{kind} {target!r} with {kind}_kwargs={sorted(kwargs)}: {error}"
             ) from error
         # Validate the endpoint at startup.
         # A missing lifecycle method can make incomplete capture look complete.
         missing = [name for name in sorted(protocol.__protocol_attrs__) if not callable(getattr(endpoint, name, None))]
         if missing or not isinstance(endpoint, protocol):
             raise ValueError(
-                f"token_id_capture.{kind} {target!r} does not satisfy {protocol.__name__}: "
+                f"token_capture.{kind} {target!r} does not satisfy {protocol.__name__}: "
                 f"{', '.join(missing) or 'attribute check failed'}"
             )
         return endpoint
@@ -349,7 +361,7 @@ def token_capture_enabled_for_agent(
     """
     if config is None:
         config = token_capture_config(global_config_dict)
-    settings = config.token_id_capture
+    settings = config.token_capture
     if not settings.enabled:
         return False
     if settings.all_agents:
@@ -362,11 +374,12 @@ def token_capture_enabled_for_agent(
     agents = server_entry.get("responses_api_agents")
     if not isinstance(agents, Mapping):
         return False
-    return any(
-        bool(agent_config.get("token_id_capture", False))
-        for agent_config in agents.values()
-        if isinstance(agent_config, Mapping)
-    )
+    return any(_agent_opted_in(agent_config) for agent_config in agents.values() if isinstance(agent_config, Mapping))
+
+
+def _agent_opted_in(agent_config: Mapping) -> bool:
+    """Read an agent's ``token_capture`` flag, also under its old name in a config that bypassed the parser."""
+    return bool(with_renamed_keys(agent_config, RENAMED_TOKEN_CAPTURE_AGENT_KEYS).get("token_capture", False))
 
 
 # Serves the names this module had before token_id_capture was renamed token_capture, with a warning.

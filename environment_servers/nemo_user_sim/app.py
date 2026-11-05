@@ -602,7 +602,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         token_capture = (
             capture_training_tokens
             and bool(block.get("enabled", False))
-            and (bool(block.get("all_agents", False)) or bool(target_config.get("token_id_capture", False)))
+            and (bool(block.get("all_agents", False)) or bool(target_config.get("token_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"

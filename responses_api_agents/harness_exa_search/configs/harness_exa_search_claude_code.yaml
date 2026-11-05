@@ -32,4 +32,4 @@ harness_exa_search_claude_code:
           DISABLE_COMPACT: "1"
       sandbox_model_base_url: null
       exa_api_key: null
-      token_id_capture: false
+      token_capture: false

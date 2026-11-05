@@ -14,7 +14,7 @@ from responses_api_agents.miniswe_sandboxed_agent import app as module
 @pytest.mark.parametrize("capture", [False, True])
 async def test_seed_replays_completed_result_without_restarting_agent(monkeypatch, capture):
     client = MagicMock(spec=ServerClient)
-    client.global_config_dict = {"observability_enabled": capture, "token_id_capture": {"enabled": capture}}
+    client.global_config_dict = {"observability_enabled": capture, "token_capture": {"enabled": capture}}
     client.post = AsyncMock(return_value=SimpleNamespace(cookies={"session": "resource"}))
     params = {"input": []}
     result = dict(
@@ -45,7 +45,7 @@ async def test_seed_replays_completed_result_without_restarting_agent(monkeypatc
             port=1,
             entrypoint="app.py",
             name="agent",
-            token_id_capture=capture,
+            token_capture=capture,
             model_server={"type": "responses_api_models", "name": "model"},
             resources_server={"type": "resources_servers", "name": "resources"},
         ),

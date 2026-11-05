@@ -769,7 +769,7 @@ class _CaptureMiddleware:
         )
         # This store records training tokens for correlated training-capture calls.
         self._token_store = token_store
-        # Built from token_id_capture.sink, once, in this process.
+        # Built from token_capture.sink, once, in this process.
         self._configured_sink = configured_sink
         self._lineage_store: LineageResolver | None = lineage_store
         self._delta_records = delta_records
@@ -1175,33 +1175,33 @@ def install_model_call_capture(
     if capture_settings is not None and capture_settings.enabled and (num_workers or 1) > 1:
         if lineage_store is None or not lineage_store.is_process_shared():
             raise ValueError(
-                "token_id_capture with num_workers > 1 requires a process-shared lineage resolver "
+                "token_capture with num_workers > 1 requires a process-shared lineage resolver "
                 "over the same backend used by the token sink"
             )
-    external_staging = capture_settings is not None and capture_settings.token_id_capture.external_staging
+    external_staging = capture_settings is not None and capture_settings.token_capture.external_staging
     if external_staging:
         if lineage_store is None:
             raise ValueError(
-                "token_id_capture.external_staging requires a lineage resolver that implements CaptureLedger"
+                "token_capture.external_staging requires a lineage resolver that implements CaptureLedger"
             )
         if isinstance(lineage_store, InMemoryLineageStore):
             # The in-memory index evicts rollouts under memory bounds, which is
             # acceptable for a resolution cache but not for a completeness
             # ledger. External staging requires a non-evicting store.
             raise ValueError(
-                "token_id_capture.external_staging requires a non-evicting lineage store "
+                "token_capture.external_staging requires a non-evicting lineage store "
                 "(e.g. FileLineageStore); InMemoryLineageStore cannot serve as the capture ledger"
             )
         if not isinstance(lineage_store, CaptureLedger):
             raise ValueError(
-                "token_id_capture.external_staging requires the lineage store to implement "
+                "token_capture.external_staging requires the lineage store to implement "
                 "the CaptureLedger protocol (record, record_failure, manifest, has_rows, retire, delete)"
             )
         capture_ledger: CaptureLedger = lineage_store
         install_rollout_control_routes(
             app,
             capture_ledger,
-            auth_token=capture_settings.token_id_capture.resolve_control_auth_token(),
+            auth_token=capture_settings.token_capture.resolve_control_auth_token(),
             refuse_removal=lambda: ledger_removal_refusal(app),
         )
 
@@ -1235,10 +1235,10 @@ def install_model_call_capture(
         token_store=token_store,
         configured_sink=configured_sink,
         lineage_store=lineage_store,
-        delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
+        delta_records=(capture_settings.token_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
         parent_resolution_mode=(
-            capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
+            capture_settings.token_capture.parent_resolution if capture_settings is not None else "fingerprint"
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,

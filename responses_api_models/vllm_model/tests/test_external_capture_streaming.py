@@ -129,7 +129,7 @@ def make_harness(tmp_path, monkeypatch):
     def make(dialect="responses", evaluation=False, reasoning=False, backend="vllm_worker", **overrides):
         root = tmp_path / dialect.replace("/", "-")
         global_config = {
-            "token_id_capture": {
+            "token_capture": {
                 "enabled": True,
                 "external_staging": True,
                 "external_staging_backend": backend,

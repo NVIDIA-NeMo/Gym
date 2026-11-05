@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Python names renamed with the token capture package keep resolving at their old paths; config keys do not change."""
+"""Names renamed with the token capture package keep working under their old names, with a warning."""
 
 import importlib
 import warnings
@@ -21,8 +21,10 @@ import pytest
 
 from nemo_gym._moved_paths import _RENAMED_TOKEN_CAPTURE_NAMES, moved_names_getattr
 from nemo_gym._public_api import lazy_exports
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig
 from nemo_gym.config.global_config import TOKEN_CAPTURE_BLOCK
-from nemo_gym.models.token_capture.config import TokenCaptureConfig
+from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
+from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 
 
 RENAMED = sorted(
@@ -60,7 +62,53 @@ def test_an_old_name_resolves_through_a_package_public_api(monkeypatch: pytest.M
     assert TOKEN_ID_CAPTURE_BLOCK is TOKEN_CAPTURE_BLOCK
 
 
-def test_config_keys_keep_their_token_id_capture_spelling() -> None:
-    assert TOKEN_CAPTURE_BLOCK == "token_id_capture"
-    config = TokenCaptureConfig.model_validate({"token_id_capture": {"enabled": True, "dir": "/tmp/capture"}})
-    assert config.token_id_capture.enabled and config.enabled
+def test_the_run_wide_block_is_named_token_capture() -> None:
+    assert TOKEN_CAPTURE_BLOCK == "token_capture"
+
+
+def test_a_block_under_its_old_key_configures_capture_with_a_warning() -> None:
+    block = {"enabled": True, "dir": "/tmp/capture", "delta_records": True}
+    with pytest.warns(DeprecationWarning, match="'token_id_capture'.*'token_capture'"):
+        old = TokenCaptureConfig.model_validate({"token_id_capture": block})
+    assert old == TokenCaptureConfig.model_validate({"token_capture": block})
+    assert old.enabled and old.token_capture.delta_records
+
+
+def test_a_block_under_both_keys_with_different_values_is_an_error() -> None:
+    with pytest.raises(ValueError, match="remove 'token_id_capture' and keep only 'token_capture'"):
+        TokenCaptureConfig.model_validate({"token_id_capture": {"enabled": True}, "token_capture": {"enabled": False}})
+
+
+def test_the_old_block_attribute_returns_the_block_with_a_warning() -> None:
+    config = TokenCaptureConfig.model_validate({"token_capture": {"enabled": True, "dir": "/tmp/capture"}})
+    with pytest.warns(DeprecationWarning, match="TokenCaptureConfig.token_capture"):
+        assert config.token_id_capture is config.token_capture
+
+
+def test_an_agent_flag_under_its_old_key_opts_the_agent_in() -> None:
+    with pytest.warns(DeprecationWarning, match="'token_id_capture'.*'token_capture'"):
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="app.py", name="", token_id_capture=True)
+    assert config.token_capture is True
+    with pytest.warns(DeprecationWarning, match="BaseResponsesAPIAgentConfig.token_capture"):
+        assert config.token_id_capture is True
+
+
+def test_a_raw_config_with_old_keys_opts_its_agent_in() -> None:
+    # Frameworks may hand a config dict straight to this function without the parser renaming its keys.
+    config = {
+        "token_id_capture": {"enabled": True, "dir": "/tmp/capture"},
+        "captured": {"responses_api_agents": {"implementation": {"token_id_capture": True}}},
+    }
+    with pytest.warns(DeprecationWarning):
+        assert token_capture_enabled_for_agent(config, "captured") is True
+
+
+def test_model_non_generating_requests_under_their_old_key_are_declared() -> None:
+    declared = [{"method": "get", "path": "/custom/metadata"}]
+    with pytest.warns(DeprecationWarning, match="'token_capture_non_generating_requests'"):
+        config = BaseResponsesAPIModelConfig(
+            host="", port=0, entrypoint="app.py", name="", token_id_capture_non_generating_requests=declared
+        )
+    assert [(r.method, r.path) for r in config.token_capture_non_generating_requests] == [("GET", "/custom/metadata")]
+    with pytest.warns(DeprecationWarning, match="BaseResponsesAPIModelConfig.token_capture_non_generating_requests"):
+        assert config.token_id_capture_non_generating_requests is config.token_capture_non_generating_requests

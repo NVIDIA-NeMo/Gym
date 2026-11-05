@@ -90,7 +90,7 @@ class TestOpenCodeSandboxedAgent:
             sandbox_config=dict(),
             sandbox_timeout=0,
             opencode_max_context_window=0,
-            token_id_capture=True,
+            token_capture=True,
         )
 
     @mark.parametrize("worker", [False, True])
@@ -858,7 +858,7 @@ class TestOpenCodeSandboxedAgent:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
             "observability_enabled": observability_enabled,
-            "token_id_capture": {"enabled": token_capture_enabled, "all_agents": False},
+            "token_capture": {"enabled": token_capture_enabled, "all_agents": False},
         }
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
         monkeypatch.setattr(
@@ -1204,7 +1204,7 @@ class TestOpenCodeSandboxedAgent:
         server_client = MagicMock(spec=ServerClient)
         server_client.global_config_dict = {
             "observability_enabled": collect_observations,
-            "token_id_capture": {"enabled": False, "all_agents": False},
+            "token_capture": {"enabled": False, "all_agents": False},
         }
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
         server._create_opencode_config = AsyncMock(return_value={})

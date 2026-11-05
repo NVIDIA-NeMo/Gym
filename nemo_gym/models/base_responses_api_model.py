@@ -35,8 +35,9 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
+from nemo_gym.config.renamed_keys import RENAMED_TOKEN_CAPTURE_MODEL_KEYS, renamed_attribute, with_renamed_keys
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
@@ -248,7 +249,15 @@ class ModelCheckpointConfig(BaseModel):
 
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
-    token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    token_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
+    _accept_renamed_keys = model_validator(mode="before")(
+        classmethod(lambda cls, data: with_renamed_keys(data, RENAMED_TOKEN_CAPTURE_MODEL_KEYS))
+    )
+    token_id_capture_non_generating_requests = renamed_attribute(
+        "token_id_capture_non_generating_requests",
+        "token_capture_non_generating_requests",
+        owner="BaseResponsesAPIModelConfig",
+    )
     drop_hosted_tools: bool = Field(
         default=False,
         description=(
@@ -392,7 +401,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             non_generating_requests=self.non_generating_model_routes
             | {("POST", "/v1/embeddings")}
             | frozenset(
-                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+                (request.method, request.path) for request in self.config.token_capture_non_generating_requests
             ),
         )
 
@@ -434,7 +443,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         capture_settings = token_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
-                "checkpoint.policy with token_id_capture requires external_staging: only the token-free "
+                "checkpoint.policy with token_capture requires external_staging: only the token-free "
                 "capture ledger is checkpointed, and the training framework owns the staged tokens"
             )
         if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
@@ -442,9 +451,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         cut_requester = None
         if self.config.checkpoint.generation_cuts:
             if capture_ledger is None:
-                raise ValueError("checkpoint.generation_cuts requires token_id_capture with external_staging")
+                raise ValueError("checkpoint.generation_cuts requires token_capture with external_staging")
             cut_requester = generation_cut_requester(
-                capture_settings.token_id_capture.resolve_control_auth_token(),
+                capture_settings.token_capture.resolve_control_auth_token(),
                 control_root=self.generation_cut_control_root,
             )
         num_workers = self.config.num_workers or 1

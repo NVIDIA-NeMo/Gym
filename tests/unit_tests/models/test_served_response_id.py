@@ -110,7 +110,7 @@ def _client(tmp_path) -> TestClient:
         config=BaseResponsesAPIModelConfig(host="0.0.0.0", port=8099, entrypoint="", name="srv"),
         server_client=MagicMock(
             spec=ServerClient,
-            global_config_dict={"token_id_capture": {"enabled": True, "dir": str(tmp_path)}},
+            global_config_dict={"token_capture": {"enabled": True, "dir": str(tmp_path)}},
         ),
     )
     return TestClient(server.setup_webserver())

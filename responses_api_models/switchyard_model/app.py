@@ -329,7 +329,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
             return
         message = (
             "switchyard_model: forward_session_id is on, but neither observability_enabled nor "
-            "token_id_capture is -- so requests carry no /ng-rollout prefix, and no session id "
+            "token_capture is -- so requests carry no /ng-rollout prefix, and no session id "
             "will reach Switchyard. Enable ++observability_enabled=true (or token capture) to "
             "correlate rollouts, or set forward_session_id=false to accept uncorrelated routing."
         )

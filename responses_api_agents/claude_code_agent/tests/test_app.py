@@ -864,9 +864,9 @@ class TestRolloutCorrelation:
     def test_training_capture_intent_reaches_the_cli_base_url(self, tmp_path: Path) -> None:
         agent = _make_agent(
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-            token_id_capture=True,
+            token_capture=True,
         )
-        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+        agent.server_client.global_config_dict = {"token_capture": {"enabled": True}}
 
         base_url = self._run_and_capture_base_url(agent, tmp_path, rollout_id="task3-roll1")
 
@@ -1100,7 +1100,7 @@ class TestConfigYaml:
         assert "claude_code_agent" in data
         inner = data["claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
         assert inner["entrypoint"] == "app.py"
-        assert inner.get("token_id_capture", False) is False
+        assert inner.get("token_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
 
@@ -1146,9 +1146,9 @@ class TestCaptureFriendlyTranscript:
     def test_response_id_is_the_served_id_only_under_capture(self, capture: bool) -> None:
         agent = _make_agent(
             model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
-            token_id_capture=capture,
+            token_capture=capture,
         )
-        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
+        agent.server_client.global_config_dict = {"token_capture": {"enabled": capture}}
         items, meta = parse_stream_json(self._events(), fold_thinking=not capture)
         body = NeMoGymResponseCreateParamsNonStreaming(input="fix it")
         with patch.object(agent, "_run_claude_code", AsyncMock(return_value=(items, "m", meta))):
@@ -1159,8 +1159,8 @@ class TestCaptureFriendlyTranscript:
             assert response.id != "resp_served123" and response.id.startswith("resp_")
 
     def _run_stream(self, stdout: str, tmp_path: Path, *, capture: bool, timeout: bool):
-        agent = _make_agent(token_id_capture=capture, timeout=0 if timeout else 1)
-        agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
+        agent = _make_agent(token_capture=capture, timeout=0 if timeout else 1)
+        agent.server_client.global_config_dict = {"token_capture": {"enabled": capture}}
         proc = MagicMock()
         proc.returncode = None if timeout else 0
         proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))

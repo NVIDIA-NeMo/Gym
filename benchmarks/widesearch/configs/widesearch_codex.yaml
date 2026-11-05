@@ -44,7 +44,7 @@ widesearch_codex_benchmark:
           memory_mib: 8192
       sandbox_model_base_url: null
       exa_api_key: null
-      token_id_capture: false
+      token_capture: false
       datasets:
         - name: widesearch
           type: benchmark

@@ -17,6 +17,8 @@ from typing import Any, List
 
 from omegaconf import DictConfig, ListConfig, open_dict
 
+from nemo_gym.config.renamed_keys import RENAMED_TOKEN_CAPTURE_BLOCK_KEYS
+
 
 MASKED_VALUE = "****"
 
@@ -36,7 +38,11 @@ _SECRET_KEY_SUBSTRINGS = (
 )
 
 
-# Noncredential controls from TokenIdCaptureSettings. Unknown/custom children stay private; adding a
+# The root token capture block, under its current key and the key it had before the rename (a config that bypassed
+# the parser can still use it).
+_CAPTURE_BLOCK_KEYS = frozenset({*RENAMED_TOKEN_CAPTURE_BLOCK_KEYS, *RENAMED_TOKEN_CAPTURE_BLOCK_KEYS.values()})
+
+# Noncredential controls from TokenCaptureSettings. Unknown/custom children stay private; adding a
 # capture setting must not accidentally make arbitrary backend credentials visible in run artifacts.
 _CAPTURE_PUBLIC_FIELDS = frozenset(
     {
@@ -151,8 +157,8 @@ def hide_secrets_in_container(data: Any) -> Any:
     """Return the credential-safe config projection shared by saved artifacts and exporters.
 
     Preserve unresolved interpolations without evaluating them. Secret ancestry masks every value,
-    including arbitrary names in a ``secrets`` mapping. The root ``token_id_capture`` mapping is a
-    settings namespace, not a credential; its own secret-shaped children still undergo masking.
+    including arbitrary names in a ``secrets`` mapping. The root ``token_capture`` mapping (``token_id_capture``
+    before the rename) is a settings namespace, not a credential; its own secret-shaped children still undergo masking.
     Custom sink/resolver kwargs can contain credentials under arbitrary names, so their values stay masked.
     """
 
@@ -164,7 +170,7 @@ def hide_secrets_in_container(data: Any) -> Any:
                     # Header names are arbitrary. Never retain any header value, even a container.
                     masked[key] = {name: MASKED_VALUE for name in value}
                     continue
-                capture_settings = root and key == "token_id_capture" and isinstance(value, dict)
+                capture_settings = root and key in _CAPTURE_BLOCK_KEYS and isinstance(value, dict)
                 credential_options = capture and key not in _CAPTURE_PUBLIC_FIELDS
                 child_secret = secret or credential_options or (looks_like_secret_key(key) and not capture_settings)
                 masked[key] = hide(value, child_secret, capture=capture_settings)

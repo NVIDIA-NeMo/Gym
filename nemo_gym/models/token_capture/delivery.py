@@ -118,7 +118,7 @@ async def finalize_rollout_token_capture(
     An unusable build has no rebuilt response and sets ``mask_sample``.
 
     ``mask_incomplete_when_attributed`` is the
-    ``token_id_capture.mask_incomplete_when_attributed`` setting, which decides
+    ``token_capture.mask_incomplete_when_attributed`` setting, which decides
     whether an incomplete snapshot always masks the rollout.
     """
     if source is None:

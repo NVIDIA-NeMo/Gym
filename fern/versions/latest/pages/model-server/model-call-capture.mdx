@@ -64,7 +64,7 @@ original request and response payloads.
 
 ### Buffered SSE with external token staging
 
-With `token_id_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
+With `token_capture.external_staging: true` and `parent_resolution: fingerprint`, captured requests can use `stream: true`
 on Chat Completions, Responses (including the compaction adapter), and Anthropic Messages.
 Gym requests a complete, non-streaming answer from the inference worker. The worker stages
 training tokens before returning commit coordinates. Gym removes internal token fields,
@@ -87,7 +87,7 @@ server writes, such as `source_capture_key` or `finish_reason`, rejects every ma
 ### Source-history continuity and context compaction
 
 A compatible training framework can own exact-token prefix reuse and training-row reconstruction.
-Set `token_id_capture.parent_resolution: source_history` to match source history and effective render
+Set `token_capture.parent_resolution: source_history` to match source history and effective render
 options. Gym sends a root when they do not match or no unique parent can be identified. The default
 `fingerprint` mode continues to match assistant content against captured calls.
 For a candidate parent, the inference worker verifies the converted-message boundary and any
@@ -128,7 +128,7 @@ The framework must configure the worker, shared capture ledger and control beare
 these run-wide settings:
 
 ```yaml
-token_id_capture:
+token_capture:
   enabled: true
   external_staging: true
   external_staging_backend: vllm_worker

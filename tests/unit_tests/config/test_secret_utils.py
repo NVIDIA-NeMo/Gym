@@ -137,35 +137,37 @@ def test_config_projection_masks_arbitrary_secret_values(value):
     assert source["secrets"]["JUDGE_AUTH"] == value
 
 
-def test_capture_namespace_cannot_escape_a_secret_ancestor():
+# The root block keeps its settings visible under its current key and under the key it had before the rename.
+@pytest.mark.parametrize("block", ["token_capture", "token_id_capture"])
+def test_capture_namespace_cannot_escape_a_secret_ancestor(block: str) -> None:
     source = {
-        "token_id_capture": {"enabled": False, "sink": "package:Sink", "headers": {"X-Auth": "diagnostic-canary"}},
-        "secrets": {"token_id_capture": {"enabled": True, "sink": "diagnostic-canary"}},
-        "headers": {"token_id_capture": {"enabled": True}},
-        "my_token_id_capture": {"enabled": True},
-        "nested": {"token_id_capture": {"enabled": True}},
+        block: {"enabled": False, "sink": "package:Sink", "headers": {"X-Auth": "diagnostic-canary"}},
+        "secrets": {block: {"enabled": True, "sink": "diagnostic-canary"}},
+        "headers": {block: {"enabled": True}},
+        f"my_{block}": {"enabled": True},
+        "nested": {block: {"enabled": True}},
     }
     masked = hide_secrets_in_container(source)
-    assert masked["token_id_capture"] == {
+    assert masked[block] == {
         "enabled": False,
         "sink": "package:Sink",
         "headers": {"X-Auth": MASKED_VALUE},
     }
-    assert masked["secrets"]["token_id_capture"] == {"enabled": MASKED_VALUE, "sink": MASKED_VALUE}
-    assert masked["headers"]["token_id_capture"] == MASKED_VALUE
-    assert masked["my_token_id_capture"]["enabled"] == MASKED_VALUE
-    assert masked["nested"]["token_id_capture"]["enabled"] == MASKED_VALUE
+    assert masked["secrets"][block] == {"enabled": MASKED_VALUE, "sink": MASKED_VALUE}
+    assert masked["headers"][block] == MASKED_VALUE
+    assert masked[f"my_{block}"]["enabled"] == MASKED_VALUE
+    assert masked["nested"][block]["enabled"] == MASKED_VALUE
 
 
 def test_public_capture_projection_fields_match_the_supported_schema():
     from nemo_gym.config.secret_utils import _CAPTURE_PUBLIC_FIELDS
-    from nemo_gym.models.token_capture.config import TokenCaptureSettings as TokenIdCaptureSettings
+    from nemo_gym.models.token_capture.config import TokenCaptureSettings
 
     assert _CAPTURE_PUBLIC_FIELDS | {"sink_kwargs", "lineage_store_kwargs", "control_auth_token_env"} == set(
-        TokenIdCaptureSettings.model_fields
+        TokenCaptureSettings.model_fields
     )
     source = {
-        "token_id_capture": {
+        "token_capture": {
             "enabled": True,
             "auth": "diagnostic-canary",
             "access": {"opaque": "diagnostic-canary"},
@@ -173,7 +175,7 @@ def test_public_capture_projection_fields_match_the_supported_schema():
         }
     }
     assert hide_secrets_in_container(source) == {
-        "token_id_capture": {
+        "token_capture": {
             "enabled": True,
             "auth": MASKED_VALUE,
             "access": {"opaque": MASKED_VALUE},

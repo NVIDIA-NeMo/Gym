@@ -1106,7 +1106,7 @@ class TestRunCapturePathAndMasking:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         server_client = _answering_server_client()
-        server_client.global_config_dict = {"token_id_capture": {"enabled": True, "all_agents": True}}
+        server_client.global_config_dict = {"token_capture": {"enabled": True, "all_agents": True}}
         _scripted_judge(monkeypatch, [(200, "YES")])
         agent = VcqaAgent(config=_make_config(), server_client=server_client)
 

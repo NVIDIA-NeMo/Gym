@@ -93,7 +93,7 @@ def make_capture_harness(
     fetch_prefix = fetch_prefix if fetch_prefix is not None else sink.prefix
     capture = RolloutTokenCapture(sink=sink, weight_version_fn=lambda: 7)
     config = {
-        "token_id_capture": {
+        "token_capture": {
             "enabled": True,
             "external_staging": True,
             "parent_resolution": parent_resolution_mode,

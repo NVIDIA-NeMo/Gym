@@ -874,7 +874,7 @@ class AnyTerminalAgent(SimpleResponsesAPIAgent):
             server_config["model_server_url"] = apply_rollout_prefix(
                 server_config["model_server_url"].rstrip("/").removesuffix("/v1"),
                 rollout_id,
-                token_capture=self._token_id_capture_enabled(),
+                token_capture=self._token_capture_enabled(),
             )
 
         params = AnyTerminalInstanceConfig(

@@ -40,11 +40,23 @@ logger = logging.getLogger(__name__)
 # The nemo_gym release that stops accepting the old names.
 RENAMED_KEYS_REMOVED_IN = "0.10.0"
 
+# Token capture's run-wide block.
+RENAMED_TOKEN_CAPTURE_BLOCK_KEYS: dict[str, str] = {"token_id_capture": "token_capture"}
+# Token capture's agent server instance settings.
+RENAMED_TOKEN_CAPTURE_AGENT_KEYS: dict[str, str] = {"token_id_capture": "token_capture"}
+# Token capture's model server instance settings.
+RENAMED_TOKEN_CAPTURE_MODEL_KEYS: dict[str, str] = {
+    "token_id_capture_non_generating_requests": "token_capture_non_generating_requests"
+}
+
 # Top-level config keys renamed: old key -> new key.
-RENAMED_TOP_LEVEL_KEYS: dict[str, str] = {}
+RENAMED_TOP_LEVEL_KEYS: dict[str, str] = {**RENAMED_TOKEN_CAPTURE_BLOCK_KEYS}
 # Keys renamed inside each server instance of a server type, such as `responses_api_agents`:
 # server type -> {old key: new key}.
-RENAMED_SERVER_INSTANCE_KEYS: dict[str, dict[str, str]] = {}
+RENAMED_SERVER_INSTANCE_KEYS: dict[str, dict[str, str]] = {
+    "responses_api_agents": RENAMED_TOKEN_CAPTURE_AGENT_KEYS,
+    "responses_api_models": RENAMED_TOKEN_CAPTURE_MODEL_KEYS,
+}
 
 _Function = TypeVar("_Function", bound=Callable[..., Any])
 

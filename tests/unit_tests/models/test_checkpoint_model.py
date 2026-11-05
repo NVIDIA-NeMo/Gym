@@ -1809,7 +1809,7 @@ def test_a_model_server_outside_the_checkpoint_gate_that_writes_the_policy_ledge
 
     run = {
         "checkpoint": {"enabled": True, "control_auth_token": "t"},
-        "token_id_capture": {"enabled": True, "all_agents": True, "external_staging": True, "rebuild_response": False},
+        "token_capture": {"enabled": True, "all_agents": True, "external_staging": True, "rebuild_response": False},
         "policy_model": model(checkpoint={"policy": True}),
         "user_model": model(),
         "judge_model": model(),
@@ -1826,7 +1826,7 @@ def test_a_model_server_outside_the_checkpoint_gate_that_writes_the_policy_ledge
         _model_server_starting("user_model", run, ledger)
     _model_server_starting("judge_model", {**run, "user_model": model(checkpoint={"policy": True})}, ledger)
     _model_server_starting(
-        "judge_model", {**run, "token_id_capture": {**run["token_id_capture"], "all_agents": False}}, ledger
+        "judge_model", {**run, "token_capture": {**run["token_capture"], "all_agents": False}}, ledger
     )
 
 
