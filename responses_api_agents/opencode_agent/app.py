@@ -256,8 +256,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
         default="inherit",
         description=(
             "Egress of a sandbox OpenCode creates: `model_only` allows only the model server's host, "
-            "`model_and_tools` also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a "
-            "session that borrows one rejects any other value than `inherit`."
+            "`model_and_tools` also each MCP grant's host. A restricted sandbox cannot download OpenCode, so set "
+            "`sandbox_executable_path` (or use an image with the runtime already at the cache path). A borrowed task "
+            "sandbox keeps its owner's network, so a session that borrows one rejects any other value than `inherit`."
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -827,6 +828,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         str(access.connection.url)
                         for access in self.effective_tool_accesses(body)
                         if isinstance(access, MCPToolAccess)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
                     ],
                 )
             except BaseException:

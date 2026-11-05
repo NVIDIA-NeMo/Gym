@@ -78,7 +78,17 @@ allowed host is open on every port. The OpenSandbox policy is set when the sandb
 is created, so a session that borrows a task sandbox rejects any value other than
 `inherit` (the default, the provider's network), and it cannot be combined with
 `sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
-the runtime: see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity). A borrowed sandbox relies on its owner's network policy.
+the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or use an
+image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
+(see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
+Without either, the seed is accepted and each attempt then fails downloading OpenCode.
+Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the
+policy would block its host; under `model_and_tools`, a grant at an address the
+sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
+its owner's network policy. The policy is only as strong as the OpenSandbox server's
+egress mode: in `dns` mode only name resolution is filtered, so a hard-coded IP
+bypasses it; `dns+nft` also enforces it at the IP layer and is needed for full isolation.
 
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
