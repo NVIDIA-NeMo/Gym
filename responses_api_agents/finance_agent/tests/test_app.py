@@ -1262,17 +1262,21 @@ class TestAgentSessions:
     @pytest.mark.parametrize("status", [500, 400])
     def test_context_overflow_in_a_session_is_graded_at_any_status(self, status: int) -> None:
         """An overflow is the model's own failure, so the episode is verified, not dispatched again until it fits."""
-        agent, client = _session_client(AsyncMock())
+        agent, client = _session_client(AsyncMock(), observability=True)
         agent.server_client.post = AsyncMock(return_value=_model_error_reply(status, _OVERFLOW_BODY))
         _seed(client)
 
-        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+        response = NeMoGymResponse.model_validate(client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).json())
 
         assert response.status == "incomplete"
         assert response.error is None
         assert response.metadata["stop_reason"] == "error"
         assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
         assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+        # The invocation in the observations says the same.
+        records = _close(client)["agent_observations"]["records"]
+        invocation = next(record for record in records if record["kind"] == "agent_invocation")
+        assert (invocation["status"], invocation["error_type"]) == ("incomplete", None)
 
     def test_model_failure_without_a_session_is_still_verified(self) -> None:
         """A legacy /run verifies whatever the loop returns; only a session reports the cause."""
@@ -1303,22 +1307,45 @@ class TestAgentSessions:
         assert response.status_code == 200, response.text
         assert response.cookies.get("session") == "after-submit"
 
-    def test_tool_abort_in_a_session_is_graded_like_the_legacy_run(self, monkeypatch) -> None:
-        """An aborting tool error ends the loop as upstream does; the answer is graded, not retried."""
-        model_mock = _dotjson_mock(_tool_call_response("web_search", '{"query": "revenue"}'))
-        agent, client = _session_client(model_mock, config=_v2_config())
-        abort = json.dumps({"results": json.dumps({"error": "RetryExhaustedError: Tavily failed after 3 attempts"})})
+    def test_tool_abort_in_a_session_is_retried_not_graded(self, monkeypatch) -> None:
+        """An abort type names an outage the model cannot cause, so a session dispatches the episode again.
+
+        A legacy /run still grades the answer so far, as upstream ends the question with an empty answer.
+        """
+        tool_result = {"results": json.dumps({"error": "RetryExhaustedError: SEC API answered 429 after 20 attempts"})}
+        model_mock = _dotjson_mock(_tool_call_response("edgar_search", '{"query": "revenue"}'))
+        agent, client = _session_client(model_mock, observability=True, config=_v2_config())
         monkeypatch.setattr(
-            "responses_api_agents.finance_agent.app.http_request", AsyncMock(return_value=_tool_reply(abort))
+            "responses_api_agents.finance_agent.app.http_request",
+            AsyncMock(return_value=_tool_reply(json.dumps(tool_result))),
+        )
+        _seed(client)
+
+        reply = client.post("/ng-rollout/rollout/v1/responses", json=_INPUT)
+
+        response = NeMoGymResponse.model_validate(reply.json())
+        assert response.status == "failed"
+        assert "RetryExhaustedError" in response.error.message
+        assert response.metadata["stop_reason"] == "error"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "unknown"}
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
+        records = _close(client)["agent_observations"]["records"]
+        invocation = next(record for record in records if record["kind"] == "agent_invocation")
+        assert (invocation["status"], invocation["error_type"]) == ("failed", "RetryExhaustedError")
+
+        legacy_agent, legacy_client = _make_agent_and_client(_v2_config())
+        legacy_agent.server_client.post = AsyncMock(
+            side_effect=_route(
+                _dotjson_mock(_tool_call_response("edgar_search", '{"query": "revenue"}')), _dotjson_mock(tool_result)
+            )
         )
 
-        assert client.post(
-            "/v1/agent_sessions", json=_session_seed(tool_accesses=[_GRANT]).model_dump(mode="json")
-        ).is_success
-        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+        legacy = NeMoGymResponse.model_validate(legacy_client.post("/v1/responses", json=_INPUT).json())
 
-        assert response.metadata["stop_reason"] == "error"
-        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+        assert legacy.status != "failed"
+        assert legacy.metadata["stop_reason"] == "error"
+        assert AGENT_OUTCOME_METADATA_KEY not in legacy.metadata
+        assert agent_outcome_policy(legacy) == OutcomeAction.VERIFY
 
     def test_session_returns_observations_when_model_calls_are_captured(self, monkeypatch) -> None:
         model_mock = _dotjson_mock(

@@ -254,11 +254,15 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         )
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Name the cause of the model call failure that ended a session's loop.
+        """Name the cause of the model call failure or tool abort that ended a session's loop.
 
         The Environment Server's outcome policy decides from it: by default a 400, 413 or 422 is graded, a
         retryable status or a transport failure dispatches the episode again, and any other status fails it.
+        A tool abort (``abort_on_tool_error_types``) is a dependency outage no registered kind names, so it is
+        ``unknown``, which the policy dispatches again.
         """
+        if native_result.get("tool_abort"):
+            return AgentOutcome(failure_kind="unknown")
         error = native_result.get("error")
         if isinstance(error, ClientResponseError) and 400 <= error.status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
@@ -379,6 +383,8 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         tool_records: List[TrajectoryToolCall] = []
         loop_started_at = time.time()
         model_failure: Optional[BaseException] = None
+        # The exception type a tool reported that aborted the loop (abort_on_tool_error_types), if any.
+        abort_error_type: Optional[str] = None
 
         new_outputs: List[Any] = []
         usage = None
@@ -487,7 +493,6 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 continue
 
             done = False
-            aborted = False
             for output_function_call in all_fn_calls:
                 tool_started_at = time.time()
                 tool_status, tool_error_type = "completed", None
@@ -580,17 +585,16 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                     stop_reason = StopReason.DONE_TOOL
                     break
 
-                if error_type := self._aborting_error_type(tool_output):
+                if abort_error_type := self._aborting_error_type(tool_output):
                     logger.error(
                         "Tool '%s' raised %s — aborting rollout",
                         output_function_call.name,
-                        error_type,
+                        abort_error_type,
                     )
-                    aborted = True
                     stop_reason = StopReason.ERROR
                     break
 
-            if done or aborted:
+            if done or abort_error_type is not None:
                 break
         else:
             if max_steps is not None:
@@ -638,11 +642,18 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             "stop_reason": stop_reason.value,
             "steps": str(step),
         }
+        invocation_status = {
+            StopReason.DONE_TOOL: "completed",
+            StopReason.TEXT_ONLY: "completed",
+            StopReason.ERROR: "failed",
+        }.get(stop_reason, "incomplete")
+        invocation_error_type = type(model_failure).__name__ if model_failure is not None else abort_error_type
         if state is not None and model_failure is not None and self._is_context_overflow_failure(model_failure):
             # The model's own context ran out, so the episode is graded, as a legacy /run grades it and hermes_agent
             # grades its context limit, instead of being dispatched again until a shorter attempt fits.
             last_model_response.status = "incomplete"
             last_model_response.error = None
+            invocation_status, invocation_error_type = "incomplete", None
         elif state is not None and model_failure is not None:
             # A legacy /run verifies whatever the loop returns. In a session the Environment Server decides from the
             # cause whether to grade the episode, dispatch it again or fail it, instead of scoring an outage as 0.
@@ -652,12 +663,17 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                 message=f"Model call failed on step {step}: {type(model_failure).__name__}: {model_failure}"[:2000],
             )
             last_model_response = self.report_outcome(last_model_response, {"error": model_failure})
+        elif state is not None and abort_error_type is not None:
+            # Upstream ends the question with an empty answer, and a legacy /run grades what the loop returned. An
+            # abort type names an outage the model cannot cause (v2: SEC or sec.gov still answering 429/503 after
+            # retries), so a session leaves it out of the score on purpose and the default policy dispatches it again.
+            last_model_response.status = "failed"
+            last_model_response.error = ResponseError(
+                code="server_error",
+                message=f"A tool call raised {abort_error_type} on step {step}, which aborts the rollout",
+            )
+            last_model_response = self.report_outcome(last_model_response, {"tool_abort": abort_error_type})
         if collect_observations:
-            invocation_status = {
-                StopReason.DONE_TOOL: "completed",
-                StopReason.TEXT_ONLY: "completed",
-                StopReason.ERROR: "failed",
-            }.get(stop_reason, "incomplete")
             state.observations = AgentObservationBundle(
                 source="finance_agent",
                 records=[
@@ -666,7 +682,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
                         status=invocation_status,
                         stop_reason=stop_reason.value,
                         duration_ms=max(0.0, time.time() - loop_started_at) * 1000,
-                        error_type=type(model_failure).__name__ if model_failure is not None else None,
+                        error_type=invocation_error_type,
                         model_calls=model_calls,
                         conversation=[*body.input, *new_outputs],
                     ),

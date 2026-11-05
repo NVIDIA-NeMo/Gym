@@ -58,8 +58,8 @@ environment's `single_agent_turn_legacy` Environment Server, which must then gra
 seed gets 422.
 
 Outcomes differ from the legacy `/run`, which verifies every loop it finishes and turns any exception into reward 0.
-Under the Environment Server, a failed model call other than a context overflow marks the response `failed` with its
-cause, and the Environment Server's `agent_outcome_policy` decides what happens:
+Under the Environment Server, a failed model call other than a context overflow, or a tool abort, marks the response
+`failed` with its cause, and the Environment Server's `agent_outcome_policy` decides what happens:
 
 | Event | Legacy `/run` | Environment Server, default policy |
 |-------|---------------|------------------------------------|
@@ -69,8 +69,13 @@ cause, and the Environment Server's `agent_outcome_policy` decides what happens:
 | Model call fails with another HTTP 4xx | verified, usually 0 | `model_request_error`, terminal failure |
 | Model call times out (`model_call_timeout`), or cannot connect before it does. Without `model_call_timeout`, a refused connection is resent without limit, so the episode runs into the Environment Server's deadline instead | verified, usually 0 | `model_transport_error`, retryable failure |
 | Seed, verify or the agent itself fails | reward 0 | failure classified by the Environment Server |
-| Tool error or timeout, or an error type in `abort_on_tool_error_types` | verified | verified, as before |
+| Tool error or timeout | verified | verified, as before |
+| A tool reports an error type in `abort_on_tool_error_types` (v2: `RetryExhaustedError`, the SEC API or sec.gov still answering 429 or 503 after its retries) | verified, usually 0 | `unknown`, retryable failure |
 | Context overflow that `vllm_model` answers itself (its default) | verified | verified, as before |
+
+The tool-abort row departs from upstream on purpose: `vals-ai/finance-agent-v2` ends the question with an empty answer,
+and the legacy `/run` still grades the rollout like upstream, but on the Environment Server path an SEC outage is
+retried instead of scored 0.
 
 A failure is not scored: rollout collection writes it to the failures sidecar instead of the rollouts file, and
 `--resume` dispatches a retryable one again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. So an outage no longer counts as a
