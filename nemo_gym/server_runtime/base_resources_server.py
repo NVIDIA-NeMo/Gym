@@ -601,6 +601,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # Validates a typed seed's ``task_data`` and a cookie seed's body. Only servers that implement the three state
     # hooks use it; a stateless server's seed accepts any body.
     seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = BaseSeedSessionRequest
+    # Typed sessions' identities. An "exported" server that uses the state hooks exports each session's identity and
+    # restores it as its continuation's (``next_attempt``), or the continuation's typed seed is refused.
     _session_episodes: dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     # The identity is protocol state; the retained verification payload is owned and interpreted by each verifier.
     # A verifier that releases its state at ``/verify`` first masks a session ``_fence`` has closed, then ``remember``s
@@ -855,18 +857,18 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         """Discard a session whose attempt was retired; called in every checkpoint mode.
 
         A retired session's late requests, a terminal step among them, are refused, so nothing else frees its state.
-        A server that uses the state hooks inherits this: it releases the session through ``release_session_state``,
-        then drops the active identity and records the close only if that succeeded, so a failed release can be
-        retried. Other servers that keep per-session state override it; the default does nothing.
+        A server that uses the state hooks inherits this: it releases the session through ``release_session_state``
+        and drops the active identity only if that succeeded, so a failed release can be retried. It records no
+        close: the checkpoint participant refuses a retired attempt's requests until it forgets the rollout, and the
+        participant also calls this hook to undo a restore (``delete_restored``) or drop an unclaimed session, after
+        which the same session may be installed again. Other servers that keep per-session state override it; the
+        default does nothing.
         """
         if not self._manages_session_state():
             return
         async with self._fence.locked(session_id):
-            identity = self._session_episodes.get(session_id)
             await self.release_session_state(session_id)
             self._session_episodes.pop(session_id, None)
-            if identity is not None:
-                self._fence.mark_closed(session_id, identity[0])
 
     def normalize_tool_name(self, name: str) -> str:
         """Strip this server's MCP namespace from a trajectory tool-call name (see module function)."""
