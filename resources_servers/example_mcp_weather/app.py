@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Optional
+from typing import Any, Optional, cast
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -128,45 +128,38 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         body: ExampleMCPWeatherVerifyRequest,
     ) -> ExampleMCPWeatherVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        state = self.session_id_to_state.get(session_id)
-        verified = self._verified_sessions.get(session_id)
-        if session_id in self._resources_session_fences:
-            state, verified = None, None
-        expected_city_value = (body.verifier_metadata or {}).get("expected_city", "Paris")
-        expected_weather = _weather_sentence(expected_city_value)
-        expected_city = expected_city_value.casefold()
-        final_text = _extract_assistant_text(body)
-        final_response_mentions_weather = expected_weather.casefold() in final_text.casefold()
+        async with self.verifying(session_id) as verification:
+            if verification.is_live:
+                state = self.session_id_to_state[session_id]
+                # Only the unique cities are needed on a retry; do not retain the complete tool-call history.
+                called_cities = frozenset(str(call.get("city", "")).casefold() for call in state["weather_calls"])
+                verification.retain(called_cities)
+            elif not verification.is_lost:
+                called_cities = cast(frozenset[str], verification.retained)
 
-        if state is None and verified is None:
-            # The session's weather calls are gone (never seeded, closed, or the server restarted), so this server
-            # cannot tell whether the tool was used. Mask the sample rather than score the policy 0.
+            expected_city_value = (body.verifier_metadata or {}).get("expected_city", "Paris")
+            expected_weather = _weather_sentence(expected_city_value)
+            expected_city = expected_city_value.casefold()
+            final_text = _extract_assistant_text(body)
+            final_response_mentions_weather = expected_weather.casefold() in final_text.casefold()
+
+            if verification.is_lost:
+                # Without live state or retained evidence, tool use cannot be reconstructed from the answer.
+                return ExampleMCPWeatherVerifyResponse(
+                    **(body.model_dump() | lost_session_verification("No open example_mcp_weather session to verify")),
+                    expected_weather=expected_weather,
+                    tool_call_seen=False,
+                    final_response_mentions_weather=final_response_mentions_weather,
+                )
+
+            tool_call_seen = expected_city in called_cities
             return ExampleMCPWeatherVerifyResponse(
-                **(body.model_dump() | lost_session_verification("No open example_mcp_weather session to verify")),
+                **body.model_dump(),
+                reward=float(tool_call_seen and final_response_mentions_weather),
                 expected_weather=expected_weather,
-                tool_call_seen=False,
+                tool_call_seen=tool_call_seen,
                 final_response_mentions_weather=final_response_mentions_weather,
             )
-
-        # Match the city case-insensitively. The weather sentence is derived deterministically from the
-        # city, so a city match is sufficient; comparing the sentence exactly would spuriously reject a
-        # correct call that used different casing (e.g. get_weather("PARIS")).
-        if state is not None:
-            called_cities = frozenset(str(call.get("city", "")).casefold() for call in state["weather_calls"])
-            self.session_id_to_state.pop(session_id)
-            self._verified_sessions.remember(session_id, (self._session_episodes.pop(session_id, None), called_cities))
-        else:
-            called_cities = verified[1]
-        tool_call_seen = expected_city in called_cities
-        reward = float(tool_call_seen and final_response_mentions_weather)
-
-        return ExampleMCPWeatherVerifyResponse(
-            **body.model_dump(),
-            reward=reward,
-            expected_weather=expected_weather,
-            tool_call_seen=tool_call_seen,
-            final_response_mentions_weather=final_response_mentions_weather,
-        )
 
 
 if __name__ == "__main__":

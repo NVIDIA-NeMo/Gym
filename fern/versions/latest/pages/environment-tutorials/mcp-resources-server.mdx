@@ -49,7 +49,7 @@ weather_environment:
 See [Run an integrated agent on a benchmark](/main/agent-server/integrate-existing-agents#run-an-integrated-agent-on-a-benchmark) for pairing and execution setup.
 
 <Note>
-The Claude Code adapter's session path does not yet consume per-session MCP grants. The shipped weather YAML still uses the legacy agent `/run` path; it is retained only for compatibility and is not a typed-session pairing. Its commands and wiring are in the legacy section below.
+The Claude Code adapter's session path does not yet consume per-session MCP grants. The shipped weather YAML still uses the agent-owned `/run` path; it is retained only for compatibility and is not a typed-session pairing. Its commands and wiring are in the agent-owned compatibility section below.
 </Note>
 
 With a compatible agent and `resources_tool_transports: [mcp]`, the successful episode follows this sequence. The agent lifeline groups the Agent Server and its harness runtime; model calls are omitted.
@@ -88,11 +88,9 @@ On the typed-session path:
 
 The [weather README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/example_mcp_weather#sessions-under-an-environment-server) has more on this path.
 
-[`SimpleResourcesServer`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) owns the seed, close, and checkpoint-retirement flow, including request validation, identity checks, and retry bookkeeping. Stateless servers keep the default no-op lifecycle. A stateful environment supplies three hooks: `has_session_state`, `initialize_session_state`, and `release_session_state`, and sets `seed_request_model` to the model that validates a typed seed's `task_data` (invalid data receives `422`; without it any task data is accepted). Cleanup must succeed before the base class drops the identity or marks the session closed. A verifier that frees its state at `/verify`, as the weather example does, also masks a closed session and retains the identity and result that a retried verification needs; see its `verify` for the exact steps.
+[`SimpleResourcesServer`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/server_runtime/base_resources_server.py) owns seed, verification cleanup, close, and checkpoint retirement. Stateless servers keep the default no-op lifecycle. A stateful environment supplies three hooks: `has_session_state`, `initialize_session_state`, and `release_session_state`, and sets `seed_request_model` to validate task data. Initialization and release must be async. The base releases an existing cookie run before replacing it and attempts cleanup if initialization fails. Release must tolerate missing or already-released state; on failure, retain the handles needed to retry.
 
-<Accordion title="Why the implementation uses both Field and PrivateAttr">
-`session_id_to_state` retains the original example's public Pydantic `Field`. `SimpleResourcesServer` keeps `_session_episodes`, `_verified_sessions`, and `_fence` as internal `PrivateAttr` state. Pydantic excludes those attributes from model-field validation and serialization.
-</Accordion>
+The verifier scores inside `async with self.verifying(session_id) as verification`. The context holds the session lock, identifies lost sessions, and makes compact evidence available through `verification.retained` on a retry. The verifier calls `verification.retain(payload)` with the evidence it needs; the context calls `release_session_state` and transfers the identity only after cleanup succeeds. It also attempts release when scoring raises. The weather verifier retains only the unique called cities, while recomputing the score from each request. Tool handlers that await must hold `session_lock(session_id)` or coordinate their in-flight work with release; this weather tool does not await.
 
 ## How MCP reaches the tool
 
@@ -171,17 +169,17 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 
 The names are signed into the session token. `tools/list` advertises only those tools, and `tools/call` rejects others.
 
-## Legacy compatibility (not recommended)
+## Agent-owned Claude Code compatibility
 
 <Warning>
-The agent-owned `/run` path is **legacy and not recommended for use. It will be deprecated in a future release.** Use the Environment Server typed-session path above for new integrations, and migrate existing integrations to it. This warning concerns the Agent Server's `/run` endpoint; the Environment Server's `/run` remains the episode entrypoint.
+Use the Environment Server typed-session path above for new integrations. The shipped `claude_code_agent` configuration still uses its agent-owned `/run`; the deprecation of `/run` on sandboxed harnesses does not apply to this adapter. The Environment Server's `/run` remains the episode entrypoint.
 </Warning>
 
 The following examples are retained only to explain existing configurations. Claude Code needs per-session MCP grant support before its weather pairing can move to the recommended path.
 
-<Accordion title="Legacy: Claude Code weather example (/run)">
+<Accordion title="Claude Code weather example (/run)">
 
-### Run the weather example (legacy)
+### Run the weather example (agent-owned /run)
 
 Start with a working Gym installation from the [quickstart](/main/get-started/quickstart). Add your Anthropic API key to the repository-root `env.yaml`:
 
@@ -208,7 +206,7 @@ gym eval run --no-serve \
 
 In `results/weather_rollouts.jsonl`, a successful episode contains a call to `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`. For Paris, the expected answer contains `The weather in Paris is sunny and 72 F.` The verifier checks that the tool was actually called in that episode's session, as well as checking the answer.
 
-### Wiring the agent (Claude Code, legacy)
+### Wiring the agent (Claude Code, agent-owned /run)
 
 The Gym agent seeds the weather session and starts the Claude Code CLI with the generated MCP config:
 

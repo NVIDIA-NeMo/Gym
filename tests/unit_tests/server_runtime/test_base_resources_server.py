@@ -31,7 +31,6 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ExpiringResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -397,6 +396,9 @@ def _cookie_keyed_server(
             self, request: Request, body: ResourcesCloseSessionRequest
         ) -> ResourcesCloseSessionResponse:
             async with self._locks.locked(body.resources_session_id):
+                active_episode = self._episodes.get(body.resources_session_id)
+                if active_episode is not None and active_episode != body.episode_id:
+                    raise ResourcesSessionConflictError("episode_id does not match the active resources session")
                 fenced_episode = self._fences.get(body.resources_session_id)
                 if fences_close and fenced_episode not in (None, body.episode_id):
                     raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
@@ -609,56 +611,6 @@ class TestRefusalsAndLostSessions:
             404,
             {"detail": {"failure_kind": SESSION_LOST, "message": "sandbox is gone"}},
         )
-
-
-class TestExpiringResourcesSessionRecords:
-    def test_retries_keep_the_first_result_and_expiry(self, monkeypatch) -> None:
-        clock = [100.0]
-        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
-        records = ExpiringResourcesSessionRecords[str](lifetime_seconds=10)
-        records.remember("a", "first result")
-        clock[0] = 105.0
-        records.remember("a", "retried result")
-        records.remember("b", "second result")
-        assert records.get("a") == "first result"
-        assert "a" in records and len(records) == 2
-
-        clock[0] = 110.0
-        assert records.get("a") is None and "a" not in records
-        assert records.get("b") == "second result"
-        clock[0] = 115.0
-        assert len(records) == 0
-
-    def test_forgetting_a_result_preserves_other_expiries(self, monkeypatch) -> None:
-        clock = [100.0]
-        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
-        records = ExpiringResourcesSessionRecords[str](lifetime_seconds=10)
-        records.remember("a", "first run")
-        records.remember("b", "another run")
-        records.forget("a")
-        records.forget("unknown")
-        assert "a" not in records and records.get("b") == "another run"
-
-        clock[0] = 105.0
-        records.remember("a", "next run")
-        clock[0] = 110.0
-        assert "b" not in records and records.get("a") == "next run"
-        clock[0] = 115.0
-        assert len(records) == 0
-
-    def test_none_is_a_record_until_it_expires(self, monkeypatch) -> None:
-        clock = [0.0]
-        monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
-        records = ExpiringResourcesSessionRecords[None](lifetime_seconds=10)
-        records.remember("expired-session", None)
-        assert records.get("expired-session") is None and "expired-session" in records
-        clock[0] = 10.0
-        assert "expired-session" not in records
-
-    @pytest.mark.parametrize("lifetime", [0, -1, float("nan")])
-    def test_lifetime_must_be_positive(self, lifetime: float) -> None:
-        with pytest.raises(ValueError, match="lifetime_seconds must be positive"):
-            ExpiringResourcesSessionRecords[str](lifetime_seconds=lifetime)
 
 
 class TestResourcesSessionFenceLapse:

@@ -2,7 +2,7 @@
 
 A minimal example of serving a Resources Server's tools over the **Model Context Protocol (MCP)**.
 The server extends `SimpleResourcesServer` with one typed HTTP tool route (`POST /get_weather`) —
-no MCP imports, no decorators. The base class handles seed, close, and checkpoint retirement; the example
+no MCP imports, no decorators. The base class handles seed, verification cleanup, close, and checkpoint retirement; the example
 provides its weather state and scoring. Setting `expose_tools_over_mcp: true` in its YAML config serves that
 same route over a Streamable-HTTP MCP endpoint at `/mcp` on the same FastAPI app as `/seed_session`
 and `/verify`. Tool calls record against the per-rollout Gym session (resolved from a signed
@@ -17,12 +17,12 @@ This is the companion resources server for the [MCP Resources Server tutorial](h
 that accepts per-session MCP tool grants. The [tutorial](https://github.com/NVIDIA-NeMo/Gym/tree/main/fern/versions/latest/pages/environment-tutorials/mcp-resources-server.mdx#sessions-under-an-environment-server)
 shows the wiring and lifecycle diagram.
 
-An environment server such as `single_agent_turn` sends an episode seed with `ResourcesSeedSessionRequest`. It names
+An Environment Server such as `single_agent_turn` seeds the server with a typed `ResourcesSeedSessionRequest`. It names
 the session (`resources_session_id`), and `task_data` carries the row's own fields, here `verifier_metadata`. The reply
 is a `ResourcesSeedSessionResponse` whose `resources_tools` holds the same MCP metadata (the `/mcp` path and the
-per-rollout session token) that a legacy seed returns under `mcp`; the Environment Server grants it to the agent.
-`/verify` releases the live weather-call history and episode binding before checkpoint tracking ends. It keeps only
-the unique called cities and optional episode identity for `session_close_retry_window_seconds`, so a repeated verify
+per-rollout session token) that a cookie seed returns under `mcp`; the Environment Server grants it to the agent.
+`/verify` releases the live weather-call history and typed binding before checkpoint tracking ends. It keeps only
+the unique called cities and optional typed identity for `session_close_retry_window_seconds`, so a repeated verify
 can still score the response. Checkpoint retirement also releases a live history. The Environment Server then
 calls `/close_session`, which fences verification retries. From then on:
 
@@ -32,11 +32,11 @@ calls `/close_session`, which fences verification retries. From then on:
 
 Running the example under `single_agent_turn` with the `mcp` tool transport needs an agent that accepts per-session
 MCP tool grants. The Claude Code adapter does not consume those grants in its session path yet. The shipped
-Claude Code YAML is a legacy compatibility example, not a ready-to-run episode-session pairing.
+Claude Code YAML is an agent-owned compatibility example, not a ready-to-run typed-session pairing.
 
 ## Inspect the MCP round-trip without an LLM
 
-With the resources server running and MCP exposure enabled, use an episode seed as an environment server would.
+With the Resources Server running and MCP exposure enabled, use a typed seed as an Environment Server would.
 A `requests.Session` preserves the resources cookie for verification. This protocol example uses a scripted
 answer and does not run an agent or model:
 
@@ -79,7 +79,7 @@ print(s.post("http://127.0.0.1:<port>/verify", json={
         "parallel_tool_calls": False, "tool_choice": "none", "tools": []},
 }).json()["reward"])
 
-# close the episode session after verification; later tool calls and verification retries are refused
+# close the typed session after verification; later tool calls and verification retries are refused
 closed = s.post("http://127.0.0.1:<port>/close_session", json={
     "resources_session_id": session_id,
     "episode_id": episode,
@@ -87,17 +87,17 @@ closed = s.post("http://127.0.0.1:<port>/close_session", json={
 closed.raise_for_status()
 ```
 
-## Legacy compatibility (not recommended)
+## Agent-owned Claude Code compatibility
 
-The agent-owned `/run` path is **legacy and not recommended for use. It will be deprecated in a future release.**
-Use the environment server's episode-session path for new integrations, and migrate existing integrations to it.
+The shipped Claude Code adapter uses its agent-owned `/run`. The `/run` deprecation for sandboxed harnesses does not apply to this adapter.
+Use the Environment Server typed-session path for new integrations, and migrate existing integrations to it.
 The Environment Server's own `/run` remains the episode entrypoint. The commands below are retained only for
 existing Claude Code integrations; migrating this pairing requires per-session MCP grants in the Claude Code adapter.
 
 <details>
-<summary>Legacy: Run and wire Claude Code (/run)</summary>
+<summary>Run and wire Claude Code (/run)</summary>
 
-### Run with an agent (Claude Code, legacy)
+### Run with an agent (Claude Code, agent-owned /run)
 
 Put your key in a repo-root `env.yaml` (the config interpolates `${anthropic_api_key}`), then start the servers
 — the `claude_code_agent` runs `claude` with that key injected:
@@ -111,7 +111,7 @@ Then collect rollouts against `data/example.jsonl` and reward-profile as in the
 [quickstart](https://github.com/NVIDIA-NeMo/Gym/tree/main/fern/versions/latest/pages/get-started/quickstart.mdx).
 A correct rollout shows Claude Code calling `mcp__example_mcp_weather__get_weather` and a `reward` of `1.0`.
 
-### Wiring the agent (Claude Code, legacy)
+### Wiring the agent (Claude Code, agent-owned /run)
 
 In the example's `/run` flow, the Gym agent seeds the weather Resources Server and generates an MCP config
 for the Claude Code CLI:
