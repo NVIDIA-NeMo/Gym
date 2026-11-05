@@ -37,7 +37,17 @@ On a cluster, pass `--sandbox opensandbox` instead.
 
 ## Check the result
 
-TODO: After runtime integration is available, add the literal successful CLI output and identify the exact result fields and artifacts a user should inspect to verify the score.
+`gym dataset validate` ends with one line per task:
+
+```text
+task_id	status	reward	verify_s	network
+goodbye [repeat 0]	oracle solved	1.0	0.4	public
+hello [repeat 0]	oracle solved	1.0	0.5	public
+```
+
+Each task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
+
+Each command writes its results to its own folder: `results/harbor/validation/hello_dataset/` for validate and `results/harbor/hello_dataset/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show what each task's `tests/test.sh` wrote.
 
 ## Other examples
 
