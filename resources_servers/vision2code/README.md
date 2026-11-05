@@ -177,6 +177,25 @@ gym env start --config resources_servers/vision2code/configs/vision2code.yaml \
   +vision2code.resources_servers.vision2code.use_blended_reward=true
 ```
 
+## Benchmark results
+
+Gym evaluations of **Qwen3.8-27B** on **test-mini**, judged by **GPT-6.1-Sol**, cover
+the same 539 tasks across 15 rubrics. Both runs use temperature 0, up to 32,768 output
+tokens per policy call, and one rollout per task. Revisions use category-level feedback;
+generation and early stopping use linear reward.
+
+| Maximum passes | Tasks scored | Successful final renders | Linear | Squared (offline) | Blend A (offline) |
+| --- | --- | --- | --- | --- | --- |
+| 1 | 539 | 503 | 0.7947 | 0.7001 | 0.6622 |
+| 3 | 539 | 528 | 0.8815 | 0.8204 | 0.7267 |
+
+Mean rewards weight every task equally, including zero rewards for code/render failures.
+Neither run has masked samples. Squared and Blend A scores are offline rescoring of the
+same final attempts, rather than separate collection runs with those rewards.
+
+Evidence: [per-task scores](https://github.com/NVIDIA-NeMo/Gym/blob/a5947c12826e4d9fc283686fb16d91d25540f897/resources_servers/vision2code/results/test-mini-qwen.csv)
+and [run settings and provenance](https://github.com/NVIDIA-NeMo/Gym/blob/a5947c12826e4d9fc283686fb16d91d25540f897/resources_servers/vision2code/results/test-mini-provenance.json).
+
 ## Failures and artifacts
 
 Code errors, execution timeouts, and missing/invalid PNGs receive zero reward. Infrastructure,
