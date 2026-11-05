@@ -97,7 +97,12 @@ from responses_api_agents.openclaw_agent.observability import (
     build_openclaw_observations,
     discover_openclaw_session_tree,
 )
-from responses_api_agents.openclaw_agent.sandbox import _SANDBOX_PATH_CHECK, OpenClawSandboxSession
+from responses_api_agents.openclaw_agent.sandbox import (
+    _SANDBOX_PATH_CHECK,
+    PROVIDER_REPLAY_READY,
+    PROVIDER_REPLAY_RECEIPT,
+    OpenClawSandboxSession,
+)
 from responses_api_agents.openclaw_agent.setup_openclaw import ensure_openclaw
 
 
@@ -429,7 +434,9 @@ if [ "$#" -gt 0 ]; then
 fi
 """
     check_paths = f"(set -- {shlex.join([workdir, str(Path(directory).parent), runtime])}{_SANDBOX_PATH_CHECK})"
-    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.openclaw')}"
+    # A provider's upload may create a missing parent as root; the plugin writes its readiness receipt beside itself.
+    owned = shlex.join([f"{directory}/home/.openclaw", f"{directory}/provider_plugin"])
+    return bootstrap + f"{check_paths} && mkdir -p {owned}"
 
 
 # One ``openclaw mcp probe`` per MCP grant: CLI startup, connection and tool listing.
@@ -870,9 +877,20 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         response = await self._collect_sandbox_response(
             state, body, prompt=prompt, system=system, capture_correlated=True
         )
+        # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
+        # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
+        stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
+        lost = sorted(name for name in mcp_servers if f'failed to start server "{name}"' in stderr)
+        mcp_gaps += [
+            ObservationGap(code="mcp_server_skipped", detail=f"{name}: did not connect in the agent run")
+            for name in lost
+            if name not in required_grants
+        ]
+        if state.observations is not None:
+            state.observations.gaps.extend(mcp_gaps)
         artifacts = state.session.artifacts or {}
-        policy_receipt = artifacts.get("provider_plugin/policy.ready")
-        if policy_receipt != "nemo-gym-replay-v1\n":
+        policy_receipt = artifacts.get(PROVIDER_REPLAY_RECEIPT)
+        if policy_receipt != PROVIDER_REPLAY_READY:
             transcript = artifacts.get(f"home/.openclaw/agents/main/sessions/{session_id}.jsonl", "")
             model_or_tool_activity = any(
                 isinstance(event.get("message"), dict) and event["message"].get("role") in {"assistant", "toolResult"}
@@ -892,20 +910,13 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 for record in state.observations.records:
                     if record.kind == "agent_invocation":
                         record.status = "failed"
-                raise RuntimeError(
+                # Keep the worker's own failure, such as a startup crash, in the activation error.
+                cause = f": {response.error.message}" if response.error is not None else ""
+                raise HTTPException(
+                    502,
                     "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+                    + cause,
                 )
-        # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
-        # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
-        stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
-        lost = sorted(name for name in mcp_servers if f'failed to start server "{name}"' in stderr)
-        mcp_gaps += [
-            ObservationGap(code="mcp_server_skipped", detail=f"{name}: did not connect in the agent run")
-            for name in lost
-            if name not in required_grants
-        ]
-        if state.observations is not None:
-            state.observations.gaps.extend(mcp_gaps)
         if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
             # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
@@ -1059,7 +1070,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         gaps = []
         artifacts = state.session.artifacts or {}
         # Record this on interrupted activations too, before close releases the sandbox.
-        if artifacts.get("provider_plugin/policy.ready") != "nemo-gym-replay-v1\n":
+        if artifacts.get(PROVIDER_REPLAY_RECEIPT) != PROVIDER_REPLAY_READY:
             gaps.append(ObservationGap(code="provider_replay_policy_unconfirmed"))
         stdout = artifacts.get("stdout.log", "")
         if "stdout.log" not in artifacts:

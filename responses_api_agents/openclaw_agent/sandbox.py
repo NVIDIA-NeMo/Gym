@@ -24,6 +24,10 @@ from nemo_gym.trajectory import AgentObservationBundle
 
 LOG = logging.getLogger(__name__)
 
+# What provider_plugin/index.mjs writes beside itself when OpenClaw resolves the nemo provider's replay policy.
+PROVIDER_REPLAY_RECEIPT = "provider_plugin/policy.ready"
+PROVIDER_REPLAY_READY = "nemo-gym-replay-v1\n"
+
 
 # POSIX sh run with positional parameters WORKDIR SESSION_ROOT RUNTIME_ROOT before uploading
 # any adapter-owned files. Resolve symlinks and '..' on the sandbox filesystem, not on the agent-server
@@ -178,7 +182,7 @@ class OpenClawSandboxSession(AgentSessionState):
         for name in (
             "stdout.log",
             "stderr.log",
-            "provider_plugin/policy.ready",
+            PROVIDER_REPLAY_RECEIPT,
             f"home/.openclaw/agents/main/sessions/{session_id}.jsonl",
         ):
             try:

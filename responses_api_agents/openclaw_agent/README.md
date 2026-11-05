@@ -205,12 +205,14 @@ class (such as a missing executable) and the configured server's URL origin; the
 echo server responses, stays in its files in the session directory. OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
 
-A bundled `nemo-gym` provider plugin preserves tool-call IDs and reasoning when replaying
-Gym model responses. OpenClaw's generic custom-provider policy otherwise strips punctuation
-from IDs, breaking tool-result identity. The adapter requires the plugin's per-session
+In sandbox sessions, a bundled `nemo-gym` provider plugin preserves tool-call IDs and reasoning
+when replaying Gym model responses and keeps OpenClaw's openai-completions turn repairs; the
+local `/run` path does not load it. OpenClaw's generic custom-provider policy otherwise strips
+punctuation from IDs, breaking tool-result identity. The adapter requires the plugin's per-session
 readiness receipt before accepting a response. This detects a missing hook after execution;
 it does not prevent earlier model or tool calls. Missing readiness retains transcript evidence
-and fails activation before verification. A supervisor timeout before any model/tool activity
+and fails activation with HTTP 502 before verification; the message keeps the worker's own error,
+such as a startup crash. A supervisor timeout before any model/tool activity
 remains an incomplete response eligible for verification, even if startup ended before the
 receipt was written; the missing receipt is still recorded as an observation gap.
 

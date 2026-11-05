@@ -15,7 +15,16 @@ export default {
       auth: [],
       buildReplayPolicy() {
         writeFileSync(new URL("policy.ready", import.meta.url), "nemo-gym-replay-v1\n");
-        return { sanitizeToolCallIds: false, dropReasoningFromHistory: false };
+        // Matches OpenClaw's buildOpenAICompatibleReplayPolicy("openai-completions", { sanitizeToolCallIds: false,
+        // dropReasoningFromHistory: false }): tool-call IDs and reasoning replay unchanged, and the
+        // openai-completions turn repairs of the generic policy stay on.
+        return {
+          sanitizeToolCallIds: false,
+          dropReasoningFromHistory: false,
+          applyAssistantFirstOrderingFix: true,
+          validateGeminiTurns: true,
+          validateAnthropicTurns: true,
+        };
       },
     });
   },

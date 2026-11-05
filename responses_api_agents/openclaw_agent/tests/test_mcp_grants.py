@@ -246,6 +246,36 @@ def test_server_that_fails_at_agent_startup_after_its_probe(setup, lost, require
     sandbox.stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize("stage", ["probe", "agent_run"])
+def test_missing_replay_receipt_keeps_the_optional_grant_gap(setup, stage):  # noqa: F811
+    """An activation failed for its replay-policy receipt still reports the optional grant it ran without."""
+    agent, sandbox = setup
+    body = seed().model_dump(mode="json")
+    body["tool_accesses"] = [grant("task_tools", required=True), grant("extra", required=False)]
+    install_probe_fake(sandbox, {"extra"} if stage == "probe" else set(), "exit")
+    if stage == "agent_run":
+        sandbox.stderr = 'bundle-mcp: failed to start server "extra"\n'
+    download = sandbox.download
+
+    async def missing_policy(source, destination):
+        if source.endswith("/provider_plugin/policy.ready"):
+            raise FileNotFoundError(source)
+        await download(source, destination)
+
+    sandbox.download = missing_policy
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        created = client.post("/v1/agent_sessions", json=body)
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 502
+        assert "replay policy" in result.json()["detail"]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    problem = _PROBLEM["exit"] if stage == "probe" else "did not connect in the agent run"
+    assert skipped(closed) == [f"extra: {problem}"]
+    sandbox.disconnect.assert_awaited_once()
+
+
 def test_probe_problem_keeps_kind_and_origin_only(setup):  # noqa: F811
     """A 502 or gap never carries server bodies, credentials, query values or URL userinfo."""
     agent, sandbox = setup
