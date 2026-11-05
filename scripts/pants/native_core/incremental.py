@@ -13,6 +13,7 @@ MIGRATION_TEST = "tests/unit_tests/tooling/test_add_legacy_agent_environment_ser
 SCANNED_ROOTS = (
     "benchmarks/",
     "environments/",
+    "environment_servers/",
     "resources_servers/",
     "responses_api_agents/",
     "responses_api_models/",
@@ -78,6 +79,7 @@ def declared_files(source: Path) -> list[str]:
         and (
             name in explicit
             or name.startswith(SCANNED_ROOTS)
+            or name.endswith((".yaml", ".yml"))
             or (name.startswith(("tests/", "nemo_gym/")) and not name.endswith(".py"))
             or name.startswith("tests/helpers/")
         )
@@ -101,12 +103,21 @@ def build_target(source: Path) -> str:
     """Keep Git snapshots and the genuine project wheel out of this target closure."""
     native = source / "scripts/pants/native_core"
     files = declared_files(source)
+    configuration = json.loads((native / "configuration-inputs.json").read_text())
+    files += configuration["files"]
     links = {}
     tracked = subprocess.check_output(["git", "ls-files", "-z"], cwd=source).decode().split("\0")
     for name in filter(None, tracked):
         path = source / name
-        if path.is_symlink() and name.startswith(SCANNED_ROOTS):
+        if path.is_symlink() and (
+            name.startswith(SCANNED_ROOTS) or name.endswith((".yaml", ".yml")) or name in configuration["files"]
+        ):
             links[name] = os.readlink(path)
+            files = [item for item in files if item != name]
+            resolved = path.resolve()
+            if not resolved.is_relative_to(source) or not resolved.is_file():
+                raise ValueError(f"Unsupported configuration link: {name}")
+            files.append(resolved.relative_to(source).as_posix())
     (native / "incremental-links.json").write_text(json.dumps(links, sort_keys=True) + "\n")
     policy = json.loads((native / "incremental-policy.json").read_text())
     files += list(policy["audited_sha256"])
@@ -121,6 +132,7 @@ def build_target(source: Path) -> str:
             "runtime-inputs.json",
             "incremental-policy.json",
             "incremental-links.json",
+            "configuration-inputs.json",
         )
     ]
     return f"files(name='incremental-assets', sources={sorted(set(files))!r})\n"

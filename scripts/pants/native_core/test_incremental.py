@@ -92,6 +92,26 @@ class IncrementalTest(unittest.TestCase):
             self.stage()
             self.assertEqual(external_configuration(self.root), {str(first), str(second)})
 
+    def test_recursive_relative_inheritance_tracks_arbitrary_suffixes_and_absence(self):
+        self.write("resources_servers/a/config.yaml", "config_paths: [extras/first]\n")
+        self.write("extras/first", "config_paths: [extras/second.conf, extras/future]\n")
+        self.write("extras/second.conf", "value: present\n")
+        self.stage()
+        output = self.root / "inventory.json"
+        external_configuration(self.root, inventory_output=output)
+        before = json.loads(output.read_text())
+        self.assertEqual(before["files"], ["extras/first", "extras/second.conf"])
+        self.assertEqual(before["missing"], ["extras/future"])
+        self.write("extras/future", "value: newly present\n")
+        with self.assertRaisesRegex(ValueError, "untracked"):
+            external_configuration(self.root, inventory_output=output)
+        self.stage()
+        external_configuration(self.root, inventory_output=output)
+        self.assertNotEqual(before, json.loads(output.read_text()))
+        self.write("extras/first", "config_paths: [../outside.conf]\n")
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            external_configuration(self.root, inventory_output=output)
+
     def test_pex_interpreter_path_is_allowed_but_other_tools_and_drift_fail(self):
         from scripts.pants.native_core import incremental_runtime as runtime
 

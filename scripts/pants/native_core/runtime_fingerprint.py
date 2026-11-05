@@ -9,6 +9,7 @@ import os
 import platform
 import socket
 import stat
+import subprocess
 import sys
 from pathlib import Path
 
@@ -108,14 +109,19 @@ def capture(output: Path) -> None:
     if sys.platform != "linux":
         raise ValueError("Incremental runtime verification currently supports Linux only")
     roots = sorted({str(Path(sys.base_prefix).resolve()), str(Path("/usr/lib").resolve())})
-    paths = sorted(set(CONFIGURATION) | external_configuration(output.resolve().parents[3]))
+    paths = sorted(
+        set(CONFIGURATION)
+        | external_configuration(
+            output.resolve().parents[3], inventory_output=output.with_name("configuration-inputs.json")
+        )
+    )
     result = fingerprint(roots, paths)
     output.write_text(
         json.dumps({"schema_version": 1, "roots": roots, "paths": paths, "fingerprint": result}, sort_keys=True) + "\n"
     )
 
 
-def external_configuration(source: Path) -> set[str]:
+def external_configuration(source: Path, *, inventory_output: Path | None = None) -> set[str]:
     """Fingerprint absolute YAML inheritance, including absent referenced files.
 
     Paths come from the sampled public configuration, never a controller-specific
@@ -123,11 +129,39 @@ def external_configuration(source: Path) -> set[str]:
     own inheritance cannot bypass the content fingerprint.
     """
     import yaml
-    from incremental import declared_files
+    from incremental import SCANNED_ROOTS, declared_files
 
-    pending = [source / name for name in declared_files(source) if name.endswith((".yaml", ".yml"))]
+    source = source.resolve()
+    tracked = set(subprocess.check_output(["git", "ls-files", "-z"], cwd=source).decode().split("\0"))
+    pending = [
+        source / name
+        for name in declared_files(source)
+        if name.startswith(SCANNED_ROOTS) and name.endswith((".yaml", ".yml"))
+    ]
     visited = set()
     external = set()
+    included = set()
+    missing = set()
+
+    def include(value: str) -> None:
+        candidate = Path(value)
+        if candidate.is_absolute():
+            external.add(value)
+            pending.append(candidate)
+            return
+        candidate = source / os.path.normpath(value)
+        if not candidate.resolve().is_relative_to(source):
+            raise ValueError("Relative configuration inheritance escapes the sampled checkout")
+        name = candidate.relative_to(source).as_posix()
+        if candidate.is_file():
+            if name not in tracked:
+                raise ValueError(f"Configuration inheritance reads an untracked file: {name}")
+            included.add(name)
+            pending.append(candidate)
+        elif not candidate.exists():
+            missing.add(name)
+        else:
+            raise ValueError(f"Configuration inheritance is not a file: {name}")
 
     def strings(value):
         if isinstance(value, str):
@@ -146,6 +180,12 @@ def external_configuration(source: Path) -> set[str]:
             continue
         visited.add(path)
         for document in yaml.safe_load_all(path.read_text()):
+            if isinstance(document, dict):
+                references = document.get("config_paths") or []
+                if not isinstance(references, list) or not all(isinstance(value, str) for value in references):
+                    raise ValueError("Unsupported configuration inheritance syntax")
+                for reference in references:
+                    include(reference)
             for value in strings(document):
                 candidate = Path(value)
                 if (
@@ -155,6 +195,8 @@ def external_configuration(source: Path) -> set[str]:
                 ):
                     external.add(value)
                     pending.append(candidate)
+    if inventory_output is not None:
+        inventory_output.write_text(json.dumps({"files": sorted(included), "missing": sorted(missing)}) + "\n")
     return external
 
 
