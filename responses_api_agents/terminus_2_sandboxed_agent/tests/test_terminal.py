@@ -259,3 +259,40 @@ async def test_ctrl_c_recovers_a_full_pty_input_queue_without_executing_pending_
         assert "78 79 03 7a" in await terminal.capture_pane()
     finally:
         await environment.exec("tmux kill-server")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["alive", "inspect", "drain"])
+async def test_terminal_control_failures_are_sandbox_lost(stage):
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import SandboxLostError
+
+    async def execute(command, **kwargs):
+        if "pane_dead" in command:
+            if stage == "inspect":
+                return SimpleNamespace(return_code=1, stdout="", stderr="no server")
+            return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+        return SimpleNamespace(return_code=1, stdout="", stderr="gone")
+
+    terminal = session(SimpleNamespace(exec=execute))
+    if stage == "alive":
+        call = terminal.is_session_alive()
+    elif stage == "inspect":
+        call = terminal.get_incremental_output()
+    else:
+        call = terminal.send_keys("C-c\n")
+    with pytest.raises(SandboxLostError):
+        await call
+
+
+@pytest.mark.asyncio
+async def test_input_flood_that_never_goes_quiet_is_not_sandbox_lost():
+    from responses_api_agents.terminus_2_sandboxed_agent.terminal import SandboxLostError
+
+    async def execute(command, **kwargs):
+        if "pane_dead" in command:
+            return SimpleNamespace(return_code=0, stdout="0\n", stderr="")
+        return SimpleNamespace(return_code=1, stdout="", stderr="Pending terminal input did not become quiet")
+
+    with pytest.raises(RuntimeError) as error:
+        await session(SimpleNamespace(exec=execute)).send_keys("C-c\n")
+    assert not isinstance(error.value, SandboxLostError)

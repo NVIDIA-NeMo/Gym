@@ -62,6 +62,7 @@ from nemo_gym.trajectory import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.terminus_2_sandboxed_agent.observability import TerminusObservations
 from responses_api_agents.terminus_2_sandboxed_agent.terminal import (
+    SandboxLostError,
     ShellExitedError,
     TerminusJSONParser,
     TerminusTmuxSession,
@@ -135,10 +136,6 @@ MODEL_HTTP_ATTEMPTS = 20
 
 class ModelUnreachableError(RuntimeError):
     """The model endpoint never answered: refused connections, request timeouts or a gateway/auth failure after retries."""
-
-
-class SandboxLostError(RuntimeError):
-    """The borrowed sandbox could not run a command."""
 
 
 class Terminus2InfrastructureError(HTTPException):

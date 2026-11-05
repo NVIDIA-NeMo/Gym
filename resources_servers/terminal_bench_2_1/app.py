@@ -23,7 +23,14 @@ from pydantic import BaseModel, Field, ValidationError
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import EpisodeId
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    EpisodeId,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -46,6 +53,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import bounded_text
 
 
 LOG = logging.getLogger(__name__)
@@ -96,6 +104,17 @@ class TerminalBench21SeedSessionRequest(BaseModel):
 
 class TerminalBench21VerifyRequest(TerminalBench21SeedSessionRequest, BaseVerifyRequest):
     pass
+
+
+_MAX_FAILURE_REASON_CHARS = 1000
+
+
+class _VerifierInfraError(RuntimeError):
+    """The sandbox could not run the verifier; there is no verdict on the model."""
+
+
+class _VerifierDirError(RuntimeError):
+    """/logs/verifier could not be created, which is the task state the model left behind."""
 
 
 class TerminalBench21VerifyResponse(BaseVerifyResponse):
@@ -604,21 +623,40 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if self.config.debug:
             print(f"Running tests for {body.task_name}", file=stderr)
         start_time = time()
+        # An infrastructure failure leaves no verdict on the model: mask the sample instead of scoring it 0.
+        # Only the model's own failures (verifier dir broken, test.sh timeout, no or invalid reward.txt) score 0.
+        failure_reason: str | None = None
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             # Test scripts write rewards here even if their test runner fails to start.
             setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
+            if getattr(setup_result, "error_type", None) is not None:
+                raise _VerifierInfraError(f"mkdir /logs/verifier failed: {setup_result.error_type}")
             if setup_result.return_code != 0:
-                raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
-            eval_result = await eval_sandbox.exec(
-                "bash /tests/test.sh",
-                timeout_s=self.config.evaluation_timeout,
-            )
-            test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
-        except Exception:
+                raise _VerifierDirError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
+            try:
+                eval_result = await eval_sandbox.exec(
+                    "bash /tests/test.sh",
+                    timeout_s=self.config.evaluation_timeout,
+                )
+            except TimeoutError:
+                # test.sh outran the evaluation timeout: scored 0 like a result reporting error_type="timeout".
+                eval_result = None
+                test_output = ""
+            else:
+                error_type = getattr(eval_result, "error_type", None)
+                if error_type not in (None, "timeout"):
+                    raise _VerifierInfraError(f"test.sh could not run: sandbox error {error_type}")
+                test_output = (eval_result.stderr or "") + (eval_result.stdout or "")
+        except _VerifierDirError:
             print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
             eval_result = None
             test_output = ""
+        except Exception as exc:
+            print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
+            eval_result = None
+            test_output = ""
+            failure_reason = f"Verifier sandbox error: {type(exc).__name__}: {exc}"
         verification_time_taken = time() - start_time
 
         if self.config.debug:
@@ -629,7 +667,15 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         if eval_result is not None:
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
-                    await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    try:
+                        await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
+                    except Exception as download_exc:
+                        # A missing reward.txt is a failed grade; any other download failure is the sandbox's.
+                        if not isinstance(download_exc, FileNotFoundError) and await self._reward_file_exists(
+                            eval_sandbox
+                        ):
+                            failure_reason = f"Verifier sandbox error: reward download failed: {download_exc!r}"
+                        raise
                     # Providers such as Docker can replace the destination file during download.
                     reward = float(Path(temp_file.name).read_text())
 
@@ -638,6 +684,21 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
+        if failure_reason is not None:
+            failure_reason = bounded_text(failure_reason, _MAX_FAILURE_REASON_CHARS)
+            observe_failure(
+                NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=failure_reason,
+                    operation="verify",
+                    operation_id=current_verifier_invocation_id() or body.task_name,
+                    stage="verification",
+                )
+            )
+            evaluation_completed = False
+            reward = 0.0
+
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
             evaluation_completed=evaluation_completed,
@@ -645,7 +706,18 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
+            mask_sample=failure_reason is not None,
+            failure_kind=VERIFIER_ERROR if failure_reason is not None else None,
+            failure_reason=failure_reason,
         )
+
+    async def _reward_file_exists(self, eval_sandbox: AsyncSandbox) -> bool:
+        """After a failed reward download: True unless the sandbox answers that the file is absent."""
+        try:
+            probe = await eval_sandbox.exec("test -f /logs/verifier/reward.txt", timeout_s=30)
+        except Exception:
+            return True
+        return getattr(probe, "error_type", None) is not None or probe.return_code == 0
 
 
 if __name__ == "__main__":
