@@ -250,6 +250,26 @@ class TestApp:
 
         assert res.reward == approx(1.0)
         assert res.extracted_final_answer == "Paris"
+        assert res.timed_out == 0
+
+    async def test_verify_of_a_timed_out_rollout_scores_zero_without_the_judge(
+        self, config: TavilySearchResourcesServerConfig
+    ) -> None:
+        """An Environment Server verifies every rollout, including one the agent stopped at rollout_timeout_s,
+        which the agent's /run scored 0 without a verify."""
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock()
+        server = TavilySearchResourcesServer(config=config, server_client=server_client)
+        response = self._create_model_response("Exact Answer: Paris").model_dump(mode="json") | {"timed_out": True}
+
+        req = TavilySearchVerifyRequest.model_validate(
+            {"responses_create_params": {"input": []}, "response": response, "ground_truth": "Paris", "question": "?"}
+        )
+        res = await server.verify(self._create_dummy_request(), req)
+
+        assert res.reward == 0.0
+        assert res.timed_out == 1
+        server_client.post.assert_not_awaited()
 
     async def test_verify_incorrect_answer(self, config: TavilySearchResourcesServerConfig) -> None:
         server_client = MagicMock(spec=ServerClient)

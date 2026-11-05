@@ -119,3 +119,11 @@ def test_the_recover_command_sets_it_on_the_gate(tmp_path, fake_executor, capsys
         ["eval", "resubmit", "gym-job-k", "bench", "--recover", "--policy-timeout-counts-as-model", value], capsys
     )
     assert out["gate_task"]["criteria"]["evaluation"]["policy_timeout_counts_as_model"] is expected
+
+
+def test_ungraded_harness_failure_is_evaluation_side_not_model_invalid_output():
+    from collections import Counter
+
+    report = fault_report(Counter({"agent_route_failed": 1, "agent_invalid_output": 1}), 2)
+    assert report["evaluation"]["kinds"] == {"agent_route_failed": 1}
+    assert report["model"]["kinds"] == {"agent_invalid_output": 1}

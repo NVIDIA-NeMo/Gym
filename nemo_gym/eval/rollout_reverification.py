@@ -1112,15 +1112,21 @@ async def _call_aggregate_metrics(
         agent_results.setdefault((agent_name, rs_name), []).append(result)
 
     async def _fetch_agent_metrics(agent_name: str, rs_name: str, agent_result_list: List[Dict]) -> Dict:
-        # Strip heavyweight fields before sending, but preserve response.usage
+        # Preserve usage and truncation metadata: policy token-limit failures score zero, not as judge failures.
         stripped = []
         for r in agent_result_list:
             entry = {
                 k: v for k, v in r.items() if k not in ("response", "responses_create_params", ATIF_PROVENANCE_KEY)
             }
-            usage = (r.get("response") or {}).get("usage")
-            if usage:
-                entry["response"] = {"usage": usage}
+            response = r.get("response") or {}
+            response_metadata = {
+                key: response[key] for key in ("usage", "incomplete_details") if response.get(key) is not None
+            }
+            context_marker = (response.get("metadata") or {}).get("nemo_gym_context_window_exceeded")
+            if context_marker is not None:
+                response_metadata["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
+            if response_metadata:
+                entry["response"] = response_metadata
             stripped.append(entry)
 
         agg_request = AggregateMetricsRequest(verify_responses=stripped)

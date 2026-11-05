@@ -44,6 +44,13 @@ from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRe
 REPO_ROOT = Path(__file__).resolve().parents[1]
 HLE_ENVIRONMENT = "hle_equivalence_llm_judge_environment_server"
 IMAGE = "registry.example.invalid/sandbox:1"
+# Values for the harness settings a restricted profile requires (`???`): a restricted sandbox cannot download the
+# harness, so the image carries its runtime or binary.
+REQUIRED_SETTING_VALUES = {
+    "sandbox_runtime_dir": "/opt/harness-runtime",
+    "sandbox_executable_path": "/opt/harness/bin/harness",
+    "sandbox_executable_sha256": "0" * 64,
+}
 
 # Adapter directory name -> (agent class, its config class).
 HARNESSES = {
@@ -56,12 +63,28 @@ HARNESSES = {
 }
 
 
+def profile_settings(agent: str) -> dict[str, Any]:
+    """The agent block of the adapter's benchmark profile, as written, with ``???`` kept for a required value."""
+    profile = OmegaConf.load(REPO_ROOT / "responses_api_agents" / agent / "configs" / "profiles" / "benchmark.yaml")
+    return OmegaConf.to_container(profile[agent].responses_api_agents[agent], resolve=False)
+
+
+# Read from each profile, so a harness that restricts its profile changes only its own files.
+MODEL_ONLY_PROFILES = {agent for agent in HARNESSES if profile_settings(agent).get("network_access") == "model_only"}
+# The harness settings each profile requires the caller to supply.
+REQUIRED_SETTINGS = {
+    agent: sorted(key for key in REQUIRED_SETTING_VALUES if profile_settings(agent).get(key) == "???")
+    for agent in HARNESSES
+}
+
+
 def compose_profile_on_hle(
     agent: str,
     monkeypatch: pytest.MonkeyPatch,
     *,
     transports: list[str] | None = None,
     image: bool = True,
+    required: bool = True,
     cli_args: tuple = (),
 ) -> DictConfig:
     """Compose the agent's benchmark profile onto HLE as shipped, or with `transports` set on HLE's Environment Server."""
@@ -71,6 +94,12 @@ def compose_profile_on_hle(
     # Set under the composed agent's name, as the missing-value error for the profile's `image: ???` suggests.
     if image:
         cli_args = (f"++{composed}.responses_api_agents.{agent}.sandbox_config.image={IMAGE}", *cli_args)
+    if required:
+        settings = f"++{composed}.responses_api_agents.{agent}"
+        cli_args = (
+            *(f"{settings}.{key}={REQUIRED_SETTING_VALUES[key]}" for key in REQUIRED_SETTINGS[agent]),
+            *cli_args,
+        )
     monkeypatch.setattr("sys.argv", ["gym", *cli_args])
     return GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(

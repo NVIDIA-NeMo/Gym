@@ -42,6 +42,7 @@ from aiohttp import (
     ClientPayloadError,
     ClientResponseError,
     ClientSession,
+    ConnectionTimeoutError,
     ServerDisconnectedError,
 )
 from anyio import CancelScope
@@ -11428,6 +11429,28 @@ class TestTurnsFromModelCalls:
         assert turn.reasoning_content == "think"
         assert turn.answer == {"role": "assistant", "content": "", "tool_calls": [{"id": "t1"}]}
 
+    def test_messages_calls_split_the_content_blocks_and_their_thinking(self) -> None:
+        # Claude Code calls the Model Server's Anthropic Messages API.
+        thinking = {"type": "thinking", "thinking": "inspect first"}
+        tool_use = {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}
+        text = {"type": "text", "text": "Answer: 18"}
+        calls = [
+            self._call(
+                "first", {"type": "message", "role": "assistant", "content": [thinking, tool_use]}, started_at=1.0
+            ),
+            self._call("second", {"type": "message", "role": "assistant", "content": [text]}, started_at=2.0),
+        ]
+
+        turns = nemo_gym.rollouts.trajectory_builder._turns_from_model_calls(
+            "task", "rollout", [self._invocation("root", ["first", "second"])], calls, resolved=True
+        )
+
+        assert turns[0].reasoning_content == [thinking]
+        assert turns[0].answer == [tool_use]
+        assert turns[1].reasoning_content is None
+        assert turns[1].answer == [text]
+        assert [turn.step_count for turn in turns] == [0, 1]
+
     def test_a_call_that_returned_nothing_is_not_a_turn(self) -> None:
         from nemo_gym.trajectory.trajectory_record import TrajectoryModelCall
 
@@ -14455,6 +14478,31 @@ def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
     assert _missing_rollout_rows_counted_as_zero([materialized_path_for(output)], [sidecar], {(0, 0)}) == []
     assert RolloutStore.read(output).pending() == []
     assert RolloutStore.read(output).coverage()["counted_failures"] == 1
+
+
+class TestCollectorTransportDeadline:
+    """Collection sets no deadline of its own on /run (the shared client is unbounded), so no transport failure it
+    sees is attributed to one: a timeout from a connect sub-limit or elsewhere on the dispatch path, a status and a
+    refused connection carry no deadline evidence."""
+
+    @pytest.mark.parametrize(
+        "post",
+        [
+            AsyncMock(return_value=FakeResponse(504)),
+            AsyncMock(side_effect=ClientConnectorError(MagicMock(), OSError("connection refused"))),
+            AsyncMock(side_effect=asyncio.TimeoutError()),
+            AsyncMock(side_effect=ConnectionTimeoutError()),
+        ],
+        ids=["gateway-timeout-status", "refused", "timeout", "connect-timeout"],
+    )
+    async def test_a_transport_failure_is_not_a_collector_deadline(
+        self, monkeypatch: pytest.MonkeyPatch, post
+    ) -> None:
+        from nemo_gym.rollouts.health.timeouts import classify_timeout
+
+        install_fake_server_client(monkeypatch, post)
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+        assert "timeouts" not in result and classify_timeout(result) is None
 
 
 class TestEnrichRunResult:
