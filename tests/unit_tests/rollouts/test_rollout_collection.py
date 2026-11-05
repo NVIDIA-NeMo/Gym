@@ -78,8 +78,11 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
-from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED, PROVIDER_OOM_KILLED
+from nemo_gym.core.failure_records import FailureBoundary, FailureReport, SandboxFailureDetails
+from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.eval.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
 from nemo_gym.metrics.reward_profile import compute_aggregate_metrics, compute_subset_metrics
 from nemo_gym.models.token_capture.config import TokenCaptureConfig
@@ -152,6 +155,7 @@ from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, Aggr
 from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 # Not from a telemetry test module: its module-level importorskip would skip this whole module without the OTel SDK.
@@ -2776,6 +2780,136 @@ class TestRolloutCollection:
         assert "Rollouts missing from the score: 1 of 2 materialized" in printed
         assert "Metrics cover: 1 of 2 rollouts" in printed
         assert str(_failures_path_for(output_jsonl_fpath)) in printed
+
+    @pytest.mark.parametrize("count_as_zero", [False, True])
+    async def test_agent_sandbox_oom_policy_controls_denominator_and_terminal_resume(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, count_as_zero: bool
+    ) -> None:
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            "\n".join(
+                json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my_agent"}, "x": i})
+                for i in range(2)
+            )
+            + "\n"
+        )
+        output_jsonl_fpath = tmp_path / "output.jsonl"
+        aggregated: dict[str, list[dict]] = {}
+        failure = NgFailureEvent(
+            boundary=FailureBoundary.SANDBOX,
+            failure_kind=PROVIDER_OOM_KILLED,
+            failure_reason="OpenSandbox terminal lifecycle OOMKilled",
+            operation="pty",
+            details=SandboxFailureDetails(provider="opensandbox", sandbox_id="agent-sandbox"),
+        )
+        report = failure_report_for(failure).model_dump(mode="json")
+        report["failure_id"] = None if count_as_zero else failure.event_id
+        observation = SandboxObservation(
+            role="agent",
+            stage="agent",
+            outcome="oom",
+            failure_id=failure.event_id,
+        )
+
+        dispatched = []
+
+        async def post(server_name: str, url_path: str, json: dict, **kwargs):
+            if url_path == "/run":
+                dispatched.append(json["x"])
+                if json["x"] == 0:
+                    return FakeResponse(
+                        200,
+                        {
+                            "reward": 0.0,
+                            "mask_sample": not count_as_zero,
+                            "evaluation_completed": False,
+                            "sandbox_handle": "agent-sandbox",
+                            "failure_outcome_action": "count_as_zero" if count_as_zero else "fail",
+                            "failure_report": report,
+                            "failure_kind": PROVIDER_OOM_KILLED,
+                            "failure_reason": "OpenSandbox confirmed OOMKilled after agent dispatch",
+                            "response": {
+                                "output": [],
+                                "metadata": {NG_AGENT_SANDBOX_OBSERVATION_KEY: observation.model_dump_json()},
+                            },
+                            **(
+                                FailureReportRow.fields(FailureReport.model_validate(report))
+                                if count_as_zero
+                                else {
+                                    **FailureReportRow.fields(FailureReport.model_validate(report)),
+                                    "_ng_failure_class": PROVIDER_OOM_KILLED,
+                                    "_ng_failure_terminal": True,
+                                    "_ng_failure_counts_as_zero": False,
+                                }
+                            ),
+                            "ng_agent_observations": {
+                                "source": "opencode",
+                                "records": [observation.model_dump(mode="json")],
+                            },
+                        },
+                    )
+                return FakeResponse(200, {"reward": 1.0, "response": {"output": []}})
+            assert url_path == "/aggregate_metrics"
+            aggregated["verify_responses"] = [dict(row) for row in json.verify_responses]
+            return FakeResponse(200, compute_aggregate_metrics(aggregated["verify_responses"]).model_dump())
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(output_jsonl_fpath),
+            route_failures_to_sidecar=True,
+            disable_health_check=True,
+            require_complete=count_as_zero,
+        )
+        await RolloutCollectionHelper().run_from_config(config)
+
+        persisted = [orjson.loads(line) for line in output_jsonl_fpath.read_bytes().splitlines()]
+        assert sorted(dispatched) == [0, 1]
+        failures = [orjson.loads(line) for line in _failures_path_for(output_jsonl_fpath).read_bytes().splitlines()]
+        if count_as_zero:
+            assert len(persisted) == 2 and not failures
+            assert sorted(row["reward"] for row in persisted) == [0.0, 1.0]
+            oom_row = next(row for row in persisted if row["reward"] == 0.0)
+            assert oom_row["mask_sample"] is False
+            assert oom_row["failure_report"]["failure_id"] is None
+            assert len(aggregated["verify_responses"]) == 2
+        else:
+            assert len(persisted) == 1 and persisted[0]["reward"] == 1.0
+            assert len(failures) == 1
+            oom_row = failures[0]
+            assert oom_row["_ng_failure_class"] == PROVIDER_OOM_KILLED
+            assert oom_row["_ng_failure_terminal"] is True
+            assert oom_row["_ng_failure_counts_as_zero"] is False
+            selected_report = FailureReportRow.report(oom_row)
+            assert selected_report.failure_id == failure.event_id
+            assert selected_report.events[failure.event_id] == failure.event
+            assert "reward" not in oom_row
+            assert len(aggregated["verify_responses"]) == 1
+        assert oom_row["failure_kind"] == PROVIDER_OOM_KILLED
+        assert oom_row["failure_outcome_action"] == ("count_as_zero" if count_as_zero else "fail")
+        assert oom_row["ng_agent_observations"]["records"][0]["failure_id"] == failure.event_id
+        metrics_fpath = output_jsonl_fpath.with_stem(output_jsonl_fpath.stem + "_aggregate_metrics").with_suffix(
+            ".json"
+        )
+        assert orjson.loads(metrics_fpath.read_bytes())[0]["key_metrics"]["mean/reward"] == (
+            0.5 if count_as_zero else 1.0
+        )
+
+        # Read the actual persisted rows as the recovery/health gate does. A policy zero remains measured and
+        # settled despite evaluation_completed=False; a policy FAIL remains terminal and outside the score.
+        from nemo_gym.orchestration.recovery import decide_from_collected, metric_coverage, trial_faults
+        from tests.unit_tests.orchestration.test_evaluation_health import _run
+
+        collected = _run(2).model_copy(update={"results": persisted, "failures": failures})
+        decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+        assert decision.counts == ({"scored": 2} if count_as_zero else {"terminal": 1, "scored": 1})
+        assert metric_coverage(decision, collected)["trials"] == (2 if count_as_zero else 1)
+        assert trial_faults(decision, collected) == (Counter({PROVIDER_OOM_KILLED: 1}) if count_as_zero else {})
+
+        # A handled FAIL is terminal, not a failed attempt to resample on resume.
+        dispatched.clear()
+        await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
+        assert dispatched == []
 
     async def test_run_from_config_resume_retries_an_agent_failure_row(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
