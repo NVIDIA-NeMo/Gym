@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
-from aiohttp import ClientTimeout
+from aiohttp import ClientError, ClientTimeout
 from anyio import CancelScope
 from anyio.lowlevel import checkpoint_if_cancelled
 from fastapi import FastAPI, Request
@@ -60,6 +60,39 @@ from nemo_gym.server_runtime import (
 
 
 logger = logging.getLogger(__name__)
+
+# Like Skills' LocalSandbox.delete_session: 3 attempts, 2 s apart, each bounded by a 10 s timeout.
+_DELETE_ATTEMPTS = 3
+_DELETE_RETRY_DELAY_SECONDS = 2.0
+
+
+async def _delete_python_session(url: str, session_id: str) -> None:
+    """Delete a sandbox Python session, raising if the sandbox does not acknowledge it."""
+    # A transport error and a 5xx reply (a sandbox worker restarting behind its proxy) share one budget of bounded
+    # attempts, so an unreachable sandbox cannot hold the session's fence for long.
+    for attempt in range(1, _DELETE_ATTEMPTS + 1):
+        try:
+            response = await http_request(
+                "DELETE",
+                url,
+                headers={"X-Session-ID": session_id},
+                timeout=ClientTimeout(total=10),
+                _max_num_tries=1,
+            )
+        except (ClientError, TimeoutError):
+            if attempt == _DELETE_ATTEMPTS:
+                raise
+        else:
+            async with response:
+                # 404: the session is already gone, or the request reached a worker that never held it.
+                if 200 <= response.status < 300 or response.status == 404:
+                    return
+                if response.status < 500 or attempt == _DELETE_ATTEMPTS:
+                    await raise_for_status(response)
+                    raise RuntimeError(
+                        f"Sandbox did not acknowledge deletion of session {session_id}: {response.status}"
+                    )
+        await asyncio.sleep(_DELETE_RETRY_DELAY_SECONDS)
 
 
 @dataclass
@@ -133,21 +166,9 @@ class NSToolsToolManager(ToolManager):
             # Use the sandbox's resolved address and session routing header, and retain both maps on failure.
             sandbox = tool._sandbox
             session_id = str(session_id)
-            # Bounded like Skills' own delete: an unreachable sandbox must fail the close, which the caller retries,
-            # rather than hold the session's fence forever.
-            response = await http_request(
-                "DELETE",
-                f"http://{sandbox.host}:{sandbox.port}/sessions/{session_id}",
-                headers={"X-Session-ID": session_id},
-                timeout=ClientTimeout(total=10),
-                _max_num_tries=3,
-            )
-            async with response:
-                if response.status not in (200, 404):
-                    await raise_for_status(response)
-                    raise RuntimeError(
-                        f"Sandbox did not acknowledge deletion of session {session_id}: {response.status}"
-                    )
+            # The Environment Server closes once. If the DELETE still fails, the verify or close fails and keeps the
+            # Python session owned, so a later close or a checkpoint retire can release it.
+            await _delete_python_session(f"http://{sandbox.host}:{sandbox.port}/sessions/{session_id}", session_id)
             sandbox.session_histories.pop(session_id, None)
             tool.requests_to_sessions.pop(request_id, None)
 

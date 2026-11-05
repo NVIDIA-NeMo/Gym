@@ -15,7 +15,7 @@
 import asyncio
 import subprocess
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Optional
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,6 +29,7 @@ from app import (
 )
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from nemo_skills.mcp.servers.python_tool import DirectPythonTool
 from nemo_skills.mcp.tool_manager import ToolManager
 
 from nemo_gym.client import (
@@ -37,15 +38,17 @@ from nemo_gym.client import (
     ServerClient,
     set_global_aiohttp_client,
 )
+from nemo_gym.client import request as http_request
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     BaseSeedSessionRequest,
     ResourcesCloseSessionRequest,
+    ResourcesParticipant,
     ResourcesSeedSessionRequest,
     SimpleResourcesServer,
+    check_resources_session_contract,
 )
-from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
 
 
 class TestApp:
@@ -554,6 +557,70 @@ VERIFY_BODY = {
 }
 
 
+class FakeSandboxEndpoint:
+    """The NeMo Skills sandbox's execute and session DELETE routes. A DELETE answers queued statuses first."""
+
+    def __init__(self, delete_statuses: list[int]) -> None:
+        self.sessions: set[str] = set()
+        self.deletes: list[str] = []
+        self.delete_statuses = delete_statuses
+
+    async def execute(self, request: web.Request) -> web.Response:
+        await request.json()
+        session_id = request.headers["X-Session-ID"]
+        created = session_id not in self.sessions
+        self.sessions.add(session_id)
+        return web.json_response(
+            {"process_status": "completed", "stdout": "4", "stderr": "", "new_session_created": created}
+        )
+
+    async def delete(self, request: web.Request) -> web.Response:
+        session_id = request.match_info["session_id"]
+        self.deletes.append(session_id)
+        if self.delete_statuses:
+            return web.Response(status=self.delete_statuses.pop(0))
+        if session_id not in self.sessions:
+            return web.Response(status=404)
+        self.sessions.remove(session_id)
+        return web.Response(status=200)
+
+
+@asynccontextmanager
+async def _real_python_tool_server(
+    port: int, sandbox: FakeSandboxEndpoint, monkeypatch: pytest.MonkeyPatch
+) -> AsyncIterator[tuple[NSToolsResourcesServer, DirectPythonTool, MagicMock]]:
+    """Yield a server whose session ``rs-1`` holds one Python session in ``sandbox``, through the real Skills tool."""
+    backend = web.Application()
+    backend.router.add_post("/execute", sandbox.execute)
+    backend.router.add_delete("/sessions/{session_id}", sandbox.delete)
+    runner = web.AppRunner(backend)
+    await runner.setup()
+    await web.TCPSite(runner, "127.0.0.1", port).start()
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
+    http_client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+    tool_manager = NSToolsToolManager(
+        module_specs=["nemo_skills.mcp.servers.python_tool::DirectPythonTool"],
+        context={"sandbox": {"host": "127.0.0.1", "port": str(port)}},
+    )
+    tool = tool_manager._tools["DirectPythonTool"]
+    try:
+        await tool_manager.list_all_tools()
+        server, _ = _session_server(tool_manager)
+        verifier_reply = AsyncMock()
+        verifier_reply.json = AsyncMock(return_value={"reward": 1.0})
+        server.server_client.post = AsyncMock(return_value=verifier_reply)
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        request.json = AsyncMock(return_value={"code": "print(4)"})
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        assert (await server.execute_tool("stateful_python_code_exec", request)).body == b"4"
+        yield server, tool, request
+    finally:
+        await tool._sandbox.close()
+        await http_client.close()
+        await runner.cleanup()
+
+
 class TestResourcesSessions:
     async def test_cookie_reseed_waits_for_delegated_verify_and_keeps_replacement_state(self) -> None:
         manager = FakePythonToolManager()
@@ -664,8 +731,6 @@ class TestResourcesSessions:
         assert server._verified_sessions.get("rs-1") is None
 
     async def test_checkpoint_retire_releases_owned_python_state_and_retries_failure(self) -> None:
-        from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
-
         tool_manager = FakePythonToolManager()
         server, _ = _session_server(tool_manager)
         request = MagicMock()
@@ -781,6 +846,7 @@ class TestResourcesSessions:
     async def test_real_python_tool_retains_failed_deletion_for_retry(
         self, unused_tcp_port: int, deleted_status: int, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        monkeypatch.setattr("app._DELETE_RETRY_DELAY_SECONDS", 0)
         status = 503
         seen = []
 
@@ -816,7 +882,8 @@ class TestResourcesSessions:
             assert "rs-1" not in tool.requests_to_sessions
             assert "python-session" not in tool._sandbox.session_histories
             assert server._fence.closed_episode("rs-1") == EPISODE_ID
-            assert seen == [("python-session", "python-session")] * 2
+            # Three attempts for the failed close, one for the close that succeeds.
+            assert seen == [("python-session", "python-session")] * 4
         finally:
             await tool._sandbox.close()
             await http_client.close()
@@ -826,6 +893,14 @@ class TestResourcesSessions:
         self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Nothing listens on the port, so every DELETE is refused.
+        monkeypatch.setattr("app._DELETE_RETRY_DELAY_SECONDS", 0)
+        tries_per_call = []
+
+        async def counted_request(*args: Any, **kwargs: Any) -> Any:
+            tries_per_call.append(kwargs["_max_num_tries"])
+            return await http_request(*args, **kwargs)
+
+        monkeypatch.setattr("app.http_request", counted_request)
         monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
         http_client = set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
         tool_manager = NSToolsToolManager(
@@ -841,11 +916,52 @@ class TestResourcesSessions:
                     server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1"))),
                     timeout=10,
                 )
+            # Refused connections and 5xx replies share one budget of three single-try attempts.
+            assert tries_per_call == [1, 1, 1]
             assert tool.requests_to_sessions["rs-1"] == "python-session"
             assert server._fence.closed_episode("rs-1") is None
         finally:
             await tool._sandbox.close()
             await http_client.close()
+
+    async def test_python_session_release_retries_a_5xx_reply(
+        self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app._DELETE_RETRY_DELAY_SECONDS", 0)
+        sandbox = FakeSandboxEndpoint(delete_statuses=[502])
+        async with _real_python_tool_server(unused_tcp_port, sandbox, monkeypatch) as (server, tool, request):
+            [python_session] = sandbox.sessions
+
+            # A proxy's 502 while a sandbox worker restarts must not turn the scored verify into a 500.
+            verified = await server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY))
+
+            assert verified.reward == 1.0 and verified.num_tool_calls == 1
+            assert sandbox.deletes == [python_session] * 2
+            assert sandbox.sessions == set() and "rs-1" not in tool.requests_to_sessions
+            assert server._session_episodes == {}
+
+    async def test_python_session_release_gives_up_after_three_5xx_replies(
+        self, unused_tcp_port: int, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("app._DELETE_RETRY_DELAY_SECONDS", 0)
+        sandbox = FakeSandboxEndpoint(delete_statuses=[503] * 3)
+        async with _real_python_tool_server(unused_tcp_port, sandbox, monkeypatch) as (server, tool, request):
+            [python_session] = sandbox.sessions
+
+            with pytest.raises(ClientResponseError, match="503"):
+                await server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY))
+
+            assert sandbox.deletes == [python_session] * 3
+            # Verify failed, so the Python session and the active identity stay owned for the close.
+            assert str(tool.requests_to_sessions["rs-1"]) == python_session
+            assert sandbox.sessions == {python_session}
+            assert server._session_episodes["rs-1"] == (EPISODE_ID, TaskId(taskset="ns_tools", task_id="0"))
+
+            await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+
+            assert sandbox.deletes == [python_session] * 4
+            assert sandbox.sessions == set() and "rs-1" not in tool.requests_to_sessions
+            assert server._fence.closed_episode("rs-1") == EPISODE_ID
 
     def test_failed_cleanup_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
         tool_manager = FakePythonToolManager()
