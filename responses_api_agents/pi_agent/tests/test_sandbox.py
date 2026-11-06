@@ -1369,7 +1369,12 @@ def test_compaction_helper_contributes_cached_usage(setup, helper_cache, expecte
             {
                 "type": "ng_pi_compaction_call",
                 "compaction_id": "one",
-                "message": {"role": "assistant", "responseId": "helper-response", "usage": helper_usage},
+                "message": {
+                    "role": "assistant",
+                    "content": [],
+                    "responseId": "helper-response",
+                    "usage": helper_usage,
+                },
             },
             {"type": "compaction_end", "ng_compaction_id": "one", "result": {"summary": "Summary"}},
             {"type": "message_end", "message": policy},
@@ -1377,6 +1382,8 @@ def test_compaction_helper_contributes_cached_usage(setup, helper_cache, expecte
         ],
     )
     assert response["usage"]["input_tokens_details"]["cached_tokens"] == expected
+    assert response["usage"]["input_tokens"] == 2 + 5 + 7 + (helper_cache or 0)
+    assert response["usage"]["output_tokens"] == 2
     gaps = {gap["code"] for gap in observations["gaps"]}
     assert ("cached_token_usage_unavailable" in gaps) is (expected is None)
 
