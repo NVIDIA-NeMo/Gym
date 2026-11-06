@@ -64,6 +64,7 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 128
     --use-replayssm
     --replayssm-buffer-len 16
+    --quantization nvfp4_per_token
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # @bxyu-nvidia: We set num_speculative_tokens_per_batch_size to 0 here since prefill does not need to speculate any tokens, it just needs to know that we are speculating.
