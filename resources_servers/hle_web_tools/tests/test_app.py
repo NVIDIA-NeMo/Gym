@@ -598,7 +598,7 @@ async def test_cached_pages_are_rechecked_on_every_fetch(server):
 
 def test_exactly_web_search_and_web_fetch_are_offered_over_mcp():
     pytest.importorskip("mcp")
-    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
+    from nemo_gym.server_runtime import maybe_auto_expose
 
     server = make_server(expose_tools_over_mcp=True)
     app = server.setup_webserver()
