@@ -1,0 +1,23 @@
+# A vision model on a local vLLM server, reasoning OFF, with the
+# perception-subset protocol: temperature 0, max_tokens 8192.
+policy_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${policy_base_url}
+      api_key: ${policy_api_key}
+      model: ${policy_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+      uses_interleaved_reasoning: true
+      chat_template_kwargs:
+        enable_thinking: false
+      sampling_overrides:
+        temperature: 0
+        max_tokens: 8192
+      extra_body: null
+      default_headers: {}
+      endpoint_file: null
+      endpoint_stale_grace_s: 300.0
+      endpoint_connection_retries: 8
+      endpoint_check_interval_s: 10.0
