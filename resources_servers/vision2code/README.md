@@ -251,7 +251,7 @@ or preserve its reward; the improvement here comes from comparing the trained mo
 This was not a uniform improvement: document render failures rose from
 4 to 23, so inspect domain-level quality and render reliability alongside mean reward.
 These results describe the tested training recipes, not a universal ranking or a
-multi-seed result. [Comparison settings and summary](results/rl-reward-comparison.json).
+multi-seed result.
 
 ## Benchmark results
 
