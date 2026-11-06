@@ -37,7 +37,11 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId
-from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE, ROLLOUT_ALLOCATION_ENDED
+from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT_INFRASTRUCTURE,
+    ROLLOUT_ALLOCATION_ENDED,
+    FailureClassificationConfig,
+)
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_recovery import (
     RunManifest,
@@ -58,6 +62,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     masked_kept_answer_kind,
     matches_failure_class,
     observed_elapsed,
+    saved_failure_classification,
 )
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
@@ -545,7 +550,10 @@ def _has_eligible_interruption_cause(row: dict) -> bool:
 
 
 class RolloutRecords:
-    def __init__(self, manifest: RunManifest, expected: list[dict]):
+    def __init__(
+        self, manifest: RunManifest, expected: list[dict], *, classification: FailureClassificationConfig | None = None
+    ):
+        self.classification = classification
         self.manifest = manifest
         self.expected = {}
         for row in expected:
@@ -640,7 +648,7 @@ class RolloutRecords:
             self.attempt_counts[key[0]] += 1
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
         interruption = is_interruption_failure(row)
-        infrastructure = is_infrastructure_agent_timeout(row)
+        infrastructure = is_infrastructure_agent_timeout(row, classification=self.classification)
         failure_class = row.get("_ng_failure_class")
         if failure_class is None and infrastructure:
             # A graded result of an agent timeout whose window held a server-side fault (Harbor's graded zero) is not
@@ -669,8 +677,10 @@ class RolloutRecords:
             row.get(TASK_INDEX_KEY_NAME),
             row.get(ROLLOUT_INDEX_KEY_NAME),
             key[1],
-        ) in self.rerun_masked and masked_kept_answer_kind(row) is not None
-        masked_infrastructure = masked_infrastructure_kind(row) is not None or rerun_approved
+        ) in self.rerun_masked and masked_kept_answer_kind(row, classification=self.classification) is not None
+        masked_infrastructure = (
+            masked_infrastructure_kind(row, classification=self.classification) is not None or rerun_approved
+        )
         if masked_infrastructure and key not in self.payloads:
             # The results file keeps no resubmit offset, so a masked attempt counts whenever it was saved: a resubmit
             # still gives the process it starts a fresh budget, as for every failure.
@@ -688,7 +698,7 @@ class RolloutRecords:
             # The producer settled this rollout as a scored zero, or the agent's deadline ended it with its answer
             # kept (the model's result, as recovery classifies it): final, so no policy reopens it.
             final_zero=(row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")))
-            or is_answered_agent_deadline(row),
+            or is_answered_agent_deadline(row, classification=self.classification),
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
@@ -729,7 +739,7 @@ class RolloutRecords:
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
-        state = cls(manifest, expected)
+        state = cls(manifest, expected, classification=saved_failure_classification(output))
         unexpected = manifest.next_attempt.keys() - state.expected.keys()
         if unexpected:
             raise ConfigError(f"Run manifest reserves attempts for unknown rollouts: {sorted(unexpected)!r}.")
