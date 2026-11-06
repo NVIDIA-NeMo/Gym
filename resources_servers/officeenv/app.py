@@ -89,7 +89,9 @@ import re
 import shlex
 import socket
 import stat
+import sys
 import tempfile
+import time
 import weakref
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
@@ -153,6 +155,37 @@ if TYPE_CHECKING:
 
 
 LOGGER = logging.getLogger(__name__)
+# Sandbox mode: one line per seed, the seeds ahead of it, its wait for its turn and its world's build, timestamped for a
+# CPU sample of this process to be read against (_show_seed_lines)
+SEED_LOGGER = logging.getLogger(f"{__name__}.seeds")
+
+
+class _CurrentStderr(logging.StreamHandler):
+    """Writes to whatever ``sys.stderr`` is when a record comes (a test runner swaps it per test)."""
+
+    @property
+    def stream(self) -> Any:
+        return sys.stderr
+
+    @stream.setter
+    def stream(self, value: Any) -> None:
+        pass
+
+
+def _show_seed_lines() -> None:
+    """Gym's servers configure no logging, and Python's last resort prints only warnings: the seed lines get a handler."""
+    if not any(isinstance(handler, _CurrentStderr) for handler in SEED_LOGGER.handlers):
+        handler = _CurrentStderr()
+        handler.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        SEED_LOGGER.addHandler(handler)
+    SEED_LOGGER.setLevel(logging.INFO)
+
+
+def _listed(sessions: Sequence[str], most: int = 50) -> str:
+    """Sessions for a log line: at most ``most`` of them, or "none"."""
+    if not sessions:
+        return "none"
+    return ", ".join(sessions[:most]) + (" ..." if len(sessions) > most else "")
 
 
 class LengthPenaltyConfig(BaseModel):
@@ -174,6 +207,18 @@ class LengthPenaltyConfig(BaseModel):
 
 # The most bytes of a text file a sandboxed episode's Drive answer carries inline (sandbox_config.inline_file_bytes)
 DEFAULT_INLINE_FILE_BYTES = 8192
+# At shutdown: Gym's run-wide grace, how long its run command waits for the servers it signalled to stop before it
+# kills them (1 s unless the config sets it), the part of it kept for uvicorn's own wait (0.5 s) and the exit, and how
+# many sandboxes are stopped at once
+SERVER_SHUTDOWN_TIMEOUT_KEY = "server_shutdown_timeout_seconds"
+SHUTDOWN_MARGIN_S = 2.0
+SHUTDOWN_STOPS_AT_ONCE = 64
+# In sandbox mode, before each world build the event loop runs what is ready for this long, so the requests in flight
+# finish before the build holds the loop: a harness's MCP setup is a few requests of a few dozen steps of the loop each,
+# and a training cap's burst of setups and tool calls needs many of them. A fixed gap: under uvloop nothing tells when
+# the loop has run out of work. While seeds queue it costs a seed rate (at 0.5 s builds, 1.63 a second with 10 ms, 1.41
+# with this); tool calls, a hundred or so per episode against one build, are answered in the gap they arrive in.
+SEED_TURN_YIELD_S = 0.1
 
 # What an episode image may have besides the shell, curl and Python 3.12 with pandas and openpyxl (sandbox/Dockerfile),
 # by the names sandbox_config.provides and a row's sandbox_needs use, as the workspace guide names it to the model
@@ -1566,6 +1611,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     _tokens: dict[str, str] = PrivateAttr(default_factory=dict)
     _locks: weakref.WeakValueDictionary[str, asyncio.Lock] = PrivateAttr(default_factory=weakref.WeakValueDictionary)
     _shutting_down: bool = PrivateAttr(default=False)
+    _starting: set[str] = PrivateAttr(default_factory=set)  # sessions whose sandbox's create is in flight
+    _seeding: asyncio.Semaphore = PrivateAttr(default_factory=lambda: asyncio.Semaphore(1))  # a seed's turn
+    _seeds_queued: int = PrivateAttr(default=0)  # seeds waiting for or taking their turn
     _session_secret: str | None = PrivateAttr(default=None)
     _node_addresses: frozenset[str] = PrivateAttr(default=frozenset())
     _trusted_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = PrivateAttr(default=())
@@ -1579,6 +1627,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             return
         if self.config.num_workers not in (None, 1):
             raise ValueError("OfficeEnv sandbox episodes are process-local and require num_workers=1")
+        _show_seed_lines()
         # One process holds every episode, so one secret signs all of its sessions.
         self._session_secret = token_urlsafe(32)
         self._node_addresses = node_addresses()
@@ -1728,11 +1777,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         world behind, so the seed can be retried. Once shutdown has begun, a seed starts no sandbox (503)."""
         session_id = body.resources_session_id
         async with self._locks.setdefault(session_id, asyncio.Lock()):
-            if self._shutting_down:  # shutdown stops the sandboxes it finds, and would not find this one
-                raise HTTPException(status_code=503, detail="The server is shutting down")
             new = session_id not in self._episodes
+            self._admit()
             image = self._sandbox_image(body.task_data)
-            self._seed_episode(request, body, sandboxed=True)
+            if new:
+                await self._build_in_turn(request, body)
+            else:
+                self._seed_episode(request, body, sandboxed=True)  # answers as the first seed did: nothing is built
             episode = self._episodes[session_id]
             if new:
                 try:
@@ -1743,6 +1794,37 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
                     self._discard(session_id)
                     raise
         return ResourcesSeedSessionResponse(resources_session_id=session_id, sandbox_access=episode.access)
+
+    def _admit(self) -> None:
+        if self._shutting_down:  # shutdown stops the sandboxes it finds, and would not find this one
+            raise HTTPException(status_code=503, detail="The server is shutting down")
+
+    async def _build_in_turn(self, request: Request, body: ResourcesSeedSessionRequest) -> None:
+        """Seed a new episode in its turn. A seed builds its world synchronously (a second or two of CPU for a large
+        one) on the event loop that serves every episode, and one iteration of the loop runs every task that is ready:
+        seeds left to themselves run back to back, while what arrived meanwhile, a harness's MCP initialize among it,
+        waits for all of them. So seeds take turns: one at a time, each after the loop has had SEED_TURN_YIELD_S for
+        what is ready, which lets a request in flight finish first. The turn is taken before that yield, so no other
+        seed starts in it. A seed is admitted again when its turn comes, as shutdown may have begun while it waited."""
+        ahead = self._seeds_queued
+        self._seeds_queued += 1
+        arrived = time.monotonic()
+        try:
+            async with self._seeding:
+                self._admit()
+                await asyncio.sleep(SEED_TURN_YIELD_S)
+                turn = time.monotonic()
+                self._seed_episode(request, body, sandboxed=True)
+                built = time.monotonic()
+        finally:
+            self._seeds_queued -= 1
+        SEED_LOGGER.info(
+            "Seed of OfficeEnv session %s: %d ahead, waited %.2f s, built in %.2f s",
+            body.resources_session_id,
+            ahead,
+            turn - arrived,
+            built - turn,
+        )
 
     def _workdir(self) -> str:
         return self.config.sandbox_config.workdir.rstrip("/")
@@ -1801,6 +1883,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             policy = restricted_network_policy(next(iter(provider_config)), egress_urls(own_urls, named_configs))
             spec = replace(spec, provider_options={**spec.provider_options, "network_policy": policy})
         sandbox = AsyncSandbox(provider_config)
+        self._starting.add(session_id)
         try:
             if episode.surface == "cli" or config.host_relay:
                 await sandbox.start_with_setup(spec, lambda box: self._prepare_sandbox(box, episode, named_configs))
@@ -1815,6 +1898,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         except BaseException:
             await sandbox.stop()  # also closes the provider of a sandbox that never started
             raise
+        finally:
+            self._starting.discard(session_id)
         episode.token, episode.sandbox, episode.access = token, sandbox, access
         self._tokens[token] = session_id
 
@@ -1834,18 +1919,50 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             episode.sandbox = None
 
     async def shutdown(self) -> None:
-        """Stop the sandboxes of open episodes. A seed still starting one holds its episode's lock, so the stop waits
-        for it, and a seed that comes later starts none."""
+        """Stop the sandboxes of open episodes, all at once and within the time Gym's run command leaves its servers
+        once it signals them to stop (``server_shutdown_timeout_seconds``, then it kills them): a sandbox left running
+        stays on the cell until its TTL. A seed still starting one holds its episode's lock, so its stop waits for the
+        seed, and a seed that comes later starts none. The sandboxes not stopped by the deadline are logged for a
+        reaper, the lent ones apart from those whose create is still in flight."""
         self._shutting_down = True
-        for session_id in set(self._episodes) | set(self._locks):  # a seed awaiting its lock has no episode yet
+        grace = get_global_config_dict().get(SERVER_SHUTDOWN_TIMEOUT_KEY)
+        budget = max(0.5, (1.0 if grace is None else float(grace)) - SHUTDOWN_MARGIN_S)
+        at_once = asyncio.Semaphore(SHUTDOWN_STOPS_AT_ONCE)
+
+        async def stop(session_id: str) -> None:
             async with self._locks.setdefault(session_id, asyncio.Lock()):
                 episode = self._episodes.get(session_id)
                 if episode is None:
-                    continue
-                try:
-                    await self._release(episode)
-                except Exception:
-                    LOGGER.exception("Failed to stop the sandbox of OfficeEnv session %s", session_id)
+                    return
+                async with at_once:
+                    try:
+                        await self._release(episode)
+                    except Exception:
+                        LOGGER.exception("Failed to stop the sandbox of OfficeEnv session %s", session_id)
+
+        # a seed awaiting its lock has no episode yet
+        stops = [asyncio.ensure_future(stop(session_id)) for session_id in set(self._episodes) | set(self._locks)]
+        if not stops:
+            return
+        _, pending = await asyncio.wait(stops, timeout=budget)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        # A lent sandbox whose stop failed or was cut at the deadline, and one whose create is still in flight (its seed
+        # holds the episode's lock, so the stop was cut waiting for it)
+        lent = sorted(session_id for session_id, episode in self._episodes.items() if episode.sandbox is not None)
+        starting = sorted(self._starting)  # the provider deletes a cancelled create while this process lives
+        if lent or starting:
+            LOGGER.error(
+                "Shutdown left %d OfficeEnv sandboxes running after %.1f s; a reaper must stop them. %d lent, "
+                "sessions: %s. %d still starting, their creates in flight, sessions: %s",
+                len(lent) + len(starting),
+                budget,
+                len(lent),
+                _listed(lent),
+                len(starting),
+                _listed(starting),
+            )
 
     def _seed(self, session_id: str, row: dict[str, Any], *, sandboxed: bool = False) -> Reply:
         """Build the session ``row`` describes. A malformed task, an unknown app or a row from

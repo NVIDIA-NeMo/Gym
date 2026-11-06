@@ -3,6 +3,12 @@
 # or endpoints), and moves file content over the episode's file API (README.md in the workspace). The harness configs
 # compose it with a harness and the Environment Server that binds the two: configs/officeenv_sandbox.yaml (Pi),
 # configs/officeenv_sandbox_codex.yaml (Codex CLI) and configs/officeenv_sandbox_miniswe.yaml (mini-SWE).
+
+# When Gym's run command stops its servers (a job's end, Ctrl-C), it kills the ones still running this long after
+# signalling them (1 s by default, for every server of the run). This server stops the sandboxes it lent, all at once,
+# within it less a 2 s margin for the exit: a sandbox left running stays on the cell until its TTL.
+server_shutdown_timeout_seconds: 30
+
 oe:
   resources_servers:
     officeenv:

@@ -10,12 +10,14 @@ import base64
 import io
 import ipaddress
 import json
+import logging
 import os
 import re
 import shlex
 import shutil
 import socket
 import stat
+import statistics
 import subprocess
 import threading
 import time
@@ -26,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 import yaml
 from fastapi import HTTPException
@@ -144,6 +147,9 @@ RESPONSE = {
     "tools": [],
 }
 VERIFY_BODY = {"responses_create_params": {"input": []}, "response": RESPONSE}
+# Gym's run-wide shutdown grace, as a config sets it, beside the provider config the fixture serves: the server
+# keeps 2 s of it for the exit
+GRACE_OF_3_S = {"sandbox": {"docker": {}}, "server_shutdown_timeout_seconds": 3.0}
 IMAGE = {"image": "officeenv-sandbox:pilot"}
 LOCAL = ("127.0.0.1", 50000)
 SANDBOX = ("203.0.113.47", 50000)  # a public address (TEST-NET-3), as a cluster node sees a cloud sandbox's calls
@@ -577,6 +583,245 @@ def test_shutdown_and_retiring_wait_for_a_seed_still_starting_its_sandbox(sandbo
 
     asyncio.run(scenario())
     assert len(sandboxes.started) == 1 and sandboxes.stopped == sandboxes.started
+
+
+def test_shutdown_stops_every_lent_sandbox_at_once_within_its_grace(sandboxes, monkeypatch) -> None:
+    """A job's end gives the servers server_shutdown_timeout_seconds before they are killed; stopped one after another,
+    a collection's worth of sandboxes (64 in a training smoke) would outlast it and stay on the cell until their TTL."""
+    monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a stop budget of 1 s
+    server = make_server()
+    stop = FakeSandbox.stop
+
+    async def slow_stop(sandbox: FakeSandbox) -> None:
+        await asyncio.sleep(0.25)
+        await stop(sandbox)
+
+    async def scenario() -> float:
+        for n in range(20):
+            await server._seed_sandboxed_episode(
+                SimpleNamespace(session={}), seed_request(session_id=f"rs-{n}", rollout_id=f"r{n}")
+            )
+        monkeypatch.setattr(FakeSandbox, "stop", slow_stop)
+        started = time.monotonic()
+        await server.shutdown()
+        return time.monotonic() - started
+
+    elapsed = asyncio.run(scenario())
+    assert len(sandboxes.started) == 20 and set(sandboxes.stopped) == set(sandboxes.started)
+    assert elapsed < 1.0  # one after another: 5 s
+
+
+def test_shutdown_ends_at_its_deadline_and_logs_the_sandboxes_left(sandboxes, monkeypatch, caplog) -> None:
+    monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a stop budget of 1 s
+    server = make_server()
+    stop = FakeSandbox.stop
+
+    async def stop_or_hang(sandbox: FakeSandbox) -> None:
+        if sandbox is FakeSandbox.started[0]:
+            await asyncio.Event().wait()  # the provider never answers
+        await stop(sandbox)
+
+    async def scenario() -> None:
+        for n in range(3):
+            await server._seed_sandboxed_episode(
+                SimpleNamespace(session={}), seed_request(session_id=f"rs-{n}", rollout_id=f"r{n}")
+            )
+        monkeypatch.setattr(FakeSandbox, "stop", stop_or_hang)
+        await asyncio.wait_for(server.shutdown(), timeout=3.0)  # unbounded, it would wait for the hung stop
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(scenario())
+    assert set(sandboxes.stopped) == set(sandboxes.started[1:])
+    assert "Shutdown left 1 OfficeEnv sandboxes running" in caplog.text and "rs-0" in caplog.text
+
+
+def test_shutdown_names_the_creates_still_in_flight_at_its_deadline_apart(sandboxes, monkeypatch, caplog) -> None:
+    """A sandbox whose create is still in flight at the deadline is counted and named apart from the lent ones, so a
+    reaper's count can be checked against the line."""
+    monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: GRACE_OF_3_S)  # a stop budget of 1 s
+    server = make_server()
+    start, stop = FakeSandbox.start, FakeSandbox.stop
+
+    async def scenario() -> None:
+        in_flight = asyncio.Event()
+
+        async def start_or_hang(sandbox: FakeSandbox, spec) -> None:
+            if FakeSandbox.started:  # the second create never answers
+                in_flight.set()
+                await asyncio.Event().wait()
+            await start(sandbox, spec)
+
+        async def stop_or_hang(sandbox: FakeSandbox) -> None:
+            if FakeSandbox.started and sandbox is FakeSandbox.started[0]:
+                await asyncio.Event().wait()  # the lent sandbox's stop never answers either
+            await stop(sandbox)
+
+        monkeypatch.setattr(FakeSandbox, "start", start_or_hang)
+        monkeypatch.setattr(FakeSandbox, "stop", stop_or_hang)
+        await server._seed_sandboxed_episode(
+            SimpleNamespace(session={}), seed_request(session_id="rs-0", rollout_id="r0")
+        )
+        starting = asyncio.create_task(
+            server._seed_sandboxed_episode(
+                SimpleNamespace(session={}), seed_request(session_id="rs-1", rollout_id="r1")
+            )
+        )
+        await in_flight.wait()
+        await asyncio.wait_for(server.shutdown(), timeout=3.0)
+        starting.cancel()
+        await asyncio.gather(starting, return_exceptions=True)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(scenario())
+    assert "Shutdown left 2 OfficeEnv sandboxes running" in caplog.text
+    assert "1 lent, sessions: rs-0." in caplog.text and "1 still starting" in caplog.text
+    assert caplog.text.rstrip().endswith("sessions: rs-1")
+
+
+# Seeds take turns.
+
+QUEUED_SEEDS = 20
+INITIALIZE = {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "initialize",
+    "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "t", "version": "0"}},
+}
+
+
+def slow_seeds(server: OfficeEnvResourcesServer, monkeypatch, built: list[str]) -> None:
+    """Each world build holds the event loop for a moment, as a large world's does, and is recorded."""
+    seed = server.service.seed
+
+    def slow_seed(session_id: str, row: dict) -> object:
+        time.sleep(0.01)
+        built.append(session_id)
+        return seed(session_id, row)
+
+    monkeypatch.setattr(server.service, "seed", slow_seed)
+
+
+def seed_concurrently(server: OfficeEnvResourcesServer, count: int) -> list[asyncio.Task]:
+    return [
+        asyncio.create_task(
+            server._seed_sandboxed_episode(
+                SimpleNamespace(session={}), seed_request(session_id=f"rs-{n}", rollout_id=f"r{n}")
+            )
+        )
+        for n in range(count)
+    ]
+
+
+def test_a_harness_is_answered_while_seeds_queue(sandboxes, monkeypatch) -> None:
+    """A seed builds its world synchronously, and one iteration of the event loop runs every task that is ready: a
+    wave of seeds ran back to back while a harness's MCP initialize waited behind all of them (minutes, at a training
+    cap; Pi gives up after 30 s). Seeds take turns, and the loop runs what is ready before each, so the initialize is
+    answered before more than a seed or two of 20 queued ones are built. With only a bare yield before each seed it
+    advanced a step per seed: of 40 queued seeds, it was answered after 13."""
+    server = make_server()
+    built: list[str] = []
+    slow_seeds(server, monkeypatch, built)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+
+    async def scenario() -> tuple[int, int]:
+        transport = httpx.ASGITransport(app=app, client=SANDBOX)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as harness:
+            seeds = seed_concurrently(server, QUEUED_SEEDS)
+            answer = await asyncio.create_task(harness.post("/mcp", headers=RPC_HEADERS, json=INITIALIZE))
+            answered_after = len(built)
+            await asyncio.gather(*seeds)
+        return answer.status_code, answered_after
+
+    with MCPClient(app, base_url="http://127.0.0.1:8000", client=LOCAL) as client:  # its lifespan runs MCP
+        status, answered_after = client.portal.call(scenario)
+    assert status == 200
+    assert answered_after <= 2, f"answered after {answered_after} of {QUEUED_SEEDS} seeds"
+    assert len(sandboxes.started) == QUEUED_SEEDS  # and each seed still had its turn
+
+
+def test_a_burst_of_harness_setups_is_answered_between_world_builds(sandboxes, monkeypatch) -> None:
+    """At a training cap a wave of seeds and a wave of harness setups arrive together: a cap-256 smoke queued up to 166
+    seeds while its harnesses set up, and 3.5% of Pi's setups outwaited its 30 s. A setup is a few MCP requests of a few
+    dozen steps of the loop each, so the gap between two builds must hold a burst of them: with a 10 ms gap the median
+    request waited a build out. With SEED_TURN_YIELD_S the median request is answered in the gap it arrives in, and none
+    waits more than a few builds out, however long the queue (back to back, it waited for every seed ahead of it)."""
+    server = make_server()
+    built: list[str] = []
+    slow_seeds(server, monkeypatch, built)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    seeds_queued, setups = 30, 20
+
+    async def scenario(token: str) -> list[int]:
+        headers = {**RPC_HEADERS, NEMO_GYM_MCP_SESSION_TOKEN_HEADER: token}
+        transport = httpx.ASGITransport(app=app, client=SANDBOX)
+        async with httpx.AsyncClient(transport=transport, base_url="http://127.0.0.1:8000") as harness:
+            seeds = seed_concurrently(server, seeds_queued)
+            waited: list[int] = []  # the builds each request waited out
+
+            async def request(body: dict) -> None:
+                before = len(built)
+                answer = await harness.post("/mcp", headers=headers, json=body)
+                assert answer.status_code < 300, answer.text
+                waited.append(len(built) - before)
+
+            async def setup() -> None:  # Pi's tool discovery
+                await request(INITIALIZE)
+                await request({"jsonrpc": "2.0", "method": "notifications/initialized"})
+                await request({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+
+            await asyncio.gather(*(setup() for _ in range(setups)))
+            await asyncio.gather(*seeds)
+        return waited
+
+    with MCPClient(app, base_url="http://127.0.0.1:8000", client=LOCAL) as client:
+        seeded = client.post("/seed_session", json=seed_body(session_id="rs-harness", rollout_id="r-harness"))
+        token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+        waited = client.portal.call(scenario, token)
+    assert len(waited) == 3 * setups and len(sandboxes.started) == seeds_queued + 1
+    assert statistics.median(waited) == 0, sorted(waited)
+    assert max(waited) <= 3, sorted(waited)
+
+
+def test_a_seed_is_admitted_again_in_its_turn(sandboxes, monkeypatch) -> None:
+    """While a seed waits for its turn, shutdown may begin: in its turn it is admitted again, and refused (503) before
+    its world is built."""
+    server = make_server()
+    built: list[str] = []
+    slow_seeds(server, monkeypatch, built)
+    seed = server.service.seed
+
+    def seed_as_shutdown_begins(session_id: str, row: dict) -> object:
+        server._shutting_down = True
+        return seed(session_id, row)
+
+    monkeypatch.setattr(server.service, "seed", seed_as_shutdown_begins)
+
+    async def scenario() -> list:
+        return await asyncio.gather(*seed_concurrently(server, 2), return_exceptions=True)
+
+    first, second = asyncio.run(scenario())
+    assert not isinstance(first, BaseException), first
+    assert isinstance(second, HTTPException) and second.status_code == 503, second
+    assert built == ["rs-0"] and "rs-1" not in server._episodes and len(sandboxes.started) == 1
+
+
+def test_each_seed_logs_its_place_its_wait_and_its_build_time(sandboxes, monkeypatch, caplog) -> None:
+    """One line per seed, for a CPU sample of the server to be read against: the seeds ahead of it, its wait for its
+    turn and its world's build. Gym's servers configure no logging, so the line has a handler of its own."""
+    server = make_server()
+    slow_seeds(server, monkeypatch, [])
+
+    async def scenario() -> None:
+        await asyncio.gather(*seed_concurrently(server, 3))
+
+    with caplog.at_level(logging.INFO, logger=officeenv_app.SEED_LOGGER.name):
+        asyncio.run(scenario())
+    pattern = re.compile(r"Seed of OfficeEnv session (rs-\d): (\d+) ahead, waited \d+\.\d\d s, built in \d+\.\d\d s")
+    lines = [record.getMessage() for record in caplog.records if record.name == officeenv_app.SEED_LOGGER.name]
+    assert [pattern.fullmatch(line).groups() for line in lines] == [("rs-0", "0"), ("rs-1", "1"), ("rs-2", "2")]
+    assert officeenv_app.SEED_LOGGER.handlers and officeenv_app.SEED_LOGGER.level == logging.INFO
 
 
 def test_an_episodes_lock_is_kept_only_while_a_request_holds_it(sandboxes) -> None:

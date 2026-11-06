@@ -12,6 +12,8 @@ openclaw_agent:
   responses_api_agents:
     openclaw_agent:
       timeout: 1800
+      # OpenClaw's default, set here for the admission cap below to follow.
+      concurrency: 32
 
 single_agent_turn_legacy:
   environment_servers:
@@ -21,3 +23,6 @@ single_agent_turn_legacy:
       agent_server:
         name: openclaw_agent
       resources_tool_transports: []
+      # No more episodes than OpenClaw runs at once, as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${openclaw_agent.responses_api_agents.openclaw_agent.concurrency}
+      queue_timeout_seconds: 86400

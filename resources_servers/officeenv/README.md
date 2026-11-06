@@ -167,7 +167,11 @@ with no MCP tools. Each episode also:
    `sandbox_provider`, and lends it to the harness as `SandboxAccess`. Seeding the episode again
    lends the same sandbox;
    verification stops it (or `/close_session`, when verification did not), and so does shutting
-   the server down;
+   the server down. The sandbox's TTL runs from the seed, so where the harness caps the episodes
+   it runs at once (`concurrency`: Pi, Codex, OpenCode, OpenClaw), its config has the Environment
+   Server admit no more (`max_concurrent_episodes` follows it), and the rest wait there, before
+   their seed, for up to a day (`queue_timeout_seconds`). mini-SWE and Terminus 2 run every
+   episode they are given;
 2. moves file content between the workspace and the file apps (Google Drive, Box, SharePoint,
    OneDrive) without passing it through the model: the sandbox gets `COMPANY_API_URL` and
    `COMPANY_API_TOKEN`, in its environment and in `/etc/company-api.env` for a harness whose
@@ -224,6 +228,11 @@ with no MCP tools. Each episode also:
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
+
+When the server shuts down (a job's end, Ctrl-C), it stops the sandboxes of open episodes all at
+once, within Gym's `server_shutdown_timeout_seconds` less 2 s for the exit. The sandboxed configs
+set it to 30 s, since Gym's default of 1 s cannot stop a collection's sandboxes. Any sandbox left
+running is logged at ERROR with its session, for a reaper.
 
 ### Images and what a row needs
 

@@ -28,3 +28,6 @@ single_agent_turn_legacy:
       agent_server:
         name: codex_agent
       resources_tool_transports: []
+      # No more episodes than Codex runs at once (`concurrency`), as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${codex_agent.responses_api_agents.codex_agent.concurrency}
+      queue_timeout_seconds: 86400

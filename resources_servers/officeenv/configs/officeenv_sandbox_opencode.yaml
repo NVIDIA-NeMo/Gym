@@ -12,6 +12,8 @@ opencode_agent:
   responses_api_agents:
     opencode_agent:
       timeout: 1800
+      # OpenCode's default, set here for the admission cap below to follow.
+      concurrency: 8
 
 single_agent_turn_legacy:
   environment_servers:
@@ -21,3 +23,6 @@ single_agent_turn_legacy:
       agent_server:
         name: opencode_agent
       resources_tool_transports: []
+      # No more episodes than OpenCode runs at once, as configs/officeenv_sandbox.yaml explains for Pi.
+      max_concurrent_episodes: ${opencode_agent.responses_api_agents.opencode_agent.concurrency}
+      queue_timeout_seconds: 86400

@@ -33,6 +33,8 @@ pi_agent:
     pi_agent:
       finish_tool_names: [user_complete_task]
       timeout: 1800
+      # Pi's default, set here for the admission cap below to follow.
+      concurrency: 8
 
 single_agent_turn_legacy:
   environment_servers:
@@ -42,3 +44,10 @@ single_agent_turn_legacy:
       agent_server:
         name: pi_agent
       resources_tool_transports: [mcp]
+      # The seed lends an episode its sandbox, whose TTL runs from then, and Pi runs at most `concurrency` episodes at
+      # once: an episode admitted beyond them waits for Pi while its sandbox's TTL runs, and fails when the sandbox
+      # expires ("Sandbox not found"). So the server admits no more episodes than Pi runs, and follows a raised
+      # `concurrency`; the rest wait here, before their seed, holding no sandbox, their deadline not started.
+      max_concurrent_episodes: ${pi_agent.responses_api_agents.pi_agent.concurrency}
+      # A day, as GDPVal's and EnterpriseOps' capped configs wait: a large collection queues episodes for hours.
+      queue_timeout_seconds: 86400

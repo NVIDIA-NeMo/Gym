@@ -39,6 +39,10 @@ oe:
 
 sandbox:
   opensandbox:
+    create:
+      # One create attempt holds the 1200 s request and then the SDK's readiness wait (30 s, as this config sets no
+      # ready_timeout_s). The provider's default leaves timeout_s unset, which would give it the connection's 300 s.
+      timeout_s: 1500
     # OpenSandbox's execd keeps each command's output in the sandbox, where the model's shell can read it, and the
     # provider's default post-create probe prints a marker that names Gym: this one prints a plain word.
     probe:
