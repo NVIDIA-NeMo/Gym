@@ -63,6 +63,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    observe_failure,
+    sdk_error_details,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -73,7 +76,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.cline_agent.observability import build_cline_observations
 from responses_api_agents.cline_agent.sandbox import CLINE_RUNTIME_SHA512, ClineArtifacts, ClineSandboxSession
 from responses_api_agents.cline_agent.setup_cline import ensure_cline
@@ -919,6 +922,8 @@ class ClineAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop Cline before verification; a borrowed sandbox stays with its Resources Server."""
         assert isinstance(state, ClineSandboxSession)
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -1042,7 +1047,18 @@ class ClineAgent(SimpleResponsesAPIAgent):
         if isinstance(failure, TimeoutError) and timed_out and artifacts is not None:
             # The provider stopped waiting just as the supervisor stopped Cline at its deadline: still a timeout.
             LOG.warning("The sandbox provider stopped waiting for Cline's supervisor after Cline's deadline")
+            state.provider_wait_failure = NgFailureEvent(
+                boundary="sandbox",
+                failure_kind="transport_timeout",
+                failure_reason="Sandbox provider wait expired after Cline's supervisor confirmed its deadline",
+                operation="exec_wait",
+                stage="agent",
+                foreign_error=sdk_error_details(failure, message=str(failure)),
+            )
+            state.provider_wait_failure.__cause__ = failure
             failure = None
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
         stdout = artifacts.stdout if artifacts is not None else ""
         output_items, metadata = parse_cline_events(stdout)
         terminal = _terminal_error(stdout)
@@ -1055,7 +1071,11 @@ class ClineAgent(SimpleResponsesAPIAgent):
         if failure is not None:
             status = "incomplete" if isinstance(failure, asyncio.CancelledError) else "failed"
         elif timed_out:
-            status = "incomplete"
+            # A supervisor deadline says nothing about whether a model request was ever made.
+            # Without any recorded model output, there is no partial work to grade as a model failure.
+            status = "incomplete" if output_items or state.session.expired else "failed"
+            if status == "failed":
+                error_message = "Cline's deadline passed before any model output was recorded"
         elif exit_code == HARNESS_RUNNER_FAILED or exit_code in HARNESS_COMMAND_NOT_STARTED or finish is None:
             status, crash = "failed", f"Cline produced no run result (exit {exit_code})"
         elif finish == "completed":
@@ -1089,6 +1109,10 @@ class ClineAgent(SimpleResponsesAPIAgent):
             state.observations.gaps.append(ObservationGap(code="agent_artifact_unavailable"))
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if timed_out and not state.session.expired:
+            for observation in state.observations.records:
+                if isinstance(observation, AgentInvocation):
+                    observation.stop_reason = "timeout"
         if cleanup is not None:
             access = state.request.sandbox_access
             state.observations.records.append(

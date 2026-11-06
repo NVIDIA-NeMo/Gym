@@ -67,6 +67,12 @@ names. musl images are refused. The seed is also refused (HTTP 422) without an e
 grant, and for the host-only settings `command`, `env`, `extra_args`, `repo_dir`,
 `openai_api_key` and `openai_base_url`.
 
+Concurrent replacement of a stale runtime uses `flock` with a 60-second wait. Without `flock`, a cold
+install and reuse of a verified runtime still work; replacing a stale directory fails without deleting
+it. Install `flock` or use a fresh sandbox to recover. Cline does not implement a `network_access`
+setting or tighten the provider's network policy for agent-owned sandboxes. Borrowed sandboxes retain
+the Resources Server's policy; installation needs access to npm and execution needs the Model Server.
+
 **Activation.** Cline runs in `SandboxAccess.workdir` under Gym's process supervisor, through the
 shared `harness_runner.sh`. Everything Cline writes goes to `/tmp/nemo-gym-cline-sessions/<id>`:
 `--config` and `--data-dir` point there, together with the `CLINE_*` state paths. The agent writes
@@ -94,8 +100,20 @@ it the same way but leaves out `instructions`.
 |---|---|
 | `finishReason: completed` (Cline exits 0) | `completed` |
 | `finishReason: error` | `failed`, with the outcome Cline names: a context overflow is `incomplete` instead, a refused or timed-out connection `model_transport_error`, an empty model response `agent_invalid_output`, anything else `unknown` |
-| `finishReason: aborted`, the model's output-token cap, another limit, or the deadline | `incomplete`; the partial work is verified |
+| `finishReason: aborted`, the model's output-token cap, or another limit | `incomplete`, with no typed failure kind; the partial work is verified |
+| Deadline after recorded model output | `incomplete`, with invocation `stop_reason: timeout`; the partial work is verified |
+| Deadline before any recorded model output | `failed` with `unknown`, invocation `stop_reason: timeout`; retried by default, without claiming a model transport failure |
 | No run result (Cline or the runner crashed) | The activation fails (HTTP 500) |
+
+Cline 3.0.55's error events do not retain structured HTTP status codes. Provider HTTP errors, including
+400, 429 and 5xx messages, therefore remain `unknown` and are retried by the default outcome policy;
+the adapter does not infer HTTP status from text. `agent_outcome_policy.by_failure_kind` can change
+that treatment. An explicit rollout stop remains `incomplete` even before model output arrives.
+
+If the sandbox provider also times out waiting after the supervisor confirms its deadline, both facts
+survive: the sandbox observation records the harness deadline and the failure report retains the
+provider wait error (including an original Gym failure event when available). Retaining this diagnostic
+does not turn an otherwise gradable partial response into another episode attempt.
 
 ### Observations
 

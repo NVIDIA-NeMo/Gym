@@ -145,6 +145,62 @@ def test_a_runtime_another_installer_published_is_not_replaced(tmp_path):
     assert not [path for path in tmp_path.glob(f"{runtime.name}.*") if path.is_dir()]
 
 
+def test_without_flock_cold_install_and_reuse_work_but_stale_runtime_is_not_removed(tmp_path):
+    package, digest = _package(tmp_path)
+    runtime = tmp_path / "runtime-3.0.55"
+    command, env = _installer(tmp_path, runtime, digest, package=package)
+    bin_dir = tmp_path / "bin"
+    # Use the real shell and tools, excluding only flock from this sandbox's PATH.
+    for name in (
+        "bash",
+        "sh",
+        "uname",
+        "getconf",
+        "tar",
+        "gzip",
+        "sha512sum",
+        "mkdir",
+        "dirname",
+        "mktemp",
+        "rm",
+        "mv",
+        "chmod",
+        "touch",
+        "cp",
+    ):
+        (bin_dir / name).symlink_to(shutil.which(name))
+    env["PATH"] = str(bin_dir)
+    first = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
+    assert first.returncode == 0, first.stderr
+    reused = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
+    assert reused.returncode == 0, reused.stderr
+    assert len((tmp_path / "curl.log").read_text().splitlines()) == 1
+
+    (runtime / "ready").unlink()
+    partial = (runtime / "cline").read_bytes()
+    refused = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
+    assert refused.returncode != 0
+    assert "Cannot replace stale Cline runtime safely without flock" in refused.stderr
+    assert (runtime / "cline").read_bytes() == partial
+    assert not (runtime / "ready").exists()
+    assert not [path for path in tmp_path.glob(f"{runtime.name}.*") if path.is_dir()]
+
+
+def test_lock_wait_is_bounded_and_does_not_remove_stale_runtime(tmp_path):
+    runtime = tmp_path / "runtime-3.0.55"
+    runtime.mkdir()
+    (runtime / "cline").write_text("partial")
+    package, digest = _package(tmp_path)
+    command, env = _installer(tmp_path, runtime, digest, package=package)
+    flock = tmp_path / "bin" / "flock"
+    flock.write_text('#!/bin/sh\n[ "$1" = -w ] && [ "$2" = 60 ] && [ "$3" = 9 ] || exit 99\nexit 1\n')
+    flock.chmod(0o755)
+    refused = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
+    assert refused.returncode != 0
+    assert "Timed out waiting for Cline runtime lock" in refused.stderr
+    assert (runtime / "cline").read_text() == "partial"
+
+
 def test_non_glibc_sandbox_is_refused_before_download(tmp_path):
     package, digest = _package(tmp_path)
     installed = _install(tmp_path, tmp_path / "runtime-3.0.55", digest, package=package, getconf_fails=True)

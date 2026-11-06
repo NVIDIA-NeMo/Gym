@@ -77,14 +77,17 @@ touch "$staging/ready"
 # Publish the runtime with one rename, so a concurrent session never sees a partial directory. A runtime
 # that another installer published meanwhile is kept; only a stale or partial one is replaced, under a lock
 # so that two installers replacing it cannot remove the runtime the first one published.
-if ! mv -T -- "$staging" "$runtime" 2>/dev/null; then
-  if command -v flock >/dev/null 2>&1; then
-    exec 9>>"$runtime.lock"
-    flock 9
-  fi
+if command -v flock >/dev/null 2>&1; then
+  exec 9>>"$runtime.lock"
+  flock -w 60 9 || { echo "Timed out waiting for Cline runtime lock: $runtime.lock" >&2; exit 1; }
   if ! ready; then
     rm -rf -- "$runtime"
     mv -T -- "$staging" "$runtime"
   fi
+elif ! mv -T -- "$staging" "$runtime" 2>/dev/null && ! ready; then
+  # A cold install and ready-runtime reuse need no lock. Replacing a stale directory does:
+  # never delete a runtime another installer may have published since our last readiness check.
+  echo "Cannot replace stale Cline runtime safely without flock: $runtime. Install flock or use a fresh sandbox." >&2
+  exit 1
 fi
 printf '%s\n' "$version"

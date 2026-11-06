@@ -27,11 +27,12 @@ from nemo_gym.agents import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentSeedSessionRequest,
     SandboxSession,
+    agent_outcome_policy,
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, RequestFailureLog
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
 from responses_api_agents.cline_agent import app
@@ -500,6 +501,9 @@ async def test_staged_runner_isolates_cline_and_captures_its_output(tmp_path, mo
             "model_transport_error",
         ),
         ([error_event("Error", "stub boom"), run_result("error")], cleanup(code=1), "failed", "unknown"),
+        ([error_event("Error", "400 Invalid request"), run_result("error")], cleanup(code=1), "failed", "unknown"),
+        ([error_event("Error", "429 Rate limited"), run_result("error")], cleanup(code=1), "failed", "unknown"),
+        ([error_event("Error", "503 Unavailable"), run_result("error")], cleanup(code=1), "failed", "unknown"),
         # A context overflow and an abort leave gradable partial work.
         (
             [error_event("ContextWindowOverflowError", "too large", "context_window_exceeded"), run_result("error")],
@@ -520,6 +524,8 @@ async def test_staged_runner_isolates_cline_and_captures_its_output(tmp_path, mo
         ([text("partial"), run_result("aborted")], cleanup(code=0), "incomplete", None),
         # The supervisor stopped Cline at its deadline.
         ([text("partial")], cleanup(code=None, timed_out=True), "incomplete", None),
+        ([], cleanup(code=None, timed_out=True), "failed", "unknown"),
+        ([{"type": "run_start"}], cleanup(code=None, timed_out=True), "failed", "unknown"),
     ],
 )
 async def test_activation_status_follows_clines_exit_rule(records, receipt, status, failure_kind):
@@ -530,8 +536,15 @@ async def test_activation_status_follows_clines_exit_rule(records, receipt, stat
     assert response.status == status
     outcome = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
     assert (json.loads(outcome)["failure_kind"] if outcome else None) == failure_kind
+    if failure_kind == "unknown":
+        assert json.loads(outcome).get("status_code") is None
+        assert agent_outcome_policy(response) == "retry"
     invocation = next(record for record in state.observations.records if isinstance(record, AgentInvocation))
     assert invocation.status == status
+    if receipt["timed_out"]:
+        assert invocation.stop_reason == "timeout"
+        if status == "failed":
+            assert response.error.message == "Cline's deadline passed before any model output was recorded"
 
 
 @pytest.mark.asyncio
@@ -567,16 +580,40 @@ async def test_interrupted_activation_keeps_observations_and_reraises():
 
 
 @pytest.mark.asyncio
-async def test_provider_timeout_after_a_confirmed_deadline_is_still_a_timeout():
+@pytest.mark.parametrize("with_original_event", [False, True])
+async def test_provider_timeout_after_a_confirmed_deadline_is_still_a_timeout(with_original_event):
     instance = agent()
+    failure = TimeoutError("exec wait expired")
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="provider wait", stage="agent"
+    )
+    if with_original_event:
+        failure.__cause__ = original
     session = FakeSession(
         artifacts=adapter.ClineArtifacts(stdout=stream(text("partial")), stderr=""),
         cleanup=cleanup(code=None, timed_out=True),
-        raises=TimeoutError("exec wait expired"),
+        raises=failure,
     )
     state = state_with(session)
-    response = await instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
+    with RequestFailureLog.capture() as activation_log:
+        response = await instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
     assert response.status == "incomplete"
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    sandbox = next(record for record in state.observations.records if isinstance(record, SandboxObservation))
+    assert sandbox.outcome == "timeout"
+    report = activation_log.reply_report(None)
+    assert report.failure_id is None  # Retained evidence does not become the terminal episode outcome.
+    wait = report.events[state.provider_wait_failure.event_id]
+    assert (wait.boundary, wait.operation, wait.failure_kind) == ("sandbox", "exec_wait", "transport_timeout")
+    assert wait.foreign_error.exception_type == "TimeoutError"
+    assert wait.foreign_error.message == "exec wait expired"
+    if with_original_event:
+        assert report.events[original.event_id].stage == "agent"
+        assert wait.cause_id == original.event_id
+    # Close replays the same IDs even when the original activation waiter disconnected.
+    with RequestFailureLog.capture() as close_log:
+        await instance._close_agent_session_state(state)
+    assert close_log.reply_report(None) == report
 
 
 @pytest.mark.asyncio
@@ -869,6 +906,9 @@ async def test_host_install_is_lazy_shared_and_retryable(monkeypatch):
         ({"error": {"name": "Error", "message": "Cannot connect to API: refused"}}, "model_transport_error"),
         ({"error": {"name": "Error", "message": "Model returned empty response"}}, "agent_invalid_output"),
         ({"error": {"name": "Error", "message": "Rate limit exceeded"}}, "unknown"),
+        ({"error": {"name": "Error", "message": "400 Invalid request"}}, "unknown"),
+        ({"error": {"name": "Error", "message": "429 Rate limit exceeded"}}, "unknown"),
+        ({"error": {"name": "Error", "message": "503 Service unavailable"}}, "unknown"),
         ({}, "unknown"),
     ],
 )
