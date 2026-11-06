@@ -102,8 +102,10 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     JUDGE_FAILURE_KINDS,
     PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     is_namespaced,
     is_registered,
+    quota_reset_text,
 )
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
@@ -1561,16 +1563,33 @@ class SharedRolloutCollectionConfig(
 
 
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
-    """The end of a run whose sandbox provider refused its credentials: no attempt succeeds until they are fixed."""
+    """The end of a run whose provider (sandbox, or the grading API) refused its credentials: no attempt succeeds
+    until they are fixed."""
     rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
     if not rejected:
         return None
     return IncompleteEvaluationError(
-        f"EVAL STOPPED: the sandbox provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
+        f"EVAL STOPPED: the provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
         "rollout(s); another attempt cannot succeed until they are fixed. Fix the credentials, then continue "
         "with gym eval resubmit --recover.",
         retryable=False,
         failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
+
+
+def _quota_exhausted_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+    """The end of a run whose grading provider's quota is exhausted: nothing can be graded until it resets."""
+    exhausted = [row for row in failures if row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED]
+    if not exhausted:
+        return None
+    resets = sorted({text for row in exhausted if (text := quota_reset_text(row.get("failure_reason")))})
+    when = f"resets at {resets[-1]}" if resets else "reset time unknown"
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the grading provider's quota is exhausted ({PROVIDER_QUOTA_EXHAUSTED}) on {len(exhausted)} "
+        f"rollout(s); {when}; nothing can be graded before then. After the reset continue with "
+        "gym eval resubmit --recover (re-judges the saved answers, no model calls).",
+        retryable=False,
+        failure_kind=PROVIDER_QUOTA_EXHAUSTED,
     )
 
 
@@ -4534,7 +4553,9 @@ executions → not run again (left to recovery)
                 if latency_tracker.drained
                 else ""
             )
-            stop = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            stop = await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
             if stop is not None:
                 raise stop
             raise IncompleteEvaluationError(
@@ -4580,7 +4601,9 @@ executions → not run again (left to recovery)
         # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
         rejection: Optional[BaseException] = None
         if config.require_complete:
-            rejection = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            rejection = await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
         if rejection is None:
             rejection = config.completion_rejection(
                 expected=completion["expected"],

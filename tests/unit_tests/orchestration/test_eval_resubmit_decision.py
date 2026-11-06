@@ -3075,3 +3075,57 @@ def test_a_failed_status_query_never_shows_a_password_from_the_error_url(tmp_pat
     reasons = task["mlflow_delivery"]["reasons"]
     assert task["mlflow_delivery"]["state"] == "unverified" and reasons
     assert "SECRETPW" not in json.dumps(task) and "tracking.example" in reasons[0]
+
+
+# ---------------------------------------------------------------------------
+# Verification skipped by configuration (judge_skipped): complete, unverified by construction
+# ---------------------------------------------------------------------------
+
+_SKIP_REASON = "CritPt smoke mode (fire_after): the batch was not sent to the grading API"
+
+
+def _skipped_job(tmp_path, kind: str = "judge_skipped", n: int = 5):
+    rows = [
+        ident(t, mask_sample=True, reward=0.0, failure_kind=kind, failure_reason=_SKIP_REASON, response=SAVED_ANSWER)
+        for t in range(n)
+    ]
+    return write_job_dir(tmp_path / "job", n=n, results=rows, failures=[])
+
+
+def test_an_all_skipped_run_is_a_complete_noop_and_the_gate_reads_unverified(tmp_path) -> None:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    collected = collect(_skipped_job(tmp_path))
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.action == RecoveryAction.NOOP and decision.complete and decision.unverified
+    assert "5 result(s) not graded by configuration (judge_skipped)" in decision.reason
+    assert _SKIP_REASON in decision.reason
+
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=0.02)
+    assert task["status"] == "UNVERIFIED" and task["score"] is None and task["errors"] == []
+    assert task["scored_samples"] == 0 and decision.reason in task["warnings"]
+
+
+def test_resubmit_recover_on_an_all_skipped_run_dispatches_nothing(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.recover("gym-job-skip", "bench")
+    assert out.ok and out.dispatched is None and out.decision.action == RecoveryAction.NOOP
+    assert fake_executor.calls == ["decide"]
+
+
+def test_inspect_prints_the_unverified_reading_of_an_all_skipped_run(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = _skipped_job(tmp_path)
+    out = submit.inspect_recovery("gym-job-skip2", "bench")
+    assert out.gate_task["status"] == "UNVERIFIED" and out.gate_task["score"] is None
+    assert any("not graded by configuration (judge_skipped)" in w for w in out.gate_task["warnings"])
+    assert out.gate_task["errors"] == [] and out.dispatched is None
+
+
+def test_a_masked_result_of_any_other_kind_still_stops_the_run(tmp_path) -> None:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    collected = collect(_skipped_job(tmp_path, kind="provider_unavailable", n=2))
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert not decision.unverified and not decision.complete
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=0.02)
+    assert task["status"] != "UNVERIFIED"
