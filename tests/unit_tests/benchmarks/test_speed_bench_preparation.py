@@ -11,8 +11,8 @@ import pytest
 from datasets import Dataset
 from omegaconf import OmegaConf
 
-from nemo_gym.cli.eval import PrepareBenchmarkConfig, _datasets_to_prepare, _prepare_datasets
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, datasets_to_prepare, prepare_datasets
 from nemo_gym.environment.manifest import dump_manifest, load_manifest
 from nemo_gym.environment.validation import _manifest_dataset
 
@@ -127,7 +127,7 @@ def test_unknown_split_fails_before_download(monkeypatch):
 def test_every_split_resolves_and_manifest_matches(tmp_path, splits, model_type):
     config = resolve_splits(splits, model_type)
     OmegaConf.to_container(config, resolve=True)
-    datasets = _datasets_to_prepare(config)
+    datasets = datasets_to_prepare(config)
     assert len(datasets) == len(splits)
     for benchmark, split in zip(datasets, splits, strict=True):
         dataset = benchmark.dataset
@@ -154,7 +154,7 @@ def test_every_split_resolves_and_manifest_matches(tmp_path, splits, model_type)
 @pytest.mark.parametrize("splits", [(split,) for split in SPLITS] + [SPLITS, ("throughput_32k", "throughput_1k")])
 @pytest.mark.parametrize("arguments", [{}, {"dataset_repo": "other/repo", "dataset_revision": "pinned"}])
 def test_selected_wrappers_receive_global_source_arguments(monkeypatch, tmp_path, splits, arguments):
-    monkeypatch.setattr("nemo_gym.cli.eval._install_prepare_dependencies", lambda _: None)
+    monkeypatch.setattr("nemo_gym.environment.benchmark_preparation._install_prepare_dependencies", lambda _: None)
     downloads = []
 
     def load(repo, name, **kwargs):
@@ -162,10 +162,10 @@ def test_selected_wrappers_receive_global_source_arguments(monkeypatch, tmp_path
         return Dataset.from_list(source_rows(name))
 
     monkeypatch.setattr("datasets.load_dataset", load)
-    datasets = _datasets_to_prepare(resolve_splits(splits))
+    datasets = datasets_to_prepare(resolve_splits(splits))
     for benchmark, split in zip(datasets, splits, strict=True):
         benchmark.dataset.jsonl_fpath = tmp_path / f"speed_bench_{split}_benchmark.jsonl"
-    _prepare_datasets(datasets, PrepareBenchmarkConfig(prepare_script_args={**arguments, "output_dir": tmp_path}))
+    prepare_datasets(datasets, PrepareBenchmarkConfig(prepare_script_args={**arguments, "output_dir": tmp_path}))
     assert downloads == [
         (
             arguments.get("dataset_repo", COMMON.DEFAULT_DATASET_REPO),
@@ -183,4 +183,4 @@ def test_selected_wrappers_receive_global_source_arguments(monkeypatch, tmp_path
         assert all(row["verifier_metadata"]["speed_config"] == split for row in rows)
 
     monkeypatch.setattr("datasets.load_dataset", lambda *a, **kw: pytest.fail("prepared inputs must be reused"))
-    _prepare_datasets(datasets, PrepareBenchmarkConfig(use_cached_prepared_benchmarks=True))
+    prepare_datasets(datasets, PrepareBenchmarkConfig(use_cached_prepared_benchmarks=True))

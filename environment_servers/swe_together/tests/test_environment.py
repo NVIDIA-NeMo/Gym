@@ -17,6 +17,7 @@ from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
 from nemo_gym.rollouts.rollout_collection import _episode_record
+from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
 from nemo_gym.trajectory import TrajectoryRecord
 
 
@@ -527,7 +528,7 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
         tmp_path,
         dependency_proxy_url="http://10.0.0.3:3128",
         sandbox_config={
-            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed"},
+            "metadata": {"nemo.nvidia.com/oom-kill": "process", "role": "spoofed", PLACEMENT_GROUP_KEY: "wrong"},
             "provider_options": {"network_policy": policy},
         },
         judge_sandbox_config={"metadata": {}},
@@ -551,7 +552,8 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
     episode = Episode(request(), request().task.task_input.task_data, tmp_path, tmp_path)
     episode.task_metadata = {"environment": {"memory": "4G"}}
     episode.runtime = SimpleNamespace(
-        metadata=lambda: {"placement": "shared"}, mount_options=lambda *_: {"volumes": []}
+        metadata=lambda overrides: {"placement": "shared"} | overrides | {PLACEMENT_GROUP_KEY: "runtime-group"},
+        mount_options=lambda *_: {"volumes": []},
     )
     episode.dependency_access = SimpleNamespace(
         certificate=AsyncMock(return_value="cert"), sandbox_settings=lambda token, policy, cert: (policy, {}, {})
@@ -561,6 +563,7 @@ async def test_sandbox_config_metadata_reaches_only_the_configured_role(tmp_path
     candidate, judge = specs["candidate"].metadata, specs["judge"].metadata
     assert candidate["nemo.nvidia.com/oom-kill"] == "process"
     assert candidate["placement"] == "shared" and judge["placement"] == "shared"
+    assert candidate[PLACEMENT_GROUP_KEY] == judge[PLACEMENT_GROUP_KEY] == "runtime-group"
     assert "nemo.nvidia.com/oom-kill" not in judge
     assert specs["candidate"].resources.memory_mib == 4096
 
