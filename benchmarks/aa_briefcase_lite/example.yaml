@@ -10,9 +10,6 @@ aa_briefcase_lite_resources_server:
       reward_mode: binary
       persist_raw_judge_responses: false
       persist_deliverables_dir: /opt/aa-briefcase-lite-demo
-aa_briefcase_lite_stirrup_agent:
-  responses_api_agents:
-    stirrup_agent:
       datasets:
       - name: example
         type: example
