@@ -587,11 +587,14 @@ async def test_provider_event_at_verify_is_retained_as_the_cause_of_the_verifier
     sandbox = server._session_id_to_sandbox["s"]
     result, report = await _verify_with_failure_log(server, request, tmp_path)
 
-    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+    assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+    assert "Sandbox command did not run to completion" in result.failure_reason
     assert result.reward == 0.0 and result.evaluation_completed is False
     # The report survives the reply header with the provider event's own identity and the cause link.
     sent = FailureHeader.decode(FailureHeader.encode(report))
-    [verifier] = [event for event in sent.events.values() if event.failure_kind == "verifier_error"]
+    [verifier] = [event for event in sent.events.values() if event.event_id != provider_event.event_id]
+    assert (verifier.boundary, verifier.operation, verifier.stage) == ("resources_server", "verify", "verification")
+    assert (verifier.failure_kind, verifier.http_status) == ("provider_unavailable", 503)
     assert verifier.cause_id == provider_event.event_id
     provider = sent.events[provider_event.event_id]
     assert (provider.failure_kind, provider.http_status) == ("provider_unavailable", 503)

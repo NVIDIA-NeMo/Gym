@@ -696,11 +696,14 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
         failure_reason: str | None = None
+        # A typed provider failure keeps its kind; only a verifier-side failure is a verifier_error.
+        failure_kind = failure_cause.failure_kind if isinstance(failure_cause, NgFailureEvent) else VERIFIER_ERROR
         if failure_cause is not None:
             failure_reason = _verifier_failure_reason(failure_cause)
             failure = NgFailureEvent(
                 boundary=FailureBoundary.RESOURCES_SERVER,
-                failure_kind=VERIFIER_ERROR,
+                failure_kind=failure_kind,
+                http_status=failure_cause.http_status if isinstance(failure_cause, NgFailureEvent) else None,
                 failure_reason=failure_reason,
                 operation="verify",
                 operation_id=current_verifier_invocation_id() or body.task_name,
@@ -721,7 +724,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             test_output=test_output,
             golden_patch_output=golden_patch_output,
             mask_sample=failure_reason is not None,
-            failure_kind=VERIFIER_ERROR if failure_reason is not None else None,
+            failure_kind=failure_kind if failure_reason is not None else None,
             failure_reason=failure_reason,
         )
 
