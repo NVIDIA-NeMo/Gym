@@ -84,6 +84,9 @@ class SessionHandle:
         self._conn = parent_conn
         self._max_execution_time = max_execution_time
         self._close_lock = Lock()
+        # One request and reply at a time: concurrent callers on this pipe would read each other's replies. close()
+        # does not take it, so it can still stop a worker that is busy running a cell.
+        self._exec_lock = Lock()
         self._proc = context.Process(
             target=_session_worker,
             args=(child_conn, max_execution_time),
@@ -93,6 +96,10 @@ class SessionHandle:
         self.is_closed = False
 
     def exec(self, code: str):
+        with self._exec_lock:
+            return self._exec(code)
+
+    def _exec(self, code: str):
         try:
             self._conn.send({"cmd": "exec", "code": code})
         except (BrokenPipeError, EOFError, ConnectionError):

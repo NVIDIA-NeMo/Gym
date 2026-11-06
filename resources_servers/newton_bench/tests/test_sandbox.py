@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import multiprocessing
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import MagicMock
 
@@ -12,11 +12,7 @@ from pytest import MonkeyPatch, raises
 from resources_servers.newton_bench.newton_bench_utils.sandbox import SessionHandle
 
 
-def test_worker_releases_unrelated_socket_and_preserves_python_state(monkeypatch: MonkeyPatch) -> None:
-    # Exercise Linux's default constructors even when the test host defaults to spawn.
-    fork_context = multiprocessing.get_context("fork")
-    monkeypatch.setattr(multiprocessing, "Pipe", fork_context.Pipe)
-    monkeypatch.setattr(multiprocessing, "Process", fork_context.Process)
+def test_worker_releases_unrelated_socket_and_preserves_python_state() -> None:
     server_socket, peer_socket = socket.socketpair()
     handle = None
     try:
@@ -101,4 +97,19 @@ def test_worker_close_serializes_concurrent_callers(monkeypatch: MonkeyPatch) ->
     finally:
         finish.set()
         monkeypatch.setattr(handle._conn, "send", original_send)
+        handle.close()
+
+
+def test_concurrent_execs_each_get_their_own_reply() -> None:
+    handle = SessionHandle(max_execution_time=60)
+    try:
+        assert handle.exec("1")[2] == "1"  # start the worker before the race
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            for i in range(8):
+                slow = pool.submit(handle.exec, f"import time\ntime.sleep(0.2)\n'slow-{i}'")
+                time.sleep(0.05)  # the slow cell is running when the fast one starts
+                fast = pool.submit(handle.exec, f"'fast-{i}'")
+                assert slow.result()[2] == f"slow-{i}"
+                assert fast.result()[2] == f"fast-{i}"
+    finally:
         handle.close()

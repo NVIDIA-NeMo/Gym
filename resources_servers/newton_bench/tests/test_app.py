@@ -1564,7 +1564,7 @@ class TestResourcesSessions:
 
 
 @mark.parametrize("stage", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+def test_cookie_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
     server = _session_server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=_typed_seed()).status_code == 200
@@ -1578,7 +1578,7 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
 
 
 @mark.parametrize("expose_tools_over_mcp", [False, True])
-def test_malformed_typed_seed_does_not_fall_back_to_legacy(expose_tools_over_mcp: bool) -> None:
+def test_malformed_typed_seed_does_not_fall_back_to_cookie_seed(expose_tools_over_mcp: bool) -> None:
     server = _session_server()
     server.config.expose_tools_over_mcp = expose_tools_over_mcp
     malformed = dict(TASK_DATA) | {"resources_session_id": "incomplete-typed"}
@@ -1644,7 +1644,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert not server.session_is_verified(sid)
 
 
-def test_next_legacy_run_keeps_its_cookie_and_replaces_the_finished_run() -> None:
+def test_next_cookie_run_keeps_its_cookie_and_replaces_the_finished_run() -> None:
     server = _session_server()
     body = _final_law_verify_body()
     evaluator = MagicMock()
@@ -1772,7 +1772,7 @@ def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
         assert server._sessions == {}
 
 
-def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+def test_typed_seed_cannot_replace_a_live_cookie_session() -> None:
     server = _session_server()
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=TASK_DATA).status_code == 200
@@ -1887,9 +1887,9 @@ async def test_close_queued_before_tool_prevents_worker_allocation() -> None:
             executing = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
             await asyncio.sleep(0)
         await closing
-        result = await executing
+        with raises(ResourcesSessionLostError):
+            await executing
     factory.assert_not_called()
-    assert not result.success
     assert server._sessions == {} and server._starting_sessions == {}
 
 
@@ -1915,9 +1915,9 @@ async def test_verify_queued_before_tool_refuses_execution_when_worker_cleanup_f
             executing = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
             await asyncio.sleep(0)
         verified = await verifying
-        result = await executing
+        with raises(ResourcesSessionLostError):
+            await executing
         assert not verified.mask_sample
-        assert not result.success
         handle.exec.assert_not_called()
         assert server._sessions[sid] is handle
         assert server.session_is_verified(sid)
@@ -1947,3 +1947,23 @@ async def test_idle_sweep_retries_failed_worker_and_still_releases_other_session
     failed.close.side_effect = None
     await server._cleanup_sessions()
     assert server._sessions == {} and server.session_metadata == {}
+
+
+@mark.asyncio
+async def test_shutdown_releases_the_other_sessions_when_one_worker_will_not_stop() -> None:
+    server = _session_server()
+    app = server.setup_webserver()
+    for sid in ("failed", "other"):
+        request = MagicMock(spec=Request)
+        request.session = {SESSION_ID_KEY: sid}
+        await server.seed_session(request, ResourcesSeedSessionRequest.model_validate(_typed_seed(sid)))
+    failed, other = MagicMock(), MagicMock()
+    failed.close.side_effect = RuntimeError("worker still alive")
+    server._sessions.update(failed=failed, other=other)
+
+    with raises(ExceptionGroup, match="shutdown could not release"):
+        async with app.router.lifespan_context(app):
+            pass
+
+    other.close.assert_called_once()
+    assert set(server._sessions) == set(server.session_metadata) == {"failed"}

@@ -359,6 +359,8 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
                     self._sessions.pop(sid, None)
                 raise e
 
+        except ResourcesSessionLostError:
+            raise
         except Exception as e:
             return ExecutePythonResponse(
                 success=False,
