@@ -290,6 +290,29 @@ def test_a_crash_between_blob_and_line_leaves_a_readable_capture(tmp_path: Path,
     assert len(list(store.blob_dir_for("0-0").iterdir())) == 2  # the dead write's blob is kept, harmlessly
 
 
+@pytest.mark.parametrize("capture_format", ["full", "delta"])
+def test_a_partial_line_left_by_a_killed_writer_costs_only_itself(tmp_path: Path, capture_format: str) -> None:
+    """Another process sharing the file dies mid-append. The next line must not be glued to its partial line:
+    glued, that line is unreadable, and in the delta format so is every later line that extends it."""
+    store = CaptureStore(tmp_path, capture_format=capture_format)
+    exchanges = _session(calls=6, compact_at=None)
+    expected = _write(store, "0-0", exchanges[:2])
+    with store.path_for("0-0").open("ab") as handle:
+        handle.write(b'{"model_call_id": "killed", "request": {"input": [')
+
+    expected += _write(store, "0-0", exchanges[2:])
+
+    read = list(store.iter_available("0-0"))
+    assert [index for index, exchange in read if exchange is None] == [2]
+    assert [exchange for _, exchange in read if exchange is not None] == expected
+    if capture_format == "delta":
+        # The writer still extends its own lines across the damaged one.
+        lines = store.path_for("0-0").read_bytes().splitlines()
+        del lines[2]
+        bases = [orjson.loads(line)[CAPTURE_FORMAT_KEY].get("base_model_call_id") for line in lines]
+        assert bases == [None, "c0", "c1", "c2", "c3", "c4"]
+
+
 def test_unresolvable_lines_are_reported_without_hiding_the_rest(tmp_path: Path) -> None:
     store = CaptureStore(tmp_path, capture_format="delta")
     expected = _write(store, "0-0", _session(calls=5, compact_at=None))

@@ -237,19 +237,26 @@ class CaptureStore:
         allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
         In the delta format, the blobs a line names are written durably before the line.
+
+        A writer killed mid-append leaves a partial last line. The next append ends it first, so the new line
+        starts a line of its own: glued to the partial line it would be unreadable with it, and in the delta
+        format so would every later line that extends it.
         """
         path = self.path_for(rollout_id)
         writer = self._delta_writer
         prepared = writer.prepare(exchange) if writer is not None else None
-        # The delta writer reads back the head of its base line, so it needs a readable handle.
-        with path.open("ab" if writer is None else "a+b") as handle:
+        # Readable as well: the last byte shows a partial line, and the delta writer reads back its base line's head.
+        with path.open("a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
+                offset = os.fstat(handle.fileno()).st_size
+                if offset and os.pread(handle.fileno(), 1, offset - 1) != b"\n":
+                    handle.write(b"\n")
+                    offset += 1
                 if writer is None:
                     line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
                 else:
                     assert prepared is not None
-                    offset = os.fstat(handle.fileno()).st_size
                     line = writer.encode(rollout_id, prepared, handle.fileno())
                 handle.write(line)
                 handle.flush()
