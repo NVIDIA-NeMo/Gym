@@ -127,8 +127,13 @@ def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
 
 LOG = logging.getLogger(__name__)
 
-# Canonical PUBLIC problem set; used to pad sub-batch fires in smoke-test mode.
-_ALL_PROBLEM_IDS = [f"Challenge_{n}_main" for n in range(1, 71)]
+# failure_kind of a row graded by nobody on purpose (smoke mode). It is namespaced, not a registered kind: recovery
+# keeps a masked row with an unregistered kind as the result, so it is neither regraded nor rerun.
+SMOKE_NOT_GRADED = "critpt:smoke_not_graded"
+SMOKE_NOT_GRADED_REASON = (
+    "CritPt resources server smoke mode (fire_after): the batch was not sent to the grading API, "
+    "so this answer was not graded. A real score needs a full run."
+)
 
 
 class CritPtRateLimitExceeded(RuntimeError):
@@ -180,8 +185,9 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     api_timeout_seconds: float = 1800.0
     api_max_retries: int = 4
     api_retry_backoff_seconds: float = 5.0
-    # Smoke-test only. When set < batch_size, the buffer fires after this many real
-    # submissions arrive and pads up to batch_size with empty padding submissions.
+    # Smoke-test only. When set < batch_size, the buffer fires after this many real submissions arrive, but the
+    # grading API is never contacted: the batch is cached (when cache_dir is set) and every row comes back masked
+    # as not graded. AA only grades full batches, so a real score needs a full run.
     fire_after: Optional[int] = None
     # Max time a single verify() will wait for its batch to fill (and the AA call to
     # finish) to prevent hang.
@@ -234,8 +240,9 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
 
 class CritPtVerifyResponse(BaseVerifyResponse):
     problem_id: str
-    accuracy: float
-    timeout_rate: float
+    # None on a row that was not graded (smoke mode): there is no accuracy to report.
+    accuracy: Optional[float] = None
+    timeout_rate: Optional[float] = None
 
 
 class CritPtResourcesServer(SimpleResourcesServer):
@@ -351,27 +358,20 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 submissions_snapshot = list(target_batch["submissions"].values())
                 submission_ids_snapshot = list(target_batch["submission_ids"].values())
                 self._batches.remove(target_batch)
-                # Smoke-mode padding: top up to batch_size with empty padding for missing
-                # problem_ids. Padded entries are synthetic so they get no submission_id.
-                if len(submissions_snapshot) < self.config.batch_size:
-                    existing = {s["problem_id"] for s in submissions_snapshot}
-                    for pid in _ALL_PROBLEM_IDS:
-                        if len(submissions_snapshot) >= self.config.batch_size:
-                            break
-                        if pid not in existing:
-                            submissions_snapshot.append(
-                                {
-                                    "problem_id": pid,
-                                    "generated_code": "```python\n```",
-                                    "model": "unknown",
-                                    "generation_config": {},
-                                }
-                            )
             else:
                 submissions_snapshot = None
                 submission_ids_snapshot = None
 
-        if ready_to_fire:
+        smoke_batch = ready_to_fire and len(submissions_snapshot) < self.config.batch_size
+        if smoke_batch:
+            LOG.warning(
+                "CritPt smoke mode: batch of %d submissions not sent to AA (fire_after=%s, batch_size=%d).",
+                len(submissions_snapshot),
+                self.config.fire_after,
+                self.config.batch_size,
+            )
+            future.set_result({"_not_graded": SMOKE_NOT_GRADED, "_reason": SMOKE_NOT_GRADED_REASON})
+        elif ready_to_fire:
             LOG.warning(
                 "CritPt batch full (%d submissions); firing AA API (key %d/%d).",
                 len(submissions_snapshot),
@@ -427,6 +427,19 @@ class CritPtResourcesServer(SimpleResourcesServer):
         # A failed AA call (quota, access, 4xx/5xx, timeouts) is a grader failure, not a model failure: type it
         # as judge_failed so judge_failsafe masks the row instead of returning an anonymous 500.
         result = await reraise_judge_errors(self._await_batch(future, body.problem_id))
+        if "_not_graded" in result:
+            LOG.warning("CritPt verify: %s not graded (%s)", body.problem_id, result["_not_graded"])
+            return CritPtVerifyResponse(
+                **(
+                    body.model_dump()
+                    | {
+                        "reward": 0.0,
+                        "mask_sample": True,
+                        "failure_kind": result["_not_graded"],
+                        "failure_reason": result["_reason"],
+                    }
+                )
+            )
         judge_error_count = int(result.get("judge_error_count") or 0)
         if judge_error_count:
             # AA could not grade some items; the aggregate accuracy then undercounts, so it is not a score.
@@ -530,7 +543,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _critpt_score_fn(r: dict) -> Dict[str, Union[float, bool]]:
-        return {"accuracy": r["accuracy"]} if "accuracy" in r else {}
+        return {"accuracy": r["accuracy"]} if r.get("accuracy") is not None and not r.get("mask_sample") else {}
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
         """Compute CritPt metrics: pass@k, majority@k, per-sample stats — named `accuracy`."""

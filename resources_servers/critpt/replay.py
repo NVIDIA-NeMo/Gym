@@ -40,12 +40,8 @@ Example:
         --cache-dir /path/to/critpt_cache
 
 AA only accepts full batches of `--batch-size` (70) submissions, so a partial
-run (e.g. a 5-problem smoke test) leaves a short batch that is skipped by
-default. Pass `--fire-after N` to pad short batches up to batch_size with empty
-padding submissions and ship them anyway, mirroring the live server's smoke-test fire_after:
-
-    ARTIFICIAL_ANALYSIS_API_KEY="aa-xxx" python -m resources_servers.critpt.replay \\  # pragma: allowlist secret
-        --cache-dir /path/to/critpt_cache --fire-after 5
+run (e.g. a 5-problem smoke test) leaves a short batch that is skipped: a real
+score needs a full run.
 """
 
 import argparse
@@ -58,7 +54,6 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from resources_servers.critpt.app import (
-    _ALL_PROBLEM_IDS,
     CritPtAccessDenied,
     CritPtRateLimitExceeded,
     _call_api,
@@ -178,33 +173,6 @@ def _load_jsonl(path: Path) -> List[Dict]:
     return out
 
 
-def _pad_to_batch_size(sub_payload: List[Dict], batch_size: int) -> List[Dict]:
-    """Top a short batch up to batch_size with empty padding submissions.
-
-    Mirrors the live server's smoke-test padding (see `CritPtResourcesServer`):
-    AA PUBLIC mode only accepts exactly batch_size submissions, so a partial
-    batch (e.g. a 5-problem smoke run) is filled with empty-code padding for the
-    canonical problem_ids not already present. Padding entries are synthetic — they
-    carry no submission_id and are never recorded as scored — so a later replay
-    still treats only the real submissions as done.
-    """
-    existing = {s["problem_id"] for s in sub_payload}
-    padded = list(sub_payload)
-    for pid in _ALL_PROBLEM_IDS:
-        if len(padded) >= batch_size:
-            break
-        if pid not in existing:
-            padded.append(
-                {
-                    "problem_id": pid,
-                    "generated_code": "```python\n```",
-                    "model": "unknown",
-                    "generation_config": {},
-                }
-            )
-    return padded
-
-
 def _pack_into_batches(submissions: List[Dict], batch_size: int) -> List[List[Dict]]:
     """Greedy bin-packing matching the in-server batching policy.
 
@@ -258,25 +226,14 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
         return 0
 
     batches = _pack_into_batches(pending, args.batch_size)
-    # AA only accepts exactly batch_size submissions. Normally we ship only full
-    # batches; with --fire-after (smoke-test parity), batches holding at least
-    # fire_after real submissions are shipped and padded up to batch_size.
-    padding_enabled = bool(args.fire_after) and args.fire_after < args.batch_size
-    min_real = args.fire_after if padding_enabled else args.batch_size
-    eligible = [b for b in batches if len(b) >= min_real]
-    skipped = [b for b in batches if len(b) < min_real]
-    if padding_enabled:
-        print(
-            f"packed pending into {len(batches)} batches: "
-            f"{len(eligible)} shippable (>= fire_after={args.fire_after} real submissions, "
-            f"padded up to {args.batch_size}), {len(skipped)} skipped (too few submissions)."
-        )
-    else:
-        print(
-            f"packed pending into {len(batches)} batches: "
-            f"{len(eligible)} full, {len(skipped)} short "
-            f"(AA only accepts full batches; short ones will be skipped)."
-        )
+    # AA only accepts exactly batch_size submissions, so only full batches are shipped.
+    eligible = [b for b in batches if len(b) >= args.batch_size]
+    skipped = [b for b in batches if len(b) < args.batch_size]
+    print(
+        f"packed pending into {len(batches)} batches: "
+        f"{len(eligible)} full, {len(skipped)} short "
+        f"(AA only accepts full batches; short ones will be skipped)."
+    )
 
     rejudged = 0
     rejected = 0
@@ -284,14 +241,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
     for batch in eligible:
         sub_ids = [b["submission_id"] for b in batch]
         sub_payload = [b["submission"] for b in batch]
-        if len(sub_payload) < args.batch_size:
-            sub_payload = _pad_to_batch_size(sub_payload, args.batch_size)
-            print(
-                f"shipping padded batch: {len(sub_ids)} real + "
-                f"{len(sub_payload) - len(sub_ids)} padded = {len(sub_payload)} submissions ..."
-            )
-        else:
-            print(f"shipping batch of {len(sub_payload)} submissions ...")
+        print(f"shipping batch of {len(sub_payload)} submissions ...")
         try:
             response, key_index = await _call_api_with_rotation(
                 api_keys=api_keys,
@@ -355,13 +305,8 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
     if skipped:
         print(
             f"Note: {len(skipped)} batch(es) were not shipped because they held fewer "
-            f"than {min_real} submissions and AA requires exactly batch_size per call. "
-            "The corresponding submissions remain in submissions.jsonl unscored"
-            + (
-                "."
-                if padding_enabled
-                else " (pass --fire-after N to pad and ship short batches, matching a smoke run)."
-            )
+            f"than {args.batch_size} submissions and AA requires exactly batch_size per call. "
+            "The corresponding submissions remain in submissions.jsonl unscored."
         )
     refresh_partial_metrics(args.cache_dir)
     if rejected:
@@ -389,14 +334,6 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="https://artificialanalysis.ai/api/v2/critpt/evaluate",
     )
     p.add_argument("--batch-size", type=int, default=70)
-    p.add_argument(
-        "--fire-after",
-        type=int,
-        default=None,
-        help="Smoke-test only: ship batches with at least this many real submissions, "
-        "padding up to --batch-size with empty padding submissions (mirrors the server's fire_after). "
-        "Leave unset to ship only full batches.",
-    )
     p.add_argument("--max-retries", type=int, default=4)
     p.add_argument("--backoff-seconds", type=float, default=5.0)
     return p.parse_args(argv)

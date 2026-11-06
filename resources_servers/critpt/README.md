@@ -128,34 +128,29 @@ gym env start --benchmark critpt --model-type openai_model
 
 ## Smoke test (5 example problems)
 
-**Note:** The AA API rejects sub-70 batches. To run e2e on the 5 example problems, the resources server
-has one opt-in config knob:
+**Note:** The AA API rejects sub-70 batches, and a smoke run must not call the AA server at all. To run e2e
+on the 5 example problems, the resources server has one opt-in config knob:
 
-- `fire_after: int` — fire the batch after this many real submissions arrive, then pad
-  up to `batch_size` (70) with empty padding submissions for the missing problem_ids (drawn from the
-  hardcoded canonical CritPt problem list, `Challenge_<N>_main` for `N` in 1..70)
+- `fire_after: int` — fire the batch after this many real submissions arrive. The batch is **not** sent
+  to AA: the submissions are written to the cache (when `cache_dir` is set) and every row comes back masked
+  (`mask_sample: true`, no accuracy) with `failure_kind: critpt:smoke_not_graded` and a reason naming smoke
+  mode. A smoke run therefore proves the wiring only; a real score needs a full run of 70 problems.
 
 Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:
 
 ```bash
-gym env start --benchmark critpt --model-type openai_model \
-    '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
+gym env start --benchmark critpt --model-type openai_model     '++critpt_benchmark_resources_server.resources_servers.critpt.fire_after=5'
 ```
 
 ## Collecting rollouts
 
 ```bash
-gym eval run --no-serve \
-    --agent critpt_benchmark_agent \
-    --input resources_servers/critpt/data/example.jsonl \
-    --output results/critpt_smoke.jsonl \
-    --num-repeats 1 \
-    --temperature 0.0
+gym eval run --no-serve     --agent critpt_benchmark_agent     --input resources_servers/critpt/data/example.jsonl     --output results/critpt_smoke.jsonl     --num-repeats 1     --temperature 0.0
 ```
 
 What this exercises: agent runs Turn 1 + Turn 2 on exactly 5 problems -> 5 verify() calls
-arrive -> server fires the batch after the 5th, pads with 65 empty padding slots -> real AA
-call -> aggregate distributed to the 5 real rollouts.
+arrive -> server fires the batch after the 5th, logs `smoke mode: batch of 5 submissions not sent to AA`
+and resolves the 5 rollouts as not graded. No AA call is made.
 
 ## Tests
 

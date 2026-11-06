@@ -32,6 +32,7 @@ from nemo_gym.core import (
 from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.critpt.app import (
     _REPO_ROOT,
+    SMOKE_NOT_GRADED,
     CritPtAccessDenied,
     CritPtRateLimitExceeded,
     CritPtResourcesServer,
@@ -396,35 +397,39 @@ class TestApp:
             _stop_patches(patches)
 
     @pytest.mark.asyncio
-    async def test_smoke_padding_fires_early_and_pads_to_batch_size(self):
-        """fire_after=2 + batch_size=5: fires after 2 real submissions, pads to 5 with empty
-        padding submissions drawn from _ALL_PROBLEM_IDS. AA receives 5 (2 real + 3 padded)."""
-        # Use the canonical CritPt problem_ids (Challenge_<N>_main) so they collide with the
-        # hardcoded _ALL_PROBLEM_IDS list inside app.py.
-        server = _make_server(_make_config(batch_size=5, fire_after=2))
+    async def test_smoke_mode_never_calls_aa_and_masks_every_row(self, tmp_path, caplog):
+        """fire_after=2 + batch_size=5: the batch fires after 2 real submissions without any AA call. Every row is
+        masked as not graded with a reason naming smoke mode, and the submissions are still cached."""
+        server = _make_server(_make_config(batch_size=5, fire_after=2, cache_dir=tmp_path, unique_cache_per_run=False))
 
-        mock_request, patches = _mock_api({"accuracy": 0.0, "timeout_rate": 0.0})
+        mock_request, patches = _mock_api({"accuracy": 1.0, "timeout_rate": 0.0})
         try:
-            results = await asyncio.gather(
-                server.verify(_make_verify_request("```python\na=1\n```", problem_id="Challenge_1_main")),
-                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="Challenge_2_main")),
-            )
-            assert mock_request.call_count == 1
-            payload = mock_request.call_args.kwargs["json"]
-            assert len(payload["submissions"]) == 5
-            submitted = {s["problem_id"]: s["generated_code"] for s in payload["submissions"]}
-            # The two real submissions are present with real code.
-            assert "a=1" in submitted["Challenge_1_main"]
-            assert "b=2" in submitted["Challenge_2_main"]
-            # Three padded slots are empty padding entries pulled from _ALL_PROBLEM_IDS (in order,
-            # skipping the two already-present ones — so Challenge_3, 4, 5).
-            for pid in ("Challenge_3_main", "Challenge_4_main", "Challenge_5_main"):
-                assert submitted[pid] == "```python\n```"
-            # Both real callers get the AA aggregate as their reward.
-            for r in results:
-                assert r.reward == 0.0
+            with patch.object(server, "_call_aa_with_rotation", new_callable=AsyncMock) as mock_aa:
+                with caplog.at_level("WARNING"):
+                    results = await asyncio.gather(
+                        server.verify(_make_verify_request("```python\na=1\n```", problem_id="Challenge_1_main")),
+                        server.verify(_make_verify_request("```python\nb=2\n```", problem_id="Challenge_2_main")),
+                    )
+            assert mock_aa.await_count == 0
+            assert mock_request.call_count == 0
         finally:
             _stop_patches(patches)
+        assert "smoke mode: batch of 2 submissions not sent to AA" in caplog.text
+        for r in results:
+            assert r.mask_sample is True
+            assert r.reward == 0.0
+            assert r.accuracy is None and r.timeout_rate is None
+            assert r.failure_kind == SMOKE_NOT_GRADED
+            assert "smoke mode" in r.failure_reason and "not sent to the grading API" in r.failure_reason
+        # Nothing was written as an accuracy, and the answers are cached for a later replay.
+        assert len(_read_jsonl(tmp_path / "submissions.jsonl")) == 2
+        assert not (tmp_path / "aa_responses.jsonl").exists()
+
+    def test_smoke_rows_are_excluded_from_metrics(self):
+        server = _make_server(_make_config())
+        masked = {"problem_id": "p1", "accuracy": None, "mask_sample": True}
+        assert server._critpt_score_fn(masked) == {}
+        assert server._critpt_score_fn({"problem_id": "p1", "accuracy": 0.5}) == {"accuracy": 0.5}
 
     @pytest.mark.asyncio
     async def test_verify_writes_cache_files_on_successful_batch(self, tmp_path):

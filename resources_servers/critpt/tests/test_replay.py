@@ -15,12 +15,11 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from resources_servers.critpt.app import _ALL_PROBLEM_IDS, CritPtAccessDenied, CritPtRateLimitExceeded
+from resources_servers.critpt.app import CritPtAccessDenied, CritPtRateLimitExceeded
 from resources_servers.critpt.replay import (
     _call_api_with_rotation,
     _load_api_keys,
     _pack_into_batches,
-    _pad_to_batch_size,
     _parse_api_keys_env,
     main_async,
 )
@@ -43,12 +42,11 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
-def _make_replay_args(cache_dir: Path, batch_size: int = 2, fire_after: int | None = None) -> argparse.Namespace:
+def _make_replay_args(cache_dir: Path, batch_size: int = 2) -> argparse.Namespace:
     return argparse.Namespace(
         cache_dir=cache_dir,
         api_url="https://example/api",
         batch_size=batch_size,
-        fire_after=fire_after,
         max_retries=1,
         backoff_seconds=0.0,
     )
@@ -91,32 +89,6 @@ class TestParseApiKeysEnv:
     def test_list_of_empties_rejected(self):
         with pytest.raises(ValueError):
             _parse_api_keys_env("[,, ,]")
-
-
-class TestPadToBatchSize:
-    def _real(self, pid: str) -> dict:
-        return {"problem_id": pid, "generated_code": "```python\nx=1\n```", "model": "m"}
-
-    def test_pads_short_batch_up_to_batch_size(self):
-        payload = [self._real("Challenge_1_main"), self._real("Challenge_2_main")]
-        padded = _pad_to_batch_size(payload, batch_size=70)
-        assert len(padded) == 70
-        # Real submissions are preserved unchanged at the front.
-        assert padded[:2] == payload
-
-    def test_padding_uses_missing_problem_ids_with_empty_code(self):
-        payload = [self._real("Challenge_1_main")]
-        padded = _pad_to_batch_size(payload, batch_size=70)
-        padding_entries = padded[1:]
-        assert all(d["generated_code"] == "```python\n```" for d in padding_entries)
-        # No padding entry reuses a real problem_id, and together they cover the canonical set.
-        assert "Challenge_1_main" not in {d["problem_id"] for d in padding_entries}
-        assert {p["problem_id"] for p in padded} == set(_ALL_PROBLEM_IDS)
-
-    def test_already_full_batch_unchanged(self):
-        payload = [self._real(pid) for pid in _ALL_PROBLEM_IDS]
-        padded = _pad_to_batch_size(payload, batch_size=70)
-        assert padded == payload
 
 
 class TestPackIntoBatches:
