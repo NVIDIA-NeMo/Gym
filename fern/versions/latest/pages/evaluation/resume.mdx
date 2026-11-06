@@ -78,7 +78,10 @@ Malformed replies become terminal `environment_protocol_violation` failures when
 cannot fix an invalid response format. A reply from a different execution attempt remains retryable because a transport
 retry can return a stale response. With failure routing disabled (the default), invalid replies stop collection;
 `+route_failures_to_sidecar=true` records them and lets independent tasks continue. Fix the producer before retrying
-a task whose response violates the contract. Environment replies establish delivery; gateway/throttling errors
+a task whose response violates the contract. When an Environment Server's first
+`environment_protocol_violation_stop_after` results (3 by default; all of them when it serves fewer; 0 turns it off)
+are all such replies, collection stops the run with a typed `environment_protocol_violation` stop (exit 76, no chaining):
+the server or the benchmark pairing is wrong, so a retry cannot help; fix it and submit again. Environment replies establish delivery; gateway/throttling errors
 (429, 502, 503, 504) leave delivery uncertain because they do not prove the Environment Server received the request.
 
 ## Attempts and completion coverage

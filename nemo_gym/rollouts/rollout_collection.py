@@ -1470,6 +1470,17 @@ class SharedRolloutCollectionConfig(
         ),
     )
 
+    environment_protocol_violation_stop_after: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Stop the run when this many results from one environment server (all of them, if it serves fewer) "
+            "have all been replies the collector cannot use (environment_protocol_violation). Such a reply is a "
+            "producer bug that every later task repeats. Takes effect with route_failures_to_sidecar; with it "
+            "off, the first invalid reply ends the run. 0 turns the stop off."
+        ),
+    )
+
     route_failures_to_sidecar: bool = Field(
         default=False,
         description=(
@@ -1588,6 +1599,18 @@ def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> Incompl
         "with gym eval resubmit --recover.",
         retryable=False,
         failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
+
+
+def _protocol_violation_stop(server: str, answered: int) -> IncompleteEvaluationError:
+    """The end of a run whose environment server has answered every request so far with a reply the collector cannot
+    use: the producer is wrong, and no attempt can change that."""
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the environment server {server} answered {answered} of {answered} requests with a reply "
+        f"the collector cannot use ({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+        "Fix the server or the benchmark pairing, then `gym eval submit` again.",
+        retryable=False,
+        failure_kind=ENVIRONMENT_PROTOCOL_VIOLATION,
     )
 
 
@@ -4107,6 +4130,9 @@ executions → not run again (left to recovery)
         # Rollouts that never reach the main output at all, kept apart from quality.
         agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(self._dispatch_name(row) for row in input_rows)
+        server_requests = Counter(counts_left)
+        server_answers: Counter = Counter()
+        server_violations: Counter = Counter()
         dispatched_per_agent = Counter(counts_left)
         start_time = time.time()
         environment_routes = Counter(
@@ -4436,6 +4462,16 @@ executions → not run again (left to recovery)
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
+
+                server_answers[dispatch_name] += 1
+                server_violations[dispatch_name] += failure_class == ENVIRONMENT_PROTOCOL_VIOLATION
+                stop_after = min(config.environment_protocol_violation_stop_after, server_requests[dispatch_name])
+                if (
+                    stop_after
+                    and server_answers[dispatch_name] >= stop_after
+                    and server_violations[dispatch_name] == server_answers[dispatch_name]
+                ):
+                    raise _protocol_violation_stop(dispatch_name, server_answers[dispatch_name])
 
                 if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
