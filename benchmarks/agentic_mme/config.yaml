@@ -32,4 +32,6 @@ agentic_mme_agent:
         type: benchmark
         jsonl_fpath: benchmarks/agentic_mme/data/agentic_mme_benchmark.jsonl
         prepare_script: benchmarks/agentic_mme/prepare.py
+        # prepare.py downscales the input images with Pillow, which a dev install of Gym lacks.
+        prepare_dependencies: [pillow]
         num_repeats: 1

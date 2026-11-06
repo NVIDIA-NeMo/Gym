@@ -16,7 +16,7 @@ Sources:
 Image tools: crop, rotate, flip, resize, enhance, grayscale, autocontrast,
 blur, sharpen, denoise, edge_detect, invert, equalize, threshold.
 
-Retrieval: google_search, google_lens_search (image uploaded to SerpAPI, or ImgBB for Serper; providers below),
+Retrieval: google_search, google_lens_search (SerpAPI's Google Lens, image uploaded to SerpAPI; providers below),
 fetch_webpage (Jina Reader, or Exa /contents). The paper describes download_image, but the released
 atomic harness disables it; this integration likewise does not expose it.
 Free-form Python/Gen mode is not implemented.
@@ -99,9 +99,9 @@ Provide policy_base_url, policy_api_key and policy_model_name in private Gym con
 
 Visual-only is an ablation, not full benchmark parity. To enable all 17 tools,
 merge configs/agentic_mme_search.yaml after the base config and supply
-agentic_mme_serper_api_key, agentic_mme_imgbb_api_key and agentic_mme_jina_api_key
-(the Jina key may be an empty string). This explicitly allows images to be sent
-to ImgBB/Serper. Only use it with data approved for those services.
+agentic_mme_serpapi_api_key and agentic_mme_jina_api_key (the Jina key may be an
+empty string). This explicitly allows images to be sent to SerpAPI. Only use it
+with data approved for that service.
 
 For deterministic offline retrieval, set retrieval.mode=replay and put an ordered
 retrieval_replay list on each input row; entries contain tool_name, arguments and
@@ -113,8 +113,9 @@ the network.
 ### Web search providers and shared cache
 
 `retrieval.search_provider` picks the text-search backend (`serper`, `serpapi`,
-`tavily`, `exa`); `retrieval.lens_provider` picks Google Lens (`serper`, `serpapi`,
-`none`; `auto` follows the search provider when it has Lens). Every result is
+`tavily`, `exa`); `retrieval.lens_provider` picks Google Lens (`serpapi` or `none`;
+`auto` is `serpapi` when SerpAPI is the search provider). With Serper, Tavily or Exa text
+search, Lens is off unless `lens_provider: serpapi` is set. Every result is
 normalised to the Serper shape, so the model sees the same tool output either way.
 Ready-made overlays for `benchmarks/agentic_mme/config.yaml` (keys come from the
 environment):
@@ -143,11 +144,9 @@ happens on every read, live or cached, and the cache keeps the raw answer. The t
 records `"contaminated": <n dropped>`; the model does not see it.
 `contamination_patterns: []` disables the guard.
 
-Google Lens needs the image online. With SerpAPI Lens it is uploaded to SerpAPI's own Image API
-(`POST /image`, re-encoded as JPEG under 500 KB; Lens then takes the `image_id`), so no ImgBB key
-is needed. Serper's Lens takes a public URL, so with Serper the image goes to ImgBB
-(`IMGBB_API_KEY`). `retrieval.image_host` (auto | serpapi | imgbb) overrides the choice;
-`allow_image_upload: true` is required either way.
+Google Lens needs the image online: it is uploaded to SerpAPI's own Image API (`POST /image`,
+re-encoded as JPEG under 500 KB; Lens then takes the `image_id`). No other image host is used,
+so Serper's Lens (which needs a public URL) is not offered. `allow_image_upload: true` is required.
 
 Add `retrieval_cache.yaml` after one of them to answer from a shared on-disk cache
 before calling the provider (`AGENTIC_MME_SEARCH_CACHE=<dir>`):

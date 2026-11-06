@@ -45,8 +45,6 @@ def test_public_urls_and_config() -> None:
     assert public_url("https://example.com/page?q=x") == "https://example.com/page?q=x"
     with pytest.raises(ValidationError):
         RetrievalConfig(mode="live")
-    with pytest.raises(ValidationError):
-        RetrievalConfig(allow_image_upload=True)
 
 
 @pytest.mark.asyncio
@@ -131,22 +129,22 @@ async def test_live_search_payload(workspace, monkeypatch) -> None:
 async def test_lens_upload_optin_and_flow(workspace, monkeypatch) -> None:
     http = AsyncMock()
     monkeypatch.setattr(retrieval, "http_payload", http)
-    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="test"))
+    client = Retrieval(RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test"))
     with pytest.raises(ValueError, match="allow_image_upload"):
         await client.call("google_lens_search", {}, workspace)
     http.assert_not_called()
+    # Serper has no Lens here (it needs a third-party image host): the tool is unavailable.
+    assert not RetrievalConfig(mode="live", serper_api_key="test", allow_image_upload=True).lens_available()
+    with pytest.raises(ValidationError):
+        RetrievalConfig(mode="live", serper_api_key="test", lens_provider="serper")
     client = Retrieval(
-        RetrievalConfig(mode="live", serper_api_key="test", imgbb_api_key="upload", allow_image_upload=True)
+        RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test", allow_image_upload=True)
     )
-    http.side_effect = [
-        b'{"success":true,"data":{"url":"https://i.ibb.co/test.png"}}',
-        b'{"visual_matches":[{"title":"red"}]}',
-    ]
+    http.side_effect = [b'{"image_id": "img-1"}', b'{"visual_matches":[{"title":"red"}]}']
     result = await client.call("google_lens_search", {}, workspace)
     assert result["ok"]
-    assert http.call_args_list[0].kwargs["data"]["expiration"] == "600"
-    assert http.call_args_list[1].kwargs["json"]["url"] == "https://i.ibb.co/test.png"
-    assert http.call_args_list[1].args[2] == "https://google.serper.dev/lens"
+    assert [c.args[2] for c in http.call_args_list] == ["https://serpapi.com/image", "https://serpapi.com/search.json"]
+    assert http.call_args_list[1].kwargs["params"]["image_id"] == "img-1"
 
 
 @pytest.mark.asyncio
@@ -161,9 +159,9 @@ async def test_fetch_truncates_and_invalid_providers_fail(workspace, monkeypatch
     http.return_value = b"[]"
     with pytest.raises(ValueError, match="invalid JSON"):
         await client.call("google_search", {"query": "q"}, workspace)
-    http.return_value = b'{"success":false}'
+    http.return_value = b'{"error": "no image"}'
     upload_client = Retrieval(
-        RetrievalConfig(mode="live", serper_api_key="test", imgbb_api_key="upload", allow_image_upload=True)
+        RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test", allow_image_upload=True)
     )
     with pytest.raises(ValueError, match="image upload"):
         await upload_client.call("google_lens_search", {}, workspace)
@@ -214,7 +212,7 @@ def test_provider_keys_are_required_per_provider() -> None:
         RetrievalConfig(mode="live", search_provider="serpapi", serper_api_key="only-serper")
     for provider in ("serper", "serpapi", "tavily", "exa"):
         config = RetrievalConfig(mode="live", search_provider=provider, **{f"{provider}_api_key": "k"})
-        assert config.lens_available() == (provider in ("serper", "serpapi"))
+        assert config.lens_available() == (provider == "serpapi")
 
 
 @pytest.mark.asyncio
@@ -274,9 +272,9 @@ async def test_tavily_search_with_serpapi_lens(workspace, monkeypatch) -> None:
         tavily_api_key="t",
         lens_provider="serpapi",
         serpapi_api_key="s",
-        allow_image_upload=True,  # no ImgBB key: SerpAPI hosts the image itself
+        allow_image_upload=True,  # SerpAPI hosts the image itself
     )
-    assert config.lens_available() and config.image_host_resolved() == "serpapi"
+    assert config.lens_available()
     calls = []
 
     async def fake_payload(cfg, method, url, **kwargs):
@@ -311,24 +309,6 @@ def test_serpapi_upload_is_jpeg_under_the_size_limit() -> None:
     noisy = Image.frombytes("RGB", (1600, 1600), bytes(rng.getrandbits(8) for _ in range(1600 * 1600 * 3)))
     data = retrieval.jpeg_under(noisy)
     assert len(data) <= retrieval.SERPAPI_IMAGE_MAX_BYTES and data[:2] == b"\xff\xd8"
-
-
-def test_image_host_choice_and_keys() -> None:
-    # SerpAPI Lens needs no ImgBB key; Serper Lens still uploads to ImgBB for a public URL.
-    assert RetrievalConfig(mode="live", serpapi_api_key="s", search_provider="serpapi", allow_image_upload=True)
-    with pytest.raises(ValidationError, match="requires imgbb_api_key"):
-        RetrievalConfig(mode="live", serper_api_key="s", allow_image_upload=True)
-    with pytest.raises(ValidationError, match="image_host=serpapi only serves"):
-        RetrievalConfig(mode="live", serper_api_key="s", allow_image_upload=True, image_host="serpapi")
-    forced = RetrievalConfig(
-        mode="live",
-        serpapi_api_key="s",
-        search_provider="serpapi",
-        allow_image_upload=True,
-        image_host="imgbb",
-        imgbb_api_key="i",
-    )
-    assert forced.image_host_resolved() == "imgbb"
 
 
 @pytest.mark.asyncio

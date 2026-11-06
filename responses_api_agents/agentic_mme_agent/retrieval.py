@@ -4,13 +4,14 @@
 """Bounded retrieval through Gym's shared aiohttp transport; explicit Lens upload opt-in.
 
 The web-search provider is configurable (search_provider):
-    serper   google.serper.dev            google_search + google_lens_search (Google results)
+    serper   google.serper.dev            google_search (Google results)
     serpapi  serpapi.com (engine=google / google_lens), answers mapped to Serper's shape
-    tavily   api.tavily.com/search        google_search only (no reverse image search)
-    exa      api.exa.ai/search            google_search only (no reverse image search)
-google_lens_search can use its own provider (lens_provider: serper | serpapi | none; default
-"auto" = the search provider when it has Lens, else none), e.g. Tavily text search with SerpAPI's
-Google Lens: search_provider=tavily, lens_provider=serpapi.
+    tavily   api.tavily.com/search        google_search only
+    exa      api.exa.ai/search            google_search only
+google_lens_search (reverse image search) runs through SerpAPI's Google Lens, which takes the image
+through SerpAPI's own Image API (lens_provider: serpapi | none; default "auto" = serpapi when it is
+the search provider, else none), e.g. Tavily text search with SerpAPI's Google Lens:
+search_provider=tavily, lens_provider=serpapi.
 
 cache_root (optional) puts a shared local cache in front of every live call (search_cache.py:
 flat files + FTS5 fuzzy index over earlier queries, Lens results keyed by image pixels, fetched
@@ -47,7 +48,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError, m
 
 from nemo_gym.client import request
 from responses_api_agents.agentic_mme_agent.search_cache import shared_cache
-from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace, image_data_url
+from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace
 
 
 class SearchArgs(BaseModel):
@@ -84,14 +85,15 @@ SEARCH_PROVIDERS = ("serper", "serpapi", "tavily", "exa")
 CONTAMINATION_PATTERNS = ("agentic-mme", "agentic_mme", "agentic mme", "agenticmme", "crystal1047", "chos3ne11ven")
 # A filtered page fails with the same error as a page the provider has no content for.
 PAGE_UNAVAILABLE = "no page content available for this URL"
-# Providers that can answer google_lens_search (reverse image search through Google Lens).
-LENS_PROVIDERS = ("serper", "serpapi")
+# Providers that can answer google_lens_search (reverse image search through Google Lens). Serper's
+# Lens needs the image at a public URL, i.e. a third-party image host; this integration does not use one.
+LENS_PROVIDERS = ("serpapi",)
 
 
 class RetrievalConfig(BaseModel):
     mode: Literal["disabled", "live", "replay"] = "disabled"
     search_provider: Literal["serper", "serpapi", "tavily", "exa"] = "serper"
-    lens_provider: Literal["auto", "serper", "serpapi", "none"] = "auto"
+    lens_provider: Literal["auto", "serpapi", "none"] = "auto"
     fetch_provider: Literal["jina", "exa"] = "jina"
     # Case-insensitive substrings; an empty list disables the contamination guard.
     contamination_patterns: list[str] = Field(default_factory=lambda: list(CONTAMINATION_PATTERNS))
@@ -99,18 +101,14 @@ class RetrievalConfig(BaseModel):
     serpapi_api_key: SecretStr = SecretStr("")
     tavily_api_key: SecretStr = SecretStr("")
     exa_api_key: SecretStr = SecretStr("")
-    imgbb_api_key: SecretStr = SecretStr("")
     jina_api_key: SecretStr = SecretStr("")
     # Local retrieval cache (see search_cache.py); "" disables it. Fuzzy threshold 0 = exact only (the
     # default): a fuzzy hit answers a different query, shown to the model as matched_query.
     cache_root: str = ""
     cache_fuzzy_threshold: float = Field(default=0.0, ge=0, le=1)
     cache_write: bool = True
-    # Consent to send task images to a third party for Google Lens (required in any case).
+    # Consent to send task images to SerpAPI for Google Lens (required for google_lens_search).
     allow_image_upload: bool = False
-    # Where Lens images are uploaded: "serpapi" (SerpAPI's own Image API, used by lens_provider=serpapi),
-    # "imgbb" (a public URL, needed by Serper's Lens); "auto" picks serpapi for SerpAPI Lens, else imgbb.
-    image_host: Literal["auto", "serpapi", "imgbb"] = "auto"
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     max_response_bytes: int = Field(default=2_000_000, gt=0, le=10_000_000)
 
@@ -125,17 +123,7 @@ class RetrievalConfig(BaseModel):
             raise ValueError(f"google_lens_search with lens_provider={lens} requires {lens}_api_key")
         if self.mode == "live" and self.fetch_provider == "exa" and not self.exa_api_key.get_secret_value():
             raise ValueError("fetch_webpage with fetch_provider=exa requires exa_api_key")
-        host = self.image_host_resolved()
-        if host == "serpapi" and lens != "serpapi":
-            raise ValueError("image_host=serpapi only serves lens_provider=serpapi (Serper Lens needs a public URL)")
-        if self.allow_image_upload and host == "imgbb" and not self.imgbb_api_key.get_secret_value():
-            raise ValueError("Lens image upload through ImgBB requires imgbb_api_key")
         return self
-
-    def image_host_resolved(self) -> str:
-        if self.image_host == "auto":
-            return "serpapi" if self.lens_provider_resolved() == "serpapi" else "imgbb"
-        return self.image_host
 
     def provider_key(self, provider: str | None = None) -> str:
         return getattr(self, f"{provider or self.search_provider}_api_key").get_secret_value()
@@ -513,37 +501,19 @@ class Retrieval:
         else:
             if not self.config.allow_image_upload:
                 raise ValueError("Lens requires allow_image_upload=true; the image is uploaded for the search")
-            image = workspace.get(args.image_index)
-            if self.config.image_host_resolved() == "serpapi":
-                # SerpAPI's Image API: no third image host, Lens takes the returned image_id.
-                form = FormData()
-                form.add_field("api_key", key)
-                form.add_field(
-                    "image",
-                    await asyncio.to_thread(jpeg_under, image),
-                    filename="image.jpg",
-                    content_type="image/jpeg",
-                )
-                uploaded = json.loads(await http_payload(self.config, "POST", "https://serpapi.com/image", data=form))
-                if not isinstance(uploaded, dict) or not uploaded.get("image_id"):
-                    raise ValueError("image upload did not return an image_id")
-                payload = {"image_id": str(uploaded["image_id"])}
-            else:
-                data_url = image_data_url(image)
-                upload = await http_payload(
-                    self.config,
-                    "POST",
-                    "https://api.imgbb.com/1/upload",
-                    data={
-                        "key": self.config.imgbb_api_key.get_secret_value(),
-                        "expiration": "600",
-                        "image": data_url.split(",", 1)[1],
-                    },
-                )
-                uploaded = json.loads(upload)
-                if not uploaded.get("success") or not uploaded.get("data", {}).get("url"):
-                    raise ValueError("image upload did not return an image URL")
-                payload = {"url": public_url(uploaded["data"]["url"]), "num": 5}
+            # SerpAPI's Image API hosts the image (JPEG encoded off the event loop); Lens takes the image_id.
+            form = FormData()
+            form.add_field("api_key", key)
+            form.add_field(
+                "image",
+                await asyncio.to_thread(jpeg_under, workspace.get(args.image_index)),
+                filename="image.jpg",
+                content_type="image/jpeg",
+            )
+            uploaded = json.loads(await http_payload(self.config, "POST", "https://serpapi.com/image", data=form))
+            if not isinstance(uploaded, dict) or not uploaded.get("image_id"):
+                raise ValueError("image upload did not return an image_id")
+            payload = {"image_id": str(uploaded["image_id"])}
             endpoint = "lens"
         if provider == "serpapi":
             params = {"api_key": key, "num": "5"}
@@ -555,7 +525,7 @@ class Retrieval:
                     "hl": _SERPAPI_HL.get(args.hl.lower(), args.hl),
                 }
             else:
-                params |= {"engine": "google_lens"} | {k: payload[k] for k in ("image_id", "url") if k in payload}
+                params |= {"engine": "google_lens", "image_id": payload["image_id"]}
             raw = await http_payload(self.config, "GET", "https://serpapi.com/search.json", params=params)
             data = serpapi_to_serper(json.loads(raw), lens=endpoint == "lens")
         else:
