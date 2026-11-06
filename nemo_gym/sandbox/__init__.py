@@ -93,6 +93,8 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env, read_text, rewrite_image, upload_text
 
 
+# What code outside the library, such as servers, imports from this package. Each name's submodule loads
+# on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "ApptainerProvider": "providers.apptainer.provider",
     "AsyncSandbox": "api",

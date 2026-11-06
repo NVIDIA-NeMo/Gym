@@ -25,14 +25,9 @@ from pydantic import ValidationError
 
 from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
-    rollout_run_key,
-)
+from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.rollout_keys import rollout_run_key
 from nemo_gym.core.failure_records import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.core.failure_transport import FailureHeader
 from nemo_gym.eval.rollout_reverification import (

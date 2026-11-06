@@ -35,7 +35,8 @@ Instrumentation primitives (``managed_span`` / ``span_cm`` / ``trace_fn`` /
 implementations when it is installed and to no-op stubs when it is not.
 
 See ``nemo_gym/telemetry/README.md`` for the design, and
-``fern/versions/latest/pages/observability/`` for user documentation."""
+``fern/versions/latest/pages/observability/`` for user documentation.
+"""
 
 from typing import TYPE_CHECKING
 
@@ -68,6 +69,8 @@ if TYPE_CHECKING:
     from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
+# What code outside the library, such as servers, imports from this package. Each name's submodule loads
+# on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "GymSpanGroup": "span_groups",
     "MemoryProfilingConfig": "config",

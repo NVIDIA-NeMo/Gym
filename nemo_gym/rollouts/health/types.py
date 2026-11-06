@@ -14,11 +14,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.config.global_config import (
-    ROLLOUT_ID_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config.keys import ROLLOUT_ID_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.rollouts.health.timeouts import RolloutTiming
 
 

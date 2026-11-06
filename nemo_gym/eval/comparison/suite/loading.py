@@ -24,7 +24,7 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import (
+from nemo_gym.config.keys import (
     AGENT_REF_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,

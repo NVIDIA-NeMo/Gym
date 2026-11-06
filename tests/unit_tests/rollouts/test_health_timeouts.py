@@ -24,7 +24,7 @@ import nemo_gym.artifacts.exporters
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME
 from nemo_gym.cli.eval import _health_check_collected_rollouts
-from nemo_gym.config.global_config import (
+from nemo_gym.config.keys import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,

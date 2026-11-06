@@ -5,7 +5,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.config.global_config import (
+from nemo_gym.config.keys import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,

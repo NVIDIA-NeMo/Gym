@@ -7,12 +7,8 @@ from collections.abc import Mapping
 
 from pydantic import JsonValue
 
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
-)
+from nemo_gym.config.global_config import SKILLS_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode_types import TaskId
 
 

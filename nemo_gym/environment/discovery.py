@@ -28,12 +28,8 @@ from omegaconf import DictConfig, OmegaConf
 from omegaconf.errors import InterpolationKeyError, InterpolationResolutionError
 
 from nemo_gym import component_search_roots
-from nemo_gym.config.global_config import (
-    POLICY_MODEL_KEY_NAME,
-    SERVER_TYPE_KEYS,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-)
+from nemo_gym.config.global_config import POLICY_MODEL_KEY_NAME, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.keys import SERVER_TYPE_KEYS
 
 
 _T = TypeVar("_T")
