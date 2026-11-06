@@ -10,12 +10,11 @@ from pathlib import Path
 from typing import Literal, NamedTuple
 
 from fastapi import FastAPI, Request
-from pydantic import ConfigDict, Field, JsonValue
+from pydantic import ConfigDict, Field, JsonValue, ValidationError
 
 from nemo_gym.agents import restricted_network_policy, sandbox_server_url
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import EpisodeId
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.models import ChatCompletionsConverter
 from nemo_gym.sandbox import (
@@ -32,12 +31,13 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
+    ResourcesSessionFence,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -117,8 +117,7 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
         if self.config.num_workers not in (None, 1):
             raise ValueError("OfficeQA process-local sandboxes require num_workers=1")
         self._sessions: dict[str, _DocumentSession] = {}
-        self._session_locks: dict[str, asyncio.Lock] = {}
-        self._closed = ClosedResourcesSessionRecords[EpisodeId](self.config.session_close_retry_window_seconds)
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -139,7 +138,7 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
         root = Path(self.config.workspace_root).expanduser().resolve()
         task = OfficeQAProTask.model_validate_json((root / "tasks" / (body.task_id + ".json")).read_text())
         if task.task_id != body.task_id or task.workspace_id != body.workspace_id:
-            raise ValueError("Task identity differs from the trusted OfficeQA bundle")
+            raise ResourcesSeedRejectedError("Task identity differs from the trusted OfficeQA bundle")
         return task
 
     async def _create_sandbox(self) -> tuple[AsyncSandbox, SandboxSpec]:
@@ -165,15 +164,17 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         """Seed the existing resource-session contract, returning borrower access."""
-        task = TaskData.model_validate(body.task_data)
+        try:
+            task = TaskData.model_validate(body.task_data)
+        except ValidationError as error:
+            raise ResourcesSeedRejectedError(f"Invalid OfficeQA task_data: {error}") from error
         self._task(task)
         if body.task_id.task_id != task.task_id:
-            raise ValueError("TaskId differs from the trusted OfficeQA task")
+            raise ResourcesSeedRejectedError("TaskId differs from the trusted OfficeQA task")
         session_id = body.resources_session_id
         request.session[SESSION_ID_KEY] = session_id
-        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
-            if session_id in self._closed:
-                raise ResourcesSessionConflictError("OfficeQA resources session is already closed")
+        async with self._fence.locked(session_id):
+            self._fence.raise_if_closed(session_id)
             existing = self._sessions.get(session_id)
             if existing is not None:
                 if existing.request != body:
@@ -215,15 +216,15 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
     ) -> ResourcesCloseSessionResponse:
         """Close idempotently, fencing late seed requests through Gym's existing helper."""
         session_id = body.resources_session_id
-        async with self._session_locks.setdefault(session_id, asyncio.Lock()):
-            closed = self._closed.get(session_id)
+        async with self._fence.locked(session_id):
+            closed = self._fence.closed_episode(session_id)
             session = self._sessions.get(session_id)
             if (closed is not None and closed != body.episode_id) or (
                 session is not None and session.request.episode_id != body.episode_id
             ):
                 raise ResourcesSessionConflictError("EpisodeId differs from the OfficeQA resources session")
             await self._stop_session(session_id)
-            self._closed.remember(session_id, body.episode_id)
+            self._fence.mark_closed(session_id, body.episode_id)
             request.session.pop(SESSION_ID_KEY, None)
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
 

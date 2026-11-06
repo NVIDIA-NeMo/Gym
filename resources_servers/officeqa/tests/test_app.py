@@ -12,6 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 from starlette.requests import Request
+from starlette.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
@@ -25,6 +26,7 @@ from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxSpec
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
+    ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     check_resources_session_contract,
 )
@@ -249,6 +251,7 @@ async def test_concurrent_seed_and_close_cannot_leave_a_sandbox(server, sandbox)
     release.set()
     await asyncio.gather(seeding, closing)
     assert not server._sessions
+    assert not server._fence._locks
     sandbox.stop.assert_awaited_once()
 
 
@@ -275,8 +278,9 @@ async def test_last_assistant_answer_determines_score(server):
 
 
 @pytest.mark.asyncio
-async def test_missing_trusted_reference_is_masked_without_trusting_the_public_uid(server):
-    body = verify_body().model_copy(update={"task_id": "officeqa_pro_" + "1" * 24})
+@pytest.mark.parametrize("field,prefix", [("task_id", "officeqa_pro_"), ("workspace_id", "workspace_")])
+async def test_invalid_trusted_reference_is_masked_without_trusting_the_public_uid(server, field, prefix):
+    body = verify_body().model_copy(update={field: prefix + "1" * 24})
     result = await server.verify(Request({"type": "http"}), body)
     assert result.reward == 0 and result.mask_sample and result.uid is None
     assert result.failure_kind == "officeqa:reference_unavailable" and result.failure_reason
@@ -391,7 +395,7 @@ def test_catalog_and_verification_require_the_same_fields(field: str) -> None:
 async def test_seed_requires_provenance_before_starting_a_sandbox(server, sandbox, field: str) -> None:
     body = seed_body()
     body.task_data.pop(field)
-    with pytest.raises(ValidationError, match=field):
+    with pytest.raises(ResourcesSeedRejectedError, match=field):
         await server.seed_session(http_request(), body)
     sandbox.start.assert_not_awaited()
 
@@ -419,3 +423,53 @@ async def test_network_access_controls_the_sandbox_policy(server, monkeypatch, n
             "egress": [{"action": "allow", "target": "model.example.test"}],
         }
         endpoint.assert_called_once_with("policy_model", require_reachable=True)
+
+
+@pytest.mark.parametrize("invalid", ["provenance", "task_id", "workspace_id"])
+def test_invalid_seed_returns_422_without_creating_a_sandbox(server, sandbox, invalid: str) -> None:
+    body = seed_body()
+    if invalid == "provenance":
+        body.task_data.pop("source_revision")
+    elif invalid == "task_id":
+        body.task_id = body.task_id.model_copy(update={"task_id": "officeqa_pro_" + "1" * 24})
+    else:
+        body.task_data["workspace_id"] = "workspace_" + "1" * 24
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/seed_session", json=body.model_dump(mode="json"))
+    assert response.status_code == 422
+    server._create_sandbox.assert_not_awaited()
+    assert not server._sessions
+
+
+@pytest.mark.parametrize("failure", ["missing_reference", "corrupt_reference", "provider"])
+def test_seed_infrastructure_failures_remain_retryable(server, sandbox, failure: str) -> None:
+    body = seed_body()
+    record = Path(server.config.workspace_root) / "tasks" / (body.task_data["task_id"] + ".json")
+    if failure == "missing_reference":
+        record.unlink()
+    elif failure == "corrupt_reference":
+        record.write_text("{}")
+    else:
+        sandbox.start.side_effect = RuntimeError("provider unavailable")
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/seed_session", json=body.model_dump(mode="json"))
+    assert response.status_code == 500
+    assert not server._sessions
+    if failure == "provider":
+        sandbox.stop.assert_awaited_once()
+    else:
+        server._create_sandbox.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_successful_session_cycles_release_inactive_locks(server, sandbox) -> None:
+    for index in range(30):
+        body = seed_body().model_copy(update={"resources_session_id": f"session-{index}"})
+        await server.seed_session(http_request(), body)
+        await server.close_resources_session(
+            http_request(),
+            ResourcesCloseSessionRequest(resources_session_id=body.resources_session_id, episode_id=body.episode_id),
+        )
+        assert not server._sessions
+        assert not server._fence._locks
+    assert sandbox.start.await_count == sandbox.stop.await_count == 30
