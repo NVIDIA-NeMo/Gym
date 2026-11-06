@@ -1,0 +1,29 @@
+# Collaborative Intelligence (Zou group, arXiv 2611.02633, github.com/zou-group/collaborative-intelligence @ 3de5f7d):
+# the 157 released scenarios of the scored set x 3 test seeds. Eval only: never train on it (some scenarios reuse GPQA).
+config_paths:
+  - resources_servers/collab_intel/configs/collab_intel.yaml
+
+collab_intel_benchmark_resources_server:
+  _inherit_from: collab_intel_resources_server
+
+collab_intel_benchmark_agent:
+  _inherit_from: collab_intel_agent
+  responses_api_agents:
+    collab_intel_agent:
+      resources_server:
+        name: collab_intel_benchmark_resources_server
+      datasets:
+        - name: collab_intel
+          type: benchmark
+          jsonl_fpath: benchmarks/collab_intel/data/collab_intel_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/collab_intel/prepare.py
+          num_repeats: 1
+          license: CC BY 4.0 (7 scenarios CC BY-NC-SA 4.0, evaluation only)
+
+collab_intel_benchmark_environment_server:
+  _inherit_from: collab_intel_agent_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: collab_intel_benchmark_agent
