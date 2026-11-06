@@ -1,10 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Harvey LAB source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# f46ef86e4788545622db25dcffa3aebb7a139929/evaluation/scoring.py
 """Harbor entrypoint and result writer for Legal Agent Bench verification.
 
 Generated Harbor tasks place the adjacent ``lab_harbor`` verifier package in
-``/tests``. Repository imports use the vendored package at the pinned source
+``/tests``. Repository imports use the adjacent package at the pinned source
 revision.
 """
 
@@ -21,11 +28,11 @@ from typing import Any
 
 
 if __package__:
-    from .vendor.harvey_labs.lab_harbor.judge import (
+    from .lab_harbor.judge import (
         OpenAICompatibleJudge,
         write_transcript_event,
     )
-    from .vendor.harvey_labs.lab_harbor.scoring import score_rubric
+    from .lab_harbor.scoring import score_rubric
 else:
     from lab_harbor.judge import OpenAICompatibleJudge, write_transcript_event
     from lab_harbor.scoring import score_rubric
