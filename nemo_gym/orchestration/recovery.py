@@ -75,6 +75,7 @@ from nemo_gym.core.failure_kinds import (
     INVALID_OUTPUT_BUDGET,
     INVALID_REQUEST_PARAMETER,
     JUDGE_FAILED,
+    JUDGE_FAILURE_KINDS,
     JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
@@ -5968,10 +5969,55 @@ def _verify_transport_failure(row: Mapping[str, Any]) -> bool:
     )
 
 
+_FAILED_RESPONSE_STATUSES = frozenset({"failed", "incomplete", "cancelled"})
+
+
+def _verifier_model_answered(row: Mapping[str, Any], verifiers: list[Any]) -> bool:
+    """Whether one model call of the row's verifiers completed with a 2xx and a usable response, read from the call
+    the row saved for each reference (by call id, else response id). A call the row does not hold has not answered."""
+    refs = [ref for verifier in verifiers for ref in verifier.get("model_calls") or [] if isinstance(ref, Mapping)]
+    trajectory = row.get("ng_trajectory")
+    calls = trajectory.get("model_calls") if isinstance(trajectory, Mapping) else None
+    if not refs or not isinstance(calls, list):
+        return False
+    by_id, by_response = {}, {}
+    for call in calls:
+        if isinstance(call, Mapping):
+            metadata = call.get("response_metadata")
+            by_id[call.get("model_call_id")] = call
+            if isinstance(metadata, Mapping):
+                by_response[metadata.get("response_id")] = call
+    for ref in refs:
+        call = by_id.get(ref.get("model_call_id")) or by_response.get(ref.get("response_id"))
+        metadata = call.get("response_metadata") if call is not None else None
+        if not isinstance(metadata, Mapping):
+            continue
+        code, status = metadata.get("status_code"), metadata.get("response_status")
+        answered = 200 <= code < 300 if type(code) is int else status == "completed"
+        if answered and status not in _FAILED_RESPONSE_STATUSES:
+            return True
+    return False
+
+
+def _judge_error_marker(row: Mapping[str, Any]) -> bool:
+    """Whether the row names a judge error the server wrote: a judge failure kind, or a saved judge error or invalid
+    judge response."""
+    facts = _grading_facts(row)
+    return (
+        row.get("failure_kind") in JUDGE_FAILURE_KINDS
+        or facts.get("judge_error") is True
+        or facts.get("invalid_judge_response") is True
+    )
+
+
 def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
     """Whether the row's verifier invocations were observed but recorded no grading: no grading operation, no
     verifier grading record, no saved grading artifact (``grading_artifact``) and no model-failure rule
-    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected."""
+    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected. Nor is
+    one whose verifier got an answer from a model (``_verifier_model_answered``) and wrote no judge-error marker
+    (``_judge_error_marker``): a judge the verifier does not observe (``observe_llm_judge_grading``) records no
+    grading however often it is asked again, and a grade it gave is never replaced. A row whose model calls all
+    failed, or that names a judge error, was not graded."""
     observed = row.get("ng_trial_observations")
     verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
     if not isinstance(verifiers, list) or not verifiers:
@@ -5980,6 +6026,8 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
         not isinstance(verifier, Mapping) or verifier.get("grading_operations") or verifier.get("grading_record")
         for verifier in verifiers
     ):
+        return False
+    if _verifier_model_answered(row, verifiers) and not _judge_error_marker(row):
         return False
     return grading_artifact(row) is None and not _model_failure(row)
 

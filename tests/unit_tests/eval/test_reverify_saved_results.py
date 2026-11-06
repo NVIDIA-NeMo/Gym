@@ -338,6 +338,61 @@ async def test_an_ungraded_result_is_reverified_and_one_with_a_grading_artifact_
     assert rewards == [0.5, 1.0] and len(verifier["posted"]) == 1
 
 
+def _asked_a_model(row: dict, metadata: dict | None, **extra) -> dict:
+    """``row``'s verifier asked one model, whose call the row saved with ``metadata`` (None: no call saved)."""
+    trajectory = row["ng_trajectory"]
+    trajectory["verifier_invocations"][0]["model_calls"] = [{"model_call_id": "judge-0"}]
+    if metadata is not None:
+        trajectory["model_calls"] = [{"model_call_id": "judge-0", "response_metadata": metadata}]
+    return row | extra
+
+
+ANSWERED = {"status_code": 200, "response_status": "completed"}
+
+
+async def test_a_result_the_judge_answered_without_a_grading_record_is_not_graded_again(tmp_path, verifier) -> None:
+    """A verifier that does not observe its judge records no grading however often it is asked again; a grade the
+    judge gave is never replaced, so the pass leaves the row as saved: no second judge call, no second row."""
+    output = _run(tmp_path, [_asked_a_model(ungraded(0), ANSWERED), ungraded(1)])
+    before = output.read_bytes()
+
+    assert len(due_judge_failures(output)) == 1  # only the row whose verifier asked no model
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    rows = [json.loads(line) for line in output.read_bytes().splitlines()]
+    assert len(rows) == 3 and len({logical_rollout_id(row) for row in rows}) == 2
+    assert output.read_bytes().startswith(before) and len(verifier["posted"]) == 1
+    assert due_judge_failures(output) == []
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"status_code": 504, "response_status": None},
+        {"status_code": 500, "response_status": "failed"},
+        {"status_code": None, "response_status": None},
+        {"status_code": 200, "response_status": "incomplete"},
+        None,
+    ],
+    ids=["timeout", "server_error", "no_response", "incomplete", "call_not_saved"],
+)
+async def test_a_result_scored_after_every_judge_call_failed_is_graded_again(tmp_path, verifier, metadata) -> None:
+    output = _run(tmp_path, [_asked_a_model(ungraded(0), metadata)])
+    assert len(due_judge_failures(output)) == 1
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+
+async def test_one_answered_judge_call_among_failed_ones_keeps_the_grade(tmp_path) -> None:
+    row = _asked_a_model(ungraded(0), {"status_code": 504, "response_status": None})
+    row["ng_trajectory"]["verifier_invocations"][0]["model_calls"].append({"model_call_id": "judge-1"})
+    row["ng_trajectory"]["model_calls"].append({"model_call_id": "judge-1", "response_metadata": ANSWERED})
+    assert due_judge_failures(_run(tmp_path, [row])) == []
+
+
+async def test_a_result_naming_a_judge_error_is_graded_again_even_after_a_200(tmp_path) -> None:
+    row = _asked_a_model(ungraded(0), ANSWERED, failure_kind="judge_invalid")
+    assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
+
+
 async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(tmp_path, verifier) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
     before = output.read_bytes()
