@@ -47,4 +47,9 @@ gym eval run --no-serve +agent_name=remote_agent +input_jsonl_fpath=... +output_
 and the agent sessions API instead: it seeds and verifies, grants this agent direct HTTP access to the resources
 server's tools, and records failures. Name the resources server there too; it must serve resources sessions.
 
+Because the agent serves agent sessions, composing `configs/remote_agent.yaml` onto a benchmark whose environment is a
+`single_agent_turn_legacy` server keeps that server instead of relaying to `/run`. The benchmark must then grant the
+agent `direct_http` in `resources_tool_transports`: the agent refuses a seed whose only required grant is MCP, and with
+no grant the service's tool requests fail.
+
 Knobs and the full contract: see the "Drive a Remote Agent" docs page.
