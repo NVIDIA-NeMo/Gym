@@ -608,7 +608,8 @@ class GDPValVerifyResponse(GDPValVerifyRequest, BaseVerifyResponse):
 class _TaskSession:
     episode_id: EpisodeId
     task_id: TaskId
-    repeat: int
+    # The repeat directory's key (persisted_layout.repeat_key_from_rollout_id).
+    repeat: str
     sandbox: Optional[AsyncSandbox]
     reference_dir: Path
     # The finish or abandon_task_finish call the agent made.
@@ -660,7 +661,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
             raise ValueError("GDPVal sessions are process-local and require num_workers=1")
         self._sessions: Dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
-        self._claimed_directories: Dict[Tuple[str, int], str] = {}
+        self._claimed_directories: Dict[Tuple[str, str], str] = {}
         self._locks = ResourcesSessionLocks()
         self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
             self.config.session_close_retry_window_seconds
@@ -763,11 +764,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ResourcesSeedRejectedError(f"task_data is not a GDPVal task: {error}") from error
             if body.task_id.task_id != task.task_id:
                 raise ResourcesSeedRejectedError("TaskId does not match the GDPVal task_id")
-            try:
-                repeat = persisted_layout.repeat_from_rollout_id(body.episode_id.rollout_id)
-            except ValueError as error:
-                # A retry sends the same rollout_id, so no retry can fix it.
-                raise ResourcesSeedRejectedError(str(error)) from error
+            repeat = persisted_layout.repeat_key_from_rollout_id(body.episode_id.rollout_id)
             directory = (task.task_id, repeat)
             owner = self._claimed_directories.get(directory)
             if owner is not None:
