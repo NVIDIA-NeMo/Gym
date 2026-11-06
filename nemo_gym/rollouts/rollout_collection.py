@@ -80,6 +80,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
+    STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     allowed_agents_for,
@@ -118,11 +119,14 @@ from nemo_gym.rollouts.batch_status import (
 )
 from nemo_gym.rollouts.health.types import RunHealthConfig
 from nemo_gym.rollouts.model_calls import (
+    CaptureRetirementBatch,
     await_model_call_capture_quiescence,
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
+    retire_covered_model_call_captures_from_config,
+    snapshot_model_call_capture,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
 from nemo_gym.rollouts.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
@@ -160,6 +164,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     record_resubmit_offset as record_resubmit_offset,
 )
 from nemo_gym.rollouts.rollout_store import RolloutStore
+from nemo_gym.rollouts.token_metadata import strip_duplicate_token_metadata
 from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
@@ -893,7 +898,9 @@ async def enrich_run_result(
     from the record. Harness output and reward are never modified. A row that names no task (no task id field,
     task index or trajectory identity) gets no ``ng_trajectory`` rather than a guessed task id.
     ``include_payloads=False`` keeps call metadata only; ``delete_capture`` removes the rollout's capture file once it
-    has been merged, so it requires the payloads to be kept.
+    has been merged, so it requires the payloads to be kept. This serves callers retaining the returned
+    in-memory result. File-based collection instead uses ``CaptureRetirementBatch`` after persisting
+    and syncing the JSONL row; enrichment alone does not make that row durable.
     """
     if not isinstance(result, dict):
         return result
@@ -3991,6 +3998,9 @@ executions → not run again (left to recovery)
         # The post-run health check times failed rollouts from the same captures.
         self._health_capture_dirs = capture_dirs
         observability_enabled = observability_enabled_from_config(global_config)
+        retire_captures = bool(capture_dirs) and retire_covered_model_call_captures_from_config(global_config)
+        capture_retirements = CaptureRetirementBatch() if retire_captures else None
+        strip_token_metadata = bool(global_config.get(STRIP_DUPLICATE_TOKEN_METADATA_KEY_NAME, False))
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -4251,8 +4261,14 @@ executions → not run again (left to recovery)
 
                 _record_policy_model_server(result, global_config, self._agent_name_for_row(row, global_config))
 
-                # Fold this rollout's captured model calls into its record (uniform across agents; no-op
-                # when capture is off), project ng_trajectory and assemble ng_perf. Never alters the
+                # Snapshot before enrichment reads the capture. A write arriving while enrichment drains
+                # pending claims changes its size, conservatively keeping the file at retirement.
+                capture_snapshot = None
+                if retire_captures:
+                    rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
+                    if rollout_id_for_capture is not None:
+                        capture_snapshot = snapshot_model_call_capture(rollout_id_for_capture, capture_dirs)
+                # Fold captured calls into the record, project ng_trajectory and assemble ng_perf. Never alters the
                 # harness output/reward already in `result`.
                 await enrich_run_result(
                     row,
@@ -4300,6 +4316,10 @@ executions → not run again (left to recovery)
                                 f"Mask reasons: {dict(mask_reasons)}. Aborting instead of collecting "
                                 "mostly token-less data."
                             )
+
+                # Last change to the record: everything that copies token metadata has been built by now.
+                if strip_token_metadata and not no_result:
+                    strip_duplicate_token_metadata(result)
 
                 if failure_class is not None:
                     result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.attempt_cap
@@ -4392,6 +4412,10 @@ executions → not run again (left to recovery)
                             )
                     if rollout_id is not None and capture_build_can_retire(token_capture_build):
                         await retire_rollout_token_capture(rollout_id, token_source, token_capture_build)
+                    if rollout_id is not None and capture_retirements is not None:
+                        capture_retirements.add(rollout_id, result, capture_snapshot)
+                        if capture_retirements.due():
+                            await capture_retirements.flush_async(store.sync_outcomes)
 
                 counts_left[dispatch_name] -= 1
                 if counts_left[dispatch_name] <= 0:
@@ -4436,6 +4460,11 @@ executions → not run again (left to recovery)
                     print_str += f"""Examples left:
 {top_left_str}
 """
+                    if capture_retirements is not None:
+                        print_str += (
+                            f"Model-call capture files: {capture_retirements.retired} deleted, "
+                            f"kept {dict(capture_retirements.kept)}\n"
+                        )
                     for agent_name in sorted(agent_name_to_metrics):
                         metrics = agent_name_to_metrics[agent_name]
                         agent_total_samples = dispatched_per_agent[agent_name]
@@ -4484,6 +4513,9 @@ executions → not run again (left to recovery)
                         health_span_context,
                     )
 
+            # Finish cleanup while the store is open; cancellation waits for the worker to finish.
+            if capture_retirements is not None:
+                await capture_retirements.flush_async(store.sync_outcomes)
             collection_succeeded = True
 
         # The collection API already retains returned results. Reuse those
@@ -4537,6 +4569,11 @@ executions → not run again (left to recovery)
                 made_progress=store.progress_outcomes_recorded > 0,
             )
         print(latency_tracker.summary())
+        if capture_retirements is not None:
+            print(
+                f"Model-call capture files: {capture_retirements.retired} deleted, "
+                f"kept {dict(capture_retirements.kept)}"
+            )
 
         if config.upload_rollouts and exporters_enabled:  # pragma: no cover
             print("Uploading rollouts. This may take a few minutes if your data is large.")

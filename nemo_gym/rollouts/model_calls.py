@@ -6,13 +6,22 @@
 import asyncio
 import logging
 import time
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Mapping, Optional
+
+import orjson
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_records import FailureReport
 from nemo_gym.core.failure_transport import FailureReportRow, StreamFailureReportReader
-from nemo_gym.models.model_call_capture import CaptureStore, ModelCallCaptureConfig
+from nemo_gym.models.model_call_capture import (
+    CaptureStore,
+    ModelCallCaptureConfig,
+    reconstruct_complete_streamed_response,
+)
 from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
 from nemo_gym.trajectory.model_call_record import (
     ModelCallRecord,
@@ -34,13 +43,48 @@ from nemo_gym.trajectory.trajectory_record import (
 logger = logging.getLogger(__name__)
 
 
+def _parse_cancelled_call_body(exchange: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Parse the raw body of a cancelled call that already has a 2xx status and a complete body."""
+    if exchange.get("error_category") != "cancelled" or isinstance(exchange.get("response"), dict):
+        return None
+    status = exchange.get("status_code")
+    if type(status) is not int or not 200 <= status < 300:
+        return None
+    raw_text = exchange.get("response_raw")
+    if not isinstance(raw_text, str) or not raw_text.strip():
+        return None
+    try:
+        parsed = orjson.loads(raw_text)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
+    dialect = exchange.get("dialect")
+    return reconstruct_complete_streamed_response(raw_text.encode(), dialect) if isinstance(dialect, str) else None
+
+
+def _build_captured_model_call_record(exchange: dict[str, Any], *, call_index: int) -> ModelCallRecord:
+    """Recover complete cancelled bodies before normalizing the captured exchange."""
+    response = _parse_cancelled_call_body(exchange)
+    if response is not None:
+        reader = StreamFailureReportReader()
+        reader.feed_text(exchange["response_raw"])
+        reader.finish()
+        exchange = {**exchange, "response": response, "response_raw": None}
+        if reader.report is not None:
+            report = FailureReport.model_validate(exchange.get("failure_report") or {}).merged(reader.report)
+            exchange["failure_report"] = report.model_dump(mode="json")
+    return build_model_call_record(exchange, call_index=call_index)
+
+
 # --- Model-call records read from captured exchanges ---
 
 
 def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelCallRecord]:
     """Read captured exchanges in durable append order."""
     return [
-        build_model_call_record(exchange, call_index=index) for index, exchange in enumerate(store.read(rollout_id))
+        _build_captured_model_call_record(exchange, call_index=index)
+        for index, exchange in enumerate(store.read(rollout_id))
     ]
 
 
@@ -58,7 +102,7 @@ def _read_capture_records(
     verifier_invocations: dict[str, "VerifierInvocation"] = {}
     for index, exchange in exchanges:
         try:
-            call = build_model_call_record(exchange, call_index=index)
+            call = _build_captured_model_call_record(exchange, call_index=index)
             calls.append(call)
             merge_verifier_call_observation(verifier_invocations, exchange, model_call_id=call.model_call_id)
         except Exception:
@@ -86,6 +130,12 @@ def model_call_capture_dirs_from_config(global_config_dict: Any) -> list[Path]:
 def observability_enabled_from_config(global_config_dict: Any) -> bool:
     """Return the run-wide ``observability_enabled`` flag directly, without going through capture dirs."""
     return ModelCallCaptureConfig.model_validate(global_config_dict).observability_enabled
+
+
+def retire_covered_model_call_captures_from_config(global_config_dict: Any) -> bool:
+    """Return whether capture files are deleted once the persisted rollout fully covers them."""
+    config = ModelCallCaptureConfig.model_validate(global_config_dict)
+    return config.observability_enabled and config.retire_covered_model_call_captures
 
 
 # How long a reader waits for writes already claimed by the model server to land. A claimed
@@ -202,18 +252,19 @@ def merge_model_call_capture_into_record(
     # Captured SSE preserves the terminal report even when an external client ignores the extension.
     # A model call's selected failure is only an observation of the enclosing episode.
     for call in calls:
+        report = call.failure_report if call.error_category == "cancelled" else None
         if isinstance(call.response_raw, str) and call.dialect in {"responses", "chat"}:
             reader = StreamFailureReportReader()
             reader.feed_text(call.response_raw)
             reader.finish()
             if reader.report is not None:
-                observed = reader.report.model_copy(update={"failure_id": None})
-                existing = FailureReportRow.report(record)
-                if any(
-                    key in existing.events and existing.events[key] != event for key, event in observed.events.items()
-                ):
-                    observed = observed.model_copy(update={"omitted": True})
-                record.update(FailureReportRow.merged_into(record, observed))
+                report = report.merged(reader.report) if report is not None else reader.report
+        if report is not None:
+            observed = report.model_copy(update={"failure_id": None})
+            existing = FailureReportRow.report(record)
+            if any(key in existing.events and existing.events[key] != event for key, event in observed.events.items()):
+                observed = observed.model_copy(update={"omitted": True})
+            record.update(FailureReportRow.merged_into(record, observed))
     observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:
@@ -257,3 +308,142 @@ def merge_model_call_capture_into_record(
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
 __getattr__ = moved_names_getattr(__name__)
+
+
+_PAYLOAD_OMISSION_GAPS = frozenset({"multimodal_history_redacted", "trajectory_projection_failed"})
+
+
+def model_call_capture_uncovered_reasons(result: Mapping[str, Any]) -> list[str]:
+    """Return why a rollout record does not fully cover its capture file; empty when it does.
+
+    A record covers its capture file when collection read the file without a gap and every captured
+    call has its request and response in ``ng_trajectory.model_calls``.
+    """
+    capture = result.get("ng_model_call_capture")
+    if not isinstance(capture, Mapping):
+        return ["no_capture_attachment"]
+    reasons = [f"capture_gap:{gap.get('code')}" for gap in capture.get("gaps") or [] if isinstance(gap, Mapping)]
+
+    trajectory = result.get("ng_trajectory")
+    if not isinstance(trajectory, Mapping):
+        return [*reasons, "no_trajectory"]
+    payload_gaps = []
+    for source in (trajectory, result.get(NG_AGENT_OBSERVATIONS_KEY)):
+        gaps = source.get("gaps") if isinstance(source, Mapping) else None
+        for gap in gaps or []:
+            if isinstance(gap, Mapping) and gap.get("code") in _PAYLOAD_OMISSION_GAPS:
+                payload_gaps.append(f"payload_gap:{gap['code']}")
+    if payload_gaps:
+        # The gap already says the payloads were left out, so each call lacking one adds nothing.
+        return [*reasons, *payload_gaps]
+
+    with_payload = {
+        call.get("model_call_id")
+        for call in trajectory.get("model_calls") or []
+        if isinstance(call, Mapping) and call.get("request") is not None and call.get("response") is not None
+    }
+    for call in capture.get("calls") or []:
+        call_id = call.get("model_call_id") if isinstance(call, Mapping) else None
+        if call_id is None:
+            reasons.append("call_without_id")
+        elif call_id not in with_payload:
+            reasons.append(f"call_without_payload:{call_id}")
+    return reasons
+
+
+@dataclass(frozen=True)
+class CaptureSnapshot:
+    """Where a rollout's capture file was and how large it was just before collection read it."""
+
+    directory: Path
+    size: int
+
+
+def snapshot_model_call_capture(rollout_id: str, capture_dirs: list[Path]) -> Optional[CaptureSnapshot]:
+    """Record the capture file's size; take it before merging, so a row appended later changes the size."""
+    for directory in capture_dirs:
+        size = CaptureStore(directory).size(rollout_id)
+        if size is not None:
+            return CaptureSnapshot(directory=directory, size=size)
+    return None
+
+
+class CaptureRetirementBatch:
+    """Deletes a rollout's capture file once the persisted rollout holds everything in it.
+
+    ``add`` judges each rollout from the rollout itself (``model_call_capture_uncovered_reasons``) and
+    queues it. ``flush`` makes the queued rollouts durable with one sync, then deletes the capture file of
+    every rollout that covers it. A file stays when the rollout does not cover it, when it grew since its
+    snapshot, or when a call of the rollout still holds a pending write. An unflushed queue deletes nothing.
+
+    Unlike ``enrich_run_result(delete_capture=True)``, collection must keep captures until the JSONL
+    rows are durable, not just attached to an in-memory result. RolloutStore rejects duplicate logical
+    identities before dispatch, and retries have distinct capture keys.
+    """
+
+    def __init__(self, *, max_size: int = 100, max_age_s: float = 5.0) -> None:
+        self._max_size = max_size
+        self._max_age_s = max_age_s
+        self._pending: list[tuple[str, Optional[CaptureSnapshot], list[str]]] = []
+        self._last_flush = time.monotonic()
+        self.retired = 0
+        self.kept: Counter = Counter()
+
+    def add(
+        self,
+        rollout_id: str,
+        result: Mapping[str, Any],
+        snapshot: Optional[CaptureSnapshot],
+    ) -> None:
+        """Queue a persisted rollout; only its keep-or-delete verdict is retained, not the rollout."""
+        reasons = model_call_capture_uncovered_reasons(result)
+        if snapshot is None:
+            reasons.append("no_capture_file")
+        self._pending.append((rollout_id, snapshot, reasons))
+
+    def due(self) -> bool:
+        return bool(self._pending) and (
+            len(self._pending) >= self._max_size or time.monotonic() - self._last_flush >= self._max_age_s
+        )
+
+    async def flush_async(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Flush off the event loop, finishing before cancellation can close the output files."""
+        task = asyncio.create_task(asyncio.to_thread(self.flush, make_rollouts_durable))
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Cancelling to_thread cannot stop its worker. Keep its files open until it finishes,
+                # including when shutdown sends more than one cancellation request.
+                cancelled = True
+        task.result()
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def flush(self, make_rollouts_durable: Callable[[], None]) -> None:
+        """Make the queued rollouts durable, then delete the capture files that nothing keeps."""
+        if not self._pending:
+            return
+        make_rollouts_durable()
+        # One scan per capture directory answers "is a write pending?" for every file in the batch.
+        pending_by_directory: dict[Path, set[str]] = {}
+        for rollout_id, snapshot, keep_reasons in self._pending:
+            if not keep_reasons:
+                try:
+                    store = CaptureStore(snapshot.directory)
+                    if snapshot.directory not in pending_by_directory:
+                        pending_by_directory[snapshot.directory] = store.pending_rollout_ids()
+                    kept = store.delete_if_unchanged(
+                        rollout_id, snapshot.size, pending_rollout_ids=pending_by_directory[snapshot.directory]
+                    )
+                except OSError:
+                    logger.warning("Could not delete the model-call capture of rollout %s.", rollout_id, exc_info=True)
+                    kept = "delete_failed"
+                keep_reasons = [kept] if kept else []
+            if keep_reasons:
+                self.kept.update({reason.partition(":")[0] for reason in keep_reasons})
+            else:
+                self.retired += 1
+        self._pending.clear()
+        self._last_flush = time.monotonic()
