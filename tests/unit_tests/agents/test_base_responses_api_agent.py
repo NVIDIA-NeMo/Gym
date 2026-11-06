@@ -20,6 +20,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.agents.base_responses_api_agent import (
+    AgentSeedRejectedError,
     BaseResponsesAPIAgent,
     BaseResponsesAPIAgentConfig,
     ModelEndpoint,
@@ -200,10 +201,13 @@ class TestAssertModelUrlReachableFromSandbox:
     )
     @pytest.mark.parametrize("provider_name", ["opensandbox", "e2b", "daytona", None])
     def test_loopback_on_remote_provider_raises_with_fix(self, url: str, provider_name: str | None) -> None:
-        with pytest.raises(ValueError, match=r"\+\+use_absolute_ip=true") as excinfo:
+        with pytest.raises(AgentSeedRejectedError, match=r"\+\+use_absolute_ip=true") as excinfo:
             assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
-        assert url in str(excinfo.value)
-        assert "reachable model URL" in str(excinfo.value)
+        # The same configuration fails every attempt, so a seed refuses it with a final 422.
+        assert excinfo.value.status_code == 422
+        assert isinstance(excinfo.value, ValueError)
+        assert url in excinfo.value.detail
+        assert "reachable model URL" in excinfo.value.detail
 
     def test_loopback_on_docker_warns_and_passes(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger="nemo_gym.agents.base_responses_api_agent"):

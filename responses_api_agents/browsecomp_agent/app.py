@@ -432,6 +432,8 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
             ]
             for url in filter(None, sandbox_urls):
                 assert_model_url_reachable_from_sandbox(url, provider_name=provider_name)
+        except AgentSeedRejectedError:
+            raise
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
         try:
