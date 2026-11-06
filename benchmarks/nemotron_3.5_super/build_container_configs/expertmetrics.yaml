@@ -11,13 +11,13 @@ slurm:
 
 vllm:
   repo: https://github.com/bxyu-nvidia/vllm.git
-  branch: bxyu/v0.32.0-dwdp
+  branch: bxyu/v0.32.0-expertmetrics
   version: "0.32.0"
   precompiled_wheel_commit: v0.32.0
 
 shared_run_warmup_env_vars:
   MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
-  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_dwdp.sh
+  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_expertmetrics.sh
   NUM_PREFILL_NODES: 2
   NUM_DECODE_NODES: 2
   ENABLE_MOONCAKE: 1
@@ -27,22 +27,6 @@ shared_run_warmup_env_vars:
   ROUTER_INTRA_NODE_DATA_PARALLEL_SIZE: 1
   SLURM_COMMENT: '{"OccupiedIdleGPUsJobReaper":{"exemptIdleTimeMins":"720","reason":"benchmarking","description":"POR - https://nvaiinfa.aha.io/ideas/ideas/NMP-I-791"}}'
   MOUNTS: ${oc.env:PWD}:${oc.env:PWD},${oc.env:PWD}:/opt/Gym
-
-warmup:
-  env:
-    _copy: shared_run_warmup_env_vars
-    ROUTER_WORKER_STARTUP_TIMEOUT_SECONDS: 3600
-    SBATCH_TIMELIMIT: "01:30:00"
-    # Compilation
-    MAX_JOBS: 64
-    FLASHINFER_NVCC_THREADS: 4
-    # Debug env vars
-    # CUDA_LOG_FILE: stderr
-    # PYTHONFAULTHANDLER: "1"
-    # CUTE_DSL_FILTER_STACKTRACE: "0"
-    # CUTE_DSL_LOG_TO_CONSOLE: "1"
-    # CUTE_DSL_LOG_LEVEL: "30"
-    # FLASHINFER_DEBUG_FC2: "1"
 
 run:
   env:
