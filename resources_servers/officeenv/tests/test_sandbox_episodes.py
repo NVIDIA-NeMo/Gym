@@ -33,6 +33,11 @@ import pytest
 import yaml
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+
+
+# OfficeEnv installs apart from the server's locked dependencies until it is published: without it these tests skip.
+pytest.importorskip("officeenv", reason="OfficeEnv is not installed (README.md, 'The OfficeEnv version')")
+
 from officeenv import __version__ as officeenv_version
 
 from nemo_gym.client import ServerClient
@@ -54,6 +59,7 @@ from resources_servers.officeenv.app import (
     CONTENT_DOWNLOADS,
     CONTENT_UPLOADS,
     CREDENTIALS_PATH,
+    DOCS_TOOLS,
     FILE_APPS,
     RELAY_PATH,
     RELAY_SOURCE,
@@ -416,6 +422,18 @@ def test_a_refused_seed_starts_no_sandbox(sandboxes) -> None:
         for exposure in ({"mode": "mcp"}, {"mode": "tools", "options": {"separator": "."}}):
             not_served = client.post("/seed_session", json=seed_body({**SPEC, "exposure": exposure}))
             assert not_served.status_code == 400 and "unsupported_exposure" in not_served.text, not_served.text
+        assert sandboxes.started == [] and not server._episodes and len(server.service.store) == 0
+
+
+def test_an_api_search_episode_whose_documentation_tool_mcp_does_not_serve_is_refused(sandboxes, monkeypatch) -> None:
+    """An OfficeEnv naming the documentation tool otherwise than MCP serves it (DOCS_TOOLS read from an OfficeEnv
+    that lists no names) would leave the episode no documentation: its seed is refused before a sandbox starts."""
+    monkeypatch.setattr(officeenv_app, "SEARCH_TOOLS", officeenv_app.SEARCH_TOOLS[:1])  # api_search alone
+    server = make_server()
+    with mcp_client(server) as client:
+        refused = client.post("/seed_session", json=seed_body(in_surface(SPEC, "api_search")))
+        assert refused.status_code == 400 and "unsupported_exposure" in refused.text, refused.text
+        assert "not ['api_fetch']" in refused.text
         assert sandboxes.started == [] and not server._episodes and len(server.service.store) == 0
 
 
@@ -1928,10 +1946,22 @@ UPLOADS = {
 }
 
 
-def in_surface(spec: dict, surface: str) -> dict:
-    """A copy of ``spec`` with its task in exposure ``surface``."""
+def _names_the_docs_tool() -> bool:
+    from officeenv.exposure import Catalog, build_exposure
+
+    tools = build_exposure("api_search", Catalog({}), {"docs_tool": "api_docs"}).tools()
+    return "api_docs" in {tool["name"] for tool in tools}
+
+
+# api_search's documentation tool named api_docs (exposure option docs_tool) is OfficeEnv 1.11.0's: an older one
+# ignores the option. Run these against a newer OfficeEnv: install it, or put its src on PYTHONPATH.
+NEEDS_DOCS_TOOL = pytest.mark.skipif(not _names_the_docs_tool(), reason="needs OfficeEnv 1.11.0's option docs_tool")
+
+
+def in_surface(spec: dict, surface: str, **options: object) -> dict:
+    """A copy of ``spec`` with its task in exposure ``surface``, with the exposure ``options`` given."""
     spec = json.loads(json.dumps(spec))
-    spec["exposure"] = {"mode": surface}
+    spec["exposure"] = {"mode": surface, **({"options": options} if options else {})}
     return spec
 
 
@@ -1948,12 +1978,20 @@ def command_flags(arguments: dict) -> list[str]:
     ]
 
 
-def seed_in(client: TestClient, sandboxes: type[FakeSandbox], spec: dict, surface: str, files: dict | None = None):
-    """Seed ``spec`` in ``surface``, with ``files`` in the workspace as if the model had written them: the seed's
-    answer, the bearer header of the episode's API, an MCP caller (``tool(name, **arguments)``), and
-    ``call(app, op, **arguments)``, which calls an op the surface's way (an MCP tool, the app's command, an endpoint)
-    and reads its JSON answer, or a failed command's error text as ``{"error": <stderr>}``."""
-    seeded = client.post("/seed_session", json=seed_body(in_surface(spec, surface)))
+def seed_in(
+    client: TestClient,
+    sandboxes: type[FakeSandbox],
+    spec: dict,
+    surface: str,
+    files: dict | None = None,
+    options: dict | None = None,
+):
+    """Seed ``spec`` in ``surface`` (with the exposure ``options``), with ``files`` in the workspace as if the model
+    had written them: the seed's answer, the bearer header of the episode's API, an MCP caller
+    (``tool(name, **arguments)``), and ``call(app, op, **arguments)``, which calls an op the surface's way (an MCP
+    tool, the app's command, an endpoint) and reads its JSON answer, or a failed command's error text as
+    ``{"error": <stderr>}``."""
+    seeded = client.post("/seed_session", json=seed_body(in_surface(spec, surface, **(options or {}))))
     assert seeded.status_code == 200, seeded.text
     sandbox = sandboxes.started[-1]
     sandbox.files.update(files or {})
@@ -2024,22 +2062,33 @@ def test_a_cli_episode_has_its_apps_as_commands_and_no_mcp_tools(sandboxes) -> N
         assert verified["sandbox_endpoint_calls"] == 0.0
 
 
-def test_an_api_search_episode_finds_endpoints_over_mcp_and_calls_them_over_http(sandboxes) -> None:
+@pytest.mark.parametrize("docs_tool", [None, "api_fetch", pytest.param("api_docs", marks=NEEDS_DOCS_TOOL)])
+def test_an_api_search_episode_finds_endpoints_over_mcp_and_calls_them_over_http(sandboxes, docs_tool) -> None:
+    """The finding tools over MCP, the documentation tool by the name the row's exposure gives it (docs_tool, by
+    default api_fetch), with each endpoint's curl command, and the endpoints over HTTP."""
+    docs = docs_tool or "api_fetch"
+    other = "api_docs" if docs == "api_fetch" else "api_fetch"
     server = make_server()
     with mcp_client(server) as local, mcp_client(server, client=SANDBOX) as remote:
-        seeded, auth, tool, _ = seed_in(local, sandboxes, SPEC, "api_search")
+        options = {"docs_tool": docs_tool} if docs_tool else None
+        seeded, auth, tool, _ = seed_in(local, sandboxes, SPEC, "api_search", options=options)
         grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
         tools = rpc(local, "tools/list", {}, grant).json()["result"]["tools"]
-        assert {listed["name"] for listed in tools} == {"api_search", "api_fetch"}
-        assert sandboxes.started[0].spec.files["/workspace/README.md"] == workspace_guide(
-            8192, ("gdrive", "user"), surface="api_search"
-        )
+        assert {listed["name"] for listed in tools} == {"api_search", docs}
+        guide = sandboxes.started[0].spec.files["/workspace/README.md"]
+        assert guide == workspace_guide(8192, ("gdrive", "user"), surface="api_search", docs_tool=docs_tool)
+        assert f"read its parameters with your {docs} tool" in guide and other not in guide
         found = tool("api_search", query="list drive files")
         hit = next(result for result in found["results"] if result["endpoint"] == "gdrive.list_files")
         assert hit["path"] == "/v1/gdrive/list_files"
-        fetched = tool("api_fetch", endpoint="gdrive.list_files")
+        fetched = tool(docs, endpoint="gdrive.list_files")
         assert fetched["http"]["path"] == "/v1/gdrive/list_files"
         assert '"$COMPANY_API_URL/v1/gdrive/list_files"' in fetched["http"]["curl"]
+        # the endpoints that move content are documented as they behave here, whatever the tool's name
+        saved = tool(docs, endpoint="gdrive.download_file")["description"]
+        assert saved == content_description("gdrive", "download_file", "", 8192, guide=GUIDE)
+        refused = rpc(local, "tools/call", {"name": other, "arguments": {"endpoint": "gdrive.list_files"}}, grant)
+        assert refused.json()["result"]["isError"] is True  # the other name is no tool of this episode's
 
         listed = remote.post("/v1/gdrive/list_files", headers=auth, json={"q": "name contains 'ledger'"})
         assert listed.status_code == 200 and "ledger.csv" in listed.text
@@ -2070,17 +2119,38 @@ def test_the_sandbox_gets_the_command_without_its_comments() -> None:
 
 
 def test_the_finding_tools_take_the_api_search_exposures_arguments() -> None:
+    """MCP serves api_search's search and its documentation tool under each name the installed OfficeEnv's exposure
+    may give it (DOCS_TOOLS), each taking the arguments the exposure's own tool takes."""
     from officeenv.session import Session
     from officeenv.task import TaskSpec
 
-    own = {
-        tool["name"]: tool["parameters"]
-        for tool in Session(TaskSpec.model_validate(in_surface(SPEC, "api_search"))).tools()
-    }
+    own = {}
+    for docs in DOCS_TOOLS:
+        session = Session(TaskSpec.model_validate(in_surface(SPEC, "api_search", docs_tool=docs)))
+        own |= {tool["name"]: tool["parameters"] for tool in session.tools()}
+    assert [name for name, _, _ in SEARCH_TOOLS] == ["api_search", *DOCS_TOOLS]
+    assert DOCS_TOOLS[0] == "api_fetch"  # the exposure's default name
     for name, schema, _ in SEARCH_TOOLS:
         assert (
             set(schema["properties"]) == set(own[name]["properties"]) and schema["required"] == own[name]["required"]
         )
+
+
+@NEEDS_DOCS_TOOL
+def test_the_documentation_tools_names_are_the_installed_officeenvs() -> None:
+    """An OfficeEnv that names the documentation tool api_docs lists its names, and MCP serves the tool under each:
+    the names are OfficeEnv's, not the fallback for the versions before 1.11.0, which name it api_fetch alone."""
+    assert "api_docs" in DOCS_TOOLS
+
+
+def test_the_documentation_tool_is_the_one_the_episode_names() -> None:
+    """with_http_calls gives the curl command in the documentation of the tool the episode's exposure names
+    (docs_tool), and leaves any other tool's answer as it is."""
+    doc = json.dumps({"endpoint": "gdrive.list_files", "examples": [{"q": "trashed = false"}]})
+    assert "curl" in json.loads(with_http_calls("api_docs", doc, guide=GUIDE, docs_tool="api_docs"))["http"]
+    assert "curl" in json.loads(with_http_calls("api_fetch", doc, guide=GUIDE))["http"]  # the default name
+    assert with_http_calls("api_docs", doc, guide=GUIDE) == doc
+    assert with_http_calls("api_fetch", doc, guide=GUIDE, docs_tool="api_docs") == doc
 
 
 def test_api_fetch_shows_a_curl_command_that_keeps_its_example_intact() -> None:
@@ -2806,6 +2876,21 @@ def test_row_prompts_name_the_company_api_and_how_each_surface_reaches_the_apps(
         assert not ENVIRONMENT_NAMES.search(prompt), prompt
     assert "run `user complete-task --answer=" in prepare_rows.system_prompt("cli")
     assert "your mcp__company__api_search tool" in prepare_rows.system_prompt("api_search", "mcp__company__")
+    assert "your company_api_fetch tool" in prepare_rows.system_prompt("api_search")  # the tool's default name
+
+
+@NEEDS_DOCS_TOOL
+def test_an_api_search_rows_prompt_names_the_documentation_tool_as_its_task_does(tmp_path) -> None:
+    """A task whose exposure names its documentation tool api_docs (docs_tool) gets a prompt that names it so."""
+    prepare_rows = load_prepare_rows()
+    spec = prepare_rows.rows("api_search")[0]["officeenv"]
+    spec["exposure"]["options"] = {"docs_tool": "api_docs"}
+    (tmp_path / "api_docs.json").write_text(json.dumps({"prompt": "Do the task.", "spec": spec}), encoding="utf-8")
+    (row,) = prepare_rows.rows("api_search", folder=tmp_path)
+    system_message = row["responses_create_params"]["input"][0]["content"]
+    assert "read its parameters with your company_api_docs tool" in system_message
+    assert "api_fetch" not in system_message and "api_call" not in system_message
+    assert row["officeenv"]["exposure"]["options"] == {"docs_tool": "api_docs"}
 
 
 @pytest.mark.parametrize("surface", ["cli", "api_search"])

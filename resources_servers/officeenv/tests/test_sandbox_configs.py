@@ -9,6 +9,10 @@ import pytest
 from omegaconf import OmegaConf
 from opensandbox import Sandbox
 
+
+# OfficeEnv installs apart from the server's locked dependencies until it is published: without it these tests skip.
+pytest.importorskip("officeenv", reason="OfficeEnv is not installed (README.md, 'The OfficeEnv version')")
+
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.sandbox import create_provider, resolve_provider_config

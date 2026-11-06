@@ -14,7 +14,9 @@ per op (``tools``, the default, written to data/sandbox_pilot.jsonl), one comman
 or endpoints found over MCP and called with curl (``api_search``); those two are written to
 data/sandbox_pilot_<exposure>_prepare.jsonl unless an output is given. The system prompt says which,
 naming MCP tools as the harness lists them: ``--tool-prefix company_`` (the default) for Pi, which
-lists configs/officeenv_sandbox.yaml's MCP endpoint as ``company``, ``mcp__company__`` for Codex. It
+lists configs/officeenv_sandbox.yaml's MCP endpoint as ``company``, ``mcp__company__`` for Codex,
+and on ``api_search`` the documentation tool by the name the task's exposure gives it (``api_fetch``,
+or ``api_docs`` with the option ``docs_tool``, OfficeEnv 1.11.0). It
 names the company's API the way the sandbox does (app.py's API_URL_ENV, API_TOKEN_ENV and
 GUIDE_NAME), never the environment. A task that needs more than the shell, curl and Python in its
 sandbox (its example's ``sandbox_needs``: documents, office) keeps that in its row, for the server
@@ -53,7 +55,7 @@ SURFACES = {
     ),
     "api_search": (
         "The company's apps (Google Drive, Gmail and others) are an HTTP API: find an endpoint with your "
-        "{prefix}api_search tool, read its parameters with your {prefix}api_fetch tool, and call it with curl "
+        "{prefix}api_search tool, read its parameters with your {prefix}{docs} tool, and call it with curl "
         "as /workspace/README.md shows.",
         "call the user/complete_task endpoint with a one-line summary as its answer",
     ),
@@ -62,8 +64,23 @@ SURFACES = {
 DATA = Path(__file__).resolve().parents[1] / "data"
 
 
-def system_prompt(exposure: str = "tools", tool_prefix: str = TOOL_PREFIX) -> str:
-    apps, done = (text.format(prefix=tool_prefix) for text in SURFACES[exposure])
+def docs_tool(exposure: str = "api_search", options: dict | None = None) -> str | None:
+    """The documentation tool of a task on ``exposure`` whose exposure has ``options``, as the installed OfficeEnv's
+    api_search exposure lists it: api_fetch, or api_docs with the option docs_tool (OfficeEnv 1.11.0); None on any
+    other exposure, which has none."""
+    if exposure != "api_search":
+        return None
+    from officeenv.exposure import Catalog, build_exposure
+
+    listed = [tool["name"] for tool in build_exposure(exposure, Catalog({}), options).tools()]
+    return next(name for name in listed if name not in ("api_search", "api_call"))
+
+
+def system_prompt(exposure: str = "tools", tool_prefix: str = TOOL_PREFIX, docs: str | None = None) -> str:
+    """The rows' system prompt; ``docs`` names the documentation tool as the task's exposure does (``docs_tool``;
+    None: the exposure's default name)."""
+    docs = docs or docs_tool(exposure)
+    apps, done = (text.format(prefix=tool_prefix, docs=docs) for text in SURFACES[exposure])
     return f"{SANDBOX} {apps} {FILES} When the task is done, {done}."
 
 
@@ -85,10 +102,11 @@ def rows(exposure: str = "tools", tool_prefix: str = TOOL_PREFIX, folder=None) -
         spec = task["spec"]
         if spec.get("exposure", {}).get("mode", "tools") != exposure:
             spec["exposure"] = {**spec.get("exposure", {}), "mode": exposure}
+        system = system_prompt(exposure, tool_prefix, docs_tool(exposure, spec.get("exposure", {}).get("options")))
         row = {
             "responses_create_params": {
                 "input": [
-                    {"role": "system", "content": system_prompt(exposure, tool_prefix)},
+                    {"role": "system", "content": system},
                     {"role": "user", "content": task["prompt"]},
                 ]
             },

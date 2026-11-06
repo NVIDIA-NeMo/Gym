@@ -334,15 +334,18 @@ the checks and the reward are the same for all three:
   harness with nothing but a shell runs these rows (`resources_tool_transports: []`). A call to
   `/v1/cli` that does not come from an app's command (its `<app>-cli/1.0` User-Agent) is refused
   with a pointer to the command, and counted;
-- `api_search`: the MCP tools `api_search` and `api_fetch` find and document endpoints, with each
-  endpoint's HTTP path and the curl command that calls it, and the harness calls
-  `POST /v1/<app>/<op>` with the op's parameters as a JSON object. An endpoint answers with the
-  app's JSON, or with its error under the error's HTTP status.
+- `api_search`: the MCP tools `api_search` and the documentation tool find and document
+  endpoints, with each endpoint's HTTP path and the curl command that calls it, and the harness
+  calls `POST /v1/<app>/<op>` with the op's parameters as a JSON object. An endpoint answers with
+  the app's JSON, or with its error under the error's HTTP status. The documentation tool goes by
+  the name the row's exposure gives it: `api_fetch`, or `api_docs` with the exposure option
+  `docs_tool` (OfficeEnv 1.11.0). The episode's MCP token admits that name, and the workspace's
+  `README.md` and `sandbox/prepare_rows.py`'s prompts use it.
 
 The file API and the content kept out of the conversation (downloads saved, pasted uploads
-refused, Gmail's attachments by path) serve every surface: a command's `--help` and `api_fetch`'s
-documentation describe the ops that move content as they behave here, as the tools' descriptions
-do. The workspace's `README.md` is written for the episode's surface, and
+refused, Gmail's attachments by path) serve every surface: a command's `--help` and the
+documentation tool's answers describe the ops that move content as they behave here, as the
+tools' descriptions do. The workspace's `README.md` is written for the episode's surface, and
 `sandbox_config.mcp_tool_prefix` names the MCP tools in it as the harness lists them (`company_`
 for Pi). `/verify` adds `sandbox_commands`, `sandbox_commands_refused` and
 `sandbox_endpoint_calls`.

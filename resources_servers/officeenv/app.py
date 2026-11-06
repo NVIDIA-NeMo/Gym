@@ -47,9 +47,11 @@ API command that sends the file instead. Gmail's attachments move through the wo
 A sandboxed episode's row exposure decides how its harness reaches the apps (``SANDBOX_SURFACES``):
 one MCP tool per op (``tools``); one command per app in the sandbox (``cli``: ``slack post-message
 --channel=...``, which sends its arguments to ``/v1/cli``), with no MCP tools, so any harness with a
-shell and curl runs it; or ``api_search`` and ``api_fetch`` over MCP, which find endpoints the
-harness calls with curl at ``/v1/<app>/<op>``. The file API, the content kept out of the
-conversation and the workspace guide serve every surface.
+shell and curl runs it; or ``api_search`` and its documentation tool over MCP, which find endpoints
+the harness calls with curl at ``/v1/<app>/<op>``. The documentation tool goes by the name the
+episode's exposure gives it: ``api_fetch``, or ``api_docs`` with the exposure option ``docs_tool``
+(OfficeEnv 1.11.0, ``DOCS_TOOLS``). The file API, the content kept out of the conversation and the
+workspace guide serve every surface.
 
 A row may say what its task needs in the sandbox beyond the shell, curl and Python with pandas and
 openpyxl (``sandbox_needs``: ``documents``, ``office``, ``TOOL_SETS``). Its episode gets the first
@@ -146,6 +148,7 @@ from officeenv.apps import available, get_app_class
 from officeenv.artifacts import ArtifactStore
 from officeenv.errors import InvalidRequest, NotFound
 from officeenv.exposure import Catalog, ToolsExposure
+from officeenv.exposure import api_search as api_search_exposure
 from officeenv.exposure.base import Invocation
 from officeenv.service import EpisodeService, Reply, parse_arguments
 
@@ -501,7 +504,7 @@ A command prints its result as JSON and exits 0, or prints the app's error on st
 Arrays and objects go as JSON under their own flag (--data='[{{"range":"A1","values":[["x"]]}}]');
 --flag=null sends null, and a JSON-quoted value stays text (--value='"false"').""",
     "api_search": f"""The company's apps ({{apps}}) are an HTTP API. Find an endpoint with your {{prefix}}api_search
-tool, read its parameters with your {{prefix}}api_fetch tool (it gives the exact command), and call it:
+tool, read its parameters with your {{prefix}}{{docs}} tool (it gives the exact command), and call it:
 
     curl -sS -X POST "${API_URL_ENV}{API_PREFIX}/<app>/<operation>" \\
       -H "Authorization: Bearer ${API_TOKEN_ENV}" -H 'Content-Type: application/json' \\
@@ -579,15 +582,17 @@ def workspace_guide(
     workdir: str = "/workspace",
     tools: tuple[str, ...] = (),
     offline: bool = False,
+    docs_tool: str | None = None,
 ) -> str:
-    """The workspace's README.md for an episode that connects ``apps``: how its apps are reached (``surface``, and
-    ``prefix``, how the harness names this server's MCP tools), how files move between the workspace and its file apps
-    (those of ``apps`` in FILE_APPS, all of them for an episode that connects none), where downloads land when file
-    content stays out of the conversation (``content_limit``, see ContentInWorkspace; None: it does not), and then,
-    for an episode that connects Gmail, how its attachments move too. Last, for an image with more than the shell,
-    curl and Python (``tools``, TOOL_SETS' names) or a sandbox without the internet (``offline``), what is installed,
-    and whether nothing else can be."""
-    intro = SURFACE_GUIDES[surface].format(apps=", ".join(apps), prefix=prefix)
+    """The workspace's README.md for an episode that connects ``apps``: how its apps are reached (``surface``,
+    ``prefix``, how the harness names this server's MCP tools, and on ``api_search`` the documentation tool as the
+    episode's exposure names it, ``docs_tool``, the exposure's default name if None), how files move between the
+    workspace and its file apps (those of ``apps`` in FILE_APPS, all of them for an episode that connects none), where
+    downloads land when file content stays out of the conversation (``content_limit``, see ContentInWorkspace; None:
+    it does not), and then, for an episode that connects Gmail, how its attachments move too. Last, for an image with
+    more than the shell, curl and Python (``tools``, TOOL_SETS' names) or a sandbox without the internet
+    (``offline``), what is installed, and whether nothing else can be."""
+    intro = SURFACE_GUIDES[surface].format(apps=", ".join(apps), prefix=prefix, docs=docs_tool or DOCS_TOOLS[0])
     names = [app for app in FILE_APPS if app in apps] or list(FILE_APPS)
     shown = [FILE_APPS[app] for app in names]
     find = FIND_FILES[surface]
@@ -839,11 +844,29 @@ def with_content_descriptions(
     return text
 
 
-# An api_search episode finds endpoints over MCP and calls them over HTTP: the two finding tools, with the argument
-# shapes of OfficeEnv's api_search exposure (a public contract). Descriptions are formatted with the guide's path.
+# An api_search episode finds endpoints over MCP and calls them over HTTP: the finding tools, its search and its
+# documentation tool, with the argument shapes of OfficeEnv's api_search exposure (a public contract), and its call
+# (api_call) made over HTTP. The exposure names the documentation tool api_fetch, or api_docs with its option docs_tool
+# (OfficeEnv 1.11.0, which lists the names; api_fetch alone before): MCP serves it under each name, and an episode's
+# token admits the one its exposure lists (finding_tools). Descriptions are formatted with the guide's path.
+SEARCH_TOOL, CALL_TOOL = "api_search", "api_call"
+DOCS_TOOLS: tuple[str, ...] = tuple(getattr(api_search_exposure, "DOCS_TOOLS", ("api_fetch",)))
+DOCS_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "endpoint": {
+            "type": "string",
+            "description": "An endpoint id from search results, e.g. 'slack.post_message'",
+        }
+    },
+    "required": ["endpoint"],
+}
+DOCS_TOOL_DESCRIPTION = (
+    "Fetch an endpoint's documentation: description, parameter schema, examples, and the curl command that calls it."
+)
 SEARCH_TOOLS: tuple[tuple[str, dict[str, Any], str], ...] = (
     (
-        "api_search",
+        SEARCH_TOOL,
         {
             "type": "object",
             "properties": {
@@ -862,22 +885,15 @@ SEARCH_TOOLS: tuple[tuple[str, dict[str, Any], str], ...] = (
         "Search the connected apps' API for endpoints matching what you want to do. Returns endpoint ids and "
         "their HTTP paths; read an endpoint's parameters before calling it with curl (see {guide}).",
     ),
-    (
-        "api_fetch",
-        {
-            "type": "object",
-            "properties": {
-                "endpoint": {
-                    "type": "string",
-                    "description": "An endpoint id from search results, e.g. 'slack.post_message'",
-                }
-            },
-            "required": ["endpoint"],
-        },
-        "Fetch an endpoint's documentation: description, parameter schema, examples, and the curl command that "
-        "calls it.",
-    ),
+    *((name, DOCS_TOOL_SCHEMA, DOCS_TOOL_DESCRIPTION) for name in DOCS_TOOLS),
 )
+
+
+def finding_tools(tools: Sequence[str]) -> list[str]:
+    """The tools an api_search episode reaches over MCP, as its exposure lists them: all but the call, which the
+    sandbox makes over HTTP."""
+    return [name for name in tools if name != CALL_TOOL]
+
 
 CURL_CALL = (
     f'curl -sS -X POST "${API_URL_ENV}{{path}}" -H "Authorization: Bearer ${API_TOKEN_ENV}" '
@@ -892,13 +908,20 @@ def endpoint_path(endpoint: str) -> str:
 
 
 def with_http_calls(
-    tool_name: str, text: str, content_limit: int | None = None, *, guide: str, workdir: str = "/workspace"
+    tool_name: str,
+    text: str,
+    content_limit: int | None = None,
+    *,
+    guide: str,
+    workdir: str = "/workspace",
+    docs_tool: str = DOCS_TOOLS[0],
 ) -> str:
-    """api_search's results with each endpoint's HTTP path, and api_fetch's documentation with the curl command that
-    calls the endpoint (its first example as the body): in a sandbox, endpoints are called over HTTP. An endpoint
-    that moves file content is described as it behaves here (``content_description``), and so are Gmail's
-    attachments, in the parameters and the examples (``content_schema``, ``example_attachments``)."""
-    if tool_name not in ("api_search", "api_fetch"):
+    """api_search's results with each endpoint's HTTP path, and the documentation tool's documentation (``docs_tool``,
+    as the episode's exposure names it) with the curl command that calls the endpoint (its first example as the body):
+    in a sandbox, endpoints are called over HTTP. An endpoint that moves file content is described as it behaves here
+    (``content_description``), and so are Gmail's attachments, in the parameters and the examples
+    (``content_schema``, ``example_attachments``)."""
+    if tool_name not in (SEARCH_TOOL, docs_tool):
         return text
     try:
         body = json.loads(text)
@@ -906,7 +929,7 @@ def with_http_calls(
         return text
     if not isinstance(body, dict) or "error" in body:
         return text
-    if tool_name == "api_search":
+    if tool_name == SEARCH_TOOL:
         for result in body.get("results") or []:
             if isinstance(result, dict) and isinstance(result.get("endpoint"), str):
                 result["path"] = endpoint_path(result["endpoint"])
@@ -1553,11 +1576,13 @@ class _Episode:
     episode_id: EpisodeId
     task_id: TaskId
     # How its harness reaches its apps (SANDBOX_SURFACES; `tools` without a sandbox), the apps it connects, the tools
-    # its MCP token admits, and a `cli` episode's run_command tool, which its apps' commands call
+    # its MCP token admits, a `cli` episode's run_command tool, which its apps' commands call, and an `api_search`
+    # episode's documentation tool, as its exposure names it (DOCS_TOOLS)
     surface: str = "tools"
     apps: tuple[str, ...] = ()
     grant: list[str] = field(default_factory=list)
     command_tool: str | None = None
+    docs_tool: str | None = None
     # In sandbox mode: the episode's file API token, its sandbox and the access lent to the harness, and whether
     # its verification has started, from which point its tools are closed.
     token: str | None = None
@@ -1733,11 +1758,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     ) -> _Episode:
         """The episode a seed made, with how its harness reaches its apps: a sandboxed episode by its row's exposure
         (SANDBOX_SURFACES), any other by its tools. Its MCP token admits the row's tools, none for a `cli` episode,
-        whose apps are commands, and the finding tools for an `api_search` one."""
+        whose apps are commands, and for an `api_search` one the finding tools its exposure lists, whose documentation
+        tool is named as the row's exposure names it."""
         session = self.service.store.get(session_id)
         tools = list(reply.body["tools"])
         surface = session.describe()["exposure"]["mode"] if sandboxed else "tools"
-        grant = {"tools": tools, "cli": [], "api_search": [name for name, _, _ in SEARCH_TOOLS]}[surface]
+        finding = finding_tools(tools)
+        grant = {"tools": tools, "cli": [], "api_search": finding}[surface]
         return _Episode(
             body.episode_id,
             body.task_id,
@@ -1745,6 +1772,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             apps=tuple(sorted(session.apps)),
             grant=grant,
             command_tool=tools[0] if surface == "cli" else None,
+            docs_tool=next(name for name in finding if name != SEARCH_TOOL) if surface == "api_search" else None,
         )
 
     def _sandbox_image(self, row: Mapping[str, Any]) -> SandboxImage:
@@ -1861,6 +1889,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             workdir=self._workdir(),
             tools=tuple(image.provides),
             offline=config.block_internet,
+            docs_tool=episode.docs_tool,
         )
         files = {self._guide_path(): guide, CREDENTIALS_PATH: api_credentials(files_api_url.rstrip("/"), token)}
         if episode.surface == "cli":
@@ -1983,10 +2012,18 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def _unreachable(self, session_id: str, *, sandboxed: bool) -> str | None:
         """Why a seeded session's apps cannot be reached, if they cannot. Over MCP a harness reaches the ``tools``
         exposure's tools under their own names; a sandboxed episode's harness may reach its apps as commands
-        (``cli``) or as endpoints it finds over MCP (``api_search``) instead, and no other way."""
+        (``cli``) or as endpoints it finds over MCP (``api_search``, with finding tools MCP serves) instead, and no
+        other way."""
         session = self.service.store.get(session_id)
         mode = session.describe()["exposure"]["mode"]
-        if sandboxed and mode in SANDBOX_SURFACES and mode != "tools":
+        if sandboxed and mode == "api_search":
+            served = [name for name, _, _ in SEARCH_TOOLS]
+            listed = finding_tools([tool["name"] for tool in session.tools()])
+            unserved = [name for name in listed if name not in served]
+            if unserved:
+                return f"The MCP endpoint serves api_search's finding tools as {served}, not {unserved}"
+            return None
+        if sandboxed and mode == "cli":
             return None
         if sandboxed and mode not in SANDBOX_SURFACES:
             return f"A sandboxed episode reaches its apps through {', '.join(SANDBOX_SURFACES)}, not {mode}"
@@ -2075,7 +2112,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         if episode is not None and episode.surface == "api_search" and reply.status == 200:
             # the endpoints the finding tools find are called over HTTP
             limit = self.config.sandbox_config.inline_file_bytes
-            text = with_http_calls(tool_name, text, limit, guide=self._guide_path(), workdir=self._workdir())
+            text = with_http_calls(
+                tool_name, text, limit, guide=self._guide_path(), workdir=self._workdir(), docs_tool=episode.docs_tool
+            )
         return Response(content=text, media_type="application/json", status_code=reply.status)
 
     @staticmethod
@@ -2201,8 +2240,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         return OfficeEnvLengthPenaltyVerifyResponse(**{**body.model_dump(), **result, **penalty})
 
     def mcp_tools(self, harvested: list["MCPTool"], catchall: Any | None) -> list["MCPTool"] | None:
-        """Every tool of the ``tools`` exposure, and in sandbox mode an ``api_search`` episode's two finding tools,
-        dispatched through the tool route; no other route is a tool. An episode's grant admits only its own."""
+        """Every tool of the ``tools`` exposure, and in sandbox mode the finding tools of ``api_search`` episodes, the
+        documentation tool under each name an exposure may give it, dispatched through the tool route; no other route
+        is a tool. An episode's grant admits only its own."""
         if catchall is None:
             return []
         catalog = tools_exposure_catalog()
@@ -2518,9 +2558,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             result = await self._episode_call(
                 session_id,
                 episode,
-                "api_call",
+                CALL_TOOL,
                 json.dumps(call),
-                lambda: self.service.store.call(session_id, "api_call", call),
+                lambda: self.service.store.call(session_id, CALL_TOOL, call),
             )
         except HTTPException:  # the call refused, or the sandbox failed it, as any surface answers
             raise
