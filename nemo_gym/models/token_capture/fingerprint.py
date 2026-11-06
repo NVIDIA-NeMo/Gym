@@ -67,7 +67,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     User and tool content is excluded from the lookup key.
     Dialect-specific tool-call shapes normalize to the same hash input.
     """
-    fields: list[bytes] = []
+    fields = bytearray()
     count = 0
     for message in messages or []:
         if not isinstance(message, dict):
@@ -100,7 +100,7 @@ def conversation_digest(messages: list[dict]) -> str:
     conversation. Reusing the parent's tokens then serves the instruction text
     the model actually saw, which is what training needs.
     """
-    fields: list[bytes] = []
+    fields = bytearray()
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
@@ -308,27 +308,29 @@ def _canonical_json(value: Any) -> str:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 
-def _add_field(fields: list[bytes], tag: bytes, value: str) -> None:
+def _add_field(fields: bytearray, tag: bytes, value: str) -> None:
     """Append one tagged, length-delimited UTF-8 field to a digest's input."""
     encoded = value.encode("utf-8")
-    fields.append(tag)
-    fields.append(len(encoded).to_bytes(8, "big"))
-    fields.append(encoded)
+    fields += tag
+    fields += len(encoded).to_bytes(8, "big")
+    fields += encoded
 
 
-def _digest(domain: bytes, fields: list[bytes]) -> str:
-    """SHA-256 of the domain and every field, hashed in a single call.
+def _digest(domain: bytes, fields: bytearray) -> str:
+    """SHA-256 of the domain and every field, hashed in a single update.
 
-    hashlib releases the GIL for each update of 2 KiB or more and must take it back afterwards.
-    A long conversation has hundreds of fields that large.
-    Hashing them one update at a time gives up the GIL hundreds of times per digest.
+    On Python 3.13, a hash object's first update of 2 KiB or more makes it release the GIL on every later update.
+    That holds even for updates of a single byte.
+    Hashing field by field calls update three times per field: tag, length and value.
+    After the first large field, each of those calls gives up the GIL.
     The event loop and other threads can run while it is released.
     Taking it back can then wait up to the interpreter's switch interval, 5 ms by default.
-    One call over the joined bytes gives up the GIL once.
+    A long conversation has hundreds of fields, so one digest could wait that long hundreds of times.
+    One update over a single buffer gives up the GIL once.
     The digest is the same as hashing the same bytes field by field.
     """
     hasher = hashlib.sha256(domain)
-    hasher.update(b"".join(fields))
+    hasher.update(fields)
     return hasher.hexdigest()
 
 
@@ -374,7 +376,7 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozense
     were lowercased, still matches when the turn's served names had no capital letters; a turn
     served with a capitalized name then resolves only through the strict fingerprint.
     """
-    fields: list[bytes] = []
+    fields = bytearray()
     seen_ids: set[str] = set()
     for item in items or []:
         if not isinstance(item, dict):
