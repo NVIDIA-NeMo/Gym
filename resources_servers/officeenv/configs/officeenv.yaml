@@ -12,6 +12,9 @@ officeenv_resources_server:
       # term (README, "Training length penalty"); the other knobs default as in app.py.
       length_penalty:
         enabled: false
+      # The Environment Server below ends an episode at the step that ends its task, so the calls that step makes
+      # after the one that ended it are refused rather than run.
+      close_tools_on_task_end: true
 officeenv_simple_agent:
   responses_api_agents:
     simple_agent:
@@ -22,17 +25,25 @@ officeenv_simple_agent:
       model_server:
         type: responses_api_models
         name: policy_model
-      max_steps: 50
+      # One step per activation: the Environment Server drives the steps and keeps the episode's limit.
+      max_steps: 1
       datasets:
       - name: example
         type: example
         jsonl_fpath: resources_servers/officeenv/data/example.jsonl
-# Rollout collection dispatches to environment servers; the simple agent owns its episode
-# through /run, so the legacy_agent environment server stands in front of it.
+# Rollout collection dispatches each row to the Environment Server in front of its agent. OfficeEnv's runs the
+# simple agent one step at a time and reads the task state between steps, so an episode ends before the next model
+# call once its task has ended (complete_task), when the model answers without calling a tool, or after max_steps.
 officeenv_environment_server:
   environment_servers:
-    legacy_agent:
+    officeenv:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: officeenv_resources_server
       agent_server:
         type: responses_api_agents
         name: officeenv_simple_agent
+      # The agent calls the tool routes directly, with the episode's session cookie.
+      resources_tool_transports: [direct_http]
+      max_steps: 50

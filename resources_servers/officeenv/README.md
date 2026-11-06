@@ -126,10 +126,15 @@ gym eval run --no-serve --agent officeenv_simple_agent \
   --output results/officeenv_rollouts.jsonl
 ```
 
-The simple agent stops after `max_steps` (50) turns, or once the model answers without calling a
-tool. Tasks explored through `api_search` spend a search and a fetch on every endpoint before
-calling it, so long ones need more:
-`+officeenv_simple_agent.responses_api_agents.simple_agent.max_steps=150`.
+OfficeEnv's Environment Server (`environment_servers/officeenv`) runs these episodes: it drives the
+simple agent one step at a time (one model call and the tool calls it makes) and reads
+`GET /task_state` between steps. An episode ends before the next model call once its task has
+ended (`complete_task` succeeded), when the model answers without calling a tool, or after
+`max_steps` (50) steps. With `close_tools_on_task_end` (on in this config) the server refuses a
+tool call once the task has ended, so the calls a step makes after the one that ended its task
+change nothing. Tasks explored through `api_search` spend a search and a fetch on every endpoint
+before calling it, so long ones need more steps:
+`++officeenv_environment_server.environment_servers.officeenv.max_steps=150`.
 
 ## Episode sessions and MCP
 
