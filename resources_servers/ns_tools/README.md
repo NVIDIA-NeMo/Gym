@@ -37,7 +37,7 @@ the first `stateful_python_code_exec` call creates it.
   arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. A tool call for a
   closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with
   reward 0.
-- The deprecated agent-run seed sent by an agent's own `/run` takes the row itself and releases any previous Python
+- The deprecated cookie seed sent by an agent's own `/run` takes the row itself and releases any previous Python
   session. A successful seed keeps the cookie ID and drops its previous verification record; Python state is still
   created lazily. `/verify` releases that state and retains only expiring aggregate timings for retries.
 

@@ -69,7 +69,7 @@ _DELETE_RETRY_DELAY_SECONDS = 2.0
 async def _delete_python_session(url: str, session_id: str) -> None:
     """Delete a sandbox Python session, raising if the sandbox does not acknowledge it."""
     # A transport error and a 5xx reply (a sandbox worker restarting behind its proxy) share one budget of bounded
-    # attempts, so an unreachable sandbox cannot hold the session's fence for long.
+    # attempts, so an unreachable sandbox cannot hold the session lock for long.
     for attempt in range(1, _DELETE_ATTEMPTS + 1):
         try:
             response = await http_request(
@@ -166,8 +166,8 @@ class NSToolsToolManager(ToolManager):
             # Use the sandbox's resolved address and session routing header, and retain both maps on failure.
             sandbox = tool._sandbox
             session_id = str(session_id)
-            # The Environment Server closes once. If the DELETE still fails, the verify or close fails and keeps the
-            # Python session owned, so a later close or a checkpoint retire can release it.
+            # The Environment Server closes once. If the DELETE still fails, close fails and the Python session stays
+            # owned (a verify still returns its score), so a later close or a checkpoint retire can release it.
             await _delete_python_session(f"http://{sandbox.host}:{sandbox.port}/sessions/{session_id}", session_id)
             sandbox.session_histories.pop(session_id, None)
             tool.requests_to_sessions.pop(request_id, None)

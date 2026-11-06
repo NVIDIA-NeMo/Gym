@@ -1240,7 +1240,7 @@ class TestResourcesSessions:
         assert manager.python_sessions == {} and server._timing_by_session == {}
 
     @pytest.mark.parametrize("state", ["active", "verified", "closed"])
-    def test_legacy_seed_does_not_take_over_a_typed_cookie(self, state: str) -> None:
+    def test_cookie_seed_does_not_take_over_a_typed_cookie(self, state: str) -> None:
         manager = FakePythonToolManager()
         server, app = _session_server(manager)
         client = TestClient(app)
@@ -1261,7 +1261,7 @@ class TestResourcesSessions:
         }
         assert manager.python_sessions == {}
 
-    def test_legacy_seed_keeps_working(self) -> None:
+    def test_cookie_seed_keeps_working(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)
         client = TestClient(app)
