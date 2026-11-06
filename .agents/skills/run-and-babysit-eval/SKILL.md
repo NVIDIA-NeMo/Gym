@@ -178,6 +178,13 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
   `configured` cap and recorded `extension`), `observed_grading_recovery` (counts of recovered grading
   attempts; null when there are none), `health_verdict`, and `mlflow_delivery`.
 
+Run health and rollout quality are two things. Run health (`run.artifacts.healthy` and
+`unhealthy_reasons` in `quality_summary.json`) says the evaluation infrastructure did its job: nothing
+missing and infrastructure failures within the configured limits. A model that fails every answer on a
+working setup is healthy. Rollout quality (`run.verdicts`, per-rollout `findings`, task flags such as
+`task_no_successful_model_calls`) says how far to trust each measurement and fails nothing. Accept or
+promote a smoke or a run on run health and coverage; read rollout quality as a signal.
+
 Where the evidence lives, relative to the run directory: `gym-job.json` (the submission record),
 `resolved-config.yaml`, the journals (`walltime-extension-journal.jsonl`, `repin-journal.jsonl`,
 `unsafe-resume-journal.jsonl`); in `<benchmark>/`, `logs/driver-<job id>.log` and

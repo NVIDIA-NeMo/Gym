@@ -1501,9 +1501,29 @@ def _resolve_rollout_path(run_dir: Path, rollout_file: str | Path | None) -> Pat
     return rollout_path
 
 
+def _limit_text(value: float | None) -> str:
+    return "none" if value is None else f"{value * 100:g}%"
+
+
+def _run_health_line(artifacts: dict[str, Any]) -> str:
+    """Run health: evaluation-side failures against the configured limits, and the coverage reasons."""
+    healthy = artifacts.get("healthy")
+    parts = ["not evaluated" if healthy is None else "healthy" if healthy else "UNHEALTHY"]
+    if (failed := artifacts.get("failed")) is not None:
+        parts.append(
+            f"failed {failed['final']} final, {failed['not_final']} not final of {artifacts.get('expected')} expected"
+        )
+    limits = artifacts.get("limits") or {}
+    parts.append(
+        f"limit final {_limit_text(limits.get('max_final_failure_fraction'))}, "
+        f"not final {_limit_text(limits.get('max_not_final_failure_fraction'))}"
+    )
+    parts.extend(artifacts.get("unhealthy_reasons") or [])
+    return "run health (infra failures vs limit): " + "; ".join(parts)
+
+
 def format_health_report(result: HealthCheckResult) -> str:
     verdicts = result.summary["run"]["verdicts"]
-    checked = sum(verdicts.values())
     ignored = result.summary["run"].get("ignored_checks", [])
     ignored_note = f" (ignored: {', '.join(ignored)})" if ignored else ""
     responses = result.summary["run"].get("stats", {}).get("responses")
@@ -1515,8 +1535,9 @@ def format_health_report(result: HealthCheckResult) -> str:
             f"{responses['duplicated']} duplicate call IDs\n"
         )
     return (
-        f"Rollout checks: {checked} checked, {verdicts['healthy']} passed, "
-        f"{verdicts['unhealthy']} flagged, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"{_run_health_line(result.summary['run'].get('artifacts') or {})}\n"
+        f"rollout quality: {verdicts['healthy']} healthy / {verdicts['unhealthy']} unhealthy / "
+        f"{verdicts['unobserved']} unobserved{ignored_note}\n"
         f"{response_note}"
         f"Quality summary: {result.summary_path}"
     )
