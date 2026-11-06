@@ -20,7 +20,7 @@ shows the wiring and lifecycle diagram.
 An Environment Server such as `single_agent_turn` seeds the server with a typed `ResourcesSeedSessionRequest`. It names
 the session (`resources_session_id`), and `task_data` carries the row's own fields, here `verifier_metadata`. The reply
 is a `ResourcesSeedSessionResponse` whose `resources_tools` holds the same MCP metadata (the `/mcp` path and the
-per-rollout session token) that a cookie seed returns under `mcp`; the Environment Server grants it to the agent.
+per-rollout session token); the Environment Server grants it to the agent.
 `/verify` releases the live weather-call history and typed binding before checkpoint tracking ends. It keeps only
 the unique called cities and optional typed identity for `session_close_retry_window_seconds`, so a repeated verify
 can still score the response. Checkpoint retirement also releases a live history. The Environment Server then
@@ -29,10 +29,6 @@ calls `/close_session`, which fences verification retries. After `/verify` a `/g
 - a `/get_weather` call for the session, over HTTP or with its MCP token, fails with 404 (`failure_kind: session_lost`);
 - `/verify` returns a masked sample (`mask_sample: true`, `failure_kind: session_lost`) instead of a reward of 0;
 - a seed that reuses the closed `resources_session_id` is refused with 409 for `session_close_retry_window_seconds`.
-
-Running the example under `single_agent_turn` with the `mcp` tool transport needs an agent that accepts per-session
-MCP tool grants. The Claude Code adapter does not consume those grants in its session path yet. The shipped
-Claude Code YAML is an agent-owned compatibility example, not a ready-to-run typed-session pairing.
 
 ## Inspect the MCP round-trip without an LLM
 
@@ -87,12 +83,10 @@ closed = s.post("http://127.0.0.1:<port>/close_session", json={
 closed.raise_for_status()
 ```
 
-## Agent-owned Claude Code compatibility
+## Run with Claude Code
 
-The shipped Claude Code adapter uses its agent-owned `/run`. The `/run` deprecation for sandboxed harnesses does not apply to this adapter.
-Use the Environment Server typed-session path for new integrations, and migrate existing integrations to it.
-The Environment Server's own `/run` remains the episode entrypoint. The commands below are retained only for
-existing Claude Code integrations; migrating this pairing requires per-session MCP grants in the Claude Code adapter.
+The shipped config runs `claude_code_agent` through its own `/run`: the Claude Code adapter does not accept
+per-session MCP tool grants yet.
 
 <details>
 <summary>Run and wire Claude Code (/run)</summary>

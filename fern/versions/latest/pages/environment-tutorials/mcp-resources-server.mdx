@@ -49,7 +49,7 @@ weather_environment:
 See [Run an integrated agent on a benchmark](/main/agent-server/integrate-existing-agents#run-an-integrated-agent-on-a-benchmark) for pairing and execution setup.
 
 <Note>
-The Claude Code adapter's session path does not yet consume per-session MCP grants. The shipped weather YAML still uses the agent-owned `/run` path; it is retained only for compatibility and is not a typed-session pairing. Its commands and wiring are in the agent-owned compatibility section below.
+The shipped weather config runs Claude Code through its own `/run`, because the Claude Code adapter does not accept per-session MCP tool grants yet. Its commands are under [Claude Code examples](#claude-code-examples).
 </Note>
 
 With a compatible agent and `resources_tool_transports: [mcp]`, the successful episode follows this sequence. The agent lifeline groups the Agent Server and its harness runtime; model calls are omitted.
@@ -169,13 +169,7 @@ def mcp_allowed_tools_for_session(self, seed_body: dict) -> list[str] | None:
 
 The names are signed into the session token. `tools/list` advertises only those tools, and `tools/call` rejects others.
 
-## Agent-owned Claude Code compatibility
-
-<Warning>
-Use the Environment Server typed-session path above for new integrations. The shipped `claude_code_agent` configuration still uses its agent-owned `/run`; the deprecation of `/run` on sandboxed harnesses does not apply to this adapter. The Environment Server's `/run` remains the episode entrypoint.
-</Warning>
-
-The following examples are retained only to explain existing configurations. Claude Code needs per-session MCP grant support before its weather pairing can move to the recommended path.
+## Claude Code examples
 
 <Accordion title="Claude Code weather example (/run)">
 
