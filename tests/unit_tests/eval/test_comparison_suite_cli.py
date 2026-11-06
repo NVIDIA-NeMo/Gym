@@ -129,9 +129,15 @@ def test_disabled_configuration_help_still_requires_suite(help_key: str, monkeyp
 
 
 @pytest.mark.parametrize("field", ["aggregate_metrics", "materialized_inputs"])
-def test_real_cli_rejects_source_artifact_overrides(suite_path: Path, field: str, monkeypatch, capsys) -> None:
+@pytest.mark.parametrize("source_list", [False, True])
+def test_real_cli_rejects_source_artifact_overrides(
+    suite_path: Path, field: str, source_list: bool, monkeypatch, capsys
+) -> None:
     payload = yaml.safe_load(suite_path.read_text())
     payload["models"]["model-a"]["first"]["baseline"][field] = "unsupported.json"
+    if source_list:
+        pair = payload["models"]["model-a"]["first"]
+        pair["baseline"] = [pair["baseline"]]
     suite_path.write_text(yaml.safe_dump(payload))
     output = suite_path.parent / "reports"
     sources = {file: file.read_bytes() for file in suite_path.parent.rglob("*") if file.is_file()}
@@ -146,8 +152,10 @@ def test_real_cli_rejects_source_artifact_overrides(suite_path: Path, field: str
     assert error.value.code == 1
     message = " ".join(capsys.readouterr().out.split())
     assert "Cannot load suite manifest" in message
-    assert f"models.model-a.first.baseline.{field}" in message
+    assert f"models.model-a.first.baseline.0.{field}" in message
     assert "Extra inputs are not permitted" in message
+    assert message.count("type=extra_forbidden") == 1
+    assert "Input should be a valid list" not in message
     assert not output.exists()
     assert {file: file.read_bytes() for file in sources} == sources
 
