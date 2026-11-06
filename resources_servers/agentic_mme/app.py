@@ -8,9 +8,9 @@ import json
 import math
 import re
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Optional
+from typing import Any, ClassVar, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from pydantic import ConfigDict, Field, ValidationError
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymChatCompletion
@@ -22,22 +22,8 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import VerifierFixture, call_judge
+from resources_servers.agentic_mme.task_data import GoldenAnswer
 from resources_servers.agentic_mme.verifier_fixture import create_server
-
-
-class GoldenAnswer(BaseModel):
-    value: str | int | float
-    match_type: Literal["exact", "contains", "numeric"] = "contains"
-    tolerance: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-
-    @field_validator("value", mode="before")
-    @classmethod
-    def valid_target(cls, value: Any) -> str | int | float:
-        if isinstance(value, bool) or not isinstance(value, (str, int, float)) or not str(value).strip():
-            raise ValueError("golden_answer.value must be a nonempty string or finite number")
-        if isinstance(value, float) and not math.isfinite(value):
-            raise ValueError("golden_answer.value must be finite")
-        return value
 
 
 def extract_answer(text: str) -> str:
