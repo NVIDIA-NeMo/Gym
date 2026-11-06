@@ -27,7 +27,14 @@ from fastapi.testclient import TestClient
 from omegaconf import DictConfig
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    SESSION_LOST,
+    EpisodeId,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+)
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     ResourcesCloseSessionRequest,
@@ -35,6 +42,7 @@ from nemo_gym.server_runtime import (
     check_resources_session_contract,
     maybe_auto_expose,
 )
+from nemo_gym.verification.judge import judge_call_failed
 from resources_servers.tavily_search.app import (
     TavilySearchRequest,
     TavilySearchResourcesServer,
@@ -423,8 +431,48 @@ async def test_a_failed_judge_retry_preserves_metrics_without_caching_the_failur
     assert [call.function for call in retried.metrics.async_tavily_calls] == ["search"]
 
 
+def judge_response(text: str) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="judge",
+        created_at=0.0,
+        model="judge",
+        object="response",
+        output=[
+            {
+                "type": "message",
+                "id": "m",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+    )
+
+
+def test_a_judge_outage_is_masked_and_a_retried_verify_rejudges_with_the_retained_metrics() -> None:
+    server = make_server()
+    server.config.use_judge = True
+    server.config.judge_model_server = ModelServerRef(type="responses_api_models", name="judge")
+    server.config.judge_responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=[])
+    client = make_client(server)
+    outage = judge_call_failed("judge down", operation="judge.request")
+    judge = AsyncMock(side_effect=[outage, judge_response("correct: yes")])
+    with patch("resources_servers.tavily_search.app.call_judge", judge):
+        assert client.post("/seed_session", json=seed_json()).status_code == 200
+        assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
+        first = client.post("/verify", json=verify_json()).json()
+        assert (first["reward"], first["mask_sample"], first["failure_kind"]) == (0.0, True, "judge_failed")
+        second = client.post("/verify", json=verify_json()).json()
+    assert (second["reward"], second["mask_sample"]) == (1.0, False)
+    assert [call["function"] for call in second["metrics"]["async_tavily_calls"]] == ["search"]
+    assert judge.await_count == 2
+
+
 @pytest.mark.parametrize("mcp", [False, True])
-def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_task(mcp: bool) -> None:
+def test_minimal_cookie_seed_remains_valid_but_typed_seed_requires_the_task(mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     assert client.post("/seed_session", json={}).status_code == 200
@@ -437,7 +485,7 @@ def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_task(mcp:
     assert server._session_episodes == {}
 
 
-def test_failed_legacy_reseed_keeps_retry_metrics_until_initialization_succeeds() -> None:
+def test_failed_cookie_reseed_keeps_retry_metrics_until_initialization_succeeds() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     assert client.post("/seed_session", json={}).status_code == 200
@@ -470,7 +518,7 @@ def test_verify_retry_metrics_are_a_snapshot_of_the_finished_run(dump_metrics: b
     assert retry["metrics"] == first["metrics"]
 
 
-@pytest.mark.parametrize("operation", ["legacy_reseed", "typed_close"])
+@pytest.mark.parametrize("operation", ["cookie_reseed", "typed_close"])
 async def test_verification_serializes_with_reseed_and_close(operation: str) -> None:
     from nemo_gym.server_runtime import BaseSeedSessionRequest
     from resources_servers.tavily_search.app import JudgeEvaluation, TavilySearchVerifyRequest
@@ -499,7 +547,7 @@ async def test_verification_serializes_with_reseed_and_close(operation: str) -> 
             server.verify(request, TavilySearchVerifyRequest.model_validate(verify_json()))
         )
         await asyncio.wait_for(entered.wait(), timeout=5)
-        if operation == "legacy_reseed":
+        if operation == "cookie_reseed":
             changing = asyncio.create_task(server.seed_session(request, BaseSeedSessionRequest()))
         else:
             changing = asyncio.create_task(
@@ -513,7 +561,7 @@ async def test_verification_serializes_with_reseed_and_close(operation: str) -> 
             finish.set()
             verified, _ = await asyncio.wait_for(asyncio.gather(verifying, changing), timeout=5)
     assert verified.reward == 1.0 and len(verified.metrics.async_tavily_calls) == 1
-    if operation == "legacy_reseed":
+    if operation == "cookie_reseed":
         assert request.session[SESSION_ID_KEY] == "resources-session"
         assert server._session_id_to_metrics["resources-session"] is not old_metrics
         assert server._session_id_to_metrics["resources-session"].async_tavily_calls == []

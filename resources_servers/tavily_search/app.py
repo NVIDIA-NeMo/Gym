@@ -314,7 +314,7 @@ def select_provider_domains(
 
 
 class TavilyTypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
-    """Validate typed search tasks without narrowing the legacy tool-service seed."""
+    """Validate typed search tasks without narrowing the cookie seed."""
 
 
 class TavilySearchResourcesServer(SimpleResourcesServer):
@@ -409,14 +409,14 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Keep permissive legacy tool-service seeds; the base validates typed tasks and owns the lifecycle."""
+        """Keep the permissive cookie seed; the base validates typed tasks and owns the lifecycle."""
         return await super().seed_session(body, request=request)
 
     def has_session_state(self, session_id: str) -> bool:
         return session_id in self._session_id_to_metrics
 
     async def initialize_session_state(self, session_id: str, body: BaseSeedSessionRequest) -> None:
-        """Start fresh metrics after construction succeeds, including a legacy reseed of the same ID."""
+        """Start fresh metrics after construction succeeds, including a cookie reseed of the same ID."""
         self._session_id_to_metrics[session_id] = TavilySearchMetrics()
 
     async def release_session_state(self, session_id: str) -> None:
