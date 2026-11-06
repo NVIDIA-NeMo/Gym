@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -266,6 +268,43 @@ class TestPrepareDependencies:
             assert output.read_text() == "prepared"
         finally:
             sys.modules.pop(module.__name__, None)
+
+    def test_worker_directory_does_not_shadow_preparer_packages(self, tmp_path):
+        # nemo_gym/cli/agents.py sits next to the worker and must not hide the `agents` package of openai-agents.
+        package = tmp_path / "site" / "agents"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("")
+        (package / "function_schema.py").write_text("")
+        output = tmp_path / "prepared.jsonl"
+        (tmp_path / "shadow_preparer.py").write_text(
+            "from pathlib import Path\n"
+            "def prepare():\n"
+            "    import agents.function_schema\n"
+            f"    p = Path({str(output)!r}); p.write_text('ok'); return p\n"
+        )
+        worker = Path(importlib.util.find_spec("nemo_gym.cli._prepare_worker").origin)
+        (tmp_path / "args.json").write_text("{}")
+        subprocess.run(
+            [
+                sys.executable,
+                str(worker),
+                "--root",
+                str(tmp_path),
+                "--module",
+                "shadow_preparer",
+                "--action",
+                "prepare",
+                "--expected",
+                str(output),
+                "--args-file",
+                str(tmp_path / "args.json"),
+                "--result",
+                str(tmp_path / "r.json"),
+            ],
+            check=True,
+            env=os.environ | {"PYTHONPATH": str(tmp_path / "site")},
+        )
+        assert output.read_text() == "ok"
 
     def test_worker_rejects_wrong_output_path(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

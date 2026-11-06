@@ -1428,7 +1428,8 @@ def test_empty_response_reports_runtime_admission() -> None:
     assert response.verifier_metadata["osworld_termination_reason"] == "rollout_error"
 
 
-def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
+@pytest.mark.parametrize("served_call_output", [False, True])
+def test_exact_trace_keeps_parser_retries_as_distinct_model_calls(served_call_output: bool) -> None:
     request = make_run_request(osworld_task=DEFAULT_OSWORLD_TASK)
     calls = []
     for attempt, token_id, accepted in ((1, 20, False), (2, 21, True)):
@@ -1461,7 +1462,7 @@ def test_exact_trace_keeps_parser_retries_as_distinct_model_calls() -> None:
         ],
     }
 
-    response = _build_response(request, result, "test-policy", 1.0, 0.9)
+    response = _build_response(request, result, "test-policy", 1.0, 0.9, served_call_output=served_call_output)
 
     assert len(response.response.output) == 2
     assert [item["accepted"] for item in response.response.completion_evidence or []] == [
