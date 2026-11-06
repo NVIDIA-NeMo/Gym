@@ -70,11 +70,21 @@ def test_declared_overflow_precedes_helper_without_usage_or_a_policy_turn(compac
     record, witness = compaction_evidence
     witness["attempts"].insert(1, {"status_code": 400, "request": {}, "response": {"error": {"message": "overflow"}}})
     witness["compaction"]["overflow_after"] = 1
+    record["ng_agent_observations"]["records"][-1]["trigger"] = "overflow"
     assert {c["status"] for c in checks(record, witness).values()} == {"pass"}
 
     # Undeclared errors cannot disappear from expected call/usage accounting.
     del witness["compaction"]["overflow_after"]
     assert all(c["status"] == "fail" for name, c in checks(record, witness).items() if name != "compaction.schema")
+
+
+@pytest.mark.parametrize("trigger", ["automatic", "threshold"])
+def test_declared_overflow_rejects_mismatched_trigger(compaction_evidence, trigger):
+    record, witness = compaction_evidence
+    witness["attempts"].insert(1, {"status_code": 400, "request": {}, "response": {"error": {}}})
+    witness["compaction"]["overflow_after"] = 1
+    record["ng_agent_observations"]["records"][-1]["trigger"] = trigger
+    assert checks(record, witness)["compaction.event"]["status"] == "fail"
 
 
 @pytest.mark.parametrize("overflow_after", [-1, 0, 99, True, "1"])

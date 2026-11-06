@@ -81,7 +81,9 @@ def inspect_compaction(
         "event",
         lambda: len(events) == len(helper_ids) == int(expected)
         and all(
-            e.get("outcome") == "completed" and e.get("trigger") in ("automatic", "threshold", "overflow")
+            e.get("outcome") == "completed"
+            and e.get("trigger")
+            in (("overflow",) if overflow_after is not None else ("automatic", "threshold", "overflow"))
             for e in events
         )
         and (overflow_after is None or _mapping(attempts[overflow_after + 1].get("response")).get("id") in helper_ids),

@@ -212,7 +212,9 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         # Pi checks thresholds after the tool loop, so exercise its automatic
         # overflow recovery while the shared shell task is still unfinished.
         probe = probe_cls(
-            scenario, directory, compaction_overflow_after=7 if harness == "pi" and scenario.compaction else None
+            scenario,
+            directory,
+            compaction_overflow_after=scenario.tool_steps // 2 if harness == "pi" and scenario.compaction else None,
         )
     probe.save()
     tasks = []
