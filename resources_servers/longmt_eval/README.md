@@ -5,7 +5,8 @@ a model's translation of an entire document (book chapter, news article, or
 structured text) with reference-free COMETKiwi, without requiring a human
 reference translation.
 
-Scoring runs in three phases inside a persistent Ray GPU actor pool:
+Scoring runs in three phases inside persistent Python 3.12 workers owned by
+Ray GPU actors:
 
 1. **Segment** — split source and MT text into sentences with ersatz
 2. **Align** — embed sentence overlaps with LASER2, align with vecalign
@@ -212,3 +213,44 @@ For a full SLURM run with SEGALE enabled on WMT24++ see
 - `ersatz` (forked): MIT
 - `unbabel-comet`: Apache 2.0
 - `langdetect`: Apache 2.0
+
+## Python 3.12 scoring runtime
+
+The Gym-facing server and Ray actors use Gym's supported Python. Every actor
+owns a persistent **Python 3.12 subprocess** for SEGALE, LASER2, ersatz, and
+COMETKiwi. GPU assignment is inherited from the actor; models stay loaded across
+documents. JSON-lines requests cross the process boundary, not Python objects
+or Ray tasks. No Python 3.12 process joins Gym's Ray cluster.
+
+On first use, `setup_scoring.py` installs `scoring/uv.lock` using `uv sync --locked
+--python 3.12` into a lock-specific directory under Gym's `cache_dir/longmt-scoring`.
+Installations are serialized and marked ready only after imports pass. Changes
+to the lock select a new directory. No changes to Gym's Python requirements,
+server venv selection, or other environments are needed. `compute_segale=false`
+does not provision or start the scoring runtime.
+
+For reproducible cluster jobs, provision once before GPU allocation or bake the
+environment into the runtime image:
+
+```bash
+python resources_servers/longmt_eval/setup_scoring.py --cache /shared/longmt-scoring
+```
+
+The command prints the evaluator's Python path. Set `LONGMT_SCORING_PYTHON` to
+that path to use a prebuilt environment. Explicit environments must pass Python
+3.12 and scoring-import checks; this option does not install or rewrite them.
+All Ray nodes must see the evaluator, its Python installation, the server source,
+and model caches at the same paths. The locked PyTorch wheels target CUDA 12.6;
+the GPU driver must support them. Provisioning requires `uv`, network access to
+the pinned dependencies, and enough disk for the scoring libraries. Model cache
+preparation remains separate (see the cache configuration above).
+
+Worker output goes to the actor logs, including model-loading progress and
+per-document phase timings. The client logs a heartbeat every 30 seconds and
+terminates a worker after 30 minutes without a complete response. Malformed
+responses, worker crashes, and timeouts surface as `segale_error`; they must not
+be interpreted as translation-quality scores. Actor shutdown terminates its
+worker; a parent watchdog also releases the worker if Ray kills the actor.
+
+The scoring math and reward schema are unchanged. Both the wrapper environment
+and the Python 3.12 scoring environment have their own dependency lockfile.
