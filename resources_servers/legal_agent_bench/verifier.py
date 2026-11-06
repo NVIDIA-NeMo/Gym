@@ -222,7 +222,18 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
     verifier_dir = Path(args.verifier_dir)
     verifier_dir.mkdir(parents=True, exist_ok=True)
     aggregate_path = verifier_dir / "scores_dual.json"
-    aggregate_path.unlink(missing_ok=True)
+    # Replays may reuse an output directory. Never mix an earlier successful
+    # judge report/reward with this attempt's failure diagnostics.
+    for directory in (verifier_dir, verifier_dir / "judge-1", verifier_dir / "judge-2"):
+        for name in (
+            "scores.json",
+            "scores_dual.json",
+            "reward.json",
+            "error.json",
+            "report.html",
+            "transcript.jsonl",
+        ):
+            (directory / name).unlink(missing_ok=True)
     Path(args.reward_json).unlink(missing_ok=True)
     try:
         raw = json.loads(os.environ.get("LAB_JUDGES", "null"))
@@ -310,6 +321,7 @@ def write_failure_outputs(args: argparse.Namespace, exc: Exception) -> dict[str,
     criteria = task_config.get("criteria", [])
     error_type = type(exc).__name__
     message = str(exc)
+    verifier_dir = Path(args.verifier_dir)
 
     scores = {
         "score": 0.0,
@@ -317,16 +329,18 @@ def write_failure_outputs(args: argparse.Namespace, exc: Exception) -> dict[str,
         "n_passed": 0,
         "n_criteria": len(criteria),
         "criteria_results": [],
-        "summary": f"Verifier error: {error_type}",
-        "error": message,
-        "error_type": error_type,
         "run_id": config.get("run_id") or metrics.get("run_id") or "harbor-run",
         "task": config.get("task") or metrics.get("task") or task_config.get("title", ""),
         "judge_model_base_url": (os.environ.get("LAB_JUDGE_BASE_URL") or args.judge_base_url),
+        # A single judge can complete some criteria before failing. Keep those
+        # results and their provenance alongside the operational failure.
+        **_read_json_if_exists(verifier_dir / "scores.json"),
+        "summary": f"Verifier error: {error_type}",
+        "error": message,
+        "error_type": error_type,
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }
 
-    verifier_dir = Path(args.verifier_dir)
     verifier_dir.mkdir(parents=True, exist_ok=True)
     error = {"error": message, "error_type": error_type}
     write_transcript_event(
