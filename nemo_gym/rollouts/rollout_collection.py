@@ -102,8 +102,10 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     JUDGE_FAILURE_KINDS,
     PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     is_namespaced,
     is_registered,
+    quota_reset_text,
 )
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
@@ -212,6 +214,7 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
+from nemo_gym.data.task_selection import select_tasks
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -726,11 +729,32 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _episode_reply_violation(response: Any) -> NgFailureEvent:
+    """The typed failure for a reply that is neither an episode result nor a failure.
+
+    It names what the reply held (its type and top-level keys, never values), so a producer that answers an
+    episode request with another shape is found from the failure record alone.
+    """
+    shape = (
+        f"an object with keys {sorted(str(key) for key in response)[:20]}"
+        if isinstance(response, Mapping)
+        else f"a {type(response).__name__}"
+    )
+    return NgFailureEvent(
+        boundary=FailureBoundary.COLLECTION,
+        failure_kind=ENVIRONMENT_PROTOCOL_VIOLATION,
+        failure_reason=f"Environment server replied to an episode request with {shape}, not an episode result or failure",
+        operation="collection.run",
+    )
+
+
 def _native_episode_record(row: Dict, response: Any) -> Dict:
     """Validate the dispatched episode identity before translating its outcome."""
     try:
         if not _is_episode_response(response):
-            raise ValueError("Environment server must return an episode result or failure.")
+            raise InvalidRolloutResult(
+                "Environment server must return an episode result or failure."
+            ) from _episode_reply_violation(response)
         request = _episode_request_body(row)
         if EpisodeId.model_validate(response["episode_id"]) != EpisodeId.model_validate(request["episode_id"]):
             raise StaleRolloutResult("Episode response does not match the dispatched rollout attempt.")
@@ -739,7 +763,7 @@ def _native_episode_record(row: Dict, response: Any) -> Dict:
         if (response.get("result") is None) == (response.get("failure") is None):
             raise ValueError("Episode response requires exactly one result or failure.")
         return _episode_record(response)
-    except StaleRolloutResult:
+    except InvalidRolloutResult:
         raise
     except (ValueError, TypeError) as error:
         raise InvalidRolloutResult(str(error)) from error
@@ -1446,6 +1470,17 @@ class SharedRolloutCollectionConfig(
         ),
     )
 
+    environment_protocol_violation_stop_after: int = Field(
+        default=3,
+        ge=0,
+        description=(
+            "Stop the run when this many results from one environment server (all of them, if it serves fewer) "
+            "have all been replies the collector cannot use (environment_protocol_violation). Such a reply is a "
+            "producer bug that every later task repeats. Takes effect with route_failures_to_sidecar; with it "
+            "off, the first invalid reply ends the run. 0 turns the stop off."
+        ),
+    )
+
     route_failures_to_sidecar: bool = Field(
         default=False,
         description=(
@@ -1553,16 +1588,45 @@ class SharedRolloutCollectionConfig(
 
 
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
-    """The end of a run whose sandbox provider refused its credentials: no attempt succeeds until they are fixed."""
+    """The end of a run whose provider (sandbox, or the grading API) refused its credentials: no attempt succeeds
+    until they are fixed."""
     rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
     if not rejected:
         return None
     return IncompleteEvaluationError(
-        f"EVAL STOPPED: the sandbox provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
+        f"EVAL STOPPED: the provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
         "rollout(s); another attempt cannot succeed until they are fixed. Fix the credentials, then continue "
         "with gym eval resubmit --recover.",
         retryable=False,
         failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
+
+
+def _protocol_violation_stop(server: str, answered: int) -> IncompleteEvaluationError:
+    """The end of a run whose environment server has answered every request so far with a reply the collector cannot
+    use: the producer is wrong, and no attempt can change that."""
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the environment server {server} answered {answered} of {answered} requests with a reply "
+        f"the collector cannot use ({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+        "Fix the server or the benchmark pairing, then `gym eval submit` again.",
+        retryable=False,
+        failure_kind=ENVIRONMENT_PROTOCOL_VIOLATION,
+    )
+
+
+def _quota_exhausted_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+    """The end of a run whose grading provider's quota is exhausted: nothing can be graded until it resets."""
+    exhausted = [row for row in failures if row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED]
+    if not exhausted:
+        return None
+    resets = sorted({text for row in exhausted if (text := quota_reset_text(row.get("failure_reason")))})
+    when = f"resets at {resets[-1]}" if resets else "reset time unknown"
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the grading provider's quota is exhausted ({PROVIDER_QUOTA_EXHAUSTED}) on {len(exhausted)} "
+        f"rollout(s); {when}; nothing can be graded before then. After the reset continue with "
+        "gym eval resubmit --recover (re-judges the saved answers, no model calls).",
+        retryable=False,
+        failure_kind=PROVIDER_QUOTA_EXHAUSTED,
     )
 
 
@@ -3339,6 +3403,7 @@ class RolloutCollectionHelper(BaseModel):
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
+        task_ids: Optional[Sequence[str]] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
 
@@ -3349,8 +3414,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
-        the head server's config. Input rows are not mutated; the expanded, stamped copies are
-        returned.
+        the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
+        stored in each row (see ``nemo_gym.data.task_selection.select_tasks``), each task once before
+        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -3360,9 +3426,10 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
         )
+        selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
-            for idx, row in enumerate(examples)
+            (idx, orjson.dumps(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            for idx in selected
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
@@ -4063,6 +4130,9 @@ executions → not run again (left to recovery)
         # Rollouts that never reach the main output at all, kept apart from quality.
         agent_name_to_dropped = defaultdict(Counter)
         counts_left = Counter(self._dispatch_name(row) for row in input_rows)
+        server_requests = Counter(counts_left)
+        server_answers: Counter = Counter()
+        server_violations: Counter = Counter()
         dispatched_per_agent = Counter(counts_left)
         start_time = time.time()
         environment_routes = Counter(
@@ -4393,6 +4463,16 @@ executions → not run again (left to recovery)
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
 
+                server_answers[dispatch_name] += 1
+                server_violations[dispatch_name] += failure_class == ENVIRONMENT_PROTOCOL_VIOLATION
+                stop_after = min(config.environment_protocol_violation_stop_after, server_requests[dispatch_name])
+                if (
+                    stop_after
+                    and server_answers[dispatch_name] >= stop_after
+                    and server_violations[dispatch_name] == server_answers[dispatch_name]
+                ):
+                    raise _protocol_violation_stop(dispatch_name, server_answers[dispatch_name])
+
                 if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
@@ -4496,8 +4576,10 @@ executions → not run again (left to recovery)
             f"Rollout coverage: {completion['successful']}/{completion['expected']} completed, "
             f"of which {completion['measured']} measured, {completion['masked']} masked, "
             f"and {completion['unscored']} unscored; "
-            f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
-            f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+            f"{completion['failed']} failed ({completion['failed_masked']} masked, not scored as zero), "
+            f"{completion['intentionally_omitted']} intentionally omitted, "
+            f"{completion['not_started']} not started, {completion['missing']} missing outcomes; "
+            f"{completion['open']} open (no final result). "
             f"Details: {coverage_path_for(output_fpath)}"
         )
         # Explicitly counted failures can provide a score even when no rollout
@@ -4523,7 +4605,9 @@ executions → not run again (left to recovery)
                 if latency_tracker.drained
                 else ""
             )
-            stop = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            stop = await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
             if stop is not None:
                 raise stop
             raise IncompleteEvaluationError(
@@ -4610,7 +4694,9 @@ executions → not run again (left to recovery)
         expected_rollouts = completion["expected"]
         scored_rollouts = completion["successful"] - completion["unscored"] + len(counted)
         store.write_coverage(
-            scored=scored_rollouts, failures_counted_as_zero=len(counted) - len(imputed), imputed=len(imputed)
+            scored=scored_rollouts,
+            failures_counted_as_zero=len(counted) - len(imputed) + completion.get("counted_zeros_in_successful", 0),
+            imputed=len(imputed),
         )
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
@@ -4633,9 +4719,11 @@ executions → not run again (left to recovery)
                     "coverage/masked": completion["masked"],
                     "coverage/unscored": completion["unscored"],
                     "coverage/failed": completion["failed"],
+                    "coverage/failed_masked": completion["failed_masked"],
                     "coverage/omitted": completion["intentionally_omitted"],
                     "coverage/not_started": completion["not_started"],
                     "coverage/missing_outcomes": completion["missing"],
+                    "coverage/open": completion["open"],
                     "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
                     **failure_metrics,
@@ -4648,7 +4736,9 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if config.require_complete and (
-            stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            stop := await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
         ):
             raise stop
         # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
@@ -6120,6 +6210,7 @@ class RolloutAggregationHelper(BaseModel):
             "unscored": unscored_rollouts,
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
             "failed_final": sum(c["failed_final"] for c in components) if inventory_known else None,
+            "failed_masked": sum(c["failed_masked"] for c in components) if inventory_known else None,
             "failed_not_final": sum(c["failed_not_final"] for c in components) if inventory_known else None,
             "failed_by_class": dict(sum((Counter(c["failed_by_class"]) for c in components), Counter()))
             if inventory_known
@@ -6127,6 +6218,7 @@ class RolloutAggregationHelper(BaseModel):
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
             "not_started": sum(c["not_started"] for c in components) if inventory_known else None,
             "missing": sum(c["missing"] for c in components) if inventory_known else None,
+            "open": sum(c["open"] for c in components) if inventory_known else None,
             "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
             if inventory_known
             else None,
@@ -6139,7 +6231,10 @@ class RolloutAggregationHelper(BaseModel):
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
-            "failures_counted_as_zero": len(counted) - len(missing),
+            "failures_counted_as_zero": len(counted)
+            - len(missing)
+            + sum(c.get("counted_zeros_in_successful", 0) for c in components),
+            "counted_zero_kinds": dict(sum((Counter(c.get("counted_zero_kinds", {})) for c in components), Counter())),
             "imputed": len(missing),
             "shards": components,
             "shards_without_inventory": [str(path) for path in legacy_paths],
@@ -6161,9 +6256,10 @@ class RolloutAggregationHelper(BaseModel):
             coverage += (
                 f"\nCoverage: {completion['successful']} completed "
                 f"({completion['measured']} measured, {completion['masked']} masked, {completion['unscored']} unscored), "
-                f"{completion['failed']} failed, "
+                f"{completion['failed']} failed ({completion['failed_masked']} masked, not scored as zero), "
                 f"{completion['intentionally_omitted']} intentionally omitted, "
-                f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+                f"{completion['not_started']} not started, {completion['missing']} missing outcomes; "
+                f"{completion['open']} open (no final result). "
                 f"Details: {report_path}"
             )
         if get_exporters():  # pragma: no cover
@@ -6188,9 +6284,11 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing"] = completion["missing"]
                 metrics["coverage/not_scored"] = completion["expected"] - scored_rollouts
                 metrics["coverage/failed"] = completion["failed"]
+                metrics["coverage/failed_masked"] = completion["failed_masked"]
                 metrics["coverage/omitted"] = completion["intentionally_omitted"]
                 metrics["coverage/not_started"] = completion["not_started"]
                 metrics["coverage/missing_outcomes"] = completion["missing"]
+                metrics["coverage/open"] = completion["open"]
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
             export_metrics(metrics)
 

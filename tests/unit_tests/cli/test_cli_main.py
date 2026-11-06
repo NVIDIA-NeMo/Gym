@@ -31,6 +31,7 @@ import nemo_gym.orchestration.server_supervisor
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
 from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.environment.assets import asset_config_path
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +274,80 @@ class TestEvalRunFlags:
         assert "+config_paths=[b.yaml]" in overrides
         assert "+agent_name=a" in overrides
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
+
+
+class TestEvalCompareCommands:
+    @pytest.mark.parametrize(
+        ("command", "target"),
+        [
+            ("compare", "nemo_gym.cli.eval:compare"),
+            ("compare-suite", "nemo_gym.cli.eval:compare_suite"),
+        ],
+    )
+    def test_commands_dispatch_independently(self, monkeypatch: MonkeyPatch, command: str, target: str) -> None:
+        actual_target, overrides = _dispatch_for(monkeypatch, ["eval", command])
+        assert actual_target == target
+        assert overrides == []
+
+    def test_suite_is_discoverable_in_eval_help(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "--help"])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 0
+        assert "compare-suite" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("command", "accepted", "absent"),
+        [
+            ("compare", ("--baseline", "--candidates", "--agent", "--confidence-level"), ("--suite", "--level")),
+            ("compare-suite", ("--suite", "--confidence-level"), ("--baseline", "--candidates", "--agent", "--level")),
+        ],
+    )
+    def test_command_help_lists_only_its_own_inputs(
+        self, monkeypatch: MonkeyPatch, capsys, command: str, accepted: tuple[str, ...], absent: tuple[str, ...]
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", command, "--help"])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 0
+        help_text = capsys.readouterr().out
+        for flag in (*accepted, "--output-dir", "--report-format"):
+            assert flag in help_text
+        for flag in absent:
+            assert flag not in help_text
+
+    @pytest.mark.parametrize(
+        ("command", "flag", "value"),
+        [
+            ("compare", "--suite", "suite.yaml"),
+            ("compare", "--level", "suite"),
+            ("compare", "--level", "run"),
+            ("compare-suite", "--level", "suite"),
+            ("compare-suite", "--baseline", "base.jsonl"),
+            ("compare-suite", "--candidates", "candidate.jsonl"),
+            ("compare-suite", "--baseline-agg-metrics", "base.json"),
+            ("compare-suite", "--candidates-agg-metrics", "candidate.json"),
+            ("compare-suite", "--agent", "agent"),
+            ("compare-suite", "--baseline-agent", "agent"),
+            ("compare-suite", "--candidate-agents", "agent"),
+        ],
+    )
+    def test_commands_reject_flags_from_the_other_interface(
+        self, monkeypatch: MonkeyPatch, capsys, command: str, flag: str, value: str
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", command, flag, value])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 2
+        stderr = capsys.readouterr().err
+        assert "unrecognized arguments" in stderr
+        assert flag in stderr
+
+    @pytest.mark.parametrize("command", ["compare", "compare-suite"])
+    def test_both_commands_accept_confidence_level(self, monkeypatch: MonkeyPatch, command: str) -> None:
+        target, overrides = _dispatch_for(monkeypatch, ["eval", command, "--confidence-level", "0.9"])
+        assert target == f"nemo_gym.cli.eval:{command.replace('-', '_')}"
+        assert overrides == ["+confidence_level=0.9"]
 
 
 class TestEvalExportFlags:
@@ -1784,7 +1859,7 @@ class TestDidYouMean:
         self._isolate_roots(monkeypatch, tmp_path)
 
         with pytest.raises(ValueError) as exc_info:
-            cli_main._asset_config_path("agent-type", "foo")
+            asset_config_path("agent-type", "foo")
 
         message = str(exc_info.value)
         assert "responses_api_agents/foo/configs/foo.yaml" in message
@@ -1796,7 +1871,7 @@ class TestDidYouMean:
         self._isolate_roots(monkeypatch, tmp_path)
 
         with pytest.raises(ValueError) as exc_info:
-            cli_main._asset_config_path("agent-type", "foooo")
+            asset_config_path("agent-type", "foooo")
 
         assert "Did you mean `fooo`?" in str(exc_info.value)
 
@@ -1927,7 +2002,7 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
-        resolved = cli_main._asset_config_path("resources-server", "foo")
+        resolved = asset_config_path("resources-server", "foo")
         assert resolved == str(install_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
 
     def test_user_cwd_asset_resolves_when_not_builtin(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
@@ -1940,7 +2015,7 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", user_cwd)
         monkeypatch.chdir(user_cwd)
 
-        resolved = cli_main._asset_config_path("resources-server", "myenv")
+        resolved = asset_config_path("resources-server", "myenv")
         assert resolved == str(user_cwd / "resources_servers" / "myenv" / "configs" / "myenv.yaml")
 
     def test_same_name_in_install_root_and_cwd_prefers_cwd(self, monkeypatch: MonkeyPatch, tmp_path, caplog) -> None:
@@ -1956,7 +2031,7 @@ class TestInstallRootResolution:
         monkeypatch.chdir(user_cwd)
 
         with caplog.at_level(logging.WARNING):
-            resolved = cli_main._asset_config_path("resources-server", "foo")
+            resolved = asset_config_path("resources-server", "foo")
         assert resolved == str(user_cwd / "resources_servers" / "foo" / "configs" / "foo.yaml")
         assert "matches multiple configs" in caplog.text
 
@@ -1970,7 +2045,7 @@ class TestInstallRootResolution:
         monkeypatch.setattr("nemo_gym.WORKING_DIR", repo_root)
         monkeypatch.chdir(repo_root)
 
-        resolved = cli_main._asset_config_path("resources-server", "foo")
+        resolved = asset_config_path("resources-server", "foo")
         assert resolved == str(repo_root / "resources_servers" / "foo" / "configs" / "foo.yaml")
 
 
