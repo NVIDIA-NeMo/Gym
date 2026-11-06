@@ -39,11 +39,14 @@ Requires Docker and a ViBench checkout. ViBench's grading scripts invoke the leg
 seconds and reports a fully failed seeding rate, which reads like a bad app rather than a
 missing binary.
 
+This environment covers ViBench 1.0. Since ViBench 2.0 the 1.0 materials live under `v1/` and
+the shared runner under `_harness/`. `v2.0.7` is the tag this environment was checked against; a
+checkout from before ViBench 2.0 (`prds/` at the root) also works.
 
 ```bash
-git clone https://github.com/ViBench/vibench-public.git ~/vibench
-cd ~/vibench && uv sync && cp .env.template .env   # fill in the grader's provider keys
-docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
+git clone --branch v2.0.7 https://github.com/ViBench/vibench-public.git ~/vibench
+cd ~/vibench/v1 && uv sync && cp .env.template .env   # fill in the grader's provider keys
+cd ~/vibench && docker build -f _harness/runner/docker/Dockerfile.base -t app-bench-base:latest .
 ```
 
 `app-bench-base:latest` is the tag ViBench's own pipeline builds and reuses, so the build
@@ -52,7 +55,7 @@ sandboxed agents land; override `app_workdir` only alongside a different image.
 
 ```bash
 export VIBENCH_REPO_ROOT=~/vibench
-export VIBENCH_ENV_FILE=~/vibench/.env
+export VIBENCH_ENV_FILE=~/vibench/v1/.env
 export VIBENCH_ARTIFACT_DIR=/tmp/vibench-artifacts
 ```
 
@@ -75,7 +78,8 @@ python resources_servers/vibench/prepare.py \
     --output resources_servers/vibench/data/vibench_mvp.jsonl
 ```
 
-That yields 24 tasks across 74 test plans. `data/example.jsonl` holds five of them
+That yields 24 tasks across 74 test plans. Row paths are relative to the checkout root
+(`v1/prds/<app>/...`). `data/example.jsonl` holds five of them
 (`notes`, `quiz`, `barber`, `wedding`, `market_place`).
 
 P0 covers `mvp` artifacts only. `prepare.py` already resolves the PRD chain and test plans
@@ -138,7 +142,8 @@ graded, 16/16 test plans, no build or seeding failures:
 | wedding | 0.36 | 4/4 |
 
 Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
-scale is not saturated. `data/example_rollouts.jsonl` holds this run.
+scale is not saturated. `data/example_rollouts.jsonl` holds this run, with its task paths
+updated to the `v1/` layout.
 
 The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
 `notes` with 0/19 steps, its app unreachable because the build produced no output, while the
@@ -170,7 +175,7 @@ These are known and deliberate; each is a follow-up rather than a bug.
 
 ## Anti-cheat
 
-The agent's sandbox receives the PRD and `prds/<app>/assets/` only. Test plans and
+The agent's sandbox receives the PRD and `<app>/assets/` only. Test plans and
 `test_assets/` are never staged into the build container — they are read at grade time by
 the resources server. Dataset paths are resolved against `vibench_repo_root` and rejected
 if they escape it.
