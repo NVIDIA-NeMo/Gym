@@ -11,7 +11,7 @@ slurm:
 
 vllm:
   repo: https://github.com/bxyu-nvidia/vllm.git
-  branch: bxyu/v0.32.0-dwdp
+  branch: bxyu/v0.32.0-specialcacheblockcopy
   version: "0.32.0"
   precompiled_wheel_commit: v0.32.0
 
