@@ -327,6 +327,113 @@ class TestAgentSessions:
         assert detail in seeded.json()["detail"]
         agent.server_client.post.assert_not_awaited()
 
+    @pytest.mark.parametrize(
+        ("manifest_text", "detail"),
+        [
+            ("{not json", "JSONDecodeError"),
+            ("[]", "is not a JSON object"),
+            ('{"source_dpi": "high", "pages": []}', "invalid literal for int()"),
+            ('{"pages": [{"text": "no page number"}]}', "KeyError"),
+            ('{"pages": [{"page_number": 1, "image": "../../outside.png"}]}', "names page image '../../outside.png'"),
+            ('{"pages": [{"page_number": 1, "image": "/etc/hosts"}]}', "names page image '/etc/hosts'"),
+        ],
+        ids=["not-json", "not-an-object", "bad-dpi", "no-page-number", "image-above", "image-absolute"],
+    )
+    def test_a_malformed_manifest_refuses_the_seed(self, tmp_path: Path, manifest_text: str, detail: str) -> None:
+        """Every retry would read the same file, so a 422 fails the episode once instead of a 500 retried."""
+        agent, manifest, _ = _image_agent(tmp_path)
+        agent.server_client.global_config_dict = {}
+        (tmp_path / manifest).write_text(manifest_text, encoding="utf-8")
+
+        seeded = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=_seed(manifest))
+
+        assert seeded.status_code == 422
+        assert seeded.json()["detail"].startswith(f"document manifest {tmp_path.resolve() / manifest} cannot be read")
+        assert detail in seeded.json()["detail"]
+
+    def test_an_empty_body_server_error_backs_off_like_a_payload_limit(self, tmp_path: Path) -> None:
+        """vLLM answers an oversized multi-image prompt with an empty 500, which Gym's model server relays."""
+        response, _, requests = _session_run(tmp_path, [_model_error(500, ""), _model_reply()], max_model_retries=0)
+
+        assert len(requests) == 2
+        assert response["status"] == "completed"
+        delivery = json.loads(response["metadata"][DOCUMENT_DELIVERY_METADATA_KEY])
+        assert (delivery["image_dpi"], delivery["limit"]) == (120, None)
+        assert [attempt["limit"] for attempt in delivery["rejected_attempts"]] == ["payload"]
+
+    def test_an_empty_body_server_error_that_never_stops_stays_a_classified_failure(self, tmp_path: Path) -> None:
+        """Only empty bodies said the input was too large, which an outage looks like too: the outcome policy
+        judges the classified failure instead of the Environment Server scoring an empty answer 0."""
+        response, _, requests = _session_run(tmp_path, lambda **kwargs: _model_error(500, ""), max_model_retries=0)
+
+        assert len(requests) == 6
+        assert _blocks(requests[-1]) == ["input_text"]
+        assert response["status"] == "failed"
+        outcome = json.loads(response["metadata"][AGENT_OUTCOME_METADATA_KEY])
+        assert (outcome["failure_kind"], outcome["status_code"]) == ("model_request_error", 500)
+        delivery = json.loads(response["metadata"][DOCUMENT_DELIVERY_METADATA_KEY])
+        # Every attempt, the text-only one included, was rejected; none of them set a terminal input limit.
+        assert (delivery["limit"], delivery["text_only_fallback"], delivery["input_limit_rejections"]) == (
+            None,
+            True,
+            6,
+        )
+
+
+def _recording_agent(tmp_path: Path, **overrides) -> tuple[GdpPdfAgent, str, list[dict]]:
+    """The two-page document agent, its model requests recorded; the Resources Server accepts every call."""
+    agent, manifest, _ = _image_agent(tmp_path, **overrides)
+    agent.server_client.global_config_dict = {}
+    model_requests: list[dict] = []
+
+    async def post(**kwargs) -> MagicMock:
+        body = kwargs["json"]
+        body = body.model_dump(mode="json") if hasattr(body, "model_dump") else body
+        if kwargs["url_path"].endswith("/v1/responses"):
+            model_requests.append(body)
+            return _model_reply()
+        reply = MagicMock(status=200, ok=True, cookies={})
+        reply.read = AsyncMock(return_value=json.dumps(body | {"reward": 0.5}))
+        return reply
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    return agent, manifest, model_requests
+
+
+@pytest.mark.parametrize(
+    "overrides", [{}, {"max_pages": 1}, {"include_images": False}], ids=["all", "max-pages", "text"]
+)
+def test_an_agent_session_sends_the_model_the_same_request_as_run(tmp_path: Path, overrides: dict) -> None:
+    run_agent, manifest, run_requests = _recording_agent(tmp_path / "run", **overrides)
+    row = _run_request(manifest).model_dump(mode="json", exclude_unset=True)
+    run_result = TestClient(run_agent.setup_webserver()).post("/run", json=row)
+    assert run_result.status_code == 200
+
+    session_agent, _, session_requests = _recording_agent(tmp_path / "session", **overrides)
+    client = TestClient(session_agent.setup_webserver())
+    assert client.post("/v1/agent_sessions", json=_seed(manifest)).status_code == 200
+    activation = client.post("/ng-rollout/rollout/v1/responses", json=row["responses_create_params"])
+    assert activation.status_code == 200
+
+    assert session_requests == run_requests
+    session_delivery = json.loads(activation.json()["metadata"][DOCUMENT_DELIVERY_METADATA_KEY])
+    expected_truncated = 1 if overrides.get("max_pages") == 1 else 0
+    assert session_delivery["pages_truncated"] == expected_truncated
+    assert ("## Page 2" in run_requests[0]["input"][0]["content"][-1]["text"]) == (not expected_truncated)
+
+
+async def test_run_refuses_a_manifest_whose_page_image_leaves_its_directory(tmp_path: Path) -> None:
+    agent, manifest, _ = _image_agent(tmp_path)
+    (tmp_path / "secret.png").write_bytes(b"not the document")
+    (tmp_path / manifest).write_text(
+        json.dumps({"source_dpi": 150, "pages": [{"page_number": 1, "image": "../../secret.png"}]}), encoding="utf-8"
+    )
+    episode = AsyncMock()
+
+    with pytest.raises(ValueError, match=r"names page image '\.\./\.\./secret.png', which is outside"):
+        await _run_with_episodes(agent, manifest, episode)
+    episode.assert_not_awaited()
+
 
 class TestIncompleteOutputIsTheResult:
     """An incomplete answer means the model spent its output budget: that is the row's result, not a

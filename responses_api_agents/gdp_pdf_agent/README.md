@@ -25,7 +25,8 @@ user message's content to:
 ```
 
 This matches the published setup: parsed document text, with page images for models that accept
-vision input.
+vision input. A manifest's page image paths must stay inside the manifest's own directory (as `prepare.py`
+writes them, `pages/<file>`); the agent refuses a manifest that names an image anywhere else.
 
 ## Config
 
@@ -86,8 +87,13 @@ as a `multimodal_history_redacted` gap on the trajectory.
 Under an agent session (`single_agent_turn` or `single_agent_turn_legacy`), the agent reads the manifest
 from the row's `agent_context` (`artifacts.document_manifest`, written by `benchmarks/gdp_pdf/prepare.py`)
 and resolves it under `documents_base_dir` when the session is seeded. A row without `agent_context`, a
-missing manifest, or a manifest rendered at a DPI other than `dpi` is refused with HTTP 422, so a session never
-answers without its document. The activation builds the same request as `run()` and runs the same backoff:
+missing, unreadable or malformed manifest, a manifest whose page images leave its directory, or a manifest
+rendered at a DPI other than `dpi` is refused with HTTP 422, so a session never answers without its document.
+The manifest is resolved through symlinks and refused when it lands outside `documents_base_dir`: when the
+documents live on other storage behind a symlink (for example `data/documents -> /shared/gdp_pdf/documents`),
+set `documents_base_dir` to the real directory the manifest paths are relative to (`/shared/gdp_pdf`);
+otherwise every session is refused while `run()` still works. The activation builds the same request as `run()`
+and runs the same backoff:
 
 - In a session, Simple Agent returns a model HTTP error as a failed response instead of raising it. The agent
   reads the input limit from that response and retries with a smaller delivery, all within the one activation.
@@ -96,6 +102,10 @@ answers without its document. The activation builds the same request as `run()` 
 - Any other model error (a 5xx that is not an empty-body crash, 401, 403, 429) stays the
   `model_request_error` failure Simple Agent reports. The Environment Server's outcome policy decides what
   happens to it; `run()` instead scored most of these as a zero attempt or failed the run.
+- An empty-body 5xx is taken for an oversized request and backed off like one, since that is how vLLM fails
+  under an oversized multi-image prompt (Gym's model server relays the empty body). If it persists through
+  text only, it may be an outage rather than a limit, so the session returns the last `model_request_error`
+  failure for the outcome policy instead of the zero attempt `run()` scores.
 - The delivery record goes into the response's `document_delivery` metadata as a JSON string, with
   `pages_truncated` in it. A session's result has no top-level `document_delivery` or `agent_adaptations`.
 - Verification and its failures belong to the Environment Server, including `skip_verification`.

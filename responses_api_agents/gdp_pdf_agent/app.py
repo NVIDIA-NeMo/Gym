@@ -230,20 +230,20 @@ def _input_limit(error: ClientResponseError) -> tuple[Optional[str], Optional[in
     return _classify_input_limit(error.status, str(text))
 
 
-def _session_input_limit(response: NeMoGymResponse) -> tuple[Optional[str], Optional[int]]:
-    """Recognize an input-limit rejection that a session activation returned as a failed response.
+def _session_model_error(response: NeMoGymResponse) -> Optional[tuple[int, str]]:
+    """The status and upstream body of a model error that a session activation returned as a failed response.
 
     In a session, Simple Agent does not raise a model HTTP error: it returns a failed response classified as
     ``model_request_error`` with the status, and the upstream body in ``error.message``.
     """
     if response.status != "failed" or response.error is None:
-        return None, None
+        return None
     try:
         outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY, ""))
     except ValidationError:
-        return None, None
+        return None
     if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code is None:
-        return None, None
+        return None
     text = re.sub(r"^Model HTTP \d+: ", "", response.error.message)
     try:
         # Without a body, the message falls back to the reason phrase; that is the empty body _input_limit sees.
@@ -251,7 +251,12 @@ def _session_input_limit(response: NeMoGymResponse) -> tuple[Optional[str], Opti
             text = ""
     except ValueError:
         pass
-    return _classify_input_limit(outcome.status_code, text)
+    return outcome.status_code, text
+
+
+def _is_empty_server_error(status: int, text: str) -> bool:
+    """A server error without a body: taken for a payload limit, though no provider said so."""
+    return status >= 500 and not text.strip()
 
 
 def _classify_input_limit(status: int, text: str) -> tuple[Optional[str], Optional[int]]:
@@ -295,7 +300,7 @@ def _classify_input_limit(status: int, text: str) -> tuple[Optional[str], Option
         )
     ):
         return "context", None
-    if status >= 500 and not text.strip():
+    if _is_empty_server_error(status, text):
         # An empty body on a server error is exactly what an oversized-request crash on the
         # inference server looks like when nothing survives to describe why (seen in practice:
         # vLLM returning a 500 with response_content=b'' under an oversized multi-image prompt).
@@ -353,9 +358,19 @@ def _compose_pages(
 
 
 def _load_manifest(manifest_path: Path) -> dict[str, Any]:
-    """Load a prepare-time document manifest, sorting pages by page number."""
+    """Load a prepare-time document manifest, sorting pages by page number.
+
+    Raises ValueError for a manifest that is not a JSON object, or that names a page image outside its own
+    directory: page images go to the model, so a manifest cannot point at other files on the host.
+    """
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict):
+        raise ValueError(f"{manifest_path} is not a JSON object")
     manifest["pages"] = sorted(manifest.get("pages") or [], key=lambda page: page["page_number"])
+    manifest_dir = manifest_path.parent.resolve()
+    for page in manifest["pages"]:
+        if "image" in page and not (manifest_dir / page["image"]).resolve().is_relative_to(manifest_dir):
+            raise ValueError(f"{manifest_path} names page image {page['image']!r}, which is outside {manifest_dir}")
     return manifest
 
 
@@ -567,7 +582,13 @@ class GdpPdfAgent(SimpleAgent):
         manifest_path = resolve_agent_context_artifact(
             context.document_manifest, self._documents_base_dir(), kind="file"
         )
-        source_dpi = int(_load_manifest(manifest_path).get("source_dpi", self.config.dpi))
+        try:
+            source_dpi = int(_load_manifest(manifest_path).get("source_dpi", self.config.dpi))
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            # Every retry would read the same file, so a manifest that cannot be read or parsed refuses the seed.
+            raise AgentSeedRejectedError(
+                f"document manifest {manifest_path} cannot be read: {type(error).__name__}: {error}"
+            ) from None
         if source_dpi != self.config.dpi:
             raise AgentSeedRejectedError(
                 f"{manifest_path} was rendered at {source_dpi} DPI, but this agent's starting dpi is "
@@ -630,7 +651,8 @@ class GdpPdfAgent(SimpleAgent):
 
         An input-limit rejection that no smaller delivery fixes returns an empty failed response, which the
         Environment Server verifies as a zero attempt, as run() scores it. Any other model error stays the
-        classified failure Simple Agent returns, for the Environment Server's outcome policy.
+        classified failure Simple Agent returns, for the Environment Server's outcome policy; so does an empty-body
+        server error that persists through every smaller delivery, since it may be an outage rather than a limit.
         """
         manifest = _load_manifest(manifest_path)
         prompt_blocks = _prompt_blocks({"responses_create_params": params.model_dump(exclude_unset=True)})
@@ -646,12 +668,16 @@ class GdpPdfAgent(SimpleAgent):
             )
             pages_truncated = max(pages_truncated, image_pages_truncated)
             model_response, trajectory, model_cookies, resources_cookies = await create_episode(request)
-            limit, image_cap = _session_input_limit(model_response)
+            model_error = _session_model_error(model_response)
+            limit, image_cap = _classify_input_limit(*model_error) if model_error is not None else (None, None)
             if limit is not None:
                 if delivery.adapt(limit, image_cap, min_dpi=self.config.min_dpi):
                     continue
-                terminal_limit = limit
-                model_response = _terminal_failure_response(self.config.model_server.name)
+                if not _is_empty_server_error(*model_error):
+                    terminal_limit = limit
+                    model_response = _terminal_failure_response(self.config.model_server.name)
+                # Otherwise the last rejection was only an empty server error, which an outage looks like too:
+                # the classified model_request_error stays the result, for the outcome policy to judge.
             elif (
                 model_response.status == "incomplete"
                 and self.config.regenerate_on_incomplete_output
