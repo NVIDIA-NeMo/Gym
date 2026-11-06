@@ -474,7 +474,9 @@ class FinanceAgent(SimpleResponsesAPIAgent):
             )
             is_error = True if self.config.tool_error_observation == "error_prefix" else None
         except Exception as e:
-            status, error_type = "failed", type(e).__name__
+            # A raised HTTP error is recorded as the status it carries, as an unraised one is.
+            http_status = e.status if isinstance(e, ClientResponseError) else None
+            status, error_type = "failed", f"http_{http_status}" if http_status else type(e).__name__
             logger.error(
                 "Tool call '%s' failed: %s: %s",
                 output_function_call.name,
@@ -810,6 +812,7 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         invocation_status = {
             StopReason.DONE_TOOL: "completed",
             StopReason.TEXT_ONLY: "completed",
+            StopReason.ASSISTANT_MESSAGE: "completed",
             StopReason.ERROR: "failed",
         }.get(stop_reason, "incomplete")
         invocation_error_type = type(model_failure).__name__ if model_failure is not None else abort_error_type

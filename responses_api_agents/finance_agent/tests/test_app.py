@@ -1574,6 +1574,32 @@ _OVERFLOW_BODY = json.dumps(
 ).encode()
 
 
+_LOOP_FIELDS = (
+    "prose_only_behavior",
+    "tool_call_execution",
+    "tool_error_observation",
+    "done_tools",
+    "raise_on_tool_http_error",
+    "done_tool_requires_success",
+)
+
+
+def _big_finance_config(**overrides) -> FinanceAgentConfig:
+    """The shipped big_finance profile: concurrent tool batches, [ERROR] observations and raised HTTP errors."""
+    block = _shipped_block("big_finance")
+    return _make_config(
+        policy=_shipped_policy("big_finance"), **({field: block[field] for field in _LOOP_FIELDS} | overrides)
+    )
+
+
+def _headed_reply(body: str, *, cookies: dict | None = None, error: str | None = None) -> MagicMock:
+    """A tool reply that may carry the resources server's x-nemo-gym-tool-error header."""
+    reply = _tool_reply(body, cookies=cookies)
+    reply.ok = True
+    reply.headers = {} if error is None else {"x-nemo-gym-tool-error": error}
+    return reply
+
+
 def _session_client(model_mock, *, observability: bool = False, config: FinanceAgentConfig | None = None):
     agent, client = _make_agent_and_client(config)
     agent.server_client.global_config_dict = {"observability_enabled": observability}
@@ -1902,6 +1928,153 @@ class TestAgentSessions:
             ("sec_filing_search", "failed", "http_404"),
             ("submit_final_result", "completed", None),
         ]
+
+    def test_a_concurrent_batch_in_a_session_merges_cookies_in_call_order(self, monkeypatch) -> None:
+        """Every call in a batch sends the jar from before it; the replies' cookies merge in call order."""
+        model_mock = _dotjson_mock(
+            _multi_tool_call_response(("web_search", "c1"), ("edgar_search", "c2"), ("fetch_url", "c3")),
+            _tool_call_response("final_answer", '{"answer": "42"}', call_id="c4", resp_id="resp_2"),
+        )
+        agent, client = _session_client(model_mock, observability=True, config=_big_finance_config())
+        delays = {"web_search": 0.3, "edgar_search": 0.05, "fetch_url": 0.15, "final_answer": 0.0}
+        replies = {
+            "web_search": _headed_reply('{"r": 1}', cookies={"a": "1", "session": "from-web"}),
+            "edgar_search": _headed_reply('{"r": 2}', cookies={"b": "2", "session": "from-edgar"}),
+            "fetch_url": _headed_reply("fetch exploded", error="true"),
+            "final_answer": _headed_reply('{"ok": true}', error="false"),
+        }
+        sent_cookies = []
+
+        async def tool(**kwargs):
+            name = kwargs["url"].rsplit("/", 1)[1]
+            sent_cookies.append((name, dict(kwargs["cookies"])))
+            await asyncio.sleep(delays[name])
+            return replies[name]
+
+        monkeypatch.setattr("responses_api_agents.finance_agent.app.http_request", tool)
+        _seed(client)
+
+        reply = client.post("/ng-rollout/rollout/v1/responses", json=_INPUT)
+
+        assert reply.status_code == 200, reply.text
+        assert "session" not in reply.cookies
+        response = NeMoGymResponse.model_validate(reply.json())
+        assert response.metadata["stop_reason"] == "done_tool"
+        assert {
+            output.call_id: output.output for output in response.output if output.type == "function_call_output"
+        } == {"c1": '{"r": 1}', "c2": '{"r": 2}', "c3": "[ERROR] fetch exploded", "c4": '{"ok": true}'}
+        # The batch went out with the seeded jar; edgar_search answered last in call order, so its session wins.
+        merged = {"session": "from-edgar", "a": "1", "b": "2"}
+        assert sorted(sent_cookies[:3]) == [
+            (name, {"session": "seeded"}) for name in ("edgar_search", "fetch_url", "web_search")
+        ]
+        assert sent_cookies[3] == ("final_answer", merged)
+        closed = _close(client)
+        assert closed["resources_cookies"] == merged
+        tool_calls = {
+            record["tool_name"]: record
+            for record in closed["agent_observations"]["records"]
+            if record["kind"] == "tool_call"
+        }
+        # Each call is timed on its own, not as the batch.
+        assert tool_calls["web_search"]["duration_ms"] >= 0.9 * 300
+        assert tool_calls["edgar_search"]["duration_ms"] < tool_calls["web_search"]["duration_ms"]
+
+    def test_a_raised_http_error_in_a_session_is_recorded_with_its_status(self, monkeypatch) -> None:
+        """With raise_on_tool_http_error the model sees an [ERROR] and the record keeps the reply's status."""
+        model_mock = _dotjson_mock(
+            _multi_tool_call_response(("web_search", "c1"), ("edgar_search", "c2")),
+            _tool_call_response("final_answer", '{"answer": "42"}', call_id="c4", resp_id="resp_2"),
+        )
+        agent, client = _session_client(model_mock, observability=True, config=_big_finance_config())
+        unavailable = _model_error_reply(503, b"edgar down")
+        unavailable.cookies = SimpleCookie({"c": "3"})
+        unavailable.headers = {}
+        replies = {
+            "web_search": _headed_reply('{"r": 1}'),
+            "edgar_search": unavailable,
+            "final_answer": _headed_reply('{"ok": true}'),
+        }
+        monkeypatch.setattr(
+            "responses_api_agents.finance_agent.app.http_request",
+            AsyncMock(side_effect=lambda **kwargs: replies[kwargs["url"].rsplit("/", 1)[1]]),
+        )
+        _seed(client)
+
+        response = NeMoGymResponse.model_validate(client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).json())
+
+        observation = next(
+            output.output
+            for output in response.output
+            if output.type == "function_call_output" and output.call_id == "c2"
+        )
+        assert observation.startswith("[ERROR] Tool call failed: ClientResponseError: 503")
+        closed = _close(client)
+        assert closed["resources_cookies"] == {"session": "seeded", "c": "3"}
+        assert [
+            (record["tool_name"], record["status"], record["error_type"])
+            for record in closed["agent_observations"]["records"]
+            if record["kind"] == "tool_call"
+        ] == [
+            ("web_search", "completed", None),
+            ("edgar_search", "failed", "http_503"),
+            ("final_answer", "completed", None),
+        ]
+
+    @pytest.mark.parametrize(
+        ("second_call", "stop_reason", "action"),
+        [("final_answer", "done_tool", OutcomeAction.VERIFY), ("web_search", "error", OutcomeAction.RETRY)],
+    )
+    def test_a_tool_abort_in_a_concurrent_batch_yields_to_an_accepted_done_call(
+        self, monkeypatch, second_call: str, stop_reason: str, action: OutcomeAction
+    ) -> None:
+        abort = json.dumps({"results": json.dumps({"error": "RetryExhaustedError: SEC API answered 429"})})
+        model_mock = _dotjson_mock(_multi_tool_call_response(("edgar_search", "c1"), (second_call, "c2")))
+        agent, client = _session_client(
+            model_mock,
+            observability=True,
+            config=_big_finance_config(
+                abort_on_tool_error_types=["RetryExhaustedError"],
+                tool_error_observation="json",
+                raise_on_tool_http_error=False,
+                done_tool_requires_success=False,
+            ),
+        )
+        replies = {"edgar_search": abort, "final_answer": '{"ok": true}', "web_search": "{}"}
+        monkeypatch.setattr(
+            "responses_api_agents.finance_agent.app.http_request",
+            AsyncMock(side_effect=lambda **kwargs: _headed_reply(replies[kwargs["url"].rsplit("/", 1)[1]])),
+        )
+        _seed(client)
+
+        response = NeMoGymResponse.model_validate(client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).json())
+
+        assert response.metadata["stop_reason"] == stop_reason
+        assert agent_outcome_policy(response) == action
+        invocation = next(
+            record
+            for record in _close(client)["agent_observations"]["records"]
+            if record["kind"] == "agent_invocation"
+        )
+        expected = ("completed", None) if action is OutcomeAction.VERIFY else ("failed", "RetryExhaustedError")
+        assert (invocation["status"], invocation["error_type"]) == expected
+
+    def test_a_prose_answer_in_a_session_completes_the_invocation(self) -> None:
+        """Under the finish profile an assistant message is the answer, so the invocation completed."""
+        model_mock = _dotjson_mock(_text_response("The answer is 42."))
+        agent, client = _session_client(model_mock, observability=True, config=_big_finance_config())
+        _seed(client)
+
+        response = NeMoGymResponse.model_validate(client.post("/ng-rollout/rollout/v1/responses", json=_INPUT).json())
+
+        assert response.metadata["stop_reason"] == "assistant_message"
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+        invocation = next(
+            record
+            for record in _close(client)["agent_observations"]["records"]
+            if record["kind"] == "agent_invocation"
+        )
+        assert (invocation["status"], invocation["stop_reason"]) == ("completed", "assistant_message")
 
     def test_captured_model_calls_carry_the_invocation_session_header(self, monkeypatch) -> None:
         """Capture ties each model call to its AgentInvocation through x-session-id; a legacy /run sends none."""

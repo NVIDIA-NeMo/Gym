@@ -63,7 +63,9 @@ The loop also runs behind the `single_agent_turn_legacy` Environment Server, whi
 agent session, calls `/v1/responses` once, closes the agent session, verifies, and closes the resources session. The
 agent and the finance resources servers export no checkpoint state (`restart_only`), so after a crash the episode
 still starts over from its input. What changes is that a failed model call, seed or judge becomes a classified failure
-instead of reward 0. Each relay config has a counterpart that does this; the relay configs are unchanged:
+instead of reward 0. Each finance_sec_search and finance_agent_v2 relay config has a counterpart that does this; the
+relay configs are unchanged. The big_finance configs stay on the relay until the big_finance resources server serves
+typed resources sessions:
 
 | Relay config | Environment Server config |
 |--------------|---------------------------|
