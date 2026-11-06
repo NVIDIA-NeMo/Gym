@@ -231,10 +231,13 @@ def remove_dot_segments(path: str) -> str:
     return "/" + "/".join(out)
 
 
-def canonical_schemeless(url: str) -> Optional[str]:
+def canonical_schemeless(url: str, merge_slashes_first: bool = False) -> Optional[str]:
     """The scheme-less URL as a fetcher resolves it: IDNA, lower-cased host without a trailing dot, userinfo
     and a default port dropped, dot segments resolved, runs of ``/`` collapsed (as nginx's ``merge_slashes``
-    serves them), fragment dropped. None when it has no parseable host. Used for matching only, never fetched."""
+    serves them), fragment dropped. None when it has no parseable host. Used for matching only, never fetched.
+
+    Dot segments are resolved before slash runs are collapsed, as WHATWG URL parsers order them; with
+    ``merge_slashes_first`` the runs are collapsed first, as nginx does, so ``/abs/x//../y`` is ``/abs/y``."""
     try:
         parts = urlsplit(url)
         if not parts.hostname:
@@ -244,7 +247,11 @@ def canonical_schemeless(url: str) -> Optional[str]:
     except (ValueError, UnicodeError):
         return None
     netloc = host if port in (None, DEFAULT_PORTS.get(parts.scheme.lower())) else f"{host}:{port}"
-    path = _SLASH_RUN_RE.sub("/", remove_dot_segments(parts.path or "/"))
+    path = parts.path or "/"
+    if merge_slashes_first:
+        path = remove_dot_segments(_SLASH_RUN_RE.sub("/", path))
+    else:
+        path = _SLASH_RUN_RE.sub("/", remove_dot_segments(path))
     return netloc + path + (f"?{parts.query}" if parts.query else "")
 
 
@@ -384,8 +391,9 @@ class Blocklist:
     def _single_url_block(self, url: str, where: str) -> Optional[Block]:
         """The URL-shaped families against one URL string, plus the text families against the string itself.
 
-        ``url_prefixes`` and ``serp_url_patterns`` see both the string as written and its canonical form, so
-        ``arxiv.org:443/abs/...``, ``arxiv.org./abs/...`` and ``arxiv.org/x/../abs/...`` match ``arxiv.org/abs/...``.
+        ``url_prefixes`` and ``serp_url_patterns`` see both the string as written and its canonical forms, so
+        ``arxiv.org:443/abs/...``, ``arxiv.org./abs/...``, ``arxiv.org/x/../abs/...`` and ``arxiv.org/abs/x//../...``
+        match ``arxiv.org/abs/...``.
         """
         try:
             parts = urlsplit(url)
@@ -399,9 +407,9 @@ class Blocklist:
             if block is not None:
                 return block
         serp_forms = [schemeless(url)]
-        canonical = canonical_schemeless(url)
-        if canonical is not None and canonical != serp_forms[0]:
-            serp_forms.append(canonical)
+        for canonical in (canonical_schemeless(url), canonical_schemeless(url, merge_slashes_first=True)):
+            if canonical is not None and canonical not in serp_forms:
+                serp_forms.append(canonical)
         prefix_forms = {_WWW_RE.sub("", form, count=1).lower() for form in serp_forms}
         for prefix in self.url_prefixes:
             if any(form.startswith(prefix.lower()) for form in prefix_forms):

@@ -64,8 +64,10 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 
 The canonical form is the URL as a fetcher resolves it: the host UTS #46-mapped and IDNA-encoded, lower-cased and without a
 trailing dot, userinfo and a default port (`:443`, `:80`) dropped, `.` and `..` path segments resolved, runs
-of `/` collapsed, the fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./abs/...`,
-`arxiv.org/x/../abs/...` and `arxiv.org//abs/...` all match the prefix `arxiv.org/abs/...`.
+of `/` collapsed, the fragment dropped. Two canonical forms are checked: dot segments resolved before slash
+runs are collapsed (a WHATWG client resolves dots before it sends the path), and slash runs collapsed first
+(httpx sends `%2e%2e` unresolved, and nginx's `merge_slashes` then reads `abs/x//../y` as `abs/y`). So `arxiv.org:443/abs/...`, `arxiv.org./abs/...`, `arxiv.org/x/../abs/...`,
+`arxiv.org//abs/...` and `arxiv.org/abs/x//%2e%2e/...` all match the prefix `arxiv.org/abs/...`.
 
 Beyond the families, the protocol's own refusals:
 
