@@ -74,7 +74,8 @@ when episodes can wait for one of the `concurrency` slots after seeding.
 Seed probes the sandbox's architecture, libc and AVX2 support, then downloads the matching npm
 package on the **Gym host**, into the owner-only `~/.cache/nemo_gym/droid/<version>/` cache. The
 package must match its npm `sha512` integrity. For 1.1.0 the integrity of each package is pinned in
-[runtime.py](runtime.py); another version's integrity comes from the npm registry's metadata. The
+[runtime.py](runtime.py); another version's integrity comes from the npm registry's metadata, and a
+version that npm does not publish is refused at seed. The
 package (about 150 MB) is uploaded to the sandbox in 1 MiB pieces, and
 [install_droid_runtime.sh](install_droid_runtime.sh) checks its SHA-256, unpacks the `droid`
 binary into `/tmp/nemo-gym-droid-runtime-<version>`, checks that it reports the pinned version, and
@@ -140,9 +141,12 @@ invocation's conversation, not in the response output, and a gap records that.
 | Run ends with | Response status |
 | --- | --- |
 | a `completion` event and exit 0 | `completed` |
-| the time limit (or a rollout stop) | `incomplete` |
-| exit 0 without a `completion` event | `incomplete` |
+| the time limit | `incomplete`; the invocation's `stop_reason` is `timeout` |
+| a rollout stop | `incomplete`, with `ng_rollout_stop` |
+| exit 0 without a `completion` event | `failed`, with `ng_agent_outcome` `unknown`: a cut or lost stream is not graded |
 | an `error` event, or a nonzero exit | `failed`, with `ng_agent_outcome` |
+
+Every response's metadata carries the deadline that applied, in seconds, as `agent_timeout_sec`.
 
 An error event that starts with an HTTP status (Droid 1.1.0 reports a failed model request as
 `404 {...}`) is classified as `model_request_error` with that status; connection failures as
@@ -182,15 +186,21 @@ tool call started a subagent (its own transcript stays in Droid's private sessio
 
 ## Limits
 
-- In some container images, Droid kills its own foreground shell commands. On Docker 28.1.1, every
-  foreground `Execute` call in the Terminal-Bench 2.1 images that ship Python
-  (log-summary-date-ranges, openssl-selfsigned-cert, cancel-async-tasks), and on Enroot 3.4.1 in
-  `python:3.13-slim`, returned `Error: Command terminated by signal: SIGKILL`, whatever the command;
-  background `Execute` calls ran. Foreground calls ran normally in configure-git-webserver (Ubuntu
-  24.04 without Python) and on a bare host. Droid 0.251.0, 1.0.0, 1.1.0 and 1.2.0 behave the same;
-  running as non-root, with a TTY or without seccomp did not change it. Models can still finish tasks
-  by running commands in the background, but expect lower scores where this happens. The adapter
-  reports these calls as failed tools with Droid's message as the output.
+- In some container images, Droid kills its own foreground shell commands: the `Execute` call returns
+  `Error: Command terminated by signal: SIGKILL`, whatever the command, while background `Execute`
+  calls run. The adapter reports these calls as failed tools with Droid's message as the output.
+  Models can still finish tasks by running commands in the background, but scores on an affected
+  pairing understate the harness. Seen so far:
+
+  | Pairing | Sandbox | Affected tasks |
+  | --- | --- | --- |
+  | Terminal-Bench 2.1 | Resources-owned Docker 28.1.1 | every foreground call in log-summary-date-ranges, openssl-selfsigned-cert and cancel-async-tasks (images that ship Python); configure-git-webserver (Ubuntu 24.04 without Python) ran normally |
+  | Terminal-Bench 2.1 | Resources-owned OpenSandbox | circuit-fibsqrt and regex-chess: the runs that failed had repeated SIGKILLed calls |
+  | reasoning_gym | agent-owned Enroot 3.4.1, `python:3.13-slim` | every foreground call |
+
+  Foreground calls ran normally on a bare host. Droid 0.251.0, 1.0.0, 1.1.0 and 1.2.0 behave the
+  same; running as non-root, with a TTY or without seccomp did not change it. The trigger in the
+  image is not identified, so check a new pairing's smoke for SIGKILLed `Execute` results.
 - Droid is distributed under Factory's proprietary terms (`UNLICENSED` on npm). The adapter
   downloads the published binary at seed; it vendors nothing.
 - Glibc Linux sandboxes only (x86-64 or arm64).

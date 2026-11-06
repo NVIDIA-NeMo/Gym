@@ -117,6 +117,9 @@ async def _package_source(version: str, target: str) -> tuple[str, str]:
     if (version, target) in _SOURCES:
         return _SOURCES[version, target]
     async with await request("GET", f"{REGISTRY}/@factory/{name}/{version}", timeout=ClientTimeout(total=60)) as reply:
+        if reply.status == 404:
+            # An unpublished version fails every retry the same way; other registry errors may pass.
+            raise AgentSeedRejectedError(f"Droid {version} is not published as @factory/{name} on npm")
         reply.raise_for_status()
         metadata = json.loads(await reply.text())
     dist = metadata["dist"]

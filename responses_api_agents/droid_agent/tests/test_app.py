@@ -277,7 +277,7 @@ async def test_activation_routes_droid_through_the_rollout_model_route(monkeypat
     )
     assert NeMoGymResponseUsage.sum_from_list([response.usage, known]).output_tokens_details.reasoning_tokens is None
     assert "reasoning_token_usage_unavailable" in {gap.code for gap in session.observations.gaps}
-    assert response.metadata == {"harness_execution": "sandbox"}
+    assert response.metadata == {"harness_execution": "sandbox", "agent_timeout_sec": "1800.0"}
 
     invocation, tool, sandbox_record = session.observations.records
     assert invocation.invocation_id == capture_key and invocation.harness_session_id == "droid-session"
@@ -293,19 +293,26 @@ async def test_activation_routes_droid_through_the_rollout_model_route(monkeypat
     "events,cleanup,status,reason",
     [
         (EVENTS[:-1], {"timed_out": True, "return_code": 143}, "incomplete", "timeout"),
-        (EVENTS[:-1], {"timed_out": False, "return_code": 0}, "incomplete", "result_missing"),
+        # A cut or lost stream leaves nothing to grade, so it fails instead of being verified as the model's zero.
+        (EVENTS[:-1], {"timed_out": False, "return_code": 0}, "failed", "result_missing"),
         (EVENTS, {"timed_out": False, "return_code": 2}, "failed", "process_exit_2"),
     ],
 )
 async def test_outcome_follows_droid_exit_and_completion(monkeypatch, events, cleanup, status, reason):
-    instance = agent(monkeypatch)
+    instance = agent(monkeypatch, timeout=1200)
     session = state(cleanup=cleanup | {"cleanup_confirmed": True})
     monkeypatch.setattr(
         adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
     )
-    response = await instance._sandbox_response(session, body())
+    response = await instance._sandbox_response(session, body(metadata={"agent_timeout_sec": "300"}))
     assert response.status == status
-    assert session.observations.records[0].error_type == reason
+    invocation = session.observations.records[0]
+    assert invocation.error_type == reason
+    # The deadline that applied, and whether it ended the run, tell an expired deadline from a missing result.
+    assert response.metadata["agent_timeout_sec"] == "300.0"
+    assert invocation.stop_reason == ("timeout" if reason == "timeout" else None)
+    if status == "failed":
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
     if events is not EVENTS:
         # Without the completion event Droid reports no usage, so none is invented.
         assert response.usage is None
@@ -544,6 +551,8 @@ async def test_rollout_stop_before_launch_is_an_incomplete_response(monkeypatch)
     assert response.status == "incomplete" and response.output == []
     assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": "budget"}
     assert "ng_agent_outcome" not in response.metadata
+    # The stop, not the deadline, ended the run.
+    assert droid.observations.records[0].stop_reason is None
     await session.close(timeout=1)
 
 

@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from aiohttp import ClientResponseError
 
 from nemo_gym.agents import AgentSeedRejectedError
 from responses_api_agents.droid_agent import runtime
@@ -20,8 +21,9 @@ SHA256 = hashlib.sha256(PACKAGE).hexdigest()
 
 
 class Reply:
-    def __init__(self, body: bytes):
+    def __init__(self, body: bytes, status: int = 200):
         self.body = body
+        self.status = status
         self.content = SimpleNamespace(iter_chunked=self.chunks)
 
     async def __aenter__(self):
@@ -31,7 +33,8 @@ class Reply:
         return False
 
     def raise_for_status(self):
-        pass
+        if self.status >= 400:
+            raise ClientResponseError(SimpleNamespace(real_url="https://registry.npmjs.org"), (), status=self.status)
 
     async def text(self):
         return self.body.decode()
@@ -47,14 +50,15 @@ def registry(monkeypatch, tmp_path):
     monkeypatch.setattr(runtime, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(runtime, "_VERIFIED", {})
     monkeypatch.setattr(runtime, "_SOURCES", {})
-    served = {"package": PACKAGE, "urls": []}
+    served = {"package": PACKAGE, "urls": [], "metadata_status": 200}
 
     async def request(method, url, **kwargs):
         served["urls"].append(url)
         if url.endswith(".tgz"):
             return Reply(served["package"])
         tarball = "https://registry.npmjs.org/@factory/cli-linux-x64/-/cli-linux-x64-9.9.9.tgz"
-        return Reply(json.dumps({"dist": {"tarball": tarball, "integrity": INTEGRITY}}).encode())
+        metadata = json.dumps({"dist": {"tarball": tarball, "integrity": INTEGRITY}}).encode()
+        return Reply(metadata, served["metadata_status"])
 
     monkeypatch.setattr(runtime, "request", request)
     return served
@@ -110,6 +114,17 @@ async def test_registry_metadata_is_fetched_once_per_version(registry):
         "https://registry.npmjs.org/@factory/cli-linux-x64/9.9.9",
         "https://registry.npmjs.org/@factory/cli-linux-x64/-/cli-linux-x64-9.9.9.tgz",
     ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,final", [(404, True), (503, False)])
+async def test_unpublished_version_is_refused_as_final(registry, status, final):
+    registry["metadata_status"] = status
+    with pytest.raises(Exception) as error:
+        await runtime.cached_package("9.9.9", "linux-x64")
+    # A missing version is the configuration's fault; a registry outage may pass on a retry.
+    assert isinstance(error.value, AgentSeedRejectedError) is final
+    assert final or isinstance(error.value, ClientResponseError)
 
 
 @pytest.mark.asyncio

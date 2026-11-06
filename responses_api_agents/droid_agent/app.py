@@ -363,6 +363,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         prompt, system = self._conversation_input(body)
         invocation_id = state.request.episode_id.capture_key
+        timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         artifacts = failure = None
         try:
             # Close can fence the staging phase just as it fences the execution phase.
@@ -375,7 +376,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
                         "command": self._command(state, system=system is not None),
                         "env": {"FACTORY_HOME_OVERRIDE": state.factory_home, "FACTORY_AIRGAP_ENABLED": "1"},
                     },
-                    timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
+                    timeout=timeout,
                     close_timeout=self.config.session_close_timeout_seconds,
                 )
         except BaseException as error:
@@ -397,7 +398,8 @@ class DroidAgent(SimpleResponsesAPIAgent):
         elif run.completed:
             status, reason = "completed", None
         else:
-            status, reason = "incomplete", "result_missing"
+            # Exit 0 without a completion event: the stream was cut or lost, so there is no result to grade.
+            status, reason = "failed", "result_missing"
 
         conversation = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
         conversation.append(NeMoGymEasyInputMessage(role="user", content=prompt))
@@ -434,6 +436,8 @@ class DroidAgent(SimpleResponsesAPIAgent):
                 invocation_id=invocation_id,
                 harness_session_id=run.session_id,
                 status=status,
+                # A rollout stop also ends the run as at its deadline; its response carries ng_rollout_stop instead.
+                stop_reason="timeout" if reason == "timeout" and not state.session.expired else None,
                 duration_ms=run.duration_ms,
                 error_type=reason,
                 conversation=[*conversation, *run.conversation],
@@ -468,7 +472,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
             usage=usage,
-            metadata={"harness_execution": "sandbox"},
+            metadata={"harness_execution": "sandbox", AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
         response = self.report_rollout_stop(response, state.session)
         return self.report_outcome(response, {"error": run.error})
