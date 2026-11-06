@@ -102,6 +102,15 @@ example metrics.
 gym env start --config resources_servers/swe_gym/configs/swe_gym_opencode.yaml
 ```
 
+`swe_gym_opencode.yaml` runs `opencode_sandboxed_agent` through the `legacy_agent` relay.
+`swe_gym_opencode_single_agent_turn.yaml` runs `opencode_agent` through `single_agent_turn` instead: the server
+lends the task sandbox to the agent session through `sandbox_access`, and rows reach it through the `swe_gym`
+taskset.
+
+```bash
+gym env start --config resources_servers/swe_gym/configs/swe_gym_opencode_single_agent_turn.yaml
+```
+
 ## Tests
 
 ```bash

@@ -93,6 +93,17 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
+`scale_swe_opencode.yaml` runs `opencode_sandboxed_agent` through the `legacy_agent` relay.
+`configs/scale_swe_opencode_single_agent_turn.yaml` runs `opencode_agent` through `single_agent_turn` instead: the
+server lends the task sandbox to the agent session as described under Episode sessions below, and rows reach it
+through the `scale_swe` taskset.
+
+```bash
+gym env start \
+  --config resources_servers/scale_swe/configs/scale_swe_opencode_single_agent_turn.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml
+```
+
 ## Episode sessions
 
 An Environment Server such as `single_agent_turn` seeds with a `ResourcesSeedSessionRequest` whose

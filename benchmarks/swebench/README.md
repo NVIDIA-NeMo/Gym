@@ -13,6 +13,20 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
   The test split is not prepared, because the pinned SWE-bench harness (swebench 4.1.0) has no
   environment specs for its repositories.
 
+## Harnesses
+
+Each `opencode.yaml` recipe runs `opencode_sandboxed_agent` through the `legacy_agent` relay. The
+`opencode_single_agent_turn.yaml` recipes of Verified, Multilingual and Pro run `opencode_agent` through
+`single_agent_turn` instead, as `verified/hermes.yaml` runs Hermes: the Resources Server starts the task sandbox,
+lends it to the agent session, and grades the captured patch after the agent closes. Rows reach it through the
+recipe's taskset (`swebench:verified`, `swebench:multilingual` or `swebench:pro`). The two OpenCode adapters use
+different defaults, so treat their scores as separate measurements.
+
+```bash
+gym eval prepare --config benchmarks/swebench/verified/opencode_single_agent_turn.yaml
+gym env start --model-type vllm_model --config benchmarks/swebench/verified/opencode_single_agent_turn.yaml
+```
+
 ## Example usage
 
 ```bash
