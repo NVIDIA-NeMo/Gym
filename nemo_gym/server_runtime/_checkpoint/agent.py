@@ -33,8 +33,11 @@ A harness that runs outside the agent's event loop, such as a CLI in a sandbox, 
 before each model call.
 Its activation waits for ``Activation.wait_park_requested()`` beside the harness instead,
 pauses the harness when a checkpoint asks, and then parks with ``Activation.boundary()``.
-An activation waiting for the agent's own concurrency limit wraps that wait in ``Activation.queued()``,
+An activation waiting for the agent's own concurrency limit takes its slot with ``Activation.slot()``,
+or wraps another wait for one in ``Activation.queued()``,
 so a checkpoint counts it as parked instead of waiting for a slot that parked activations hold.
+An activation of a restart parks only at its boundaries: a slot or a policy reply it gets while a checkpoint is open
+is used at once.
 """
 
 import asyncio
@@ -181,6 +184,10 @@ class Activation:
         self._participant = participant
         self._session = session
         self.continuation, session.continuation = session.continuation, None
+        if self.continuation is not None:
+            # The restored boundary stays the session's latest until the activation records its own,
+            # so a checkpoint taken while it waits for a slot or a policy reply before its first boundary exports it.
+            session.boundary = lambda continuation=self.continuation: continuation
         session.unclaimed = False
 
     async def boundary(self, snapshot: BoundarySnapshot) -> None:
@@ -220,10 +227,32 @@ class Activation:
         """Wrap a wait for the agent's own concurrency limit: the session counts as at its latest boundary.
 
         A checkpoint does not wait for a slot that parked activations hold.
-        A slot granted while a checkpoint is open is held here, parked, until resume.
+        A slot granted while a checkpoint is open is held here, parked, until resume,
+        unless the episode restarts after a crash.
+        A wait that takes a slot must give it back if this raises, such as on a retire during that park:
+        ``slot`` does both.
         """
         async with self._participant.queued(self._session):
             yield
+
+    @asynccontextmanager
+    async def slot(self, semaphore: asyncio.Semaphore, *, deadline: Optional[float] = None) -> AsyncIterator[None]:
+        """Take one of the agent's concurrency slots for the body, waiting as ``queued`` does, and always release it.
+
+        The slot is released however the body or the wait ends, including a retire or close while the activation
+        is parked after taking it.
+        ``deadline``, a loop time, bounds the wait for the slot: past it, ``TimeoutError`` is raised.
+        """
+        acquired = False
+        try:
+            async with self.queued():
+                async with asyncio.timeout_at(deadline):
+                    await semaphore.acquire()
+                    acquired = True
+            yield
+        finally:
+            if acquired:
+                semaphore.release()
 
     @asynccontextmanager
     async def awaiting_model(self) -> AsyncIterator[None]:
@@ -611,7 +640,7 @@ class AgentSessionParticipant(CheckpointParticipant):
             if self._live(session):
                 session.state = "running"
             raise
-        if session.park_requested:
+        if session.park_requested and not self.restarts_session(session):
             # The reply arrived while a checkpoint is open, maybe after prepare counted the session at its boundary.
             # Hold it and stay parked at the boundary before the call until resume, so the session never leaves it.
             # After a crash the restored session calls again from that boundary;
@@ -632,8 +661,9 @@ class AgentSessionParticipant(CheckpointParticipant):
             if self._live(session):
                 session.state = previous
             raise
-        if session.park_requested:
+        if session.park_requested and not self.restarts_session(session):
             # A slot granted while a checkpoint is open: the checkpoint may have counted this session as parked.
+            # A restart's session is not in the checkpoint, so it uses the slot at once.
             await self.park(session)
         if self._live(session):
             session.state = previous

@@ -1742,3 +1742,69 @@ async def test_a_request_in_flight_for_a_restart_an_earlier_stage_reported_does_
     assert commit["episode_ids"] == ["q"]
     assert running_through_the_commit
     assert missed["phase"] == "preparing" and missed["report"]["counts"]["inflight"] == 1
+
+
+class ReleasingServer(CounterServer):
+    """Records the checkpoint IDs its exports were for and the retention sets its releases were given."""
+
+    exported_for: list[str] = []
+    released: list[frozenset[str]] = []
+
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        self.exported_for.append(checkpoint_id)
+        return await super().export_session_states(session_ids, checkpoint_id=checkpoint_id)
+
+    async def release_external_state(self, kept: frozenset[str]) -> None:
+        self.released.append(kept)
+
+
+class StatelessReleasingServer(ReleasingServer):
+    checkpoint_mode: ClassVar[str] = "stateless"
+
+
+class RestartOnlyReleasingServer(ReleasingServer):
+    checkpoint_mode: ClassVar[str] = "restart_only"
+
+
+@pytest.mark.parametrize(
+    ("server_type", "releases"),
+    [(ReleasingServer, True), (StatelessReleasingServer, False), (RestartOnlyReleasingServer, False)],
+    ids=["exported", "stateless", "restart_only"],
+)
+async def test_a_release_reaches_the_server_s_hook_with_the_kept_set_only_in_the_exported_mode(
+    server_type: type[ReleasingServer], releases: bool, tmp_path: Path
+) -> None:
+    server, client = make_server(server_type)
+    server.exported_for, server.released = [], []
+    async with client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        for operation, body in (
+            ("prepare", control("c7")),
+            ("commit", control("c7", checkpoint_dir=str(tmp_path))),
+            ("resume", control("c7")),
+            ("release", control("c7", kept=["c6", "c7"])),
+        ):
+            reply = await client.post(f"/ng-control/v1/checkpoint/{operation}", json=body, headers=AUTH)
+            assert reply.status_code == 200, reply.text
+
+    assert server.released == ([frozenset({"c6", "c7"})] if releases else [])
+    # The export learned the ID of the checkpoint it wrote, so its snapshots can be labelled with it.
+    assert server.exported_for == (["c7"] if releases else [])
+
+
+def test_an_exported_server_whose_export_hook_cannot_take_the_checkpoint_id_fails_at_startup() -> None:
+    class ExportsWithoutTheId(CounterServer):
+        async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+            return {}
+
+    class ExportsWithKeywords(CounterServer):
+        async def export_session_states(self, session_ids: list[str], **kwargs: Any) -> dict[str, JsonValue]:
+            return {}
+
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = DictConfig({"checkpoint": {"enabled": True, "control_auth_token": "t"}})
+    config = BaseResourcesServerConfig(host="", port=0, entrypoint="", name="counter")
+    with pytest.raises(ValueError, match="ExportsWithoutTheId.export_session_states must accept .*checkpoint_id"):
+        ExportsWithoutTheId(config=config, server_client=server_client, counters={}).setup_webserver()
+    ExportsWithKeywords(config=config, server_client=server_client, counters={}).setup_webserver()
+    CounterServer(config=config, server_client=server_client, counters={}).setup_webserver()

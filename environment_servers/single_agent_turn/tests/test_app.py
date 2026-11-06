@@ -1163,18 +1163,20 @@ async def test_a_seed_reply_that_cannot_be_captured_makes_the_episode_a_restart(
     assert len(restarts) == (0 if restarting_seed is None else 1)
 
 
+@pytest.mark.parametrize("lends_sandbox", [False, True], ids=["agent_owns_sandbox", "agent_borrows_sandbox"])
 @pytest.mark.parametrize("rebinds", [False, True], ids=["agent_keeps_grants", "agent_rebinds_grants"])
 @pytest.mark.parametrize("transports", [["direct_http"], ["mcp"], ["direct_http", "mcp"]])
-async def test_an_episode_that_grants_mcp_access_restarts_unless_its_agent_rebinds_grants(
-    transports: list[Literal["direct_http", "mcp"]], rebinds: bool
+async def test_an_episode_that_grants_mcp_access_restarts_unless_its_agent_borrows_a_sandbox_and_rebinds_grants(
+    transports: list[Literal["direct_http", "mcp"]], rebinds: bool, lends_sandbox: bool
 ) -> None:
     environment_server, client = _environment_server(resources_tool_transports=transports)
-    client.responses[0] = _Response(
-        {
-            "resources_session_id": "resources-session",
-            "resources_tools": {"server_name": "resources", "headers": {"X-NeMo-Gym-Session-Token": "token"}},
-        }
-    )
+    seed: dict[str, Any] = {
+        "resources_session_id": "resources-session",
+        "resources_tools": {"server_name": "resources", "headers": {"X-NeMo-Gym-Session-Token": "token"}},
+    }
+    if lends_sandbox:
+        seed["sandbox_access"] = _sandbox_access("lent")
+    client.responses[0] = _Response(seed)
     if rebinds:
         client.responses[1] = _Response({"agent_session_id": "agent-session"}, {"x-ng-checkpoint-rebinds-tools": "1"})
     restarts: list[list[str]] = []
@@ -1185,10 +1187,16 @@ async def test_an_episode_that_grants_mcp_access_restarts_unless_its_agent_rebin
     object.__setattr__(environment_server, "checkpoint_restart", record_restart)
     await environment_server.run_request(_request())
 
-    # The MCP token names this attempt. An agent that keeps it would see every tool call refused after a restore,
-    # so the episode restarts; it is marked inside the seed step, before any later boundary can be recorded.
-    # An agent that takes the token its replacement attempt's seed carries continues instead.
-    expected = [["/seed_session", "/v1/agent_sessions"]] if "mcp" in transports and not rebinds else []
+    # The MCP token names this attempt, and only a restore's re-seed carries the replacement attempt's token.
+    # A restore re-seeds only an episode whose agent borrows a sandbox, so without one the episode restarts,
+    # marked before the agent seed creates a session any checkpoint could export.
+    # An agent that keeps its token restarts too, as its own seed reply says;
+    # the reply is checked again here for an agent whose own check misses it.
+    expected = []
+    if "mcp" in transports and not lends_sandbox:
+        expected.append(["/seed_session"])
+    if "mcp" in transports and not rebinds:
+        expected.append(["/seed_session", "/v1/agent_sessions"])
     assert restarts == expected
 
 
@@ -2194,7 +2202,9 @@ def _sandbox_access(sandbox_id: str) -> dict:
     }
 
 
-def _restore_into(environment: SingleAgentTurnEnvironmentServer, boundary: dict) -> SingleAgentTurnRequest:
+def _restore_into(
+    environment: SingleAgentTurnEnvironmentServer, boundary: dict, *, elapsed_s: float = 0.0
+) -> SingleAgentTurnRequest:
     """Restore ``environment`` as a fresh process would, from a checkpoint of attempt 1 at ``boundary``."""
     from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
@@ -2207,6 +2217,7 @@ def _restore_into(environment: SingleAgentTurnEnvironmentServer, boundary: dict)
                 episode_id=request.episode_id.model_copy(update={"attempt": 1}),
                 task_digest=task_digest(request.task.model_dump(mode="json")),
                 boundary=boundary,
+                elapsed_s=elapsed_s,
             )
         ]
     )
@@ -2348,7 +2359,7 @@ async def test_a_replacement_attempt_has_only_what_is_left_of_the_episode_budget
         config=environment.config.model_copy(update={"default_episode_timeout_seconds": 30}), server_client=client
     )
     client.slow_path = "/ng-rollout/rollout-a2/v1/responses"
-    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles(elapsed_s=29.9)})
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles()}, elapsed_s=29.9)
     del client.responses[:2]
 
     episode = await environment.run_request(request)
@@ -2357,27 +2368,135 @@ async def test_a_replacement_attempt_has_only_what_is_left_of_the_episode_budget
     assert episode.failure is not None and episode.failure.failure_reason == "Episode timed out"
 
 
-async def test_each_boundary_records_the_budget_spent_without_parked_time() -> None:
-    from nemo_gym.server_runtime import EnvironmentParticipant
+class _AgentHoldClient(_Client):
+    """Holds the agent call until ``released`` is set, then answers it as scripted."""
 
-    environment, client = _environment_server()
+    released: asyncio.Event = Field(default_factory=asyncio.Event)
+    holding: bool = False
+
+    async def post(self, server_name: str, url_path: str, **kwargs) -> _Response:
+        if url_path.endswith("/v1/responses"):
+            self.holding = True
+            await self.released.wait()
+        return await super().post(server_name, url_path, **kwargs)
+
+
+async def _until(condition: Any) -> None:
+    async with asyncio.timeout(5):
+        while not condition():
+            await asyncio.sleep(0.01)
+
+
+async def test_a_checkpoint_while_the_agent_runs_records_the_budget_it_spent_without_parked_time() -> None:
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
+
+    environment, client = _environment_server(client_type=_AgentHoldClient)
     environment = SingleAgentTurnEnvironmentServer(
         config=environment.config.model_copy(update={"default_episode_timeout_seconds": 60}), server_client=client
     )
     participant = EnvironmentParticipant(mode="exported")
     environment._checkpoint = participant
-    client.slow_path = "/v1/agent_sessions"
-    recorded: list[float] = []
-    boundary = participant.boundary
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    running = asyncio.create_task(environment.run_request(_request()))
+    await _until(lambda: client.holding)
+    # The agent works for a while after its boundary was recorded.
+    await asyncio.sleep(0.3)
+    first = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 30)
+    await controller.prepare(first)
+    [at_first] = participant.export_records(None)
+    await asyncio.sleep(1.0)
+    [while_parked] = participant.export_records(None)
+    await controller.resume(first)
+    second = CheckpointRequest(checkpoint_id="c2", deadline_ts=time.time() + 30)
+    await controller.prepare(second)
+    [at_second] = participant.export_records(None)
+    await controller.resume(second)
+    client.released.set()
+    episode = await running
 
-    async def recording(episode_id: EpisodeId, state: dict) -> None:
-        recorded.append(state["handles"]["elapsed_s"])
-        await boundary(episode_id, state)
+    assert at_first.boundary["next"] == "invoke_agent" and "elapsed_s" not in at_first.boundary["handles"]
+    assert 0.3 <= at_first.elapsed_s < 1.0
+    assert while_parked.elapsed_s == at_first.elapsed_s
+    # The second checkpoint counts the agent's time since, but not the second the first one held it.
+    assert at_first.elapsed_s <= at_second.elapsed_s < at_first.elapsed_s + 1.0
+    assert episode.result.reward == 1.0
 
-    participant.boundary = recording
-    await environment.run_request(_request())
 
-    # The seed boundary comes first; the slow agent seed is counted from the invoke_agent boundary on.
-    assert recorded[0] < 0.1
-    assert all(later >= earlier for earlier, later in zip(recorded, recorded[1:]))
-    assert 0.15 < recorded[1] < 5
+@pytest.mark.parametrize("server_type", [SingleAgentTurnEnvironmentServer, SingleAgentTurnLegacyEnvironmentServer])
+@pytest.mark.parametrize("lends_sandbox", [True, False], ids=["lent", "not_lent"])
+async def test_the_seed_records_whether_the_agent_borrows_a_sandbox_and_only_then_does_a_restore_re_seed(
+    server_type: type, lends_sandbox: bool
+) -> None:
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
+
+    environment, client = _environment_server(client_type=_AgentHoldClient)
+    environment = server_type(config=environment.config, server_client=client)
+    participant = EnvironmentParticipant(mode="exported")
+    environment._checkpoint = participant
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    if lends_sandbox:
+        client.responses[0] = _Response(
+            {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("lent")}
+        )
+    running = asyncio.create_task(environment.run_request(_request()))
+    await _until(lambda: client.holding)
+    checkpoint = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 30)
+    await controller.prepare(checkpoint)
+    [record] = participant.export_records(None)
+    await controller.resume(checkpoint)
+    client.released.set()
+    await running
+
+    # The restore, in a fresh process, continues that record.
+    restored, restored_client = _environment_server()
+    restored = server_type(config=restored.config, server_client=restored_client)
+    request = _restore_into(restored, record.boundary)
+    if lends_sandbox:
+        restored_client.responses[0] = _Response(
+            {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+        )
+    else:
+        del restored_client.responses[:2]
+    episode = await restored.run_request(request)
+
+    assert record.boundary["next"] == "invoke_agent"
+    assert record.boundary["handles"]["borrowed_sandbox"] is lends_sandbox
+    assert episode.result is not None and episode.result.reward == 1.0
+    paths = [path for _, path, _ in restored_client.calls]
+    reseeded = ["/seed_session", "/v1/agent_sessions"] if lends_sandbox else []
+    assert paths == [
+        *reseeded,
+        "/ng-rollout/rollout-a2/v1/responses",
+        "/v1/agent_sessions/close",
+        "/verify",
+        "/close_session",
+    ]
+    if lends_sandbox:
+        rebind = AgentSeedSessionRequest.model_validate(restored_client.calls[1][2]["json"])
+        assert rebind.sandbox_access.connection.descriptor == {"sandbox_id": "forked"}
+
+
+async def test_a_checkpoint_does_not_wait_for_a_replacement_s_re_seed() -> None:
+    from nemo_gym.server_runtime import CheckpointRequest, ParticipantControlPlane
+
+    environment, client = _environment_server(client_type=_HoldingClient)
+    request = _restore_into(environment, {"next": "invoke_agent", "handles": _restored_handles(borrowed_sandbox=True)})
+    participant = environment._checkpoint
+    controller = ParticipantControlPlane(participant, instance_name="environment", lease_grace_seconds=60)
+    client.responses[0] = _Response(
+        {"resources_session_id": "resources-session", "sandbox_access": _sandbox_access("forked")}
+    )
+    running = asyncio.create_task(environment.run_request(request))
+    await _until(lambda: client.started == ["/seed_session"])
+    # The re-seed is held in flight; a crash during it would re-seed again, so the checkpoint does not wait for it.
+    checkpoint = CheckpointRequest(checkpoint_id="c1", deadline_ts=time.time() + 2)
+    prepared = await controller.prepare(checkpoint)
+    [record] = participant.export_records(None)
+    await controller.resume(checkpoint)
+    client.released.set()
+    episode = await running
+
+    assert prepared["phase"] == "prepared", prepared
+    assert record.boundary["next"] == "invoke_agent"
+    assert episode.result is not None and episode.result.reward == 1.0
+    assert [path for _, path, _ in client.calls][:2] == ["/seed_session", "/v1/agent_sessions"]
