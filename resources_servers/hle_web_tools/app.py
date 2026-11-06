@@ -159,7 +159,7 @@ _WORD_RE = re.compile(r"[^\W_]+")
 # A data URI with or without a media type (RFC 2397 lets ``data:;base64,`` omit it) and media-type parameters,
 # base64 or percent-encoded, up to the end of its Markdown destination: the payload stops at whitespace, ``)``, a
 # quote or ``>``, so following prose is kept. Every repetition is bounded, so the scan stays linear on
-# adversarial pages.
+# adversarial pages; a URI past these bounds is not matched and is served unchanged.
 _DATA_URI_RE = re.compile(
     r"\bdata:(?:[\w.+-]{1,127}/[\w.+-]{1,127})?(?:;[\w.+-]{1,127}=[^;,\s)]{0,256}){0,16}(?:;base64)?,[^\s)\"'>]*",
     re.IGNORECASE,
