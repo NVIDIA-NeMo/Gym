@@ -27,7 +27,8 @@ from pydantic import BaseModel, Field
 
 from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
-from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+from nemo_gym.config.keys import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER
 from nemo_gym.core.model_call_sampling import model_sampling_context
 from nemo_gym.core.responses_api_types import (
@@ -748,7 +749,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
-    from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.config.keys import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})

@@ -3761,7 +3761,7 @@ def test_partial_head_server_inherits_the_resolved_host(monkeypatch):
 
 class TestRolloutRunLabels:
     def test_rows_group_by_environment_server_and_keep_agent_labels(self) -> None:
-        from nemo_gym.config.global_config import rollout_run_key, rollout_run_labels
+        from nemo_gym.config.rollout_keys import rollout_run_key, rollout_run_labels
 
         rows = [
             {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"},
@@ -3782,7 +3782,7 @@ class TestRolloutRunLabels:
         assert rollout_run_labels(reversed(rows)) == expected
 
     def test_a_stamped_record_and_an_older_record_of_one_agent_get_distinct_labels(self) -> None:
-        from nemo_gym.config.global_config import rollout_run_labels
+        from nemo_gym.config.rollout_keys import rollout_run_labels
 
         stamped = {"agent_ref": {"name": "hermes"}, "_ng_environment_server": "hermes_relay"}
         older = {"agent_ref": {"name": "hermes"}}
@@ -3792,7 +3792,7 @@ class TestRolloutRunLabels:
         assert labels == {"hermes_relay": "hermes_relay", "hermes": "hermes"}
 
     def test_labels_stay_unique_when_a_server_name_matches_another_agent(self) -> None:
-        from nemo_gym.config.global_config import label_runs
+        from nemo_gym.config.rollout_keys import label_runs
 
         # Servers "judge" and "judge_twin" share agent "policy", so both use their own names.
         # Server "grader" fronts an agent that happens to be named "judge", which would repeat that label.

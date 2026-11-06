@@ -67,7 +67,7 @@ from typing import Any, Literal, Optional, get_args
 import orjson
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.global_config import SERVER_TYPE_KEYS
+from nemo_gym.config.keys import SERVER_TYPE_KEYS
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
 from nemo_gym.server_runtime._checkpoint.telemetry import OperationSpan, checkpoint_span

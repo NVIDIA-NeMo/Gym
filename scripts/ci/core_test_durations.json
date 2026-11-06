@@ -1,7 +1,7 @@
 {
   "source_run": "https://github.com/NVIDIA-NeMo/Gym/actions/runs/41587144451",
   "source_sha": "e86d0371b405266081be8ec66e0e543c512c37bb",
-  "method": "Estimated seconds between timestamped verbose pytest node lines, charged to the preceding file; core pass only, excludes collection and sandbox. Environment migration module weights use summed JUnit testcase times from run 42817732452 (head 885364925b4d150619cea7f4f6fdda4fafecc1f4), regrouped by their destination file.",
+  "method": "Estimated seconds between timestamped verbose pytest node lines, charged to the preceding file; core pass only, excludes collection and sandbox. Environment migration module weights use summed JUnit testcase times from run 42817732452 (head 885364925b4d150619cea7f4f6fdda4fafecc1f4), regrouped by their destination file. The extracted provider_metadata test uses a local pytest JUnit estimate with a 0.01-second floor.",
   "files": {
     "tests/e2e/checkpoint/test_checkpoint_e2e.py": 0.05,
     "tests/e2e/checkpoint/test_checkpoint_multiworker_stress.py": 0.01,
@@ -27,6 +27,7 @@
     "tests/unit_tests/client/test_server_client.py": 0.13,
     "tests/unit_tests/config/test_config_types_help.py": 0.04,
     "tests/unit_tests/config/test_global_config.py": 10.51,
+    "tests/unit_tests/config/test_provider_metadata.py": 0.01,
     "tests/unit_tests/config/test_secret_utils.py": 0.09,
     "tests/unit_tests/core/test_episode.py": 0.01,
     "tests/unit_tests/core/test_failure_kinds.py": 0.08,

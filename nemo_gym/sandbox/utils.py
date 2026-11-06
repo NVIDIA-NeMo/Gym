@@ -28,6 +28,7 @@ from nemo_gym.core.media import MediaFile
 from typing import Protocol
 
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym._moved_paths import moved_names_getattr
 
 
 class _SandboxFileTransfer(Protocol):
@@ -219,3 +220,7 @@ def rewrite_image(image: str | None, rewrites: list[dict[str, str]]) -> str | No
         if image.startswith(from_prefix):
             return to_prefix + image[len(from_prefix) :]
     return image
+
+
+# Keep the formerly imported class available without eagerly importing the sandbox API.
+__getattr__ = moved_names_getattr(__name__)

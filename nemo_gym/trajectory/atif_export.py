@@ -31,12 +31,8 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError, field_valid
 
 from nemo_gym import __version__
 from nemo_gym.config.config_types import ConfigError, RunExportConfig
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-    rollout_agent_label,
-)
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.rollout_keys import rollout_agent_label
 from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

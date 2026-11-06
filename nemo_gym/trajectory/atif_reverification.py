@@ -41,7 +41,7 @@ from openai.types.responses.response_input_text_content_param import ResponseInp
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,

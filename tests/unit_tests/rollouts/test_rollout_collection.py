@@ -70,14 +70,14 @@ from nemo_gym.config.config_types import (
     ConfigError,
     ConfigPathNotFoundError,
 )
-from nemo_gym.config.global_config import (
+from nemo_gym.config.global_config import TASK_SOURCE_KEY_NAME
+from nemo_gym.config.keys import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKIP_TOKEN_CAPTURE_KEY_NAME,
     TASK_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import BaseEpisodeRequest, EpisodeId
@@ -6998,7 +6998,7 @@ class TestRolloutCollection:
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        from nemo_gym.config.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.config.keys import ROLLOUT_ID_KEY_NAME
         from nemo_gym.models.model_call_capture import CaptureStore
 
         capture_dir = tmp_path / "captures"

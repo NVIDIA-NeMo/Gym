@@ -68,32 +68,9 @@ from nemo_gym.config.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    AGENT_SERVER_TYPE_KEY_NAME,
-    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
-    ALLOWED_AGENTS_KEY_NAME,
-    ATTEMPT_INDEX_KEY_NAME,
-    ENVIRONMENT_SERVER_ROUTES_KEY_NAME,
-    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
-    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
-    MODEL_SAMPLING_KEY_NAME,
-    RESPONSES_CREATE_PARAMS_KEY_NAME,
-    ROLLOUT_ID_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    SKILLS_REF_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-    TASK_SOURCE_KEY_NAME,
-    allowed_agents_for,
-    dataset_agent_pins,
-    environment_server_agent_names,
-    environment_server_attributed_agent,
-    get_first_server_config_dict,
-    get_global_config_dict,
-    label_runs,
-    pairing_override_enabled,
-    resolve_dataset_agent,
-)
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, AGENT_SERVER_TYPE_KEY_NAME, ATTEMPT_INDEX_KEY_NAME, ENVIRONMENT_SERVER_STAMP_KEY_NAME, ENVIRONMENT_SERVER_TYPE_KEY_NAME, ROLLOUT_ID_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.global_config import ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, ALLOWED_AGENTS_KEY_NAME, ENVIRONMENT_SERVER_ROUTES_KEY_NAME, MODEL_SAMPLING_KEY_NAME, RESPONSES_CREATE_PARAMS_KEY_NAME, SKILLS_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, allowed_agents_for, dataset_agent_pins, environment_server_agent_names, environment_server_attributed_agent, get_first_server_config_dict, get_global_config_dict, pairing_override_enabled, resolve_dataset_agent
+from nemo_gym.config.rollout_keys import label_runs
 from nemo_gym.core.episode_context import (
     check_rollout_id_length,
     maybe_rollout_id_from_run_body,

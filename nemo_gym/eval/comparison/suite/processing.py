@@ -17,7 +17,7 @@
 from dataclasses import asdict, replace
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     BenchmarkSamples,
     MetricScale,

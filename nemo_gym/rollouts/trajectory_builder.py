@@ -24,10 +24,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional
 from nemo_gym.artifacts.rollout_rows import (
     _strip_capture_payloads,
 )
-from nemo_gym.config.global_config import (
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-)
+from nemo_gym.config.keys import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.core.failure_records import FailureEvent
