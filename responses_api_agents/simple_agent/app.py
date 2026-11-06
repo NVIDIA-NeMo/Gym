@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, nullcontext
 from dataclasses import dataclass
 from time import monotonic, perf_counter, time
-from typing import Any
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from aiohttp import ClientResponseError
@@ -68,6 +68,7 @@ from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     EpisodeId,
     FailureBoundary,
+    FailureClassificationConfig,
     FailureHeader,
     FailureReportRow,
     NeMoGymEasyInputMessage,
@@ -198,18 +199,11 @@ class _LegacyLoopReply:
 class SimpleAgentOutcomePolicyConfig(OutcomePolicyConfig):
     """The legacy /run boundary can retry or stop; it has no output to verify after a timeout."""
 
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset(
+        {OutcomeAction.RETRY, OutcomeAction.FAIL, OutcomeAction.COUNT_AS_ZERO}
+    )
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
     default_action: OutcomeAction = OutcomeAction.RETRY
-
-    @model_validator(mode="after")
-    def require_run_actions(self) -> "SimpleAgentOutcomePolicyConfig":
-        """Reject grading actions this failure-only boundary cannot execute."""
-        if OutcomeAction.VERIFY in [
-            self.default_action,
-            *self.by_failure_kind.values(),
-            *self.by_status_code.values(),
-        ]:
-            raise ValueError("SimpleAgent /run outcome policy does not support verify")
-        return self
 
 
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
@@ -442,7 +436,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     async def retire_agent_session(self, session_key: str) -> None:
         self._legacy_replies.pop(session_key, None)
-        self._free_session(session_key)
+        self._release_retired_session(session_key)
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, SimpleAgentSessionState):
@@ -1034,7 +1028,9 @@ class SimpleAgent(SimpleResponsesAPIAgent):
 
     def _model_timeout_row(self, failure: NgFailureEvent, *, elapsed_s: float) -> dict[str, Any]:
         """Translate a recorded timeout and the boundary's policy into existing Collection failure fields."""
-        action = failure_outcome_policy(failure, config=self.config.outcome_policy)
+        action = failure_outcome_policy(
+            failure, config=self.config.outcome_policy, classification=self.config.outcome_policy.classification
+        )
         report = report_for_current_request(failure)
         return {
             "_ng_failure_class": AGENT_RUN_ERROR,

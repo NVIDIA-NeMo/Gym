@@ -6,6 +6,9 @@ The task image only promises Python's standard library, not Gym or aiohttp.
 Synchronous requests run in the forwarding thread and preserve streamed bodies.
 """
 
+# The task image may run Python 3.8, where these annotations would fail at import if evaluated.
+from __future__ import annotations
+
 import json
 import math
 from contextlib import contextmanager

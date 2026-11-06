@@ -30,6 +30,10 @@ claude_code_agent:
       # Sandbox sessions require an exact CLI version.
       claude_code_version: "2.1.108"
       sandbox_provider: sandbox
+      # Grade what the model knows: the sandbox reaches only the model server, as with the deprecated agents.
+      # Claude takes no tool grants. The CLI is uploaded from the Agent Server, so setup needs no sandbox
+      # network, but the image must include bash.
+      network_access: model_only
       # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
       sandbox_config:
         image: ???

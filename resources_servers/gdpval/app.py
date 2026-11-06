@@ -67,7 +67,8 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
@@ -422,7 +423,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
 
     # /verify writes each rollout's files to ``<persist_deliverables_dir>/task_<task_id>/repeat_<n>/``.
     persist_deliverables_dir: str
-    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked.
+    # False persists the deliverables without judging them, e.g. to collect a reference set; the rows are masked
+    # with failure_kind gdpval:judging_disabled.
     judge_deliverables: bool = True
     # Names a top-level sandbox provider block.
     sandbox_provider: str
@@ -562,6 +564,9 @@ def _permanent_judge_failure(
 # out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
 
+# judge_deliverables=false saves the deliverables without judging them, so the row is masked under this kind.
+JUDGING_DISABLED = "gdpval:judging_disabled"
+
 
 # Recovered by `gym eval reverify --judge-failed-only`, which judges the persisted deliverable again.
 _JUDGE_FAILED = {NG_FAILURE_CLASS_KEY: JUDGE_FAILED, "failure_kind": JUDGE_FAILED, "mask_sample": True}
@@ -625,7 +630,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self._sessions: Dict[str, _TaskSession] = {}
         # (task_id, repeat) of the persisted directory each live session will write, to the session holding it.
         self._claimed_directories: Dict[Tuple[str, int], str] = {}
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._locks = ResourcesSessionLocks()
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
+            self.config.session_close_retry_window_seconds
+        )
         # Normalize the reference-model set: prefer the multi-reference
         # ``reference_models`` mapping; fall back to the legacy single-reference
         # fields (treated as a single reference id ``"reference"``).
@@ -708,8 +716,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         session_id = body.resources_session_id
         # The cookie is set only on success: a refusal's reply passes through the session middleware too, and must
         # not hand the caller a cookie for a session that another episode holds.
-        async with self._fence.locked(session_id):
-            self._fence.raise_if_closed(session_id)
+        async with self._locks.locked(session_id):
+            self._fences.raise_if_fenced(session_id)
             session = self._sessions.get(session_id)
             if session is not None:
                 if (session.episode_id, session.task_id) != (body.episode_id, body.task_id):
@@ -790,9 +798,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
         self, request: Request, body: ResourcesCloseSessionRequest
     ) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
-        async with self._fence.locked(session_id):
-            closed_episode = self._fence.closed_episode(session_id)
-            if closed_episode is None:
+        async with self._locks.locked(session_id):
+            fenced_episode = self._fences.get(session_id)
+            if fenced_episode is None:
                 session = self._sessions.get(session_id)
                 if session is not None:
                     if session.episode_id != body.episode_id:
@@ -803,8 +811,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
                         # A failed stop must not hold the directory: every later seed of it would get a terminal 409.
                         self._claimed_directories.pop((session.task_id.task_id, session.repeat), None)
                     del self._sessions[session_id]
-                self._fence.mark_closed(session_id, body.episode_id)
-            elif closed_episode != body.episode_id:
+                self._fences.fence(session_id, body.episode_id)
+            elif fenced_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
@@ -1055,7 +1063,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
             )
         if not self.config.judge_deliverables:
             return GDPValVerifyResponse(
-                **body.model_dump(), reward=0.0, mask_sample=True, verify_mode=self.config.reward_mode
+                **body.model_dump(),
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=JUDGING_DISABLED,
+                failure_reason="judge_deliverables is false, so the deliverables were saved without judging",
+                verify_mode=self.config.reward_mode,
             )
         if self.config.reward_mode == "comparison":
             return await self._verify_comparison(body)

@@ -27,6 +27,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
@@ -34,7 +36,6 @@ from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
-    SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
     SandboxSpec,
@@ -103,7 +104,11 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
     while needle not in buffer:
         chunk = await session.read()
         if not chunk:
-            raise SandboxPtyError("PTY session ended before the command finished")
+            raise sandbox_failure(
+                operation="pty_exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason="PTY session ended before the command finished",
+            )
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)
@@ -686,6 +691,14 @@ class AsyncSandbox:
         """
         self._spec = replace(self._spec, user=user) if self._spec is not None else SandboxSpec(user=user)
 
+    def set_default_workdir(self, workdir: str | None) -> None:
+        """Change the default exec directory after sandbox setup has created it.
+
+        This does not create or change ownership of the directory. ``serialize()`` carries the new
+        default, so a harness that reattaches executes in the same directory.
+        """
+        self._spec = replace(self._spec, workdir=workdir) if self._spec is not None else SandboxSpec(workdir=workdir)
+
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
 
@@ -825,7 +838,11 @@ class AsyncSandbox:
         # Carry the working directory so a reattached sandbox lands in the same
         # place, even for providers whose descriptor does not include it (the
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
-        if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
+        if (
+            isinstance(descriptor, dict)
+            and self._spec is not None
+            and (self._spec.workdir is not None or descriptor.get("workdir") is None)
+        ):
             descriptor = {**descriptor, "workdir": self._spec.workdir}
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}

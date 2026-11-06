@@ -22,6 +22,14 @@ _ENROOT_PID_ERROR = (
 )
 
 
+class ShellCommandTimedOut(TimeoutError):
+    """The supervisor ended the model's command at its deadline; any other TimeoutError is a sandbox failure."""
+
+
+class SandboxIsolationError(RuntimeError):
+    """A completed probe showed the host's PID namespace or a mismatched /proc mount; no retry can change that."""
+
+
 def shell_source_files() -> dict[str, str]:
     """Deliver the checked-out shell implementation through SandboxSpec's cleanup-aware startup."""
     source = Path(__file__).parent
@@ -72,14 +80,15 @@ class BrowsecompShellSandbox:
         if result.return_code != 0 or result.error_type is not None:
             raise RuntimeError(f"{_ENROOT_PID_ERROR} The namespace probe did not complete successfully.")
         namespaces = (result.stdout or "").splitlines()
+        # Output that names no namespace says nothing about isolation, so it stays retryable like an unfinished probe.
         if (
             not re.fullmatch(r"pid:\[[0-9]+\]", host_namespace)
             or len(namespaces) != 2
             or any(not re.fullmatch(r"pid:\[[0-9]+\]", value) for value in namespaces)
-            or namespaces[0] != namespaces[1]
-            or namespaces[0] == host_namespace
         ):
             raise RuntimeError(f"{_ENROOT_PID_ERROR} The namespace probe did not confirm isolation.")
+        if namespaces[0] != namespaces[1] or namespaces[0] == host_namespace:
+            raise SandboxIsolationError(f"{_ENROOT_PID_ERROR} The namespace probe did not confirm isolation.")
 
     async def execute(self, *, command: str, duration: float, workspace: Path, close_timeout: float) -> str:
         """Copy new retrieved pages, then interpret the command only inside the sandbox."""
@@ -126,7 +135,7 @@ class BrowsecompShellSandbox:
         except Exception as error:
             # The supervisor ends a command at its deadline and records timed_out; the command wrote no output.
             if self.session.cleanup is not None and self.session.cleanup["timed_out"]:
-                raise TimeoutError("BrowseComp shell command passed its supervisor deadline") from error
+                raise ShellCommandTimedOut("BrowseComp shell command passed its supervisor deadline") from error
             raise
 
     async def close(self, *, timeout: float) -> None:
