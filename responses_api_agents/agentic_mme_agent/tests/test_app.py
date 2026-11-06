@@ -252,6 +252,41 @@ async def test_retrieval_replay_and_visibility() -> None:
 
 
 @pytest.mark.asyncio
+async def test_leak_guard_is_invisible_to_the_model() -> None:
+    agent, seen = make_agent(
+        [
+            response(output=[call("google_search", {"query": "red"})]),
+            response(output=[call("fetch_webpage", {"url": "https://blog.example/post"})]),
+            response("red"),
+        ],
+        retrieval={"mode": "replay"},
+    )
+    task = body()
+    filtered_page = {
+        "ok": False,
+        "tool": "fetch_webpage",
+        "url": "https://blog.example/post",
+        "error": "no page content available for this URL",
+        "contaminated": 1,
+    }
+    task.retrieval_replay = [
+        {
+            "tool_name": "google_search",
+            "arguments": {"query": "red"},
+            "output": {"ok": True, "tool": "google_search", "context": "No results.", "raw": {}, "contaminated": 3},
+        },
+        {"tool_name": "fetch_webpage", "arguments": {"url": "https://blog.example/post"}, "output": filtered_page},
+    ]
+    result = await agent.run(request(), task)
+    search = json.loads(seen[1]["input"][-1]["output"])
+    page = json.loads(seen[2]["input"][-1]["output"])
+    assert search == {"ok": True, "tool": "google_search", "context": "No results."}
+    # Exactly what an ordinary failed fetch shows.
+    assert page == {"ok": False, "error": "no page content available for this URL"}
+    assert [event["output"].get("contaminated") for event in result.tool_trace] == [3, 1]
+
+
+@pytest.mark.asyncio
 async def test_retrieval_timeout_is_a_tool_error(monkeypatch) -> None:
     monkeypatch.setattr(Retrieval, "call", AsyncMock(side_effect=TimeoutError))
     agent, _ = make_agent(

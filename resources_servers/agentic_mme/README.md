@@ -136,10 +136,11 @@ Exa returns pages from its index, so a URL it has not crawled comes back as a to
 Benchmark-contamination guard (on by default): a result quoting Agentic-MME itself (its
 dataset, repo or papers about it) would hand the model the answer key. Search and Lens items
 matching `retrieval.contamination_patterns` (case-insensitive substrings over the whole item:
-the `agentic-mme` spellings, `crystal1047`, `chos3ne11ven`) are dropped one by one; a response
-left empty, a page that mentions the benchmark, or a fetch of a benchmark URL returns "Results
-withheld: every result referenced the benchmark itself." Filtering happens on every read, live
-or cached, and the cache keeps the raw answer. Outputs carry `"contaminated": <n dropped>`.
+the `agentic-mme` spellings, `crystal1047`, `chos3ne11ven`) are dropped one by one. The model
+is never told: a search left empty reads "No results.", and a page that mentions the benchmark
+(or a fetch of a benchmark URL) fails with the same error as a page without content. Filtering
+happens on every read, live or cached, and the cache keeps the raw answer. The tool trace
+records `"contaminated": <n dropped>`; the model does not see it.
 `contamination_patterns: []` disables the guard.
 
 Google Lens needs the image online. With SerpAPI Lens it is uploaded to SerpAPI's own Image API

@@ -364,14 +364,15 @@ async def test_contamination_guard_drops_benchmark_items(workspace, monkeypatch)
     assert result["contaminated"] == 2 and "Mirror" not in result["context"]
     http.return_value = json.dumps({"organic": organic[1:]}).encode()
     result = await client.call("google_search", {"query": "q"}, workspace)
-    assert result["context"] == retrieval.CONTAMINATED_MESSAGE and result["raw"] == {}
-    # A benchmark URL is refused without a provider call; a contaminated page is withheld.
+    assert result["context"] == retrieval.NO_RESULTS_MESSAGE and result["raw"] == {"organic": []}
+    assert result["contaminated"] == 2
+    # A benchmark URL is refused without a provider call; a contaminated page fails like an empty one.
     n = http.call_count
     page = await client.call("fetch_webpage", {"url": "https://github.com/ChoS3nE11ven/Agentic-MME"}, workspace)
-    assert page["context"] == retrieval.CONTAMINATED_MESSAGE and http.call_count == n
+    assert page["error"] == retrieval.PAGE_UNAVAILABLE and not page["ok"] and http.call_count == n
     http.return_value = b"intro ... from the agentic_mme dataset ..."
     page = await client.call("fetch_webpage", {"url": "https://blog.example/post"}, workspace)
-    assert page["context"] == retrieval.CONTAMINATED_MESSAGE and page["contaminated"] == 1
+    assert page["error"] == retrieval.PAGE_UNAVAILABLE and not page["ok"] and page["contaminated"] == 1
     # An empty pattern list disables the guard.
     off = Retrieval(RetrievalConfig(mode="live", serper_api_key="s", contamination_patterns=[]))
     assert (
@@ -387,7 +388,7 @@ async def test_contamination_guard_scans_the_page_past_max_chars(workspace, monk
     monkeypatch.setattr(retrieval, "http_payload", http)
     client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s"))
     page = await client.call("fetch_webpage", {"url": "https://blog.example/post", "max_chars": 40}, workspace)
-    assert page["context"] == retrieval.CONTAMINATED_MESSAGE and page["contaminated"] == 1
+    assert page["error"] == retrieval.PAGE_UNAVAILABLE and not page["ok"] and page["contaminated"] == 1
     assert "44.6" not in json.dumps(page) and "full_text" not in page
 
 
@@ -402,7 +403,7 @@ async def test_contamination_guard_scans_full_cached_pages(tmp_path, workspace, 
     hit = await client.call("fetch_webpage", args, workspace)
     assert (miss["cache"], hit["cache"]) == ("miss", "exact") and http.call_count == 1
     for page in (miss, hit):
-        assert page["context"] == retrieval.CONTAMINATED_MESSAGE and "44.6" not in json.dumps(page)
+        assert page["error"] == retrieval.PAGE_UNAVAILABLE and "44.6" not in json.dumps(page)
 
 
 @pytest.mark.asyncio

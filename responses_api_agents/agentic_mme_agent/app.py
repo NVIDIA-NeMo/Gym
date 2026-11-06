@@ -211,8 +211,14 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     }
                 )
                 image_url = result.get("image_url")
-                # The trace keeps the provider's answer ("raw"); the model sees only its compact "context".
-                observation = {key: value for key, value in result.items() if key not in ("image_url", "raw")}
+                # The trace keeps the provider's answer ("raw") and the leak guard's count ("contaminated");
+                # the model sees neither. A failed call shows only its error, so a page the guard filtered
+                # reads like any other failed fetch.
+                if result.get("ok"):
+                    hidden = ("image_url", "raw", "contaminated")
+                    observation = {key: value for key, value in result.items() if key not in hidden}
+                else:
+                    observation = {"ok": False, "error": result.get("error")}
                 # Set type explicitly: requests are serialized with exclude_unset, and the model
                 # server's converter cannot route an item that has neither type nor role.
                 outputs.append(

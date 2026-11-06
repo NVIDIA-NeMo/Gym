@@ -29,7 +29,9 @@ Benchmark-contamination guard (as in browsecomp_advanced_harness): a result that
 Agentic-MME benchmark itself (dataset mirror, repo, paper page) hands the model the answer key.
 Results matching contamination_patterns (case-insensitive substring over the whole serialized
 result) are dropped per item on every read, from the cache or live; the cache keeps the raw
-provider answer. A response with every item dropped, or a contaminated page, is withheld.
+provider answer. The model is never told: a search left empty reads "No results.", and a
+contaminated page (or a benchmark URL) fails like any page without content. Only the tool trace
+records "contaminated" (the number of items dropped).
 """
 
 import asyncio
@@ -80,7 +82,8 @@ SEARCH_PROVIDERS = ("serper", "serpapi", "tavily", "exa")
 # Spellings of the benchmark, its Hugging Face dataset (Crystal1047/Agentic-MME), and its GitHub
 # repo (ChoS3nE11ven/Agentic-MME). "agentic-mme" etc. also cover the org-prefixed forms.
 CONTAMINATION_PATTERNS = ("agentic-mme", "agentic_mme", "agentic mme", "agenticmme", "crystal1047", "chos3ne11ven")
-CONTAMINATED_MESSAGE = "Results withheld: every result referenced the benchmark itself."
+# A filtered page fails with the same error as a page the provider has no content for.
+PAGE_UNAVAILABLE = "no page content available for this URL"
 # Providers that can answer google_lens_search (reverse image search through Google Lens).
 LENS_PROVIDERS = ("serper", "serpapi")
 
@@ -361,7 +364,7 @@ class Retrieval:
         if isinstance(args, FetchArgs):
             public_url(args.url)
             if self._contaminated(args.url):  # no provider call for a benchmark URL
-                return {"ok": True, "tool": name, "url": args.url, "context": CONTAMINATED_MESSAGE, "contaminated": 1}
+                return {"ok": False, "tool": name, "url": args.url, "error": PAGE_UNAVAILABLE, "contaminated": 1}
         if isinstance(args, LensArgs):
             workspace.get(args.image_index)
         cache = (
@@ -413,8 +416,8 @@ class Retrieval:
             # reaches the model.
             page = out.pop("full_text", None) or out["context"]
             if self._contaminated(page):
-                out["context"] = CONTAMINATED_MESSAGE
-                out["contaminated"] = 1
+                del out["context"]
+                out.update(ok=False, error=PAGE_UNAVAILABLE, contaminated=1)
             return out
         raw = out["raw"]
         dropped = 0
@@ -429,11 +432,7 @@ class Retrieval:
                 del raw[key]
                 dropped += 1
         if dropped:
-            out["contaminated"] = dropped
-            if not any(raw.values()):
-                out["raw"] = {}
-                out["context"] = CONTAMINATED_MESSAGE
-                return out
+            out["contaminated"] = dropped  # trace only; a search left empty reads "No results."
         out["raw"] = raw
         if not isinstance(raw, dict):
             raise ValueError("retrieval provider returned an invalid JSON object")
@@ -473,7 +472,7 @@ class Retrieval:
                 results = json.loads(raw).get("results") or []
                 text = (results[0].get("text") if results and isinstance(results[0], dict) else None) or ""
                 if not text.strip():
-                    raise ValueError("no page content available for this URL")
+                    raise ValueError(PAGE_UNAVAILABLE)
             else:
                 headers = {"Accept": "text/plain"}
                 if self.config.jina_api_key.get_secret_value():
