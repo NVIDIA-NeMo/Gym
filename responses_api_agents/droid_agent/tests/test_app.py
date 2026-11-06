@@ -20,6 +20,7 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     SandboxSession,
+    agent_outcome_policy,
     check_agent_seed_rejected,
     shell_assignments,
 )
@@ -326,7 +327,7 @@ async def test_outcome_follows_droid_exit_and_completion(monkeypatch, events, cl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("detail", ['{"status":404,"title":"Not Found"}', "x" * 5000])
-async def test_model_request_error_is_classified_for_the_environment(monkeypatch, detail):
+async def test_untyped_error_keeps_the_failure_reason_for_the_environment(monkeypatch, detail):
     instance = agent(monkeypatch)
     session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
     error = f"404 {detail}"
@@ -336,10 +337,7 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
     )
     response = await instance._sandbox_response(session, body())
     assert response.status == "failed"
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": 404,
-    }
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
     # The environment saves Droid's message as the failure reason, cut to the length it keeps.
     message = response.error.message
     if len(error) <= 2000:
@@ -350,16 +348,29 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "message,kind",
+    "message",
     [
-        ("429 rate limited", ("model_request_error", 429)),
-        ("Connection error.", ("model_transport_error", None)),
-        ("tool crashed", ("unknown", None)),
+        "400 maximum context length exceeded",
+        "429 rate limited",
+        "503 service unavailable",
+        "Connection error.",
+        "Execute timed out while fetching a tool result",
+        "tool crashed",
     ],
 )
-def test_classifier_reads_droid_error_messages(monkeypatch, message, kind):
-    outcome = agent(monkeypatch).classify_outcome({"error": message})
-    assert (outcome.failure_kind, outcome.status_code) == kind
+@pytest.mark.parametrize("version", ["1.1.0", "1.2.0"])
+@pytest.mark.asyncio
+async def test_error_text_does_not_establish_a_model_failure_cause(monkeypatch, message, version):
+    events = [EVENTS[0], {"type": "error", "source": "agent_loop", "message": message}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    response = await agent(monkeypatch, droid_version=version)._sandbox_response(state(), body())
+    assert response.status == "failed"
+    assert response.error.message == message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    # An unproven 400/context-overflow claim must not send a broken episode to verification.
+    assert agent_outcome_policy(response) == "retry"
 
 
 @pytest.mark.asyncio
@@ -683,10 +694,7 @@ async def test_error_event_fails_a_run_that_exits_zero(monkeypatch):
     session = state()
     response = await agent(monkeypatch)._sandbox_response(session, body())
     assert response.status == "failed" and session.observations.records[0].error_type == "agent_error"
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": 429,
-    }
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
 
 
 @pytest.mark.asyncio

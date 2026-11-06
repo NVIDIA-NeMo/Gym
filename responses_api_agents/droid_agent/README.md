@@ -152,10 +152,13 @@ A failed response's `error.message` is Droid's error message, or what ended the 
 (`result_missing`, `process_exit_<code>`), cut to 2,000 characters; the Environment Server saves it
 as the failure reason.
 
-An error event that starts with an HTTP status (Droid 1.1.0 reports a failed model request as
-`404 {...}`) is classified as `model_request_error` with that status; connection failures as
-`model_transport_error`; anything else as `unknown`. The Environment Server's outcome policy then
-decides whether to verify or retry.
+Droid's error stream supplies a message without a structured model error category or HTTP status.
+Every failed response therefore has `ng_agent_outcome` `unknown`, with no status code, even when
+the text begins with `400`, `429` or `500`, or mentions a connection failure or context overflow.
+The same rule applies when `droid_version` is overridden. The Environment Server's default
+`agent_outcome_policy` retries these failures; a text-only context overflow is not graded as a
+context-limit ending. Configure `agent_outcome_policy.by_failure_kind.unknown` to change that
+policy. The bounded error message remains available for diagnosis.
 
 Session identity, the single activation, retries, close and its retry window follow the shared
 agent-session contract. `SandboxSession` runs Droid through the shared `harness_runner.sh` under the

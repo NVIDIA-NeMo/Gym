@@ -16,9 +16,7 @@
 
 import asyncio
 import logging
-import re
 from asyncio import Semaphore
-from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import time
@@ -33,7 +31,6 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
-    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -47,8 +44,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
-    MODEL_REQUEST_ERROR,
-    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -90,8 +85,6 @@ fi
 """
 # Environment servers keep this many characters of a failed response's error message as the failure reason.
 _FAILURE_REASON_CHARS = 2000
-# Transport failures Droid 1.1.0 reports in its error event when a model request does not reach the server.
-_TRANSPORT_ERRORS = ("Connection error", "fetch failed", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "timed out")
 
 
 class DroidAgentConfig(BaseResponsesAPIAgentConfig):
@@ -133,16 +126,6 @@ class DroidAgent(SimpleResponsesAPIAgent):
 
     async def run(self, body: object) -> None:
         raise NotImplementedError("Use the single_agent_turn Environment Server")
-
-    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Droid 1.1.0's error event: a failed model request starts with its HTTP status."""
-        message = str(native_result.get("error") or "")
-        match = re.match(r"^([45]\d{2})\b", message)
-        if match:
-            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-        if any(marker in message for marker in _TRANSPORT_ERRORS):
-            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
-        return AgentOutcome(failure_kind="unknown")
 
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
         return state.session if isinstance(state, DroidSandboxSession) else None
@@ -483,6 +466,8 @@ class DroidAgent(SimpleResponsesAPIAgent):
             metadata={"harness_execution": "sandbox", AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
         response = self.report_rollout_stop(response, state.session)
+        # The stream exposes only error text, not a structured model cause or status. Keep the shared unknown
+        # classification: numbers and transport/context-limit phrases in arbitrary text do not establish either.
         return self.report_outcome(response, {"error": run.error})
 
     async def responses(
