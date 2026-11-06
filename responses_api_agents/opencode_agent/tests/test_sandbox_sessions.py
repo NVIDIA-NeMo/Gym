@@ -1919,6 +1919,9 @@ async def test_close_keeps_captured_events_after_sandbox_release(setup, tmp_path
 @pytest.mark.parametrize("diagnostics", [{"return_code": "0"}, {"extra": 1}])
 def test_optional_diagnostics_preserve_valid_terminal_result(setup, diagnostics):
     agent, sandbox = setup
+    # The fixture's 1 s close budget also bounds the artifact snapshot, which a loaded CI runner can exceed; this
+    # test is about diagnostics, so give the capture room. The timeout tests keep the short deadline.
+    agent.config.session_close_timeout_seconds = 30
     sandbox.result.update(diagnostics)
     sandbox.runtime_info = {"pid": "invalid"}
     with TestClient(agent.setup_webserver()) as client:
