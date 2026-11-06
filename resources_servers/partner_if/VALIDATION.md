@@ -1,5 +1,35 @@
 # Testing / Validation
 
+## Current-main conflict resolution
+
+Merged `main` at `bd6f5f0d8f3a56cbf3f7e1d2d4a1d2220b7ff6fe` into the PR branch.
+Kept the managed `pyproject.toml` / `uv.lock` dependency format, preserving Prime's
+`sandbox` extra, and updated the Prime adapter to the current public imports and
+`ResourcesSessionFences` API. The checker, dataset pin, and task routes are unchanged.
+
+Fresh checks against the resolved implementation:
+
+```bash
+gym env test --resources-server partner_if +should_validate_data=true +skip_venv_if_present=true
+# 561 passed; example data validation passed
+
+gym env test +entrypoint=responses_api_agents/prime_agent +should_validate_data=true +skip_venv_if_present=true
+# 67 passed
+
+python -m pytest tests/unit_tests/benchmarks/test_partner_if_prepare.py tests/unit_tests/test_public_api_facades.py -q
+# 844 passed, including the complete 27-task route-coverage check
+
+uv lock --project responses_api_agents/prime_agent --check
+# Passed with uv 0.13.4
+```
+
+Component tests reused the existing local virtual environments. No new model or
+cluster rollout was run: these fixes preserve the existing adapter behavior while
+following upstream packaging and API changes. Earlier rollout evidence remains
+applicable to the unchanged checker; it is not new cluster validation.
+
+The sections below record earlier integration stages and their then-current gaps.
+
 ## Checker integration history
 
 Integration testing combined checker commit `2962b195f` with the changes from

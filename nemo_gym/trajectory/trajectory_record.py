@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -15,21 +18,25 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationError,
     field_validator,
     model_serializer,
     model_validator,
 )
 
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.failure_kinds import validate_failure_kind
+from nemo_gym.core.failure_kinds import FailureStage, validate_failure_kind
+from nemo_gym.core.failure_records import FailureReport
+from nemo_gym.core.failure_transport import ModelOperationObservation
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
 
 
 if TYPE_CHECKING:
-    from nemo_gym.observability.model_calls import ModelCallRecord
+    from nemo_gym.trajectory.model_call_record import ModelCallRecord
 
 
 NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
+NG_AGENT_SANDBOX_OBSERVATION_KEY = "ng_agent_sandbox_observation"
 # The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
 # collector's canonical projection.
 NG_TRAJECTORY_KEY = "ng_trajectory"
@@ -62,6 +69,15 @@ class TrajectoryTokenStats(ObservationModel):
     cached_tokens: Optional[int] = Field(default=None, ge=0)
 
 
+class OutputBudgetRefit(ObservationModel):
+    """A model call the server sent again with its output budget lowered, because the budget it requested exceeded
+    the engine's whole context window."""
+
+    requested_max_tokens: int = Field(ge=1)
+    window: int = Field(ge=1)
+    applied_max_tokens: int = Field(ge=1)
+
+
 class TrajectoryResponseMetadata(ObservationModel):
     response_id: Optional[str] = None
     model_ref: Optional[ModelServerRef] = None
@@ -74,8 +90,14 @@ class TrajectoryResponseMetadata(ObservationModel):
     response_source: Optional[Literal["upstream", "local"]] = None
     upstream_status_code: Optional[int] = None
     local_response_reason: Optional[str] = None
+    failure_report: FailureReport | None = None
+    model_operations: list[ModelOperationObservation] | None = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
+    # The output budget the call asked for and the one sent after it was lowered to fit the context window.
+    requested_max_tokens: Optional[int] = Field(default=None, ge=1)
+    applied_max_tokens: Optional[int] = Field(default=None, ge=1)
+    output_budget_refit: Optional[OutputBudgetRefit] = None
 
 
 class TrajectoryModelCall(ObservationModel):
@@ -149,6 +171,8 @@ class AgentInvocation(ObservationModel):
         default=None,
         description="Session ID assigned by the harness, retained as context across activations; omitted when not reported.",
     )
+    in_session: bool | None = Field(default=None, strict=True)
+    verification_skipped: bool | None = Field(default=None, strict=True)
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(
@@ -176,6 +200,81 @@ class AgentInvocation(ObservationModel):
         return result
 
 
+class GradingOperationObservation(ObservationModel):
+    """A source-reviewed grading calculation actually executed inside a verifier invocation.
+
+    ``llm_judge`` grades from judge calls made through ``call_judge``; its dependencies are those calls' model and
+    response ids, and it completes only when the reviewed call site marked an explicitly parsed verdict.
+    """
+
+    operation_id: str = Field(min_length=1)
+    kind: Literal["programmatic_calculation", "llm_judge"] = "programmatic_calculation"
+    outcome: Literal["completed", "failed", "unknown"] = "unknown"
+    result_binding_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    dependencies: list[ModelCallRef] | None = None
+
+
+class VerifierGradingRecord(ObservationModel):
+    """The grade a verifier returned without asking any model, recorded by the shared verify path.
+
+    It names the verifier (its resources server), the score and the verifier's verdict on it (``masked`` when the
+    verifier marked the score as no valid measurement), and binds the graded response and score like a grading
+    operation. A verify execution that sent a model request records none: its grading is observed only through
+    its captured calls.
+    """
+
+    verifier: str = Field(min_length=1)
+    score: float
+    verdict: Literal["scored", "masked"]
+    result_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def grading_result_binding(result: object) -> str | None:
+    """Bind the actual graded response and numeric reward/components, without exporting their payload."""
+    if isinstance(result, BaseModel):
+        result = result.model_dump(mode="json")
+    if not isinstance(result, dict) or not isinstance(result.get("response"), dict):
+        return None
+    response = result["response"]
+    if not isinstance(response.get("id"), str) or not response["id"] or not isinstance(response.get("output"), list):
+        return None
+    reward = result.get("reward")
+    if type(reward) not in (int, float) or (isinstance(reward, float) and not math.isfinite(reward)):
+        return None
+    value = {"response": response, "reward": reward}
+    if "reward_components" in result:
+        components = result["reward_components"]
+        if not isinstance(components, dict) or not all(
+            isinstance(key, str)
+            and type(number) in (int, float)
+            and (not isinstance(number, float) or math.isfinite(number))
+            for key, number in components.items()
+        ):
+            return None
+        value["reward_components"] = components
+
+    def canonical(item):
+        if item is None or type(item) in (str, bool, int):
+            return item
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("nonfinite grading input")
+            return int(item) if item.is_integer() else item
+        if isinstance(item, list):
+            return [canonical(child) for child in item]
+        if isinstance(item, dict) and all(isinstance(key, str) for key in item):
+            return {key: canonical(child) for key, child in item.items()}
+        raise ValueError("non-JSON grading input")
+
+    try:
+        payload = json.dumps(
+            canonical(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return None
+
+
 class VerifierInvocation(ObservationModel):
     """One verify() execution, its outcome, and all model attempts made while grading.
 
@@ -188,6 +287,20 @@ class VerifierInvocation(ObservationModel):
     status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown"
     failure_kind: Optional[str] = None
     model_calls: list[ModelCallRef] = Field(default_factory=list)
+    grading_operations: list[GradingOperationObservation] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    grading_record: VerifierGradingRecord | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
+    # Owner-observed lifecycle facts; these do not certify external grading dependencies.
+    sandbox_observations: list[SandboxObservation] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @field_validator("failure_kind")
     @classmethod
@@ -239,6 +352,9 @@ class SandboxObservation(ObservationModel):
     """Outcome and lifetime resource usage reported by a sandbox-owning harness."""
 
     kind: Literal["sandbox"] = "sandbox"
+    stage: FailureStage | None = Field(
+        default=None, description="Originating execution stage, when known to the caller."
+    )
     role: Literal["agent", "verifier", "environment"]
     provider: Optional[str] = None
     sandbox_id: Optional[str] = None
@@ -257,6 +373,23 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    failure_id: Optional[str] = Field(
+        default=None, description="Canonical failure event in the request failure report."
+    )
+    observed_client_interval_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Client-observed interval from the provider's create return to its close return; "
+        "not the remote sandbox lifetime or its CPU time.",
+    )
+    teardown_confirmed: Optional[bool] = Field(
+        default=None,
+        description="Whether a provider close returned successfully; False means unconfirmed, not proof the sandbox remains alive. None if unattempted.",
+    )
+    cleanup_errors: list[str] = Field(
+        default_factory=list, description="Every failed close or client release, in order; kept after a retry."
+    )
 
 
 class ContextCompactionObservation(ObservationModel):
@@ -685,3 +818,31 @@ class AgentEpisode:
 
     response: NeMoGymResponse
     observations: AgentObservationBundle
+
+
+def failure_observations(value: Any) -> dict[str, Any]:
+    """Keep the existing typed observation slots across an unsuccessful HTTP reply.
+
+    Error strings are not searched recursively: only producer-owned top-level fields
+    are accepted, and malformed observations remain unavailable.
+    """
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key, schema in ((NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle), (NG_TRAJECTORY_KEY, TrajectoryRecord)):
+        if key in value:
+            try:
+                result[key] = schema.model_validate(value[key]).model_dump(mode="json")
+            except (ValidationError, TypeError, ValueError):
+                pass
+    if isinstance(value.get(NG_VERIFIER_INVOCATIONS_KEY), list):
+        try:
+            result[NG_VERIFIER_INVOCATIONS_KEY] = [
+                VerifierInvocation.model_validate(item).model_dump(mode="json")
+                for item in value[NG_VERIFIER_INVOCATIONS_KEY]
+            ]
+        except (ValidationError, TypeError, ValueError):
+            pass
+    if isinstance(value.get("verification_skipped"), bool):
+        result["verification_skipped"] = value["verification_skipped"]
+    return result

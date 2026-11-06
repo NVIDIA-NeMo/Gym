@@ -34,7 +34,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.models import ResponsesConverter, chat_completion_usage_to_response_usage
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
@@ -185,7 +185,7 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
         )
 
         response_params = body.responses_create_params.model_copy(update={"model": final_response.model})
-        response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        response = ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params,
             final_response,
         )

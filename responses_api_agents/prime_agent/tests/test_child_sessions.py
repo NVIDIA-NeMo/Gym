@@ -8,10 +8,9 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
+from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.prime_agent.child_app import ChildSession, PrimeChildAgent, PrimeChildConfig
 
 
@@ -216,7 +215,7 @@ async def test_seed_verifies_archives_and_cleans_failed_installations(failure):
     import hashlib
     from types import SimpleNamespace
 
-    from nemo_gym.base_responses_api_agent import AgentSessionSetupError
+    from nemo_gym.agents import AgentSessionSetupError
 
     instance = agent()
     sandbox = AsyncMock()
@@ -283,7 +282,7 @@ async def test_close_cancels_outstanding_activation_after_remote_cleanup():
 async def test_execution_preserves_output_usage_and_error_distinctions(tmp_path, kind):
     import json
 
-    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from nemo_gym.agents import SandboxSession
 
     instance = agent(artifact_directory=str(tmp_path / "captures"))
     sandbox = AsyncMock()

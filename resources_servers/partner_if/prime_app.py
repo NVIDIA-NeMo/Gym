@@ -15,16 +15,20 @@ from pydantic import PrivateAttr, field_validator
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import EpisodeId
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
-from nemo_gym.sandbox.utils import read_text
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxAccess,
+    SandboxConfig,
+    read_text,
+    resolve_provider_config,
+)
 from nemo_gym.server_runtime import (
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionFences,
     ReverifyMode,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -149,13 +153,13 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
     _seeds: dict[str, ResourcesSeedSessionRequest] = PrivateAttr(default_factory=dict)
     _access: dict[str, SandboxAccess] = PrivateAttr(default_factory=dict)
     _locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _closed: ClosedResourcesSessionRecords[EpisodeId | None] = PrivateAttr()
+    _fences: ResourcesSessionFences[EpisodeId | None] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
         if self.config.num_workers != 1:
             raise ValueError("Prime resource sessions require num_workers=1")
-        self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -175,7 +179,7 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         identifier = body.resources_session_id
         async with self._locks.setdefault(identifier, asyncio.Lock()):
-            if identifier in self._closed:
+            if identifier in self._fences:
                 raise HTTPException(409, "Resource session is closed")
             if identifier in self._seeds and self._seeds[identifier] != body:
                 raise HTTPException(409, "Resource session belongs to a different task")
@@ -229,7 +233,7 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
         identifier = body.resources_session_id
         async with self._locks.setdefault(identifier, asyncio.Lock()):
             seed = self._seeds.get(identifier)
-            episode = seed.episode_id if seed else self._closed.get(identifier)
+            episode = seed.episode_id if seed else self._fences.get(identifier)
             if episode is not None and episode != body.episode_id:
                 raise HTTPException(409, "Resource session belongs to another episode")
             if sandbox := self._sandboxes.get(identifier):
@@ -237,7 +241,7 @@ class PrimeIFResourcesServer(PartnerIFResourcesServer):
             self._sandboxes.pop(identifier, None)
             self._seeds.pop(identifier, None)
             self._access.pop(identifier, None)
-            self._closed.remember(identifier, body.episode_id)
+            self._fences.fence(identifier, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=identifier)
 
     async def retire_session_state(self, session_id: str) -> None:

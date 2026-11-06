@@ -22,11 +22,11 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionFences,
     ReverifyMode,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -141,7 +141,8 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
     # Seed, verify, close and retire hold the session's lock. A sandbox start awaits, and a close or a repeated seed
     # that ran meanwhile would leak its sandbox or start a second one.
     _session_locks: dict[str, asyncio.Lock] = PrivateAttr(default_factory=dict)
-    _closed: ClosedResourcesSessionRecords[EpisodeId | None] = PrivateAttr()
+    # Separate from the inherited Scale-SWE `_fences`, whose records always name an episode.
+    _adapter_fences: ResourcesSessionFences[EpisodeId | None] = PrivateAttr()
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
@@ -149,7 +150,7 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
             raise ValueError("Actor sandboxes live in the server's memory, so it requires num_workers=1")
         if self.config.is_verifying_golden_patch:
             raise ValueError("Golden patches are not agent instruction-following trajectories")
-        self._closed = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
+        self._adapter_fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -183,7 +184,7 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
         # A contract the verifier would refuse fails here, before the episode spends a sandbox and an agent run.
         actor_contract(contract)
         async with self._session_lock(session_id):
-            if session_id in self._closed:
+            if session_id in self._adapter_fences:
                 raise HTTPException(409, "Session is closed")
             seeded = self._seeds.get(session_id)
             if seeded is None:
@@ -233,8 +234,8 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         session_id = body.resources_session_id
         async with self._session_lock(session_id):
-            closed_episode = self._closed.get(session_id)
-            if closed_episode is not None and closed_episode != body.episode_id:
+            fenced_episode = self._adapter_fences.get(session_id)
+            if fenced_episode is not None and fenced_episode != body.episode_id:
                 raise HTTPException(409, "Session belongs to another episode")
             seeded = self._seeds.get(session_id)
             if seeded is not None and seeded[0].episode_id != body.episode_id:
@@ -243,7 +244,7 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
                 # A sandbox that fails to stop raises and stays, so a retried close stops it again.
                 await sandbox.stop()
             self._forget(session_id)
-            self._closed.remember(session_id, body.episode_id)
+            self._adapter_fences.fence(session_id, body.episode_id)
         # Later requests for a closed session are refused, so it needs no lock; any waiting on this one see the close.
         self._session_locks.pop(session_id, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
@@ -253,7 +254,7 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
             seeded = self._seeds.get(session_id)
             sandbox = self._session_id_to_sandbox.get(session_id)
             self._forget(session_id)
-            self._closed.remember(session_id, seeded[0].episode_id if seeded is not None else None)
+            self._adapter_fences.fence(session_id, seeded[0].episode_id if seeded is not None else None)
             await self._stop_sandbox(sandbox)
         self._session_locks.pop(session_id, None)
 
@@ -261,7 +262,7 @@ class SWEIFResourcesServer(PartnerIFGradingMixin, PartnerIFMetricsMixin, ScaleSW
         contract = actor_contract(body.verifier_metadata.partner_if)
         session_id = request.session[SESSION_ID_KEY]
         async with self._session_lock(session_id):
-            if session_id in self._closed:
+            if session_id in self._adapter_fences:
                 # Its sandbox is gone, so neither its patch nor the native tests can run: the sample is masked.
                 return SWEIFVerifyResponse(
                     **body.model_dump(), **masked_fields(contract, SESSION_LOST, "The session closed before verify")
