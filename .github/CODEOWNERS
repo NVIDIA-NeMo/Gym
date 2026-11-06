@@ -125,3 +125,6 @@ docker/ @nvidia-nemo/automation
 # suggest: /Makefile @nvidia-nemo/automation
 # suggest: /codecov.yml @nvidia-nemo/automation
 # suggest: /.pre-commit-config.yaml @nvidia-nemo/automation
+
+# test-only: exists solely on this PR branch; must NOT be suggested
+# suggest: /tests/unit_tests/sandbox/ @nvidia-nemo/gym_reviewers_telemetry
