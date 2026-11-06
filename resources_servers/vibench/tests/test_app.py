@@ -871,5 +871,8 @@ def _stub_extraction(server: VibenchResourcesServer, monkeypatch) -> None:
         (dest / "setup-environment.sh").write_text("#!/bin/bash\n")
         (dest / "start-server.sh").write_text("#!/bin/bash\n")
 
-    _register_session(server, server._repo_root, Path("app.tar"))
+    # verify copies the harvested tarball before grading, so it has to exist; its content goes unread.
+    archive = server._repo_root / "app.tar"
+    archive.write_bytes(b"")
+    _register_session(server, server._repo_root, archive)
     monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)

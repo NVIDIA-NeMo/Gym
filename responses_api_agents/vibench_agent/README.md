@@ -5,11 +5,6 @@ takes a product requirements document, builds a working web application in its o
 and copies the result out as a tarball for
 [`resources_servers/vibench`](../../resources_servers/vibench/README.md) to stand up and grade.
 
-This is ViBench's legacy relay path (`legacy_agent`). The default path is the resources server's own config,
-`resources_servers/vibench/configs/vibench.yaml`, where the resources server lends the build sandbox to
-`opencode_agent` through an agent session; see the [resources server README](../../resources_servers/vibench/README.md).
-This agent runs from `resources_servers/vibench/configs/vibench_agent.yaml`.
-
 Everything about installing and driving the OpenCode harness is inherited from
 `opencode_sandboxed_agent`. Only two things are overridden: how the sandbox is acquired, and
 how the finished app is harvested.
@@ -75,7 +70,7 @@ editing anything else.
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench_agent.yaml \
+    --config resources_servers/vibench/configs/vibench.yaml \
     --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 

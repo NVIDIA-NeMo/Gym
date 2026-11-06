@@ -11,8 +11,14 @@ on its own Harbor harness, is not integrated.
 
 ## Shape
 
-The episode runs through the `single_agent_turn_legacy` Environment Server and the agent-session
-protocol. This server owns the build sandbox and lends it; the agent only borrows it.
+Two configs run this server:
+
+- `configs/vibench_sessions.yaml` runs the episode through the `single_agent_turn_legacy` Environment
+  Server and the agent-session protocol. This server owns the build sandbox and lends it; the agent
+  only borrows it. The rest of this README describes this path unless it says otherwise.
+- `configs/vibench.yaml`, the default, keeps the legacy relay path through `vibench_agent`; see
+  [Legacy relay path](#legacy-relay-path). It stays the default until both paths are graded on the
+  same tasks, since their scores are not directly comparable.
 
 | Stage | Owner |
 | --- | --- |
@@ -25,7 +31,8 @@ protocol. This server owns the build sandbox and lends it; the agent only borrow
 `verify` tars the app directory inside the sandbox, downloads it and stops the sandbox before
 grading starts. Grading then runs on the copy, in fresh compose stacks on this server's Docker
 daemon; the box the model controlled is never graded in place. A second `verify` of the same
-session regrades the same copy. A missing app directory, or one tar cannot read, is a build
+session regrades the same copy. The harvest holds the session's lock, so a concurrent `verify` or a
+`close` waits for it, and each `verify` grades its own copy outside the lock. A missing app directory, or one tar cannot read, is a build
 failure. A provider that fails to run the harvest or transfer the archive is the environment's
 failure, not the model's: the sample is masked with that failure kind, and the sandbox is kept so
 a resent `verify` can harvest again (close stops it). Sessions are process-local, so the server
@@ -124,7 +131,7 @@ With OpenSandbox, start Gym on a host the sandboxes can route to:
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench.yaml \
+    --config resources_servers/vibench/configs/vibench_sessions.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
     --model-type openai_model \
     ++use_absolute_ip=true \
@@ -140,7 +147,7 @@ exec timeout would also kill the build, which OpenCode runs as one long exec. Do
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench.yaml \
+    --config resources_servers/vibench/configs/vibench_sessions.yaml \
     --config resources_servers/vibench/configs/docker.yaml \
     --model-type openai_model
 ```
@@ -175,7 +182,7 @@ per test plan; wall-clock is tens of minutes and the box needs headroom for
 ## Legacy relay path
 
 `responses_api_agents/vibench_agent` still runs ViBench behind the `legacy_agent` relay, from
-`configs/vibench_agent.yaml`. That agent starts its own build sandbox from the same image, runs
+`configs/vibench.yaml`, the default config. That agent starts its own build sandbox from the same image, runs
 OpenCode in it with the legacy recipe above, and writes the app as a tarball into `artifact_dir`, a
 directory it shares with this server; `seed_session` hands it only the PRD text and asset
 directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
@@ -185,13 +192,14 @@ OpenSandbox, set `sandbox_model_base_url` on the agent. See
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench_agent.yaml \
+    --config resources_servers/vibench/configs/vibench.yaml \
     --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 ```
 
 The two paths differ in output budget and command deny-list, so their scores are not directly
-comparable.
+comparable. Making the sessions path the default, and removing `vibench_agent`, waits until both
+have been graded on the same tasks.
 
 ## Validation
 
@@ -209,7 +217,7 @@ example tasks graded, 16/16 test plans, no build or seeding failures:
 
 Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
 scale is not saturated. `data/example_rollouts.jsonl` holds this run, with its task paths
-updated to the `v1/` layout and `vibench_agent`'s artifact path removed.
+updated to the `v1/` layout.
 
 The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
 `notes` with 0/19 steps, its app unreachable because the build produced no output, while the

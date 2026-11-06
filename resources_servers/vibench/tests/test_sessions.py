@@ -2,11 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """The build sandbox lifecycle, run on the local sandbox provider in a temporary directory."""
 
+import asyncio
 import dataclasses
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -420,6 +422,105 @@ def test_close_after_verify_does_not_stop_the_sandbox_twice(server, root, stoppe
     assert _close(client, seed).status_code == 200
 
     assert len(stopped) == 1
+
+
+class _Gate:
+    """Holds whatever awaits it until released, and tells the test when something has reached it."""
+
+    def __init__(self) -> None:
+        self.reached = asyncio.Event()
+        self.released = asyncio.Event()
+
+    async def wait(self) -> None:
+        self.reached.set()
+        await self.released.wait()
+
+
+def _async_client(server: VibenchResourcesServer) -> httpx.AsyncClient:
+    """A client whose requests can overlap, unlike TestClient's; it keeps the session cookie the same way."""
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=server.setup_webserver()), base_url="http://testserver")
+
+
+def test_a_close_during_verify_waits_for_the_harvest_and_leaves_the_copy_being_graded(
+    server, root, stopped, graded, monkeypatch
+):
+    real_download = AsyncSandbox.download
+    real_grade = VibenchResourcesServer._grade
+
+    async def scenario() -> dict:
+        harvesting, grading = _Gate(), _Gate()
+
+        async def download(self, *args, **kwargs):
+            await harvesting.wait()
+            return await real_download(self, *args, **kwargs)
+
+        async def grade(self, *args, **kwargs):
+            await grading.wait()
+            return await real_grade(self, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSandbox, "download", download)
+        monkeypatch.setattr(VibenchResourcesServer, "_grade", grade)
+        seed = _seed()
+        close = ResourcesCloseSessionRequest(
+            resources_session_id=seed.resources_session_id, episode_id=seed.episode_id
+        )
+        async with _async_client(server) as client:
+            await client.post("/seed_session", json=seed.model_dump(mode="json"))
+            _build(root)
+            verifying = asyncio.create_task(client.post("/verify", json=_verify_body()))
+            await harvesting.reached.wait()
+            closing = asyncio.create_task(client.post("/close_session", json=close.model_dump(mode="json")))
+            await asyncio.sleep(0.1)
+            assert not closing.done(), "close waits while the app is harvested"
+
+            harvesting.released.set()
+            await grading.reached.wait()
+            # The close removes the session's copy before grading reads anything.
+            assert (await closing).status_code == 200
+            assert server._sessions == {}
+            grading.released.set()
+            verified = await verifying
+        assert verified.status_code == 200, verified.text
+        return verified.json()
+
+    verified = asyncio.run(scenario())
+
+    assert (verified["reward"], verified["build_failed"], verified["mask_sample"]) == (1.0, False, False)
+    assert len(stopped) == 1
+
+
+def test_two_verifies_at_once_harvest_once_and_both_grade(server, root, stopped, graded, monkeypatch):
+    real_exec = AsyncSandbox.exec
+
+    async def scenario() -> list[dict]:
+        harvesting = _Gate()
+        harvests: list[str] = []
+
+        async def exec_(self, command, **kwargs):
+            harvests.append(command)
+            await harvesting.wait()
+            return await real_exec(self, command, **kwargs)
+
+        async with _async_client(server) as client:
+            await client.post("/seed_session", json=_seed().model_dump(mode="json"))
+            _build(root)
+            monkeypatch.setattr(AsyncSandbox, "exec", exec_)
+            first = asyncio.create_task(client.post("/verify", json=_verify_body()))
+            await harvesting.reached.wait()
+            second = asyncio.create_task(client.post("/verify", json=_verify_body()))
+            await asyncio.sleep(0.1)
+            assert len(harvests) == 1, "the second verify waits instead of tarring into the same file"
+
+            harvesting.released.set()
+            responses = await asyncio.gather(first, second)
+        assert len(harvests) == 1
+        return [response.json() for response in responses]
+
+    verified = asyncio.run(scenario())
+
+    assert [(v["reward"], v["build_failed"]) for v in verified] == [(1.0, False), (1.0, False)]
+    assert len(stopped) == 1
+    assert len(graded) == 4 and all(tree == graded[0] for tree in graded), "both graded the same app"
 
 
 def test_a_close_whose_stop_fails_is_an_error_and_can_be_retried(server, root, monkeypatch):

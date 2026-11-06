@@ -28,7 +28,7 @@ host in a fresh compose stack, not in the box the model controlled.
     run-seed-then-evaluate.py is not used; see the comment above SEED_SCRIPT.)
   * ``close_session`` stops the sandbox if verify has not, and removes the copied app.
 
-The legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench_agent.yaml``) still works: its
+The legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench.yaml``) still works: its
 ``seed_session`` gets the PRD text and asset directories and starts no sandbox, its agent builds in a sandbox of its
 own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and grades the
 same way.
@@ -896,29 +896,49 @@ class VibenchResourcesServer(SimpleResourcesServer):
             grading_time_s=0.0,
         )
 
+    @classmethod
+    def _lost(cls, body: VibenchVerifyRequest) -> VibenchVerifyResponse:
+        return cls._ungraded(
+            body, lost_session_verification("No live ViBench session: there is no built app to grade")
+        )
+
     async def verify(self, request: Request, body: VibenchVerifyRequest) -> VibenchVerifyResponse:
         if "artifact_path" in body.model_fields_set:
             return await self._verify_artifact(body)
-        session = self._sessions.get(request.session.get(SESSION_ID_KEY))
-        if session is None:
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id not in self._sessions:
             # A session that is gone (a restart, a checkpoint restore) took its sandbox with it; a 0 would read
             # as an app that failed to build.
-            return self._ungraded(
-                body, lost_session_verification("No live ViBench session: there is no built app to grade")
-            )
+            return self._lost(body)
 
         started = time.time()
-        try:
-            archive = await self._harvest_app(session)
-        except _HarvestUnavailable as error:
-            print(f"Masking the verify of {body.app}/{body.artifact}: {error}", file=sys.stderr)
-            return self._ungraded(
-                body,
-                {"reward": 0.0, "mask_sample": True, "failure_kind": error.failure_kind, "failure_reason": str(error)},
-            )
-
         work_dir = Path(tempfile.mkdtemp(prefix=f"vibench-{_label(body.app, body.artifact)}-"))
         try:
+            # Only the harvest holds the session's lock. Without it a second verify would tar into the same remote
+            # file and download over the same copy, and a close would remove that copy while it is unpacked, which
+            # grades as a build failure. Grading runs outside the lock, on this verify's own copy in work_dir.
+            async with self._locks.locked(session_id):
+                session = self._sessions.get(session_id)
+                if session is None:
+                    # Closed while this verify waited for the lock.
+                    return self._lost(body)
+                try:
+                    harvested = await self._harvest_app(session)
+                except _HarvestUnavailable as error:
+                    print(f"Masking the verify of {body.app}/{body.artifact}: {error}", file=sys.stderr)
+                    return self._ungraded(
+                        body,
+                        {
+                            "reward": 0.0,
+                            "mask_sample": True,
+                            "failure_kind": error.failure_kind,
+                            "failure_reason": str(error),
+                        },
+                    )
+                archive: Optional[Path] = None
+                if harvested is not None:
+                    archive = work_dir / "app.tar"
+                    await asyncio.to_thread(shutil.copyfile, harvested, archive)
             return await self._grade(body, archive, work_dir, started)
         finally:
             if not self.config.keep_evaluation_artifacts:
