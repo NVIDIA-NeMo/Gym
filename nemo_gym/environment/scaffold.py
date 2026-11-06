@@ -8,7 +8,9 @@ import ast
 import json
 import keyword
 import re
+import tomllib
 from dataclasses import dataclass
+from importlib.metadata import version
 from os.path import relpath
 from pathlib import Path
 from textwrap import dedent
@@ -17,8 +19,8 @@ from typing import Any, Mapping
 import yaml
 from pydantic import ValidationError
 
-from nemo_gym import component_search_roots
-from nemo_gym.config_types import ConfigError
+from nemo_gym import PARENT_DIR, component_search_roots
+from nemo_gym.config import ConfigError
 from nemo_gym.environment.manifest import (
     Determinism,
     EnvironmentKind,
@@ -505,7 +507,7 @@ def _resource_component_files(
         directory / "README.md": readme,
         directory / "app.py": _resources_server_app(module_name),
         directory / "configs" / f"{module_name}.yaml": config,
-        directory / "requirements.txt": requirements,
+        directory / "pyproject.toml": requirements,
         directory / "tests" / "__init__.py": _license_header().removesuffix("\n"),
         directory / "tests" / "test_app.py": _resources_server_test(),
         directory / "tests" / "verifier_cases.jsonl": _verifier_cases(),
@@ -611,6 +613,8 @@ def _standalone_resources_server_readme() -> str:
         Code: ?
         Data: ?
 
+        Before first setup, run `uv lock` in this directory and commit `pyproject.toml` and `uv.lock`.
+
         Dependencies
         - nemo_gym: Apache 2.0
         ?
@@ -638,15 +642,15 @@ def _resources_server_app(module_name: str) -> str:
 
         from pydantic import ConfigDict
 
-        from nemo_gym.base_resources_server import (
+        from nemo_gym.server_runtime.base_resources_server import (
             BaseResourcesServerConfig,
             BaseVerifyRequest,
             BaseVerifyResponse,
             ReverifyMode,
             SimpleResourcesServer,
         )
-        from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-        from nemo_gym.verifier_fixture import VerifierFixture
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+        from nemo_gym.verification import VerifierFixture
 
 
         class {class_name}ResourcesServerConfig(BaseResourcesServerConfig):
@@ -689,7 +693,7 @@ def _resources_server_test() -> str:
         """\
         import asyncio
 
-        from nemo_gym.verifier_fixture import exercise_verifier_fixture
+        from nemo_gym.verification import exercise_verifier_fixture
 
         from ..app import VERIFIER_FIXTURE
 
@@ -758,7 +762,7 @@ def _agent_files(root: Path, directory: Path, composition: _Composition) -> dict
         directory / "__init__.py": _license_header().removesuffix("\n"),
         directory / "README.md": f"# {composition.agent_implementation}\n\n{instruction}\n",
         directory / "app.py": _agent_app(composition.module_name, composition.profile),
-        directory / "requirements.txt": _requirements(directory, _gym_checkout_root(root)),
+        directory / "pyproject.toml": _requirements(directory, _gym_checkout_root(root)),
     }
 
 
@@ -768,9 +772,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-        from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+        from nemo_gym.agents import Body
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import SimpleAgent
 
 
@@ -788,9 +792,9 @@ def _agent_app(module_name: str, profile: IntegrationProfile) -> str:
         body = f"""\
         from fastapi import Request, Response
 
-        from nemo_gym.base_responses_api_agent import Body
-        from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-        from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+        from nemo_gym.agents import Body
+        from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
         from responses_api_agents.simple_agent.app import (
             SimpleAgent,
             SimpleAgentRunRequest,
@@ -841,7 +845,7 @@ def _rollout_driver() -> str:
             _global_config_dict: Mapping[str, Any],
         ) -> None:
             """TODO: Replace this delegation with custom rollout coordination."""
-            from nemo_gym.rollout_collection import RolloutCollectionHelper
+            from nemo_gym.rollouts import RolloutCollectionHelper
 
             await RolloutCollectionHelper().run_from_config(rollout_collection_config)
         '''
@@ -853,9 +857,35 @@ def _gym_checkout_root(root: Path) -> Path | None:
 
 
 def _requirements(directory: Path, checkout_root: Path | None) -> str:
+    project_name = "gym-" + directory.name.replace("_", "-")
+    gym_dependency = "nemo-gym[dev]"
     if checkout_root is None:
-        return "nemo-gym[dev]\n"
-    return f"-e nemo-gym[dev] @ {relpath(checkout_root, directory)}\n"
+        # Generated code uses the installed Gym API, including APIs not yet on PyPI.
+        gym_dependency += f"=={version('nemo-gym')}"
+    text = (
+        _license_header()
+        + f'\n[project]\nname = "{project_name}"\nversion = "0.0.0"\n'
+        + f'requires-python = ">=3.13.14"\ndependencies = [{json.dumps(gym_dependency)}]\n'
+        + "\n[tool.uv]\npackage = false\n"
+    )
+    metadata_path = PARENT_DIR / "pyproject.toml"
+    if not metadata_path.is_file():
+        metadata_path = PARENT_DIR / "nemo_gym/resources/locked_project/pyproject.toml"
+    policy = tomllib.loads(metadata_path.read_text())["tool"]["uv"]
+    text += f"required-version = {json.dumps(policy['required-version'])}\n"
+    for key in ("constraint-dependencies", "override-dependencies", "exclude-dependencies"):
+        text += f"{key} = {json.dumps(policy.get(key, []))}\n"
+    sources = dict(policy.get("sources", {}))
+    if checkout_root is not None:
+        sources["nemo-gym"] = {"path": relpath(checkout_root, directory), "editable": True}
+    if sources:
+        text += "\n[tool.uv.sources]\n"
+        for name, source in sources.items():
+            fields = ", ".join(f"{key} = {json.dumps(value)}" for key, value in source.items())
+            text += f"{json.dumps(name)} = {{ {fields} }}\n"
+    text += '\n[project.optional-dependencies]\ntelemetry = ["nemo-gym[telemetry]"]\n'
+    text += "\n[tool.uv.workspace]\nmembers = []\n"
+    return text + "\n# Add dependencies here, then run `uv lock` and commit pyproject.toml and uv.lock.\n"
 
 
 def _server_entries(raw: Mapping[str, Any], server_type: str) -> list[tuple[str, str, Mapping[str, Any]]]:

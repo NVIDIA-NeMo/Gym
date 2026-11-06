@@ -19,27 +19,56 @@ from contextlib import asynccontextmanager, nullcontext
 from typing import Any, Awaitable, Callable, Dict, Literal, Optional, TypeVar
 
 from aiohttp import ClientResponseError
+from openai.types.shared import ReasoningEffort
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModelConfig,
-    Body,
-    SimpleResponsesAPIModel,
-)
-from nemo_gym.openai_utils import (
-    MAX_NUM_TRIES,
-    NeMoGymAsyncOpenAI,
+from nemo_gym.client import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
-    ReasoningEffort,
 )
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
+from nemo_gym.telemetry import MeteredSemaphore
+from responses_api_models.openai_model.provider_refusals import provider_refusal, refusal_response
 
 
 LOG = logging.getLogger(__name__)
 ResponseT = TypeVar("ResponseT")
+
+
+def _normalize_reasoning_content(response: Any) -> Any:
+    """Correct the known provider text shape without relaxing native validation."""
+    if not isinstance(response, dict) or not isinstance(response.get("output"), list):
+        return response
+    output = response["output"]
+    corrected_output = None
+    for item_index, item in enumerate(output):
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        corrected_content = None
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            if not isinstance(part.get("text"), str) or set(part) not in (
+                {"type", "text"},
+                {"type", "text", "annotations"},
+            ):
+                continue
+            if "annotations" in part and part["annotations"] != []:
+                continue
+            if corrected_content is None:
+                corrected_content = content.copy()
+            corrected_content[part_index] = part | {"type": "reasoning_text"}
+        if corrected_content is not None:
+            if corrected_output is None:
+                corrected_output = output.copy()
+            corrected_output[item_index] = item | {"content": corrected_content}
+    return response if corrected_output is None else response | {"output": corrected_output}
 
 
 class UpstreamRetriesExhaustedError(RuntimeError):
@@ -104,6 +133,10 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
+    provider_refusal_codes: frozenset[Literal["bio_policy", "content_filter", "content_policy_violation"]] = Field(
+        default_factory=frozenset,
+        description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
+    )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
@@ -227,13 +260,22 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
             max_num_tries=self.config.upstream_max_num_tries,
+            # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP
+            # error; left unset, the transport would retry the connection forever.
+            max_connection_retries=self.config.max_http_attempts,
             request_timeout_seconds=self.config.upstream_request_timeout_seconds,
             connect_timeout_seconds=self.config.upstream_connect_timeout_seconds,
             max_http_attempts=self.config.max_http_attempts,
             max_rate_limit_wait_seconds=self.config.max_rate_limit_wait_seconds,
         )
         self._semaphore = (
-            asyncio.Semaphore(self.config.max_concurrent_requests)
+            MeteredSemaphore(
+                self.config.max_concurrent_requests,
+                component="model_server",
+                limit_name="upstream_requests",
+                server_name=self.config.name,
+                admission_timeout_s=self.config.upstream_pool_timeout_seconds,
+            )
             if self.config.max_concurrent_requests is not None
             else nullcontext()
         )
@@ -256,10 +298,8 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             return
 
         try:
-            await asyncio.wait_for(
-                self._semaphore.acquire(),
-                timeout=self.config.upstream_pool_timeout_seconds,
-            )
+            # The semaphore applies upstream_pool_timeout_seconds and counts the timeout.
+            await self._semaphore.acquire()
         except TimeoutError as exc:
             raise TimeoutError(
                 "Timed out acquiring an upstream provider slot after "
@@ -336,7 +376,17 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 ]
 
         async def create_and_validate() -> NeMoGymResponse:
-            response_dict = await self._client.create_response(**body_dict)
+            try:
+                response_dict = await self._client.create_response(**body_dict)
+            except ClientResponseError as error:
+                raw_body = getattr(error, "response_content", None)
+                refusal = provider_refusal(error.status, raw_body, self.config.provider_refusal_codes)
+                if refusal is None:
+                    raise
+                return NeMoGymResponse.model_validate(
+                    refusal_response(self.config.openai_model, refusal, raw_body, request=body_dict)
+                )
+            response_dict = _normalize_reasoning_content(response_dict)
             reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (
                 self.config.reasoning_effort_none_replacement is not None

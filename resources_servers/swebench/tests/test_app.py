@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import base64
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -19,20 +22,25 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from pytest import MonkeyPatch
+from swebench.harness.run_evaluation import make_test_spec
 
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
+from docker.models.containers import ExecResult
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,
     SwebenchResourcesServerConfig,
+    SWEBenchSeedSessionRequest,
+    SWEBenchVerifyRequest,
     SWEBenchVerifyResponse,
     patch_extraction_command,
     strip_binary_diffs,
 )
-from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox
+from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox, run_instance
+from resources_servers.swebench.task_data import TaskData
 
 
 def make_sandbox(
@@ -109,18 +117,26 @@ class TestApp:
         )
         assert res.status_code == 200
         observation = res.json()["verifier_sandbox_observation"]
-        assert observation.pop("wall_time_s") >= 0
+        wall_time_s = observation["wall_time_s"]
+        assert wall_time_s >= 0
         assert observation == {
             "kind": "sandbox",
             "role": "verifier",
             "provider": "test-provider",
             "sandbox_id": "sandbox-123",
             "outcome": "completed",
+            "stage": "verification",
+            "wall_time_s": wall_time_s,
             "exit_code": None,
             "cpu_time_s": None,
             "peak_memory_mib": None,
             "resource_usage_source": None,
             "error_type": None,
+            "error_message": None,
+            "failure_id": None,
+            "observed_client_interval_s": None,
+            "teardown_confirmed": None,
+            "cleanup_errors": [],
         }
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
@@ -311,3 +327,329 @@ class TestPatchExtraction:
         out = strip_binary_diffs(text)
         assert "img.png" not in out and "a/a.py" in out and "b/b.py" in out
         assert strip_binary_diffs("") == ""
+
+
+VERIFY_BODY = {
+    "repo": "astropy/astropy",
+    "instance_id": "my instance_id",
+    "base_commit": "my base_commit",
+    "patch": "my patch",
+    "test_patch": "my test_patch",
+    "problem_statement": "my problem_statement",
+    "hints_text": "",
+    "created_at": "my created_at",
+    "version": "4.3",
+    "FAIL_TO_PASS": "[]",
+    "PASS_TO_PASS": "[]",
+    "environment_setup_commit": "my environment_setup_commit",
+    "difficulty": "my difficulty",
+    "responses_create_params": {"input": []},
+    "response": {
+        "output": [],
+        "id": "",
+        "created_at": 0,
+        "model": "",
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+    "subset": "my subset",
+    "split": "my split",
+}
+
+
+class TestVerdictMasking:
+    """An evaluation that did not complete has no verdict and is masked as a verifier error; a patch the harness
+    could not apply is the model's own graded zero."""
+
+    async def _verify(
+        self, monkeypatch: MonkeyPatch, run_result: dict, *, sandbox_error: str | None = None, golden: bool = True
+    ) -> tuple[SWEBenchVerifyResponse, list]:
+        server = SwebenchResourcesServer(
+            config=SwebenchResourcesServerConfig(
+                host="0.0.0.0",
+                port=8080,
+                entrypoint="",
+                name="",
+                sandbox_provider="test",
+                sandbox_config=dict(),
+                is_verifying_golden_patch=golden,
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        monkeypatch.setattr(
+            "resources_servers.swebench.app.SwebenchResourcesServer._create_sandbox",
+            AsyncMock(
+                return_value=make_sandbox(exec_result=SandboxExecResult(return_code=0, stdout="/testbed\n", stderr=""))
+            ),
+        )
+
+        async def fake_run_instance(*, client, **kwargs):
+            client._sandbox_error_type = sandbox_error
+            return run_result
+
+        monkeypatch.setattr("resources_servers.swebench.app.run_instance", fake_run_instance)
+        observed = []
+        monkeypatch.setattr("resources_servers.swebench.app.observe_failure", observed.append)
+        if not golden:
+            # The agent's sandbox is gone: extracting the patch raises.
+            server._session_id_to_sandbox["sid"] = make_sandbox(exec_error=RuntimeError("sandbox lost"))
+        response = await server.verify(
+            SimpleNamespace(session={SESSION_ID_KEY: "sid"}), SWEBenchVerifyRequest.model_validate(VERIFY_BODY)
+        )
+        return response, observed
+
+    async def test_a_completed_evaluation_is_a_verdict_with_the_patch_digest(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(monkeypatch, {"completed": True, "resolved": True})
+        assert response.evaluation_completed and response.reward == 1 and not response.mask_sample
+        assert response.failure_kind is None and response.failure_reason is None and observed == []
+        assert response.model_patch_sha256 == hashlib.sha256(b"my patch").hexdigest()
+
+    async def test_a_patch_that_does_not_apply_is_the_models_graded_zero(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": False, "resolved": False, "patch_apply_failed": True, "error": "EvaluationError: apply"},
+        )
+        assert response.reward == 0 and not response.mask_sample and response.failure_kind is None
+        assert observed == []
+
+    async def test_an_evaluation_error_is_masked_as_a_verifier_error(self, monkeypatch: MonkeyPatch) -> None:
+        response, observed = await self._verify(
+            monkeypatch, {"completed": False, "resolved": False, "patch_apply_failed": False, "error": "ValueError: x"}
+        )
+        assert not response.evaluation_completed and response.reward == 0 and response.mask_sample
+        assert response.failure_kind == "verifier_error" and response.failure_reason == "ValueError: x"
+        assert response.model_patch_sha256 == hashlib.sha256(b"my patch").hexdigest()
+        [event] = observed
+        assert event.failure_kind == "verifier_error" and event.failure_reason == "ValueError: x"
+
+    @pytest.mark.parametrize("apply_failed", [False, True])
+    async def test_a_sandbox_error_is_masked_even_when_the_patch_did_not_apply(
+        self, monkeypatch: MonkeyPatch, apply_failed: bool
+    ) -> None:
+        # A failed sandbox operation can itself make `git apply` or the tests fail, so neither is the model's result.
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": apply_failed is False, "resolved": False, "patch_apply_failed": apply_failed},
+            sandbox_error="TimeoutError",
+        )
+        assert response.mask_sample and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "Verification sandbox error: TimeoutError" and len(observed) == 1
+
+    async def test_a_patch_that_could_not_be_extracted_is_masked(self, monkeypatch: MonkeyPatch) -> None:
+        # The empty patch then fails to apply, but the agent's patch was never collected: no verdict on it.
+        response, observed = await self._verify(
+            monkeypatch,
+            {"completed": False, "resolved": False, "patch_apply_failed": True, "error": "EvaluationError: apply"},
+            golden=False,
+        )
+        assert response.mask_sample and response.failure_kind == "verifier_error"
+        assert response.failure_reason == "Failed to extract the model patch from the agent sandbox"
+        assert response.model_patch_sha256 is None and response.model_patch is None and len(observed) == 1
+
+
+PNG_A = b"\x89PNG\r\n\x1a\n" + b"reference-a"
+PNG_B = b"\x89PNG\r\n\x1a\n" + b"reference-b"
+CHART_TEST_ASSETS = [
+    {
+        "path": "test/fixtures/controller.bar/minBarLength/horizontal-neg.png",
+        "url": "https://example.com/chartjs/horizontal-neg.png",
+        "content_base64": base64.b64encode(PNG_A).decode("ascii"),
+    },
+    {
+        "path": "test/fixtures/controller.bar/minBarLength/vertical-pos.png",
+        "url": "https://example.com/chartjs/vertical-pos.png",
+        "content_base64": base64.b64encode(PNG_B).decode("ascii"),
+    },
+]
+CHART_F2P = "Chart.controllers.bar auto /base/test/fixtures/controller.bar/minBarLength/horizontal-neg.js "
+CHART_ROW = VERIFY_BODY | {
+    "repo": "chartjs/Chart.js",
+    "instance_id": "chartjs__Chart.js-10157",
+    "base_commit": "abc123",
+    "version": "3.7",
+    "test_patch": (
+        "diff --git a/test/specs/controller.bar.tests.js b/test/specs/controller.bar.tests.js\n"
+        "--- a/test/specs/controller.bar.tests.js\n+++ b/test/specs/controller.bar.tests.js\n@@ -1 +1 @@\n-a\n+b\n"
+    ),
+    "FAIL_TO_PASS": json.dumps([CHART_F2P]),
+    "PASS_TO_PASS": "[]",
+    "image_assets": {
+        "problem_statement": ["https://example.com/issue.png"],
+        "patch": [],
+        "test_patch": CHART_TEST_ASSETS,
+    },
+}
+
+
+def make_server(*, golden: bool = True) -> SwebenchResourcesServer:
+    return SwebenchResourcesServer(
+        config=SwebenchResourcesServerConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="",
+            sandbox_provider="test",
+            sandbox_config=dict(),
+            is_verifying_golden_patch=golden,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+
+
+class TestImageAssets:
+    """SWE-bench Multimodal's test-patch binary files (Chart.js reference images) reach the evaluation script."""
+
+    def test_the_parsed_request_restores_each_test_asset_where_swebench_downloads_it(self) -> None:
+        request = SWEBenchVerifyRequest.model_validate(CHART_ROW)
+        assert request.model_dump()["image_assets"]["test_patch"][0]["path"] == CHART_TEST_ASSETS[0]["path"]
+
+        upstream = make_test_spec(CHART_ROW, namespace="swebench").eval_script_list
+        script = make_server()._make_test_spec(request).eval_script_list
+
+        assert not [line for line in script if line.startswith("curl ")]
+        for index, asset in enumerate(CHART_TEST_ASSETS):
+            position = upstream.index(f"curl -o {asset['path']} {asset['url']}")
+            assert script[position] == f"cp /tmp/nemo-gym-swebench-test-asset-{index} {asset['path']}"
+        # Only the downloads change: the copies run after the test files are reset and before the test patch applies.
+        assert [line for line in script if not line.startswith("cp ")] == [
+            line for line in upstream if not line.startswith("curl ")
+        ]
+
+    def test_image_assets_stored_as_a_json_string_are_read(self) -> None:
+        request = SWEBenchVerifyRequest.model_validate(
+            CHART_ROW | {"image_assets": json.dumps(CHART_ROW["image_assets"])}
+        )
+        assert [asset.content for asset in request.test_assets()] == [PNG_A, PNG_B]
+        assert request.image_assets.model_dump()["patch"] == []
+        assert SWEBenchVerifyRequest.model_validate(VERIFY_BODY).test_assets() == []
+
+    @pytest.mark.parametrize("schema", [SWEBenchVerifyRequest, TaskData])
+    def test_a_test_asset_without_its_bytes_is_rejected(self, schema: type) -> None:
+        without_bytes = [{"path": "test/fixtures/a.png", "url": "https://example.com/a.png"}]
+        with pytest.raises(ValidationError, match="benchmarks/swebench/multimodal/prepare.py"):
+            schema.model_validate(CHART_ROW | {"image_assets": {"test_patch": without_bytes}})
+        not_base64 = [without_bytes[0] | {"content_base64": "not base64!"}]
+        with pytest.raises(ValidationError):
+            schema.model_validate(CHART_ROW | {"image_assets": {"test_patch": not_base64}})
+
+    async def test_only_the_verifier_sandbox_receives_the_test_assets(self, monkeypatch: MonkeyPatch) -> None:
+        server = make_server()
+        create = AsyncMock(
+            return_value=make_sandbox(exec_result=SandboxExecResult(return_code=0, stdout="/testbed\n", stderr=""))
+        )
+        monkeypatch.setattr("resources_servers.swebench.app.SwebenchResourcesServer._create_sandbox", create)
+        monkeypatch.setattr(
+            "resources_servers.swebench.app.run_instance",
+            AsyncMock(return_value={"completed": True, "resolved": True}),
+        )
+        request = SimpleNamespace(session={SESSION_ID_KEY: "sid"})
+
+        await server.seed_session(request, SWEBenchSeedSessionRequest.model_validate(CHART_ROW))
+        await server.verify(request, SWEBenchVerifyRequest.model_validate(CHART_ROW))
+
+        seed_call, verify_call = create.await_args_list
+        assert "test_assets" not in seed_call.kwargs
+        assert [asset.content for asset in verify_call.kwargs["test_assets"]] == [PNG_A, PNG_B]
+
+    async def test_the_verifier_sandbox_setup_uploads_each_test_asset(self, monkeypatch: MonkeyPatch) -> None:
+        sandbox = MagicMock()
+        uploaded: dict[str, bytes] = {}
+
+        async def start_with_setup(spec: Any, setup: Any) -> MagicMock:
+            await setup(sandbox)
+            return sandbox
+
+        async def upload(local_path: Path, remote_path: str) -> None:
+            uploaded[remote_path] = Path(local_path).read_bytes()
+
+        sandbox.start_with_setup = AsyncMock(side_effect=start_with_setup)
+        sandbox.upload = AsyncMock(side_effect=upload)
+        monkeypatch.setattr("resources_servers.swebench.app.get_global_config_dict", lambda: {})
+        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_config", lambda *_: MagicMock())
+        monkeypatch.setattr("resources_servers.swebench.app.resolve_provider_metadata", lambda *_: {})
+        monkeypatch.setattr("resources_servers.swebench.app.AsyncSandbox", MagicMock(return_value=sandbox))
+        monkeypatch.setattr("resources_servers.swebench.app.patch_swebench_multilingual_sandbox", AsyncMock())
+        test_spec = SimpleNamespace(
+            instance_image_key="img:key", instance_id="chartjs__Chart.js-10157", repo="chartjs/Chart.js"
+        )
+        server = make_server()
+
+        await server._create_sandbox(test_spec)
+        assert uploaded == {}
+
+        await server._create_sandbox(
+            test_spec, test_assets=SWEBenchVerifyRequest.model_validate(CHART_ROW).test_assets()
+        )
+        assert uploaded == {
+            "/tmp/nemo-gym-swebench-test-asset-0": PNG_A,
+            "/tmp/nemo-gym-swebench-test-asset-1": PNG_B,
+        }
+
+
+class _FakeEvalContainer:
+    """The verification sandbox as `run_instance` sees it: every command succeeds and the tests print `test_output`."""
+
+    def __init__(self, test_output: str) -> None:
+        self.test_output = test_output
+
+    async def copy(self, src: Path, dest: Any) -> None:
+        pass
+
+    async def exec_run(self, command: str, workdir: str | None = None, user: str | None = None) -> ExecResult:
+        return ExecResult(exit_code=0, output=b"")
+
+    async def exec_run_with_timeout(self, command: str, timeout: int | None) -> tuple[str, bool, float]:
+        return self.test_output, False, 1.0
+
+    async def cleanup(self) -> None:
+        pass
+
+
+class TestFailureOnlyGrading:
+    """SWE-bench grades Chart.js, marked and p5.js from failures alone, so their success needs a completed suite."""
+
+    async def _run(self, monkeypatch: MonkeyPatch, tmp_path: Path, tests_printed: str) -> dict:
+        monkeypatch.chdir(tmp_path)  # run_instance writes its logs under the working directory
+        test_spec = make_server()._make_test_spec(SWEBenchVerifyRequest.model_validate(CHART_ROW))
+        return await run_instance(
+            test_spec=test_spec,
+            pred={"instance_id": test_spec.instance_id, "model_patch": "diff --git a/src/a.js b/src/a.js\n"},
+            rm_image=False,
+            force_rebuild=False,
+            client=_FakeEvalContainer(
+                f"+ : '>>>>> Start Test Output'\n{tests_printed}\n+ : '>>>>> End Test Output'\n"
+            ),
+            run_id="run-id",
+        )
+
+    async def test_a_suite_that_never_started_has_no_verdict(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        result = await self._run(
+            monkeypatch,
+            tmp_path,
+            "ERROR [launcher]: Chrome failed 2 times (cannot start). Giving up.\n"
+            "Firefox 131.0 (Linux x86_64): Executed 1545 of 1545 SUCCESS (56 secs / 48 secs)",
+        )
+        assert result["completed"] is False and result["resolved"] is False
+        assert "chartjs/Chart.js test suite did not run to completion" in result["error"]
+
+    async def test_a_completed_suite_without_the_failure_is_resolved(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        result = await self._run(
+            monkeypatch,
+            tmp_path,
+            "Chrome 120.0.0.0 (Linux x86_64) Chart.helpers.dom getRelativePosition FAILED\n"
+            "Chrome 120.0.0.0 (Linux x86_64): Executed 1545 of 1545 (1 FAILED) (43 secs / 33 secs)",
+        )
+        assert result["completed"] is True and result["resolved"] is True and result["error"] is None
+
+    async def test_a_failing_required_test_is_unresolved(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+        result = await self._run(
+            monkeypatch,
+            tmp_path,
+            f"Chrome 120.0.0.0 (Linux x86_64) {CHART_F2P}FAILED\n"
+            "Chrome 120.0.0.0 (Linux x86_64): Executed 1545 of 1545 (1 FAILED) (43 secs / 33 secs)",
+        )
+        assert result["completed"] is True and result["resolved"] is False

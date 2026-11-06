@@ -34,8 +34,11 @@ BOTH branches: the resources-server tool path and the `update_progress` board pa
 import json as jsonlib
 from unittest.mock import AsyncMock, MagicMock
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+import pytest
+
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -45,7 +48,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
 
 
@@ -59,6 +61,7 @@ MALFORMED_ARGS = '{"queries":["who won the 1998 prize","runner up 1998 prize""go
 
 def _make_config(**kwargs) -> BrowsecompAgentConfig:
     defaults = dict(
+        allow_host_execution=True,
         host="0.0.0.0",
         port=8080,
         entrypoint="",
@@ -226,6 +229,22 @@ class TestMalformedArgumentsAreRecoverable:
         outputs = _fn_call_outputs(result)
         assert len(outputs) == 1
         assert "JSON" in outputs[0]
+
+    @pytest.mark.parametrize("arguments", ["[]", "null", '"board"'])
+    async def test_non_object_update_progress_args_are_reported_back_to_the_model(self, arguments: str) -> None:
+        """Valid JSON that is not an object is the model's mistake too, so the rollout keeps its score."""
+        agent, fake = _make_agent(
+            [
+                _model_response([_raw_fn_call("update_progress", arguments)]),
+                _model_response([_make_msg("Exact Answer: X")], response_id="resp_002"),
+            ],
+            progress=True,
+        )
+        result = await _run(agent, [SYSTEM, USER])
+        assert _fn_call_outputs(result) == [
+            "Arguments of 'update_progress' must be a JSON object with a 'board' string; re-issue the call."
+        ]
+        assert fake.tool_paths == [] and len(fake.model_bodies) == 2
 
 
 class TestWellFormedArgumentsUnaffected:

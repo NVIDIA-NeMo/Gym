@@ -126,7 +126,7 @@ python - <<'PY'
 import json
 from pathlib import Path
 
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.data import materialize_task
 
 rows = [json.loads(line) for line in Path("benchmarks/terminal_bench_2_1/data/benchmark.jsonl").read_text().splitlines()]
 rows = [row for row in rows if row["task_name"] == "terminal-bench/regex-log"]
@@ -188,7 +188,7 @@ service. Detach its process group and standard streams, for example with
 in task-owned log files. Check that the service is reachable before finishing.
 A file-producing smoke does not validate this service-dependent behavior.
 
-Resources retains completed close receipts for `session_close_retry_window_seconds`
+The resources server fences each closed session for `session_close_retry_window_seconds`
 (default 300 seconds); retries do not extend the window. Pending setup or failed stops
 retain their handles. Close fences an in-progress setup before waiting for its lock,
 so setup finishing after a close timeout attempts its own bounded teardown. If that

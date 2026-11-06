@@ -13,8 +13,8 @@ follows the prompt's requested key, mood, instrumentation, or length.
 - Task rows: `responses_create_params.input` with a composition request.
   Optional `verifier_metadata` is preserved for provenance, not scored.
 - Agent: the existing `simple_agent`, with one generation and no tools.
-- Environment Server: the existing `legacy_agent` relay routes rollout requests
-  to `mimo_music_simple_agent`, as required by current Gym config composition.
+- Environment Server: `single_agent_turn_legacy` runs each rollout as a
+  `mimo_music_simple_agent` session.
 - Verifier: this resources server's `/verify` endpoint; no session state.
   Scoring uses local subprocesses and explicitly opts out of Ray initialization.
 - Model: any compatible Gym model server. Thinking models are supported:

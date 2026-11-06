@@ -34,7 +34,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 
 
 def _rows(path: Path):
