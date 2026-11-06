@@ -692,7 +692,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
     assert code == 1 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["status"] == "UNVERIFIED" and out["gate_task"]["score"] == 0.5
     assert out["gate_task"]["errors"] == [] and out["gate_task"]["warnings"][0] == HEALTH_UNKNOWN
-    assert out["gate_task"]["warnings"][1].startswith("per-rollout health not judged against the configured criterion")
+    assert out["gate_task"]["warnings"][1].startswith("rollout quality not judged against the configured criterion")
     assert "2 unobserved" in out["gate_task"]["warnings"][1]
 
 
@@ -1172,7 +1172,7 @@ def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path
         d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
     )
     assert task["status"] == "UNVERIFIED"
-    assert task["warnings"][-4].startswith("per-rollout health within the configured criterion")
+    assert task["warnings"][-4].startswith("rollout quality within the configured criterion")
     assert task["warnings"][-3:-1] == [
         "health-check issues (nonzero): model_call_runaway_generation 1, task_consistently_unhealthy 1",
         "health checks not fully evaluated: run_excessive_failures (evaluated 0, unobserved 1, ignored 0)",

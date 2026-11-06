@@ -1123,7 +1123,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
         Raise AgentSeedRejectedError when the seed carries a key the model does not declare, misses a required one,
         or carries a value of the wrong type, and when an agent without a model is sent any context. The seed then
-        answers a final 422, so an episode never runs without task data it was given.
+        answers a terminal 422, so an episode never runs without task data it was given.
         """
         fields = request.agent_context.fields() if request.agent_context is not None else {}
         model = type(self).agent_context_model
