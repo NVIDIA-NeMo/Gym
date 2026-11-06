@@ -32,7 +32,8 @@ opencode_math_agent:
         permission:
           bash: allow
           edit: allow
-          webfetch: allow
+          # The harness runs on the Gym host with its network, so keep it from looking answers up.
+          webfetch: deny
         provider:
           nvinf:
             npm: "@ai-sdk/openai-compatible"
