@@ -79,7 +79,7 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
-from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.episode_types import BaseEpisodeRequest, EpisodeId
 from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED, PROVIDER_OOM_KILLED
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, SandboxFailureDetails
 from nemo_gym.core.failure_transport import FailureReportRow
@@ -16113,8 +16113,15 @@ def test_an_episode_request_carries_a_rollout_that_skips_token_capture(
         **row_setting,
     }
 
-    assert nemo_gym.rollouts.rollout_collection._episode_request_body(row) == {
+    body = nemo_gym.rollouts.rollout_collection._episode_request_body(row)
+
+    assert body == {
         "episode_id": {"rollout_id": "3-1", "attempt": 0},
         "task": {"task_id": row["task_id"], "task_input": row["task_input"]},
         **episode_setting,
     }
+    # An Environment Server parses the body with its episode request model, which refuses unknown keys.
+    request = BaseEpisodeRequest[dict].model_validate(body)
+    assert request.skip_token_capture is bool(episode_setting)
+    # The model leaves the setting out when it is false, so a request that does not skip is unchanged.
+    assert ("skip_token_capture" in request.model_dump()) is bool(episode_setting)

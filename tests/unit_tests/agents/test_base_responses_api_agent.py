@@ -186,7 +186,11 @@ class TestRolloutTokenCapture:
                 return {"model_base_url": self.resolve_model_base_url("policy_model", "3-1")}
 
             async def run(self, body: BaseRunRequest = Body()) -> dict:
-                return {"model_url_path": self.url_path_for_run("/v1/responses", body)}
+                # A harness's URL follows the request's capture setting; the run's URL helpers read the row.
+                return {
+                    "model_url_path": self.url_path_for_run("/v1/responses", body),
+                    "model_base_url": self.resolve_model_base_url("policy_model", self.rollout_id_from_run(body)),
+                }
 
         client = MagicMock(spec=ServerClient)
         client.global_config_dict = OmegaConf.create(
@@ -203,21 +207,33 @@ class TestRolloutTokenCapture:
         return TestClient(self._agent().setup_webserver())
 
     @pytest.mark.parametrize(
-        ("row", "model_url_path"),
+        ("row", "model_url_path", "model_base_url"),
         [
-            ({}, "/ng-rollout/3-1/training-token-capture/v1/responses"),
-            ({"_ng_skip_token_capture": False}, "/ng-rollout/3-1/training-token-capture/v1/responses"),
-            # Nothing else needs the rollout prefix here, so the call goes out as it would without capture.
-            ({"_ng_skip_token_capture": True}, "/v1/responses"),
+            (
+                {},
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
+            (
+                {"_ng_skip_token_capture": False},
+                "/ng-rollout/3-1/training-token-capture/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/training-token-capture/v1",
+            ),
+            # The rollout keeps its prefix and drops only the training tag.
+            (
+                {"_ng_skip_token_capture": True},
+                "/ng-rollout/3-1/v1/responses",
+                "http://model-host:8000/ng-rollout/3-1/v1",
+            ),
         ],
     )
-    def test_a_run_follows_its_rollout_setting(self, row: dict, model_url_path: str) -> None:
+    def test_a_run_follows_its_rollout_setting(self, row: dict, model_url_path: str, model_base_url: str) -> None:
         reply = self._client().post(
             "/run", json={"responses_create_params": {"input": "task"}, "_ng_rollout_id": "3-1", **row}
         )
 
         assert reply.status_code == 200, reply.text
-        assert reply.json() == {"model_url_path": model_url_path}
+        assert reply.json() == {"model_url_path": model_url_path, "model_base_url": model_base_url}
 
     def test_a_run_with_a_setting_that_is_not_a_boolean_is_refused(self) -> None:
         reply = self._client().post(
@@ -251,6 +267,26 @@ class TestRolloutTokenCapture:
 
         assert reply.status_code == 200, reply.text
         assert reply.json() == {"model_base_url": model_base_url}
+
+    def test_every_rollout_route_without_the_training_tag_turns_capture_off(self) -> None:
+        # Covers activation routes added later, such as one per agent instance: each must turn capture off.
+        app = self._agent().setup_webserver()
+        paths = [
+            path
+            for route in app.routes
+            if (path := getattr(route, "path", "")).startswith("/ng-rollout/{rollout_id}/")
+            and path.endswith("/v1/responses")
+            and "training-token-capture" not in path
+        ]
+        assert "/ng-rollout/{rollout_id}/v1/responses" in paths
+        client = TestClient(app)
+        for path in paths:
+            url = path.replace("{rollout_id}", "3-1")
+            url = "/".join("x" if part.startswith("{") else part for part in url.split("/"))
+            reply = client.post(url, json={"input": "task"})
+
+            assert reply.status_code == 200, (path, reply.text)
+            assert "training-token-capture" not in reply.json()["model_base_url"], path
 
     def test_the_run_url_helpers_read_the_row_where_the_run_route_sets_no_context(self) -> None:
         # Some agents register their own /run route; the URL helpers still read the row's setting.
