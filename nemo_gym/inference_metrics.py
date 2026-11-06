@@ -379,6 +379,14 @@ class InferenceMetricsCollector:
                 hits = metrics.get(f"{prefix}prefix_cache_hits_per_second{suffix}")
                 if hits is not None and value > 0:
                     metrics[f"{prefix}prefix_cache_hit_rate{suffix}"] = 100 * hits / value
+        # Share of CUDA graph token slots that are padding (`--cudagraph-metrics`), per runtime mode.
+        padded_prefix = f"{prefix}cudagraph_padded_tokens_per_second"
+        for key, padded in list(metrics.items()):
+            if key == padded_prefix or key.startswith(padded_prefix + "/"):
+                suffix = key[len(padded_prefix) :]
+                unpadded = metrics.get(f"{prefix}cudagraph_unpadded_tokens_per_second{suffix}")
+                if unpadded is not None and padded > 0:
+                    metrics[f"{prefix}cudagraph_padding_fraction{suffix}"] = 1 - unpadded / padded
 
     async def scrape(self, replica: str, url: HttpUrl) -> dict[str, float] | None:
         """Publish one replica sample; failures do not interrupt rollout collection."""
@@ -506,7 +514,8 @@ class InferenceMetricsCollector:
                     name = metric.split("/", 1)[0]
                     if namespace == "vllm" and (
                         name in PREFILL_DERIVED_METRICS
-                        or name in {"dbo_comm_overlap_fraction", "dbo_compute_overlap_fraction"}
+                        or name
+                        in {"dbo_comm_overlap_fraction", "dbo_compute_overlap_fraction", "cudagraph_padding_fraction"}
                     ):
                         continue  # Recompute from pooled sums/counts; never sum or average ratios.
                     if name == "cache_inventory":
