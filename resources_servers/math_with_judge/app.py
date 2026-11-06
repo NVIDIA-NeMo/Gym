@@ -79,6 +79,7 @@ class JudgeEvaluation(BaseModel):
 
 
 class LibraryJudgeMathVerifyResponse(BaseVerifyResponse):
+    question: str
     expected_answer: str
     extracted_answer: Optional[str]
     library_reward: float
