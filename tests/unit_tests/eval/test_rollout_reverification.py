@@ -2080,6 +2080,46 @@ class TestCallAggregateMetrics:
         assert returned_path == tmp_path / "my_run_rollouts_aggregate_metrics.json"
         assert returned_path.exists()
 
+    @pytest.mark.parametrize(
+        ("usage", "context_marker"),
+        [
+            (None, None),  # Legacy context-window rejection.
+            ({"input_tokens": 10, "output_tokens": 32768}, None),  # Truncated generation.
+            ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "true"),
+            ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, None),  # Output-budget rejection.
+            ({"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}, "false"),
+        ],
+    )
+    async def test_preserves_incomplete_details_even_without_usage(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, usage: dict | None, context_marker: str | None
+    ) -> None:
+        """Keep limit diagnostics without forwarding unrelated metadata or mutating the saved response."""
+        client = self._patch(monkeypatch, {"agent_a": "rs_a"})
+        metadata = {"unrelated": "not needed for aggregation"}
+        if context_marker is not None:
+            metadata["nemo_gym_context_window_exceeded"] = context_marker
+        response = {
+            "output": [{"type": "message", "content": "large partial answer"}],
+            "usage": usage,
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "metadata": metadata.copy(),
+        }
+        original = json.dumps(response, sort_keys=True)
+        results = [{"response": response, "games": [], TASK_INDEX_KEY_NAME: 0}]
+        rows = [{AGENT_REF_KEY_NAME: {"name": "agent_a"}, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}]
+
+        await _call_aggregate_metrics(results, rows, tmp_path / "out.jsonl")
+
+        sent = client.post.call_args.kwargs["json"].verify_responses[0]
+        expected = {"incomplete_details": {"reason": "max_output_tokens"}}
+        if usage is not None:
+            expected["usage"] = usage
+        if context_marker is not None:
+            expected["metadata"] = {"nemo_gym_context_window_exceeded": context_marker}
+        assert sent["response"] == expected
+        assert "output" not in sent["response"]
+        assert json.dumps(response, sort_keys=True) == original
+
     async def test_returns_none_when_no_results(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
         """No results → no aggregate file written and None returned."""
         self._patch(monkeypatch, {"agent_a": "rs_a"})

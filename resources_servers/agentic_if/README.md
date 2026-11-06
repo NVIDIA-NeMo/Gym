@@ -4,7 +4,7 @@ Measures whether a coding agent follows instructions while it completes a real r
 (Terminal-Bench 2.1) task in OpenCode. This resources server owns each episode under `single_agent_turn`:
 
 1. **Seed.** It checks the sealed row, borrows the task's sandbox through the `scale_swe` or `terminal_bench_2_1`
-   typed session, checks the agent user and working directory, and stages the row's workspace files. For a row that
+   episode session, checks the agent user and working directory, and stages the row's workspace files. For a row that
    continues a recorded session, it also restores that session's workspace and stages its export. It then stages the
    OpenCode plugins in `opencode_bundle/`, and any `opencode_runtime_files`, and lends the sandbox to `opencode_agent`.
 2. **Agent turn.** `opencode_agent` runs OpenCode in that sandbox with the plugins. A profile plugin applies the row's
