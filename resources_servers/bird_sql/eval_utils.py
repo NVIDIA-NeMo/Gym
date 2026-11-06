@@ -17,13 +17,14 @@ default thread pool under a semaphore for bounded concurrency.
 """
 
 import asyncio
+import contextlib
 import datetime
 import decimal
 import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 
 ResultRow = tuple[Any, ...]
@@ -194,12 +195,79 @@ async def execute_spark_async(
 _POSTGRES_INFRA_SQLSTATE_CLASSES = ("08", "53", "57", "58", "XX")
 
 
-async def _run_postgres(dsn: str, db_id: str, sql: str, timeout_s: float) -> Optional[ResultSet]:
+class PostgresPool:
+    """The grader's PostgreSQL connections: one pool of ``size`` connections per resources-server process.
+
+    Connections are opened once and reused, so a grade pays no connection setup (a server process forked per
+    connection, plus SCRAM authentication), and one process never holds more than ``size`` server connections. Size it
+    to the server's ``max_concurrency``: a grade holding the semaphore then always finds a free connection, and grades
+    queue in the semaphore as they did before pooling. Every transaction starts ``BEGIN READ ONLY``, which also holds
+    behind a transaction-mode pooler such as PgBouncer.
+
+    The pool opens on first use because psycopg's pool needs a running event loop. Waiting longer than ``timeout_s``
+    to open it or to get a connection raises: the server is unreachable or full, which is not the model's mistake.
+    """
+
+    def __init__(self, dsn: str, size: int, timeout_s: float = 30.0) -> None:
+        import psycopg_pool  # noqa: F401 - imported here so a missing install fails startup, not every grade
+
+        self.dsn = dsn
+        self.size = size
+        self.timeout_s = timeout_s
+        self._pool: Any = None
+        self._lock = asyncio.Lock()
+
+    async def _open(self) -> Any:
+        import psycopg
+        from psycopg_pool import AsyncConnectionPool
+
+        async def read_only(conn: psycopg.AsyncConnection) -> None:
+            await conn.set_read_only(True)
+
+        async with self._lock:
+            if self._pool is None:
+                # Connect once first, so a wrong DSN or an unreachable server raises its own error now rather than a
+                # PoolTimeout after the pool has retried for ``timeout_s``.
+                await (await psycopg.AsyncConnection.connect(self.dsn)).close()
+                pool = AsyncConnectionPool(
+                    self.dsn,
+                    min_size=self.size,
+                    max_size=self.size,
+                    open=False,
+                    configure=read_only,
+                    check=AsyncConnectionPool.check_connection,  # replaces connections a server restart broke
+                    timeout=self.timeout_s,
+                    name="bird_sql",
+                )
+                try:
+                    await pool.open(wait=True, timeout=self.timeout_s)
+                except BaseException:
+                    await pool.close()
+                    raise
+                self._pool = pool
+        return self._pool
+
+    @contextlib.asynccontextmanager
+    async def connection(self) -> AsyncIterator[Any]:
+        pool = self._pool or await self._open()
+        async with pool.connection() as conn:
+            yield conn
+
+    async def close(self) -> None:
+        if self._pool is not None:
+            await self._pool.close()
+            self._pool = None
+
+
+async def _run_postgres(conn: Any, db_id: str, sql: str, timeout_s: float) -> Optional[ResultSet]:
     """Run one query as a single prepared statement in a read-only transaction with ``search_path`` set to ``db_id``.
 
     A prepared statement cannot hold more than one command, so ``COMMIT; ...`` cannot leave the read-only
     transaction. The server's ``statement_timeout`` raises ``TimeoutError``; any other error caused by the query
     returns ``None``. Connection and server failures raise, so they are not scored as the model's mistake.
+
+    The transaction always rolls back: the connection goes back to the pool and serves other rollouts, so nothing the
+    query sets (``SET TimeZone``, ``set_config(..., false)``) may outlive it.
 
     Parallel query is off: a parallel float ``SUM`` adds in a different order on every run (BIRD dev id 1476 gave 10
     different values in 10 runs), which would make the same answer pass or fail at random. It also keeps one rollout
@@ -207,10 +275,8 @@ async def _run_postgres(dsn: str, db_id: str, sql: str, timeout_s: float) -> Opt
     """
     import psycopg
 
-    conn = await psycopg.AsyncConnection.connect(dsn)
     try:
-        await conn.set_read_only(True)
-        async with conn.transaction():
+        async with conn.transaction(force_rollback=True):
             await conn.execute(
                 "SELECT set_config('statement_timeout', %s, true), set_config('search_path', %s, true),"
                 " set_config('max_parallel_workers_per_gather', '0', true)",
@@ -227,29 +293,32 @@ async def _run_postgres(dsn: str, db_id: str, sql: str, timeout_s: float) -> Opt
             raise
         return None
     except asyncio.CancelledError:
-        await conn.cancel_safe()
+        # The backstop fired: stop the server-side query and close the connection, which may still be mid-query, so
+        # the pool replaces it rather than handing it to the next grade.
+        if not conn.closed:
+            await conn.cancel_safe()
+            await conn.close()
         raise
-    finally:
-        await conn.close()
 
 
 async def execute_postgres_async(
-    dsn: str,
+    pool: PostgresPool,
     db_id: str,
     sql: str,
     semaphore: asyncio.Semaphore,
     timeout_s: float = 30.0,
     raise_on_timeout: bool = False,
 ) -> Optional[ResultSet]:
-    """Execute SQL on PostgreSQL schema ``db_id``, bounded by semaphore.
+    """Execute SQL on PostgreSQL schema ``db_id`` on a pooled connection, bounded by semaphore.
 
     Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query error. ``timeout_s`` is enforced by the
-    server (``statement_timeout``); the outer ``wait_for`` is a backstop that also cancels the server-side query.
+    server (``statement_timeout``); the outer ``wait_for`` is a backstop that also cancels the server-side query. The
+    connection is taken before the backstop starts, so time spent waiting for one never counts against the query.
     """
-    async with semaphore:
+    async with semaphore, pool.connection() as conn:
         try:
             return await asyncio.wait_for(
-                _run_postgres(dsn, db_id, sql, timeout_s), timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S
+                _run_postgres(conn, db_id, sql, timeout_s), timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S
             )
         except (asyncio.TimeoutError, TimeoutError):
             if raise_on_timeout:
@@ -321,7 +390,7 @@ async def execute_and_compare_spark(
 
 async def execute_and_compare_postgres(
     db_path: Path,
-    dsn: str,
+    pool: PostgresPool,
     db_id: str,
     gold_sql: str,
     pred_sql: str,
@@ -338,6 +407,6 @@ async def execute_and_compare_postgres(
         return None if rows is None else normalize_rows(rows)
 
     async def run_pred(sql: str) -> Optional[ResultSet]:
-        return await execute_postgres_async(dsn, db_id, sql, semaphore, timeout_s, raise_on_timeout=True)
+        return await execute_postgres_async(pool, db_id, sql, semaphore, timeout_s, raise_on_timeout=True)
 
     return await _compare(run_gold, run_pred, gold_sql, pred_sql)

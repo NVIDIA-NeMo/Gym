@@ -36,7 +36,7 @@ import sqlglot
 from psycopg import sql as pgsql
 from sqlglot import exp
 
-from resources_servers.bird_sql.eval_utils import execute_and_compare_postgres
+from resources_servers.bird_sql.eval_utils import PostgresPool, execute_and_compare_postgres
 from resources_servers.bird_sql.setup_bird_postgres import check_bird_postgres, ensure_bird_postgres
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
 
@@ -101,9 +101,11 @@ async def _pg_error(dsn: str, db_id: str, query: str) -> str:
         return f"{e.sqlstate}: {str(e).strip().splitlines()[0]}"[:300]
 
 
-async def _grade(entry: Dict[str, Any], query: str, dsn: str, db_path: Path, sem: asyncio.Semaphore) -> Dict[str, Any]:
+async def _grade(
+    entry: Dict[str, Any], query: str, pool: PostgresPool, db_path: Path, sem: asyncio.Semaphore
+) -> Dict[str, Any]:
     match, gold, pred, err = await execute_and_compare_postgres(
-        db_path, dsn, entry["db_id"], entry["SQL"], query, sem, timeout_s=30.0
+        db_path, pool, entry["db_id"], entry["SQL"], query, sem, timeout_s=30.0
     )
     result: Dict[str, Any] = {}
     if err == "gold_sql_error" or err == "gold_sql_timeout":
@@ -111,7 +113,7 @@ async def _grade(entry: Dict[str, Any], query: str, dsn: str, db_path: Path, sem
     if err == "pred_sql_timeout":
         return {**result, "status": "pg_timeout"}
     if err == "pred_sql_error":
-        return {**result, "status": "pg_error", "error": await _pg_error(dsn, entry["db_id"], query)}
+        return {**result, "status": "pg_error", "error": await _pg_error(pool.dsn, entry["db_id"], query)}
     if match:
         return {**result, "status": "match"}
     return {
@@ -125,7 +127,7 @@ async def _grade(entry: Dict[str, Any], query: str, dsn: str, db_path: Path, sem
 
 
 async def _check_one(
-    entry: Dict[str, Any], dsn: str, dev_databases_dir: Path, names: Dict[str, str], sem: asyncio.Semaphore
+    entry: Dict[str, Any], pool: PostgresPool, dev_databases_dir: Path, names: Dict[str, str], sem: asyncio.Semaphore
 ) -> Dict[str, Any]:
     result = {"id": entry["id"], "db_id": entry["db_id"], "difficulty": entry["difficulty"], "gold": entry["SQL"]}
     db_path = dev_databases_dir / entry["db_id"] / f"{entry['db_id']}.sqlite"
@@ -136,8 +138,8 @@ async def _check_one(
         result["pg_sql"] = tree.sql(dialect="postgres")
     except Exception as e:
         return {**result, "status": "transpile_error", "status_raw": "transpile_error", "error": str(e)[:200]}
-    raw = await _grade(entry, result["pg_sql_raw"], dsn, db_path, sem)
-    fixed = await _grade(entry, result["pg_sql"], dsn, db_path, sem)
+    raw = await _grade(entry, result["pg_sql_raw"], pool, db_path, sem)
+    fixed = await _grade(entry, result["pg_sql"], pool, db_path, sem)
     return {**result, **fixed, "status_raw": raw["status"], "error_raw": raw.get("error")}
 
 
@@ -156,10 +158,14 @@ async def _main(args: argparse.Namespace) -> None:
     }
 
     sem = asyncio.Semaphore(args.concurrency)
+    pool = PostgresPool(args.dsn, args.concurrency)
     start = time.time()
-    results = await asyncio.gather(
-        *(_check_one(e, args.dsn, dev_databases_dir, names[e["db_id"]], sem) for e in entries)
-    )
+    try:
+        results = await asyncio.gather(
+            *(_check_one(e, pool, dev_databases_dir, names[e["db_id"]], sem) for e in entries)
+        )
+    finally:
+        await pool.close()
     elapsed = time.time() - start
 
     with open(args.out_dir / "results.jsonl", "w") as f:

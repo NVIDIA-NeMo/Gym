@@ -53,12 +53,18 @@ gold SQL is transpiled. The model's query runs as a single prepared statement (s
 with a server-side `statement_timeout`. A connection or server failure is scored as
 `unknown_error`, not as the model's mistake.
 
+Each server process keeps a pool of `max_concurrency` connections (opened on the first
+grade), so the PostgreSQL server needs `max_connections` above `max_concurrency` times the
+number of server processes. Every transaction rolls back, so nothing a query sets carries
+over to the next grade on that connection. Waiting for a connection does not count against
+the query's timeout.
+
 The grader connects with `postgres_dsn`, a read-only role. When `postgres_admin_dsn` is set,
 startup loads any missing `db_id` from the SQLite files (Spark's column typing; text columns
 use the `"C"` collation so ordering matches SQLite) and creates that role from
 `postgres_dsn`'s user and password. Without it, startup only checks that the data is
-loaded. Requires `psycopg` and `pandas` (see `benchmarks/birdbench/README.md`); the default
-SQLite dialect needs neither.
+loaded. Requires `psycopg`, `psycopg_pool` and `pandas` (see `benchmarks/birdbench/README.md`);
+the default SQLite dialect needs none of them.
 
 ## Example usage
 

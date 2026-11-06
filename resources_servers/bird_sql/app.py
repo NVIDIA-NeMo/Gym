@@ -12,7 +12,8 @@ the databases (see ``setup_bird_spark.py``) and its result set is compared again
 gold query's result set. The gold SQL is never transpiled.
 
 ``dialect: postgres`` works the same way against a PostgreSQL server holding one schema per ``db_id`` (see
-``setup_bird_postgres.py``); the model's query runs in a read-only transaction with a server-side timeout.
+``setup_bird_postgres.py``); the model's query runs in a read-only transaction with a server-side timeout, on one of
+``max_concurrency`` pooled connections.
 
 Only the model's query is scored. When the verifier itself cannot measure it (the
 database is missing or corrupt, the gold query cannot run, the executor crashes)
@@ -51,6 +52,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.bird_sql.eval_utils import (
+    PostgresPool,
     SparkUnavailableError,
     execute_and_compare,
     execute_and_compare_postgres,
@@ -135,7 +137,8 @@ class BirdSqlResourcesServerConfig(BaseResourcesServerConfig):
     spark_warehouse_dir: str = "resources_servers/bird_sql/.bird_sql/spark_warehouse"
     # ``dialect: postgres``: the grader connects with ``postgres_dsn`` (a read-only role). With ``postgres_admin_dsn``
     # set, startup loads any missing db_id and creates that role; without it, the data must already be loaded.
-    # Dev and train db_ids differ, so both splits can share one database.
+    # Dev and train db_ids differ, so both splits can share one database. Each server process keeps a pool of
+    # ``max_concurrency`` connections, so the server needs ``max_connections`` above that times the processes.
     postgres_dsn: str = "postgresql://bird_reader@127.0.0.1:5432/bird"  # password via the DSN or PGPASSWORD
     postgres_admin_dsn: Optional[str] = None
     max_concurrency: int = 32
@@ -217,6 +220,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
                 ensure_bird_postgres(self._databases_dir, self.config.postgres_admin_dsn, self.config.postgres_dsn)
             else:
                 check_bird_postgres(self._databases_dir, self.config.postgres_dsn)
+            self._postgres = PostgresPool(self.config.postgres_dsn, self.config.max_concurrency)
 
     @staticmethod
     def _resolve_dir(path: str) -> Path:
@@ -306,7 +310,7 @@ class BirdSqlResourcesServer(SimpleResourcesServer):
             elif self.config.dialect == "postgres":
                 match, _gold, _pred, err = await execute_and_compare_postgres(
                     db_path=db_path,
-                    dsn=self.config.postgres_dsn,
+                    pool=self._postgres,
                     db_id=body.db_id,
                     gold_sql=body.gt_sql,
                     pred_sql=extracted_sql,

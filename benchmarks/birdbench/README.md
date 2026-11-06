@@ -51,7 +51,8 @@ On macOS: `brew install openjdk@17`, then `export JAVA_HOME="$(brew --prefix ope
 Spark runs in local mode inside the server process; no cluster is needed.
 
 **PostgreSQL dialect** needs a PostgreSQL server, plus `psycopg` and `pandas` in both the server's venv and the one
-you run `gym` from (`prepare` renders the column types the loader will create, without connecting). `BIRD_PG_DSN` is
+you run `gym` from (`prepare` renders the column types the loader will create, without connecting), and
+`psycopg_pool` in the server's venv. `BIRD_PG_DSN` is
 the grader's DSN: a read-only role that the loader creates. `BIRD_PG_ADMIN_DSN` (optional) is a role that can create
 schemas and roles; when it is set, the server loads any missing `db_id` on startup (dev takes about 20 s).
 
@@ -59,7 +60,7 @@ schemas and roles; when it is set, the server loads any missing `db_id` on start
 docker run -d --name bird-pg -p 127.0.0.1:5432:5432 -e POSTGRES_USER=bird -e POSTGRES_PASSWORD=<admin password> postgres:16
 export BIRD_PG_ADMIN_DSN=postgresql://bird:<admin password>@127.0.0.1:5432/bird
 export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bird
-uv pip install --python resources_servers/bird_sql/.venv/bin/python "psycopg[binary]>=3.2" pandas
+uv pip install --python resources_servers/bird_sql/.venv/bin/python "psycopg[binary]>=3.2" "psycopg_pool>=3.2" pandas
 ```
 
 ## Dialects and splits
@@ -87,7 +88,8 @@ uv pip install --python resources_servers/bird_sql/.venv/bin/python "psycopg[bin
 - **PostgreSQL execution.** One schema per `db_id` in one database, with the Spark typing rules; text columns use the
   `"C"` collation so ordering matches SQLite. The model's query runs as one prepared statement (so `COMMIT; ...` cannot
   leave the transaction) in a read-only transaction as the read-only role, with `statement_timeout`, `search_path` set
-  to the `db_id`, and parallel query off (a parallel float `SUM` changes from run to run). Identifiers keep BIRD's
+  to the `db_id`, and parallel query off (a parallel float `SUM` changes from run to run), on one of `max_concurrency`
+  pooled connections per server process; size the server's `max_connections` for all of them. Identifiers keep BIRD's
   original case, so the model must double-quote mixed-case names. `postgres_gold_check.py` grades sqlglot transpiles of
   the golds: 91% match after three mechanical fixes (identifier case, double-quoted strings, `REAL`).
 - **Caveat.** Because the gold is the answer under SQLite semantics, a correct Spark query can differ from it when the
