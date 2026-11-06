@@ -168,6 +168,34 @@ def test_stored_infra_retry_budget_is_consumed_not_guessed(tmp_path, used, actio
     assert d.action == action
 
 
+PROTOCOL_VIOLATION = dict(
+    failure_kind="environment_protocol_violation",
+    _ng_failure_terminal=True,
+    _ng_failure_events={
+        "e": {
+            "boundary": "collection",
+            "operation": "collection.run",
+            "operation_id": "op",
+            "attempt_id": "a1",
+            "cause_id": None,
+        }
+    },
+)
+
+
+def test_only_protocol_violations_stop_with_the_producer_hint_and_never_recover(tmp_path) -> None:
+    job = write_job_dir(
+        tmp_path / "job",
+        n=2,
+        results=[],
+        failures=[ident(0, **PROTOCOL_VIOLATION), ident(1, **PROTOCOL_VIOLATION)],
+    )
+    d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert d.action == RecoveryAction.STOP
+    assert "environment_protocol_violation" in d.reason and "producer bug" in d.reason
+    assert "gym eval submit" in d.reason and "--recover" not in d.reason
+
+
 def test_walltime_cap_and_unknown_cap_both_stop(tmp_path) -> None:
     job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[], walltime=57600)
     assert (
@@ -775,7 +803,9 @@ def test_stopped_incomplete_chain_is_named_in_the_gate_errors(tmp_path, fake_exe
     fake_executor.job_dir = job
     out = submit.recover("gym-job-q", "bench")
     assert out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
-    assert any("chain stopped" in e for e in out.gate_task["errors"])
+    assert any(
+        "the job chain stopped with 1 of 2 rollouts unsettled (1 missing)" in e for e in out.gate_task["errors"]
+    )
 
 
 def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
