@@ -95,6 +95,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
 from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
+    AGENT_ROUTE_FAILED,
     CANCELLED,
     COLLECTION_DISPATCH_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
@@ -2357,7 +2358,32 @@ def _record_rollout_health(
         logger.debug("Could not record rollout health telemetry.", exc_info=True)
 
 
-def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dict[str, Any]:
+# Kinds that only say where a failure passed. The kind a row carries is the first cause that says more.
+_ROUTING_FAILURE_KINDS = frozenset({AGENT_ROUTE_FAILED, COLLECTION_DISPATCH_FAILED, AGENT_RUN_ERROR_FAILURE_CLASS})
+
+
+def _reply_failure_kind(headers: Any) -> Optional[str]:
+    """The kind of the outermost failure in the chain an agent's failed reply selected that is not a routing kind.
+
+    ``None`` without a report, with an omitted or broken chain, or when every failure on it only routes.
+    """
+    report = FailureHeader.decode(headers) if headers is not None else None
+    if report is None or report.omitted:
+        return None
+    seen: set[str] = set()
+    current = report.failure_id
+    while current is not None and current not in seen:
+        seen.add(current)
+        event = report.events.get(current)
+        if event is None:
+            return None
+        if event.failure_kind not in _ROUTING_FAILURE_KINDS:
+            return event.failure_kind
+        current = event.cause_id
+    return None
+
+
+def _agent_request_failure_row(exc: BaseException, status: Optional[int], headers: Any = None) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
     No reward and no response: an infrastructure failure is not a verifier score of zero, and a
@@ -2374,8 +2400,11 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
         observations = failure_observations(orjson.loads(body)) if body else {}
     except (TypeError, ValueError):
         observations = {}
+    # A reply that ran and broke names its cause's kind, so the row is typed instead of a bare agent_run_error.
+    kind = _reply_failure_kind(headers) if rollout_ran else None
     return {
         **observations,
+        **({"_ng_failure_kind": kind} if kind is not None else {}),
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
@@ -5341,7 +5370,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
-                    failure = _agent_request_failure_row(e, status)
+                    failure = _agent_request_failure_row(
+                        e, status, getattr(e, "headers", None) or getattr(res, "headers", None)
+                    )
                     if (
                         (typed_outcomes or validate_results)
                         and isinstance(e, (InvalidRolloutResult, orjson.JSONDecodeError))
