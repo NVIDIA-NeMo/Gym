@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import time
+from contextlib import nullcontext
 from typing import ClassVar
 from unittest.mock import MagicMock
 
@@ -12,6 +14,8 @@ from pydantic import Field, JsonValue, PrivateAttr
 
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core.episode_types import EpisodeId, TaskId
+from nemo_gym.core.failure_kinds import SESSION_RELEASE_FAILED
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -24,9 +28,11 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 
 
 class TaskSeed(BaseSeedSessionRequest):
@@ -553,7 +559,7 @@ async def test_verifying_retains_snapshot_on_score_error_and_release_failure(mon
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
     server._fail_release = True
-    with pytest.raises(RuntimeError, match="resource still running"):
+    with pytest.raises(ValueError, match="judge unavailable"):
         async with server.verifying("session") as verification:
             verification.retain(42)
             raise ValueError("judge unavailable")
@@ -689,3 +695,151 @@ async def test_a_retry_finishing_after_expiry_does_not_resurrect_an_evicted_rece
     assert server.session_identity("session") is None
     async with server.verifying("session") as verification:
         assert verification.is_lost
+
+
+@pytest.mark.parametrize("payload", [None, False, 0, {}, []])
+@pytest.mark.parametrize("score_error", [False, True])
+async def test_explicit_falsey_evidence_allows_retry(payload: object, score_error: bool) -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    with pytest.raises(ValueError, match="judge unavailable") if score_error else nullcontext():
+        async with server.verifying("session") as verification:
+            verification.retain(payload)
+            if score_error:
+                raise ValueError("judge unavailable")
+    async with server.verifying("session") as verification:
+        assert not verification.is_lost
+        assert verification.retained == payload
+
+
+@pytest.mark.parametrize("failed_release", [False, True])
+@pytest.mark.parametrize("score_error", [False, True])
+async def test_omitted_evidence_masks_retry_but_still_retries_pending_release(
+    failed_release: bool, score_error: bool
+) -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    server._fail_release = failed_release
+    with pytest.raises(ValueError, match="judge unavailable") if score_error else nullcontext():
+        async with server.verifying("session") as verification:
+            assert not verification.is_lost
+            if score_error:
+                raise ValueError("judge unavailable")
+    assert server.session_release_pending("session") is failed_release
+    server._fail_release = False
+    async with server.verifying("session", allow_missing=True) as verification:
+        assert verification.is_lost
+    assert not server.session_release_pending("session")
+    assert server.state == {}
+    assert server.released == ["session"]
+
+
+async def test_cancelled_scoring_is_not_replaced_by_failed_cleanup() -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    server._fail_release = True
+    with RequestFailureLog.capture() as log, pytest.raises(asyncio.CancelledError):
+        async with server.verifying("session") as verification:
+            verification.retain(42)
+            raise asyncio.CancelledError
+    assert server.session_release_pending("session")
+    assert log.report.failure_id is None
+    assert any(event.failure_kind == SESSION_RELEASE_FAILED for event in log.report.events.values())
+
+
+async def test_cancelled_release_propagates_and_keeps_ownership(monkeypatch) -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+
+    async def cancelled_release(self, session_id: str) -> None:
+        raise asyncio.CancelledError
+
+    with monkeypatch.context() as patch:
+        patch.setattr(AsyncResourceServer, "release_session_state", cancelled_release)
+        with pytest.raises(asyncio.CancelledError):
+            await _verify_and_release(server)
+    assert server.session_release_pending("session")
+    await server.close_resources_session(CLOSE)
+    assert server.state == {} and server.session_is_closed("session")
+
+
+class ObservedResourceServer(AsyncResourceServer):
+    scores: int = 0
+
+    async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        async with self.verifying(request.session[SESSION_ID_KEY]) as verification:
+            if verification.is_lost:
+                return BaseVerifyResponse(**body.model_dump(), **lost_session_verification("evidence unavailable"))
+            verification.retain(None)  # This calculation needs only the answer supplied in the request.
+            self.scores += 1
+            return BaseVerifyResponse(**body.model_dump(), reward=0.25)
+
+
+VERIFY_BODY = {
+    "responses_create_params": {"input": "task"},
+    "response": {
+        "id": "graded-response",
+        "created_at": 0,
+        "model": "test",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+}
+
+
+@pytest.mark.parametrize("failed_release", [False, True])
+@pytest.mark.parametrize("cleanup", ["close", "retire"])
+def test_observed_score_survives_failed_release_and_remains_owned(failed_release: bool, cleanup: str) -> None:
+    client_config = MagicMock(spec=ServerClient)
+    client_config.global_config_dict = {
+        "observability_enabled": True,
+        "checkpoint": {"enabled": True, "control_auth_token": "test-token"},
+    }
+    server = ObservedResourceServer(config=_server().config, server_client=client_config)
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    client = TestClient(app)
+    seeded = client.post("/ng-rollout/rollout/seed_session", json=SEED.model_dump(mode="json"))
+    assert seeded.status_code == 200, seeded.text
+    server._fail_release = failed_release
+
+    response = client.post("/ng-rollout/rollout/verify", json=VERIFY_BODY)
+
+    assert response.status_code == 200, response.text
+    scored = response.json()
+    assert scored["reward"] == 0.25 and scored["mask_sample"] is False
+    (invocation,) = scored["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    record = invocation["grading_record"]
+    assert record["verifier"] == "async-resource" and record["score"] == 0.25
+    assert record["result_binding_sha256"] == grading_result_binding(scored)
+    assert record["result_binding_sha256"] != grading_result_binding(scored | {"reward": 0.75})
+    assert record["result_binding_sha256"] != grading_result_binding(
+        scored | {"response": scored["response"] | {"id": "another-answer"}}
+    )
+    report = FailureHeader.decode(response.headers)
+    if failed_release:
+        assert report is not None and report.failure_id is None
+        assert any(event.failure_kind == SESSION_RELEASE_FAILED for event in report.events.values())
+    assert server.session_release_pending("session") is failed_release
+    assert server.checkpoint_participant.readiness().counts["sessions"] == int(failed_release)
+    server._fail_release = False
+    if cleanup == "close":
+        closed = client.post("/ng-rollout/rollout/close_session", json=CLOSE.model_dump(mode="json"))
+    else:
+        closed = client.post(
+            "/ng-control/v1/checkpoint/retire",
+            json={
+                "checkpoint_id": "retire",
+                "deadline_ts": time.time() + 5,
+                "episode_ids": [{"rollout_id": "rollout"}],
+            },
+            headers={"authorization": "Bearer test-token"},
+        )
+    assert closed.status_code == 200, closed.text
+    assert server.state == {} and not server.session_release_pending("session")
+    assert server.checkpoint_participant.readiness().counts["sessions"] == 0
+    assert server.scores == 1  # Cleanup retries never execute the successful grader again.
