@@ -23,15 +23,23 @@ import tempfile
 import time
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Union
 
 import httpx
+from fastapi import HTTPException, Request
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse, SimpleResourcesServer
-from nemo_gym.config_types import AggregateMetrics, AggregateMetricsRequest
-from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.server_runtime import BaseVerifyResponse, SimpleResourcesServer
+from resources_servers.gdpval import persisted_layout
+from resources_servers.gdpval.app import (
+    GDPValResourcesServer,
+    GDPValResourcesServerConfig,
+    GDPValVerifyRequest,
+    _TaskSession,
+    resolve_deliverables,
+)
 from resources_servers.gdpval.comparison import (
     JUDGE_REQUEST_TIMEOUT_SECONDS,
     MAX_SECTION_TEXT_CHARS_FOR_JUDGE,
@@ -52,7 +60,12 @@ from resources_servers.gdpval.judge_panel import (
     sample_judge,
 )
 from resources_servers.gdpval.preconvert import OFFICE_EXTENSIONS, preconvert_dir_async, sidecar_pdf
+from resources_servers.gdpval.task_sandbox import collect_deliverables
 
+
+SANDBOX_WORKDIR = "/home/user"
+# The read-only input directories of AA's protocol, under the working directory.
+SOURCE_DIRECTORIES = ("shared", "week")
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
@@ -189,16 +202,12 @@ class AABriefcaseLiteResourcesServerConfig(GDPValResourcesServerConfig):
     pairwise_num_trials: int = Field(default=2, ge=1)
     binary_formatting_retries: int = Field(default=2, ge=0, le=3)
     binary_max_tokens_by_judge: Dict[str, int] = Field(default_factory=dict)
+    # GDPVal's web tools need a key at startup. The prepared rows offer no web tool, and the routes refuse requests.
+    tavily_api_key: Union[str, List[str]] = "unused"
 
 
-class AABriefcaseLiteVerifyRequest(BaseVerifyRequest):
-    model_config = ConfigDict(populate_by_name=True)
-
-    task_id: str
-    deliverables_dir: Optional[str] = None
-    ng_task_index: Optional[int] = Field(default=None, alias="_ng_task_index")
-    ng_rollout_index: Optional[int] = Field(default=None, alias="_ng_rollout_index")
-    ng_attempt_index: Optional[int] = Field(default=None, alias="_ng_attempt_index")
+class AABriefcaseLiteVerifyRequest(GDPValVerifyRequest):
+    """GDPVal's request: the task id, the deliverable directory, and the rollout and attempt indices."""
 
 
 class AABriefcaseLiteVerifyResponse(AABriefcaseLiteVerifyRequest, BaseVerifyResponse):
@@ -355,6 +364,9 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
     """Grade public Lite artifacts with official binary and local pairwise checks."""
 
     config: AABriefcaseLiteResourcesServerConfig
+
+    # AA's prompts name /home/user, and the task inputs sit in its shared/ and week/ directories.
+    _sandbox_workdir: ClassVar[Optional[str]] = SANDBOX_WORKDIR
 
     def model_post_init(self, context: Any) -> None:
         root = Path(self.config.dataset_dir).resolve()
@@ -711,7 +723,45 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         reward = (wins + 0.5 * ties) / judged if judged else 0.0
         return reward, results, wins, losses, ties, invalid
 
-    async def verify(self, body: AABriefcaseLiteVerifyRequest) -> AABriefcaseLiteVerifyResponse:
+    async def web_search(self, body: Any) -> str:
+        raise HTTPException(status_code=404, detail="AA-Briefcase-Lite offers no web tools")
+
+    async def fetch_web_page(self, body: Any) -> str:
+        raise HTTPException(status_code=404, detail="AA-Briefcase-Lite offers no web tools")
+
+    async def _download_reference_files(self, task: Any, reference_dir: Path) -> List[str]:
+        """Stage the dataset's shared and week inputs for upload under the working directory."""
+        staged: List[str] = []
+        for name in SOURCE_DIRECTORIES:
+            source = self._aa_dataset_root / "source_files" / name
+            for path in sorted(source.rglob("*")):
+                if not path.is_file():
+                    continue
+                relative = f"{name}/{path.relative_to(source).as_posix()}"
+                target = reference_dir / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.symlink_to(path.resolve())
+                staged.append(relative)
+        return staged
+
+    async def _collect_deliverables(self, session: _TaskSession) -> str:
+        # The inputs are the dataset's, so unlike GDPVal they are not copied beside the submitted files.
+        if session.deliverables_dir is None:
+            task_dir = persisted_layout.repeat_dir(
+                self.config.persist_deliverables_dir, session.task_id.task_id, session.repeat
+            )
+            with tempfile.TemporaryDirectory(prefix="aa_bclite_no_inputs_") as empty:
+                await collect_deliverables(
+                    session.sandbox, session.finish_call, Path(empty), task_dir, self._sandbox_workdir
+                )
+            await self._release(session)
+            session.deliverables_dir = str(task_dir)
+        return session.deliverables_dir
+
+    async def verify(self, request: Request, body: AABriefcaseLiteVerifyRequest) -> AABriefcaseLiteVerifyResponse:
+        body, masked = await resolve_deliverables(self, request, body)
+        if masked is not None:
+            return AABriefcaseLiteVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
         task_markdown = self._task_markdown(body.task_id)
         binary_checks = self._checks_for_task(body.task_id, "binary")
         pairwise_checks = self._checks_for_task(body.task_id, "pairwise")

@@ -10,7 +10,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
@@ -31,6 +31,9 @@ async def test_binary_request_preserves_valid_and_malformed_subtitles(
             port=18000,
             entrypoint="",
             dataset_dir=str(tmp_path),
+            persist_deliverables_dir=str(tmp_path / "deliverables"),
+            sandbox_provider="test",
+            sandbox_config={},
             judge_model_server={"type": "responses_api_models", "name": "judge"},
             preconvert_office_to_pdf=False,
             binary_formatting_retries=0,

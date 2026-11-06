@@ -10,7 +10,9 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from openai import OpenAI
 
-from nemo_gym.server_utils import ServerClient
+import nemo_gym.client.http_client
+import nemo_gym.client.server_client
+from nemo_gym.client import ServerClient
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
@@ -60,6 +62,7 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
     for name, value in model_overrides.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("AA_BRIEFCASE_LITE_DATASET_DIR", str(tmp_path))
+    monkeypatch.setenv("PERSIST_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
     monkeypatch.setenv("JUDGE_BASE_URL", "http://upstream.invalid/v1")
     monkeypatch.setenv("JUDGE_API_KEY", "dummy")
     benchmark = Path(__file__).resolve().parents[3] / "benchmarks/aa_briefcase_lite/config.yaml"
@@ -71,7 +74,8 @@ async def test_benchmark_panel_routes_to_matching_upstream_model(
         model_config = section.responses_api_models.openai_model
         model_config.update(host="127.0.0.1", port=19000 + len(model_configs), name=name)
         model_configs[name] = SimpleModelServerConfig(**OmegaConf.to_container(model_config, resolve=True))
-    monkeypatch.setattr("nemo_gym.server_utils.get_global_config_dict", lambda: config)
+    monkeypatch.setattr(nemo_gym.client.server_client, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_config_dict", lambda: config)
     resource_config = AABriefcaseLiteResourcesServerConfig(
         **OmegaConf.to_container(
             config.aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite, resolve=True

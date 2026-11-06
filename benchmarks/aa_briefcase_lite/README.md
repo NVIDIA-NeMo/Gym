@@ -2,7 +2,11 @@
 
 Public four-task example of Artificial Analysis's private AA-Briefcase evaluation.
 
-This integration uses the existing NeMo Gym Stirrup wrapper. It intentionally omits web tools, requires an isolated execution provider, uses 500 turns, and exposes `finish` plus `abandon_task_finish`.
+This integration runs the shared Stirrup agent in a sandbox that the resources server starts for each task. It
+intentionally omits web tools, uses 500 turns, and exposes `finish` plus `abandon_task_finish`. The prepared rows carry
+the rendered prompts and the two tool definitions. The resources server grades the files the agent submits with
+`finish`; it also derives from the GDPVal server, so GDPVal's sessions, deliverable persistence and judge failure
+handling apply.
 
 Prepare data from an explicitly pinned local checkout. A fresh user can create
 that checkout and materialize its Git LFS objects with:
@@ -28,8 +32,13 @@ It also records the checkout's absolute path, so
 for each installation. The preparation script rejects a different dataset
 revision or missing referenced source files.
 
-Set `AA_BRIEFCASE_CONTAINER_PATH` to an audited Apptainer image and
-`PERSIST_DELIVERABLES_DIR` to an absolute shared-filesystem output path. Configure
+Set `AA_BRIEFCASE_SANDBOX_IMAGE` to an OCI image for AA's working environment and `PERSIST_DELIVERABLES_DIR` to an
+absolute shared-filesystem output path. The image must run commands as the unprivileged `user` (UID 1000) with a
+writable `/home/user`, and carry the document tooling AA's system prompt lists (LibreOffice, TeX Live, Python with
+python-docx, python-pptx, openpyxl and PyMuPDF, and the others named there). The resources server uploads the checkout's
+`source_files/shared` and `source_files/week` to `/home/user/shared` and `/home/user/week` at the start of each task.
+AA's protocol runs without network access; the sandbox provider enforces that, so set the network policy of the sandbox
+in `sandbox_config` for your provider. Configure
 the policy credentials with Gym's normal `policy_api_key` setting, and set
 `JUDGE_BASE_URL` and `JUDGE_API_KEY` for the judge endpoint. Then run:
 
@@ -43,42 +52,27 @@ gym eval run \
     --output results/aa_briefcase_lite.jsonl
 ```
 
-The configuration uses the shared Stirrup wrapper, a 500-turn limit, no web tool,
-an Apptainer network namespace with no interfaces, an isolated writable
-`/home/user`, and read-only `/home/user/shared` and `/home/user/week` inputs.
+The configuration uses the shared Stirrup agent, a 500-turn limit and no web tool. The agent works in `/home/user`
+with the shared and week inputs at `/home/user/shared` and `/home/user/week`.
 
 The default runs all four tasks and judges their deliverables with both the 55
 released binary checks and the eight local analytical-quality/presentation
-pairwise criteria (`AA_BRIEFCASE_REWARD_MODE` defaults to `all`, `execute_only: false`, `judge_only: false`).
+pairwise criteria (`AA_BRIEFCASE_REWARD_MODE` defaults to `all`).
 Pairwise judging uses the public GPT-5.5 reference submission (`gpt-5-5`) with two
 position-debiased trials per criterion. AA has not released its production
 pairwise prompt or private comparison graph, so these pairwise and combined
 results are local/unofficial.
 
-For diagnostic runs, append native Gym YAML overrides to the run command and
-choose a distinct `--output` path. To generate and persist deliverables without
-judging:
+To generate and persist deliverables without judging, for example for a reference set, append
+`++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.judge_deliverables=false`. `/verify` still
+persists each deliverable, then returns `reward: 0.0` and `mask_sample: true` with `failure_kind: gdpval:judging_disabled`.
 
-```bash
-++aa_briefcase_lite_stirrup_agent.responses_api_agents.stirrup_agent.execute_only=true
-```
-
-To judge existing deliverables without rerunning the policy, retain the same
-`PERSIST_DELIVERABLES_DIR` and use:
-
-```bash
-++aa_briefcase_lite_stirrup_agent.responses_api_agents.stirrup_agent.execute_only=false \
-++aa_briefcase_lite_stirrup_agent.responses_api_agents.stirrup_agent.judge_only=true \
-++aa_briefcase_lite_stirrup_agent.responses_api_agents.stirrup_agent.rerun_incomplete=false
-```
-
-This rejudges the cached artifacts with both scoring paths. To isolate one path,
-also append either
-`++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.reward_mode=binary`
-or
-`++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.reward_mode=pairwise`.
-Alternatively, set `EXECUTE_ONLY`, `JUDGE_ONLY`, or `AA_BRIEFCASE_REWARD_MODE`
-environment variables. Explicit Gym config overrides take precedence.
+To judge a finished run's persisted deliverables again, without the policy or a sandbox, use `gym eval reverify` on its
+output, as described under "Deliverables and re-judging" in the GDPVal benchmark README. A judge failure is masked as
+`judge_failed`, keeps the saved deliverable, and `gym eval reverify --judge-failed-only` judges it again. To isolate one
+scoring path, append
+`++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.reward_mode=binary` or `...reward_mode=pairwise`,
+or set `AA_BRIEFCASE_REWARD_MODE`. Explicit Gym config overrides take precedence.
 
 Report `aa_lite/binary_pass_rate` and `aa_lite/pairwise_win_rate` separately,
 alongside their counts and Gym's expected, scored, and missing rollout coverage.
@@ -96,8 +90,8 @@ Each judge-panel member uses its own model server because the `openai_model`
 adapter fixes the upstream model. Override the three model names with
 `JUDGE_GPT_MODEL`, `JUDGE_GEMINI_MODEL`, and `JUDGE_CLAUDE_MODEL` as needed.
 Claude uses adaptive thinking with medium effort and a local 49,152-token output
-limit in both binary and pairwise judging. Medium effort is a local deviation
-from AA's published maximum-effort setting and is under validation.
+limit in both binary and pairwise judging. Medium effort differs from AA's published
+maximum-effort setting.
 GPT and Gemini inherit the local 4,096-token binary and 65,535-token pairwise
 limits. AA's judge output budgets are not disclosed.
 
@@ -111,8 +105,7 @@ contain SRT files also include their subtitle text in judge inputs.
 LaTeX source and PDF content are shown separately; the harness does not compile
 the source to verify that it produces the submitted PDF.
 
-The 49,152-token Claude budget is under validation; it is not an AA-prescribed
-limit or a demonstrated reliability fix.
+The 49,152-token Claude budget is a local setting, not an AA-prescribed limit.
 
 For long judge requests, set `GDPVAL_JUDGE_REQUEST_TIMEOUT_SECONDS=600` before
 starting Gym. This controls the client timeout, not upstream service deadlines.

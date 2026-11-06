@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 from omegaconf import OmegaConf
-from pydantic import TypeAdapter
 
+from benchmarks.aa_briefcase_lite.prepare import AGENT_MAX_TURNS
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.global_config import (
     GlobalConfigDictParser,
@@ -29,12 +29,11 @@ def resolve_config(monkeypatch, tmp_path):
     monkeypatch.chdir(REPO_ROOT)
     monkeypatch.delenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, raising=False)
     monkeypatch.setenv("AA_BRIEFCASE_LITE_DATASET_DIR", str(tmp_path / "dataset"))
+    monkeypatch.setenv("PERSIST_DELIVERABLES_DIR", str(tmp_path / "deliverables"))
     monkeypatch.setenv("JUDGE_BASE_URL", "https://judge.invalid/v1")
     monkeypatch.setenv("JUDGE_API_KEY", "dummy")
     # Test the defaults independently of the calling shell.
     monkeypatch.delenv("AA_BRIEFCASE_REWARD_MODE", raising=False)
-    monkeypatch.delenv("EXECUTE_ONLY", raising=False)
-    monkeypatch.delenv("JUDGE_ONLY", raising=False)
 
     def resolve(*overrides):
         initial = OmegaConf.merge(
@@ -60,8 +59,9 @@ def test_benchmark_config_resolves_full_local_profile(resolve_config) -> None:
     resources = get_first_server_config_dict(config, RESOURCES_NAME)
 
     assert resolve_dataset_agent(config, AGENT_NAME) == AGENT_NAME
-    assert TypeAdapter(bool).validate_python(agent.execute_only) is False
-    assert TypeAdapter(bool).validate_python(agent.judge_only) is False
+    assert agent.finish_tool_names == ["finish", "abandon_task_finish"]
+    assert agent.agent_max_turns == AGENT_MAX_TURNS
+    assert resources.sandbox_provider == "sandbox"
     assert resources.reward_mode == "all"
     assert resources.pairwise_reference_ids == ["gpt-5-5"]
     assert resources.pairwise_num_trials == 2
@@ -72,27 +72,16 @@ def test_benchmark_config_resolves_full_local_profile(resolve_config) -> None:
 
 
 @pytest.mark.parametrize("reward_mode", ["binary", "pairwise", "all"])
-def test_judge_only_overrides_keep_reference_profile(resolve_config, reward_mode) -> None:
-    config = resolve_config(
-        f"{RESOURCES_KEY}.reward_mode={reward_mode}",
-        f"{AGENT_KEY}.execute_only=false",
-        f"{AGENT_KEY}.judge_only=true",
-        f"{AGENT_KEY}.rerun_incomplete=false",
-    )
-    agent = get_first_server_config_dict(config, AGENT_NAME)
+def test_reward_mode_override_keeps_reference_profile(resolve_config, reward_mode) -> None:
+    config = resolve_config(f"{RESOURCES_KEY}.reward_mode={reward_mode}")
     resources = get_first_server_config_dict(config, RESOURCES_NAME)
 
-    assert TypeAdapter(bool).validate_python(agent.execute_only) is False
-    assert agent.judge_only is True
-    assert agent.rerun_incomplete is False
     assert resources.reward_mode == reward_mode
     assert resources.pairwise_reference_ids == ["gpt-5-5"]
     assert resources.pairwise_num_trials == 2
 
 
-def test_generation_only_override(resolve_config) -> None:
-    config = resolve_config(f"{AGENT_KEY}.execute_only=true")
-    agent = get_first_server_config_dict(config, AGENT_NAME)
+def test_judging_can_be_switched_off_to_save_deliverables_only(resolve_config) -> None:
+    config = resolve_config(f"{RESOURCES_KEY}.judge_deliverables=false")
 
-    assert agent.execute_only is True
-    assert TypeAdapter(bool).validate_python(agent.judge_only) is False
+    assert get_first_server_config_dict(config, RESOURCES_NAME).judge_deliverables is False
