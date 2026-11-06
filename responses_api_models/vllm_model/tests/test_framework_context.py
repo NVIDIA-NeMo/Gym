@@ -1567,3 +1567,69 @@ def test_retired_capture_refuses_dispatch_and_measurement(monkeypatch, tmp_path,
     assert response.status_code == 409, response.text
     assert "retired" in response.json()["detail"]
     assert len(harness.worker_calls) == 1
+
+
+@pytest.mark.parametrize("tool", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatch, tmp_path, tool, stream):
+    harness = make_capture_harness(monkeypatch, tmp_path, reasoning=False)
+    worker = NeMoGymAsyncOpenAI.create_chat_completion
+
+    async def tool_worker(client, **body):
+        payload = await worker(client, **body)
+        if tool:
+            payload["choices"][0].update(
+                finish_reason="tool_calls",
+                message={
+                    "role": "assistant",
+                    "content": "delegating",
+                    "tool_calls": [
+                        {
+                            "id": f"call-{len(harness.worker_calls)}",
+                            "type": "function",
+                            "function": {"name": "Agent", "arguments": '{"prompt":"solve"}'},
+                        }
+                    ],
+                },
+            )
+        return payload
+
+    monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", tool_worker)
+    path = "/ng-rollout/attempt/training-token-capture/v1/messages"
+    body = {
+        "model": "test-model",
+        "max_tokens": 64,
+        "stream": stream,
+        "system": "solve independently",
+        "messages": [{"role": "user", "content": "task"}],
+        "tools": [{"name": "Agent", "input_schema": {"type": "object"}}],
+    }
+
+    def post(payload):
+        response = harness.client.post(path, json=payload)
+        if not stream:
+            return assert_clean(response)
+        assert response.status_code == 200, response.text
+        for field in (NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD, "prompt_token_ids"):
+            assert field not in response.text
+        result = _reconstruct_streamed_response(response.content, "messages")
+        assert result is not None
+        return result
+
+    first = post(body)
+    feedback = [{"type": "tool_result", "tool_use_id": "call-1", "content": "solved"}] if tool else "continue"
+    continued = {
+        **body,
+        "messages": body["messages"]
+        + [{"role": "assistant", "content": first["content"]}, {"role": "user", "content": feedback}],
+    }
+    post(continued)
+    manifest = harness.manifest("attempt")
+    assert harness.worker_calls[1][0].mode == "candidate"
+    assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
+    post({**continued, "system": "rewritten context"})
+    assert harness.worker_calls[2][0].mode == "text"
+    final = harness.manifest("attempt")
+    assert len(final.records) == 3
+    assert not final.failures and not final.pending_call_ids
+    assert final.records[0].response_id == first["id"]

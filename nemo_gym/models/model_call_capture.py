@@ -856,10 +856,10 @@ class _CaptureMiddleware:
             capture_wanted
             and self._parent_resolution_mode == "source_history"
             and dialect is not None
-            and dialect not in ("responses", "chat")
+            and dialect not in ("responses", "chat", "messages")
         ):
             await Response(
-                content='{"detail":"Source-history capture currently requires Responses or Chat"}',
+                content='{"detail":"Source-history capture requires Responses, Chat, or Messages"}',
                 status_code=422,
                 media_type="application/json",
             )(scope, receive, send)
