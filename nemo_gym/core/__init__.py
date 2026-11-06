@@ -87,9 +87,12 @@ if TYPE_CHECKING:
         report_for_current_request,
     )
     from nemo_gym.core.outcome_policy import (
+        OutcomeAction,
         OutcomeDecision,
+        OutcomePolicyConfig,
         StageOutcomePolicyConfig,
         StagePolicyConfig,
+        choose_action,
         choose_stage_outcome,
     )
     from nemo_gym.core.responses_api_types import (
@@ -235,6 +238,8 @@ _PUBLIC_API = {
     "NeMoGymResponseUsage": "responses_api_types",
     "NeMoGymSummary": "responses_api_types",
     "NgFailureEvent": "typed_exceptions",
+    "OutcomeAction": "outcome_policy",
+    "OutcomePolicyConfig": "outcome_policy",
     "PROVIDER_IO_TIMEOUT": "failure_kinds",
     "PROVIDER_OOM_KILLED": "failure_kinds",
     "PROVIDER_STATUS_UNAVAILABLE": "failure_kinds",
@@ -252,6 +257,7 @@ _PUBLIC_API = {
     "VERIFIER_ERROR": "failure_kinds",
     "accumulate_response_usage": "responses_api_types",
     "agent_route_failure": "typed_exceptions",
+    "choose_action": "outcome_policy",
     "current_rollout_id": "episode_context",
     "current_verifier_invocation_id": "episode_context",
     "failure_report_for": "typed_exceptions",
