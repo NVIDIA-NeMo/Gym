@@ -106,7 +106,8 @@ Loads `reader_model` with transformers in this server (`device_map="auto"`, so i
 the last `reader_max_tokens` tokens of each reviewed window at `jspace_layer` (`reader_mode: jspace`, with
 `jlens_path`, `jspace_concepts` and `jspace_top_k`) or with a probe (`reader_mode: probe`). It reads the rendered
 text, not the policy's tokens, and during RL its weights stay at the starting checkpoint. Use it when the policy is
-not served by vLLM. `reader_layout` names the modules of architectures jlens does not detect, for example
+not served by vLLM. The lock leaves out what this mode needs (jlens, torch, transformers, accelerate, safetensors),
+so install them in this server's venv first; the server says so at startup if they are missing. `reader_layout` names the modules of architectures jlens does not detect, for example
 `{path: backbone, layers: layers, norm: norm_f, embed: embeddings}` for Nemotron-H.
 
 Calibrate layer 0 before relying on it: check its flag rate on clean rollouts, and use the audited share to measure

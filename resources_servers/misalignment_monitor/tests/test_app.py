@@ -1038,6 +1038,7 @@ def _connector_module(monkeypatch: pytest.MonkeyPatch) -> Any:
     return importlib.import_module(name)
 
 
+@pytest.mark.skipif(importlib.util.find_spec("torch") is None, reason="layer 0 needs torch")
 @pytest.mark.parametrize("generated", [1, 4098])
 def test_the_probe_reads_the_last_prompt_token_however_long_the_generation(monkeypatch, generated: int) -> None:
     import torch

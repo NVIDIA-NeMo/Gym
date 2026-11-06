@@ -272,10 +272,18 @@ class ActivationReader:
     """
 
     def __init__(self, config: MisalignmentMonitorConfig) -> None:
-        import jlens
-        import torch
-        import transformers
-        from safetensors.torch import load_file
+        try:
+            import jlens
+            import torch
+            import transformers
+            from safetensors.torch import load_file
+        except ImportError as e:
+            raise ImportError(
+                f"activation_source: reader needs jlens, torch, transformers, accelerate and safetensors in this "
+                f"server's venv, which its lock leaves out ({e}). Install them there, for example with "
+                "`uv pip install 'jlens @ git+https://github.com/anthropics/jacobian-lens@581d398613e5602a5af361e1c34d3a92ea82ba8e' "
+                "accelerate safetensors`."
+            ) from e
 
         from resources_servers.misalignment_monitor.activation_readout import concept_token_ids
 

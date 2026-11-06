@@ -9,12 +9,10 @@ dependencies = [
     "nemo-gym[dev,sandbox]",
     # The investigators' search: a timeout stops a regular expression that backtracks without end.
     "regex",
-    # Layer 0 (activation_mode probe or jspace). jlens is the Apache-2.0 reference implementation of the Jacobian lens
-    # from "Verbalizable Representations Form a Global Workspace in Language Models"; it brings torch and transformers.
-    "jlens",
-    "accelerate",
-    "safetensors",
 ]
+# Not locked: `activation_source: reader` also needs jlens (the Apache-2.0 Jacobian lens reference implementation),
+# torch, transformers, accelerate and safetensors in this server's venv. They would double the lock for a mode that is
+# off by default; the engine mode reads inside vLLM and needs none of them here.
 
 [tool.uv]
 package = false
@@ -59,7 +57,6 @@ required-version = ">=0.13.4"
 
 [tool.uv.sources]
 "nemo-gym" = { path = "../..", editable = true }
-jlens = { git = "https://github.com/anthropics/jacobian-lens", rev = "581d398613e5602a5af361e1c34d3a92ea82ba8e" }
 
 [tool.uv.sources.nemo-lens]
 git = "https://github.com/NVIDIA-NeMo/Lens.git"
