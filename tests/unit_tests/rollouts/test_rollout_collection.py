@@ -3527,9 +3527,11 @@ class TestRolloutCollection:
             "coverage/masked": 0,
             "coverage/unscored": 0,
             "coverage/failed": 0,
+            "coverage/failed_masked": 0,
             "coverage/omitted": 0,
             "coverage/not_started": 0,
             "coverage/missing_outcomes": 1,
+            "coverage/open": 1,
             "coverage/failure_budget_exhausted": 0,
         }
         assert "Scored as zero because they left no row: 1 of 2 rollouts" in capsys.readouterr().out
@@ -3604,9 +3606,11 @@ class TestRolloutCollection:
             "coverage/masked": 0,
             "coverage/unscored": 0,
             "coverage/failed": 1,
+            "coverage/failed_masked": 0,
             "coverage/omitted": 0,
             "coverage/not_started": 0,
             "coverage/missing_outcomes": 0,
+            "coverage/open": 0,
             "coverage/failure_budget_exhausted": 1,
             # Task 0 failed with this class before it landed: the reopened tracking run is told it is 0 now.
             f"coverage/failed/{AGENT_REQUEST_FAILED_FAILURE_CLASS}": 0,
@@ -9743,6 +9747,8 @@ class TestRolloutAggregationHelper:
         coverage = orjson.loads((merged_dir / "rollouts_coverage.json").read_bytes())
         assert coverage["retry_terminal_timeouts"] is retry_timeouts
         assert coverage["failed_final"] == int(not retry_timeouts)
+        # A timeout the policy retries has no final result yet; a terminal one is final, so not open.
+        assert (coverage["open"], coverage["failed_masked"]) == (int(retry_timeouts), 0)
         assert all(p.read_bytes() == data for p, data in before.items())
 
     def _landed_and_failed_runs(self, root: Path, *, same_indices: bool) -> tuple[Path, Path]:
