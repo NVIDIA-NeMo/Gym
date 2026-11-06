@@ -92,8 +92,8 @@ OPENAI_COMPATIBLE_PROVIDER = "openai-compatible"
 MAX_PROMPT_BYTES = 128 * 1024 - 1
 SESSION_ROOT = "/tmp/nemo-gym-cline-sessions"
 RUNTIME_PREFIX = "/tmp/nemo-gym-cline-runtime-"
-# Errors Cline 3.0.55 reports when a model request never got an HTTP response: a refused or dropped
-# connection, and its runtime's 300-second request timeout.
+# Transport errors reported by Cline 3.0.55's runtime. Its request timeout is not a wall-clock
+# bound on Gym's streaming route; the process supervisor owns the run deadline.
 _TRANSPORT_ERRORS = ("Cannot connect to API", "The operation timed out.")
 # Cline 3.0.55 ends the run with this error when a model call stops at its output-token cap.
 _OUTPUT_LIMIT_ERROR = "Model reached the maximum output token limit"

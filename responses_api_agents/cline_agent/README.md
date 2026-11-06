@@ -288,11 +288,12 @@ recorded. Agent sessions report that run's usage as unknown instead (see
 - Cline 3.0.55 reads a prompt only from argv or a pipe, not from a redirected file, so the prompt is
   an argument: an agent session refuses one over 128 KiB (Linux's limit for one argument), and a
   process listing inside the sandbox shows it.
-- Each model call must answer within 300 seconds, the request timeout of Cline's runtime; a slower
-  call ends the run with `The operation timed out.` and Cline does not retry it. An agent session
-  reports that run as `model_transport_error`, which the Environment Server retries by default. The
-  provider settings' own `timeout` field cannot raise it: with it set, Cline 3.0.55 fails to connect
-  at all.
+- The process supervisor's `timeout` bounds the entire run, including model requests and tools.
+  Do not rely on a fixed 300-second per-request limit: streamed calls through Gym have remained in
+  flight longer than that while Gym sends keepalives and waits for a complete backend response.
+  If Cline itself reports `The operation timed out.`, the session reports `model_transport_error`,
+  which the Environment Server retries by default. Setting `timeout` in Cline 3.0.55's provider
+  settings fails to connect; use the agent's `timeout` for the run's wall-clock budget.
 - Agent sessions use only Cline's built-in tools: MCP and `direct_http` grants are not wired into
   Cline, so required grants are refused and optional ones skipped (`resources_tool_transports: []`).
 - Cline 3.0.55 always records checkpoint commits under `refs/cline/checkpoints/` when the workdir is a
