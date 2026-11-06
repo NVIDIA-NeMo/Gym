@@ -1056,6 +1056,8 @@ async def test_progress_masking_matches_persisted_outcomes(runner_config, monkey
     rows[2]["agent_ref"]["name"] = "dropped_agent"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
     runner_config.upload_rollouts = False
+    # The typed reply is an invalid reply from the one-task dropped agent; this test is about masking, not the stop.
+    runner_config.environment_protocol_violation_stop_after = 0
     exported = []
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))

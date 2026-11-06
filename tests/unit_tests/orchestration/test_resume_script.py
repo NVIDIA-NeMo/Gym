@@ -1453,6 +1453,21 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
     assert "the chain recorded: Previous job 100 ended FAILED: provider_credentials_rejected" in decision.reason
 
 
+def test_inspection_names_a_chain_stopped_on_a_producer_protocol_violation(tmp_path):
+    from nemo_gym.orchestration.executors.resume_script import PROTOCOL_VIOLATION_REASON
+    from nemo_gym.orchestration.recovery import decide_from_collected
+    from tests.unit_tests.orchestration.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
+    line = f"Previous job 100 ended FAILED: {PROTOCOL_VIOLATION_REASON}"
+    (job / INCOMPLETE_MARKER_NAME).write_text(line + chr(10))
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.chain_continuation_note == line
+    assert "the chain recorded: Previous job 100 ended FAILED: environment_protocol_violation" in decision.reason
+
+
 def test_inspection_names_a_chain_stopped_on_an_exhausted_grading_quota(tmp_path):
     from nemo_gym.orchestration.executors.resume_script import QUOTA_EXHAUSTED_REASON
     from nemo_gym.orchestration.recovery import decide_from_collected

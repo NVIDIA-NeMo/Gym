@@ -67,6 +67,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     EPISODE_FAILED,
     GRADING_WITHOUT_VERDICT,
     HARBOR_FAILED,
@@ -1498,6 +1499,18 @@ def decide_recovery(
                     f"({PROVIDER_QUOTA_EXHAUSTED}), which {'resets at ' + resets[-1] if resets else 'has no known reset'}"
                     "; nothing can be graded before then. After the reset continue with gym eval resubmit --recover "
                     "(re-judges the saved answers, no model calls)",
+                )
+            violations = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == ENVIRONMENT_PROTOCOL_VIOLATION
+            ]
+            if len(violations) == counts[IdentityState.TERMINAL]:
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(violations)} rollout(s) got a reply the collector cannot use "
+                    f"({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+                    "Fix the server or the benchmark pairing, then `gym eval submit` again",
                 )
             return decision(
                 RecoveryAction.STOP,
