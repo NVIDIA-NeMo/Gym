@@ -13,10 +13,14 @@ from PIL import Image
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, EpisodeId, TaskId
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer
 from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace
+from resources_servers.agentic_mme.tests.test_app import response
 
 
 def _png(size: tuple[int, int], color: str) -> bytes:
@@ -125,7 +129,7 @@ def test_a_failed_tool_returns_the_agent_s_error_to_the_model(image_root) -> Non
     assert reply.json() == {"ok": False, "error": "image_index does not exist in this rollout"}
 
 
-def test_a_tool_call_needs_a_seeded_workspace_and_close_drops_it(image_root) -> None:
+def test_a_tool_call_needs_a_seeded_workspace_and_answers_404_after_close(image_root) -> None:
     server = _server(image_root)
     assert TestClient(server.setup_webserver()).post("/invert", json={"image_index": 0}).status_code == 409
 
@@ -134,7 +138,11 @@ def test_a_tool_call_needs_a_seeded_workspace_and_close_drops_it(image_root) -> 
     assert client.post("/close_session", json=close.model_dump(mode="json")).status_code == 200
 
     assert server._sessions == {}
-    assert client.post("/invert", json={"image_index": 0}).status_code == 409
+    late = client.post("/invert", json={"image_index": 0})
+    # The harness records a failed tool call that names the lost session, and nothing is recreated.
+    assert late.status_code == 404
+    assert late.json()["detail"]["failure_kind"] == "session_lost"
+    assert server._sessions == {}
 
 
 def test_seed_refuses_an_image_it_cannot_load(image_root) -> None:
@@ -153,6 +161,11 @@ def test_server_tools_follow_the_session_contract(image_root) -> None:
         _seed("contract"),
         keeps_state=True,
         holds_state=lambda resources_session_id: resources_session_id in server._sessions,
+        verify_body={
+            "responses_create_params": {"input": "What colour is image 0?"},
+            "response": response("<answer>red</answer>").model_dump(mode="json"),
+            "verifier_metadata": {"golden_answer": {"value": "red"}},
+        },
     )
 
 

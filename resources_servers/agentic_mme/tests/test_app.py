@@ -4,6 +4,8 @@
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi import Request
+from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -33,6 +35,11 @@ def response(text: str = "", output: list | None = None) -> NeMoGymResponse:
             ],
         }
     )
+
+
+def no_session() -> Request:
+    """A verify request that carries no session cookie, as from an agent's /run."""
+    return Request({"type": "http", "session": {}})
 
 
 @pytest.fixture
@@ -80,10 +87,15 @@ async def test_grading(server, text, golden, reward) -> None:
         response=response(text),
         verifier_metadata={"golden_answer": golden},
     )
-    result = await server.verify(body)
+    result = await server.verify(no_session(), body)
     assert result.reward == reward
     assert result.evaluation_track == "task_only"
     assert bool(result.failure_reason) == (reward == 0)
+    # A task without a usable gold answer is not graded: its row is masked instead of counted as wrong.
+    ungraded = result.failure_reason == "invalid_golden_answer"
+    assert result.mask_sample == ungraded
+    assert result.evaluation_completed == (not ungraded)
+    assert result.failure_kind == ("verifier_error" if ungraded else None)
 
 
 @pytest.mark.asyncio
@@ -95,11 +107,11 @@ async def test_terminal_tool_and_incomplete_do_not_score(server) -> None:
         response=response(output=output),
         verifier_metadata={"golden_answer": {"value": "blue"}},
     )
-    assert (await server.verify(body)).reward == 0
+    assert (await server.verify(no_session(), body)).reward == 0
     body.response = NeMoGymResponse.model_validate(
         response("blue").model_dump() | {"incomplete_details": {"reason": "max_output_tokens"}}
     )
-    assert (await server.verify(body)).failure_reason == "incomplete_response"
+    assert (await server.verify(no_session(), body)).failure_reason == "incomplete_response"
 
 
 def completion(content: str):
@@ -157,7 +169,6 @@ def judged_request(text: str, value: str = "44.6 million") -> AgenticMMEVerifyRe
         ('{"verdict": "equivalent", "confidence": 0.9, "reason": "same amount"}', 1.0),
         ('```json\n{"verdict": "different", "reason": "other number"}\n```', 0.0),
         ('{"verdict": "unsure"}', 0.0),
-        ("not json", 0.0),
     ],
 )
 async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward) -> None:
@@ -169,7 +180,7 @@ async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward)
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
     # String match fails (exact), so any reward comes from the judge.
-    result = await judged_server.verify(judged_request("<answer>$44.6M</answer>"))
+    result = await judged_server.verify(no_session(), judged_request("<answer>$44.6M</answer>"))
     assert result.reward == reward
     assert result.string_match_reward == 0.0
     assert seen["server_name"] == "judge" and seen["url_path"] == "/v1/chat/completions"
@@ -179,17 +190,26 @@ async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward)
     assert result.failure_reason == (None if reward else "incorrect_answer")
 
 
-@pytest.mark.asyncio
-async def test_judge_error_scores_zero(judged_server, monkeypatch) -> None:
+@pytest.mark.parametrize("judge_reply", ["judge down", "not json", '{"verdict": "maybe"}', '{"reason": "no verdict"}'])
+def test_a_judge_failure_masks_the_row_instead_of_scoring_zero(judged_server, monkeypatch, judge_reply) -> None:
     from nemo_gym.verification import JudgeError
 
-    async def failing_call_judge(*args, **kwargs):
-        raise JudgeError("judge down")
+    async def call_judge(*args, **kwargs):
+        if judge_reply == "judge down":
+            raise JudgeError("judge down")
+        return completion(judge_reply)
 
-    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", failing_call_judge)
-    result = await judged_server.verify(judged_request("<answer>44.6 million</answer>"))
-    assert result.reward == 0.0 and result.failure_reason == "judge_error"
-    assert result.string_match_reward == 1.0
+    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", call_judge)
+    client = TestClient(judged_server.setup_webserver())
+
+    reply = client.post("/verify", json=judged_request("<answer>44.6 million</answer>").model_dump(mode="json"))
+
+    assert reply.status_code == 200, reply.text
+    row = reply.json()
+    # The base class's judge_failsafe masks the row and sends it to the failures sidecar.
+    assert row["mask_sample"] is True and row["reward"] == 0.0
+    assert row["failure_kind"] == "judge_failed"
+    assert row["_ng_failure_class"] == "judge_failed"
 
 
 @pytest.mark.asyncio
@@ -198,5 +218,5 @@ async def test_judge_skipped_without_answer(judged_server, monkeypatch) -> None:
         raise AssertionError("judge must not be called without an answer")
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", unexpected_call)
-    result = await judged_server.verify(judged_request("<answer></answer>"))
+    result = await judged_server.verify(no_session(), judged_request("<answer></answer>"))
     assert result.reward == 0.0 and result.failure_reason == "missing_answer"

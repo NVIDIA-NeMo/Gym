@@ -47,7 +47,8 @@ Task metadata uses the released shape:
 Accepted match modes are exact (case-sensitive), contains (case-insensitive,
 with the released short-number boundary rule), and numeric (absolute tolerance).
 The default is contains, matching the released evaluator, although the paper
-describes normalized exact match. Empty/missing/nonfinite targets are rejected.
+describes normalized exact match. A task with an empty, missing or nonfinite target is not graded: its row is
+masked (see Sessions).
 This preserves the released contains behavior, including its limitations; it is
 not a hardened training verifier. Final answers use <answer>...</answer>, with
 plain terminal text as a fallback; reasoning blocks are excluded.
@@ -82,6 +83,37 @@ does not expose reference crops or search answers. The released HF split is
 called train, but it is an evaluation benchmark; do not train on it by default.
 Full converted datasets are ignored by git. See
 [benchmarks/agentic_mme](../../benchmarks/agentic_mme/README.md) for the measurement contract.
+
+## Sessions
+
+Every pairing runs under the `single_agent_turn_legacy` Environment Server, which reads the flat rows unchanged. For
+each episode it seeds this server with a typed seed, opens an agent session, runs one turn, calls `/verify`, and then
+calls `/close_session`.
+
+- **What a session holds.** With `serve_image_tools`, an image workspace that the tools change. With
+  `sandbox_provider`, the sandbox lent to the harness, with or without the task images. With neither, the server keeps
+  nothing, and the base class answers the seed and the close.
+- **Seed.** A row whose `image_files` is missing, malformed, outside `image_root` or unreadable is refused with 422.
+  A seed that names an open session with another episode or task, or a closed session, is refused with 409. A repeated
+  seed returns the same sandbox.
+- **Close.** Close stops the lent sandbox and drops the workspace by `resources_session_id`. It is safe to repeat. A failed stop raises without fencing, so a retried close stops the sandbox. A
+  closed ID is fenced for `session_close_retry_window_seconds`.
+- **After close.** An image tool call answers 404 (`session_lost`), and a `/verify` returns a masked sample.
+- **Shutdown and expiry.** Shutdown stops every sandbox still lent. A session that is never closed keeps its sandbox
+  until shutdown, or until the provider reclaims it after `sandbox_config.ttl_s`. Set `ttl_s` above the agent's
+  timeout plus grading: `opencode.yaml` sets 7200 s against OpenCode's 3600 s timeout.
+- **Grading.** A wrong or missing answer is reward 0 with `mask_sample: false`. A judge failure, or a judge reply
+  without a verdict, masks the row and sends it to the failures sidecar (`judge_failed`). A task without a usable gold
+  answer is masked with `verifier_error` and `evaluation_completed: false`.
+
+| Config in `benchmarks/agentic_mme/` | Harness | Image tools | Sandbox |
+| --- | --- | --- | --- |
+| `config.yaml` | `agentic_mme_agent` | in the agent | none |
+| `server_tools.yaml` | `simple_agent` | on this server, over direct HTTP | none |
+| `opencode.yaml` | `opencode_agent` | its own shell, Python and read tool | lent, with the task images |
+| `opencode_server_tools.yaml` | `opencode_agent` | on this server, over MCP | lent, empty |
+
+The seed that an agent's `/run` sends through a `legacy_agent` relay still works, for compatibility.
 
 ## Run
 

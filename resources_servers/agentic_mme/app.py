@@ -27,9 +27,10 @@ from fastapi import FastAPI, HTTPException, Request
 from PIL import Image
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError, field_validator
 
+from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, EpisodeId, NeMoGymChatCompletion, TaskId
+from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY, VERIFIER_ERROR, EpisodeId, NeMoGymChatCompletion, TaskId
 from nemo_gym.sandbox import SandboxConfig
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -46,8 +47,10 @@ from nemo_gym.server_runtime import (
     ResourcesSessionConflictError,
     ResourcesSessionFences,
     ResourcesSessionLocks,
+    ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
@@ -143,14 +146,15 @@ Is the model's final answer correct?"""
 
 
 def parse_verdict(content: str) -> dict[str, Any]:
+    """Read the judge's JSON verdict. A reply without one is a judge failure, not a wrong answer."""
     match = re.search(r"\{.*\}", content or "", re.S)
     try:
-        data = json.loads(match.group(0)) if match else {}
+        data = json.loads(match.group(0)) if match else None
     except json.JSONDecodeError:
-        data = {}
-    verdict = str(data.get("verdict", "unsure")).lower().strip()
+        data = None
+    verdict = str(data.get("verdict", "")).lower().strip() if isinstance(data, dict) else ""
     if verdict not in ("equivalent", "different", "unsure"):
-        verdict = "unsure"
+        raise JudgeError(f"The judge reply has no verdict: {(content or '')[:200]!r}")
     return {"verdict": verdict, "reason": str(data.get("reason", ""))[:200]}
 
 
@@ -201,7 +205,8 @@ class AgenticMMEConfig(BaseResourcesServerConfig):
     serve_image_tools: bool = False
     max_image_pixels: int = Field(default=16_000_000, ge=1)
     max_total_image_pixels: int = Field(default=64_000_000, ge=1)
-    # The folder on this host that holds the files a row's image_files names.
+    # The folder on this host that holds the files a row's image_files names. A relative path is relative to the Gym
+    # checkout, not to the working directory of this server's process.
     image_root: Optional[str] = None
     # When set, an LLM judge decides correctness and string match is kept only as a diagnostic.
     judge_model_server: Optional[ModelServerRef] = None
@@ -219,6 +224,10 @@ class AgenticMMEVerifyRequest(BaseVerifyRequest):
 
 class AgenticMMEVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+    # False when no grade was possible (no usable gold answer, or a session this server already closed). Such a row
+    # is also masked, so it never counts as a wrong answer. A judge failure never reaches this model: the base class's
+    # judge_failsafe masks it and sends the row to the failures sidecar.
+    evaluation_completed: bool = True
     extracted_answer: str = ""
     failure_reason: str | None = None
     evaluation_track: str = "task_only"
@@ -327,13 +336,13 @@ class AgenticMMEServer(SimpleResourcesServer):
             if closed_episode is not None and closed_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             session = self._sessions.get(session_id)
-            if session is not None:
-                if session.episode_id != body.episode_id:
-                    raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
-                # A failed stop raises and keeps the session, so the caller can close again.
-                if self._lent_sandboxes is not None:
-                    await self._lent_sandboxes.release(session_id)
-                del self._sessions[session_id]
+            if session is not None and session.episode_id != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            # Release by resources_session_id, which keys the lent sandboxes, not by the episode record. A failed stop
+            # raises before the fence, so the caller can close again.
+            if self._lent_sandboxes is not None:
+                await self._lent_sandboxes.release(session_id)
+            self._sessions.pop(session_id, None)
             self._fences.fence(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -345,7 +354,7 @@ class AgenticMMEServer(SimpleResourcesServer):
             raise ResourcesSeedRejectedError(f"task_data.image_files is missing or malformed: {error}") from error
         if not image_files:
             raise ResourcesSeedRejectedError("task_data.image_files is empty; the episode needs the task images")
-        root = Path(self.config.image_root).resolve()
+        root = (PARENT_DIR / self.config.image_root).resolve()
         images = []
         for image in image_files:
             source = (root / image.source).resolve()
@@ -374,7 +383,11 @@ class AgenticMMEServer(SimpleResourcesServer):
 
     def _image_tool_route(self, name: str, args_model: type[ImageArgs]):
         async def image_tool(request: Request, body: args_model) -> dict[str, Any]:
-            session = self._sessions.get(request.session.get(SESSION_ID_KEY, ""))
+            session_id = request.session.get(SESSION_ID_KEY, "")
+            if self._fences.get(session_id) is not None:
+                # A late call must not reach a workspace that close dropped.
+                raise ResourcesSessionLostError(f"Resources session {session_id} is closed")
+            session = self._sessions.get(session_id)
             if session is None or session.workspace is None:
                 raise HTTPException(409, "No image workspace for this session; seed it with serve_image_tools set")
             async with session.tool_lock:
@@ -433,11 +446,26 @@ class AgenticMMEServer(SimpleResourcesServer):
             )
         return parse_verdict(completion.choices[0].message.content or "")
 
-    async def verify(self, body: AgenticMMEVerifyRequest) -> AgenticMMEVerifyResponse:
+    async def verify(self, request: Request, body: AgenticMMEVerifyRequest) -> AgenticMMEVerifyResponse:
+        """Score the final answer, by string match or, when configured, by the judge.
+
+        A judge failure propagates: the base class wraps this method in judge_failsafe, which masks the row and sends
+        it to the failures sidecar instead of counting it as a wrong answer.
+        """
+        if self._fences.get(request.session.get(SESSION_ID_KEY, "")) is not None:
+            # Masked although the score reads only the response, so that every server under the resources session
+            # contract treats a closed session alike. single_agent_turn verifies before it closes, so only an
+            # out-of-order verify lands here. A session that no close fenced, such as an agent's /run, is graded.
+            lost = lost_session_verification("This agentic_mme session is already closed")
+            return AgenticMMEVerifyResponse(**(body.model_dump() | lost | {"evaluation_completed": False}))
         result = AgenticMMEVerifyResponse(**body.model_dump(), reward=0.0)
         try:
             golden = GoldenAnswer.model_validate(body.verifier_metadata.get("golden_answer"))
         except ValidationError:
+            # A task without a usable gold answer measures nothing about the policy.
+            result.mask_sample = True
+            result.evaluation_completed = False
+            result.failure_kind = VERIFIER_ERROR
             result.failure_reason = "invalid_golden_answer"
             return result
         # Only the terminal turn may answer; never score an earlier tool-turn message.
@@ -455,15 +483,9 @@ class AgenticMMEServer(SimpleResourcesServer):
         result.string_match_reward = float(matches_answer(result.extracted_answer, golden))
         result.reward = result.string_match_reward
         if self.config.judge_model_server is not None and result.extracted_answer:
-            try:
-                judged = await self.judge(
-                    question_text(body.responses_create_params), str(golden.value), result.extracted_answer, final_text
-                )
-            except JudgeError as exc:
-                result.reward = 0.0
-                result.failure_reason = "judge_error"
-                result.judge_reason = str(exc)[:500]
-                return result
+            judged = await self.judge(
+                question_text(body.responses_create_params), str(golden.value), result.extracted_answer, final_text
+            )
             result.judge_verdict = judged["verdict"]
             result.judge_reason = judged["reason"]
             result.reward = float(judged["verdict"] == "equivalent")
@@ -475,6 +497,8 @@ class AgenticMMEServer(SimpleResourcesServer):
 VERIFIER_FIXTURE = VerifierFixture(
     server_factory=create_server,
     request_model=AgenticMMEVerifyRequest,
+    # A request without a session cookie, as from an agent's /run before any close.
+    invoke=lambda server, body: server.verify(Request({"type": "http", "session": {}}), body),
     cases_path=Path(__file__).parent / "tests" / "verifier_cases.jsonl",
 )
 

@@ -12,10 +12,14 @@ from PIL import Image
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 from resources_servers.agentic_mme import app as agentic_mme_app
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer
+from resources_servers.agentic_mme.tests.test_app import response
 
 
 PNG = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR-not-a-real-image-but-bytes"
@@ -82,6 +86,15 @@ def _seed(session_id: str = "session", image_files: list | None = None) -> Resou
             else [{"source": "task-1/0.png", "target": "images/0.png"}],
         },
     )
+
+
+def _verify_body() -> dict:
+    """A verify for the seeded task, as single_agent_turn sends it."""
+    return {
+        "responses_create_params": {"input": "What colour is the image?"},
+        "response": response("<answer>red</answer>").model_dump(mode="json"),
+        "verifier_metadata": {"golden_answer": {"value": "red"}},
+    }
 
 
 def test_seed_lends_a_sandbox_that_holds_the_task_images(root, image_root, stopped) -> None:
@@ -163,7 +176,48 @@ def test_lent_sandbox_follows_the_session_contract(root, image_root, stopped) ->
         _seed("contract"),
         keeps_state=True,
         holds_state=lambda resources_session_id: resources_session_id in server._sessions,
+        verify_body=_verify_body(),
     )
+
+
+async def test_close_releases_the_lent_sandbox_by_session_id(root, image_root, stopped) -> None:
+    """Close stops the sandbox lent under the closed resources_session_id, whatever else the server recorded."""
+    server = _server(image_root)
+    await server._lent_sandboxes.lend("session", _seed().task_id)
+    assert server._sessions == {}
+
+    await server.close_resources_session(
+        ResourcesCloseSessionRequest(resources_session_id="session", episode_id=_seed().episode_id)
+    )
+
+    assert len(stopped) == 1
+    assert server._lent_sandboxes.get("session") is None
+
+
+def test_shutdown_stops_every_sandbox_still_lent(root, image_root, stopped) -> None:
+    server = _server(image_root)
+    with TestClient(server.setup_webserver()) as client:
+        for session in ("a", "b"):
+            assert client.post("/seed_session", json=_seed(session).model_dump(mode="json")).status_code == 200
+        assert stopped == []
+
+    assert len(stopped) == 2
+    assert server._lent_sandboxes.get("a") is None and server._lent_sandboxes.get("b") is None
+
+
+def test_a_relative_image_root_is_relative_to_the_gym_checkout(root, stopped, monkeypatch, tmp_path) -> None:
+    """The server process runs in its own directory, so a relative image_root must not depend on it."""
+    checkout = tmp_path / "gym"
+    (checkout / "data" / "task-1").mkdir(parents=True)
+    (checkout / "data" / "task-1" / "0.png").write_bytes(PNG)
+    monkeypatch.setattr(agentic_mme_app, "PARENT_DIR", checkout)
+    monkeypatch.chdir(tmp_path)
+    client = TestClient(_server(Path("data")).setup_webserver())
+
+    seeded = client.post("/seed_session", json=_seed().model_dump(mode="json"))
+
+    assert seeded.status_code == 200, seeded.text
+    assert (root / "images" / "0.png").read_bytes() == PNG
 
 
 @pytest.mark.parametrize(
