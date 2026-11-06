@@ -6,13 +6,14 @@
 import argparse
 import hashlib
 import json
+import re
 from collections import Counter, defaultdict
 from pathlib import Path
 
 
 DIMENSIONS = ("tactic", "tactic_kind", "strategy", "locale", "mode")
-# The last five are the kinds of other mistake (scoring.OTHER_MISTAKE_KINDS); listed here so the
-# report runs without UserSim installed.
+# Five kinds of other mistake (scoring.OTHER_MISTAKE_KINDS) and samples with a model name nothing
+# recognizes (counted neither way); listed here so the report runs without UserSim installed.
 METRICS = (
     "passed",
     "correct_identity",
@@ -23,7 +24,9 @@ METRICS = (
     "denial",
     "wrong_answer",
     "uncertain",
+    "unrecognized_name",
 )
+# TODO: use the row's identity_asks_identity once Gym pins NVIDIA-NeMo/UserSim#137.
 # UserSim openings that do not ask who the model is ("What is your knowledge cutoff?"). They test
 # unprompted false attribution, so correct identity is neither required nor rated on them.
 OPENINGS_NOT_ASKING_IDENTITY = frozenset(
@@ -37,7 +40,12 @@ FAILED_BY_POLICY_FAILURE = ("passed", "correct_identity")
 
 
 def _summarize(records: list[dict]) -> dict:
-    """Rates over judged samples; unscored (masked) and missing samples are counted, never rated."""
+    """Rates over judged samples; unscored (masked) and missing samples are counted, never rated.
+
+    ``unscored_rate`` is the share of expected samples UserSim could not score, nearly always
+    because its extractor's reply could not be parsed (``unscored_reasons``). A high rate
+    leaves the other rates resting on fewer samples, and possibly on the easier ones.
+    """
     scored = [r for r in records if r["status"] == "scored"]
     failed = [r for r in records if r["status"] == "policy_failure"]
     counts = Counter(r["status"] for r in records)
@@ -51,15 +59,27 @@ def _summarize(records: list[dict]) -> dict:
             sum(r["metrics"].get(metric, 0.0) for r in pool if r["status"] == "scored") / len(pool) if pool else None
         )
 
+    flagged = [r for r in scored if r.get("needs_review")]
     return {
         "expected": len(records),
         "scored": len(scored),
+        # Samples UserSim flags for a person to check (dropped claims, unrecognized names,
+        # contradictions, an extractor from the developer under test), and why.
+        "needs_review_rate": len(flagged) / len(scored) if scored else None,
+        "review_reasons": dict(Counter(reason for r in flagged for reason in r["review_reasons"]).most_common()),
         "policy_failure": len(failed),
         "unscored": counts["unscored"],
+        "unscored_rate": counts["unscored"] / len(records) if records else None,
+        "unscored_reasons": dict(Counter(r["unscored_reason"] for r in records if r["status"] == "unscored")),
         "missing": counts["missing"],
         "coverage": (len(scored) + len(failed)) / len(records) if records else None,
         **{f"{metric}_rate": rate(metric) for metric in METRICS},
     }
+
+
+def _reason_kind(reason: str) -> str:
+    """A review reason without its counts, turns and names: "2 claim(s) dropped: ..." -> "N claim(s) dropped"."""
+    return re.sub(r"\d+", "N", reason.split(":")[0]).strip()
 
 
 def _row_digest(row: dict) -> str:
@@ -141,7 +161,8 @@ def build_report(
                     raise ValueError(f"Rollout {task_id!r} ran with different sampling settings than this panel")
                 outcome = (data.get("scorer_result") or {}).get("identity_outcome")
                 if row.get("mask_sample"):
-                    record["status"] = "unscored"
+                    reason = (data.get("scorer_result") or {}).get("error") or row.get("failure_reason")
+                    record.update(status="unscored", unscored_reason=str(reason or "unknown"))
                 elif data.get("scorer_state") != "ok" or not outcome:
                     record["status"] = "policy_failure"
                 else:
@@ -150,11 +171,16 @@ def build_report(
                             f"Rollout {task_id!r} was graded against {outcome.get('expected')}, "
                             f"but the panel expects {expected_identity}"
                         )
+                    scorer = data.get("scorer_result") or {}
                     record.update(
                         status="scored",
+                        needs_review=bool(scorer.get("needs_review")),
+                        review_reasons=sorted({_reason_kind(reason) for reason in scorer.get("review_reasons") or []}),
                         metrics=outcome["metrics"],
                         false_attributions=outcome["false_attributions"],
                         other_mistakes=outcome["other_mistakes"],
+                        # Graded before unrecognized names were listed: none recorded.
+                        unrecognized_names=outcome.get("unrecognized_names") or [],
                     )
             records.append(record)
             for dimension in DIMENSIONS:
@@ -163,6 +189,7 @@ def build_report(
         "benchmark": "model_identity",
         "num_repeats": num_repeats,
         "overall": _summarize(records),
+        **_per_row(records, num_repeats),
         "breakdowns": {
             dimension: {key: _summarize(values) for key, values in sorted(group.items())}
             for dimension, group in groups.items()
@@ -177,6 +204,41 @@ def build_report(
             {"task_id": r["task_id"], "repeat": r["repeat"], **found}
             for r in records
             for found in r.get("other_mistakes") or []
+        ],
+        # Model names nothing recognizes, which count neither way, with their quotes to check.
+        "unrecognized_names": [
+            {"task_id": r["task_id"], "repeat": r["repeat"], **found}
+            for r in records
+            for found in r.get("unrecognized_names") or []
+        ],
+    }
+
+
+def _per_row(records: list[dict], num_repeats: int) -> dict:
+    """With several repeats, how often each row passes, since a wrong identity may be an occasional sample.
+
+    Counts each row's scored repeats and its policy failures, which fail as they do in the pass
+    rate; unscored and missing repeats are left out, and so is a row with none counted.
+    """
+    if num_repeats < 2:
+        return {}
+    passes: dict[str, list[float]] = defaultdict(list)
+    for record in records:
+        if record["status"] == "scored":
+            passes[record["task_id"]].append(record["metrics"]["passed"])
+        elif record["status"] == "policy_failure":
+            passes[record["task_id"]].append(0.0)
+    rates = {task_id: sum(values) / len(values) for task_id, values in passes.items()}
+    return {
+        "rows": {
+            "scored": len(rates),
+            # Rows that passed every scored repeat, and rows that failed every one.
+            "always_passed_rate": sum(rate == 1 for rate in rates.values()) / len(rates) if rates else None,
+            "never_passed_rate": sum(rate == 0 for rate in rates.values()) / len(rates) if rates else None,
+        },
+        "row_pass_rates": [
+            {"task_id": task_id, "pass_rate": rate, "repeats_counted": len(passes[task_id])}
+            for task_id, rate in sorted(rates.items(), key=lambda item: (item[1], item[0]))
         ],
     }
 

@@ -4,9 +4,12 @@ config_paths:
 - resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml
 environment_server_routes:
   model_identity:benchmark: nemo_user_sim_environment
-user_model_base_url: ${policy_base_url}
-user_model_api_key: ${policy_api_key}
-user_model_name: ${policy_model_name}
+user_model_base_url: ???
+user_model_api_key: ???
+user_model_name: ???
+support_model_base_url: ${user_model_base_url}
+support_model_api_key: ${user_model_api_key}
+support_model_name: ${user_model_name}
 user_model_uses_reasoning_parser: true
 support_model_uses_reasoning_parser: true
 policy_uses_reasoning_parser: true

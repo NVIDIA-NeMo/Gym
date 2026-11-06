@@ -4,8 +4,9 @@
 """Freeze UserSim identity_disclosure episodes for the model identity benchmark.
 
 Every opening and every pressure follow-up comes from UserSim's packaged identity spec. This script
-only overrides the expected identity and pins which tactic, strategy, locale and persona each row
-gets, so every cell is covered evenly.
+only overrides the expected identity and pins the tactic, strategy and locale of each row, so every
+cell the report breaks down by is covered evenly. Each row gets its own persona, and UserSim derives
+the rest (the competitor named, the generated openings and follow-ups) from the persona and the seed.
 """
 
 import hashlib
@@ -23,21 +24,20 @@ from types import SimpleNamespace
 
 import yaml
 
-from benchmarks.model_identity.report import DIMENSIONS
+from benchmarks.model_identity.report import DIMENSIONS, OPENINGS_NOT_ASKING_IDENTITY
+from environments.nemo_user_sim.prepare import ENVIRONMENT_DIR as PREPARE_PROJECT
+from environments.nemo_user_sim.prepare import NEMOTRON_PERSONAS_SHA256, NEMOTRON_PERSONAS_VERSION, USERSIM_REVISION
 
 
 ROOT = Path(__file__).resolve().parents[2]
 DIRECTORY = Path(__file__).resolve().parent
 DATA = DIRECTORY / "data" / "benchmark.jsonl"
 VERSION = "1.0.0"
-REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
-PERSONAS_SHA256 = "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"  # pragma: allowlist secret
-REQUIREMENTS = ROOT / "environments/nemo_user_sim/requirements.txt"
+DEFAULT_TEMPERATURE = 1.0
+DEFAULT_TOP_P = 0.95
 # Other spellings that also count as the expected model, keyed by its casefolded name: the
 # transliterations UserSim's vocabulary lists for Nemotron. Other models default to none.
 DEFAULT_MODEL_ALIASES = {"nemotron": ("ネモトロン", "네모트론", "नेमोट्रॉन")}
-# The locales UserSim's spec writes every verbatim opening in. Personas are en_US in all of them.
-DEFAULT_LOCALES = ("en_US", "pt_BR", "fr_FR", "ja_JP", "ko_KR", "hi_Deva_IN", "hi_Latn_IN")
 
 
 def _settings(
@@ -48,10 +48,12 @@ def _settings(
     tactics,
     seed: int,
     max_turns: int,
-    temperature: float,
+    temperature: float | None,
+    top_p: float | None = None,
     expected_developer: str,
     expected_model: str,
     expected_model_aliases=None,
+    expected_lineage=None,
 ) -> dict:
     """Normalized preparation settings, as the manifest records them."""
     developer = expected_developer.strip().casefold()
@@ -62,21 +64,23 @@ def _settings(
         raise ValueError("Row counts must be nonnegative and not both zero")
     if multi_per_strategy and max_turns < 2:
         raise ValueError("Multi-turn rows require max_turns >= 2")
-    if not locales:
+    if locales is not None and not locales:
         raise ValueError("Expected at least one locale")
     if expected_model_aliases is None:
         expected_model_aliases = DEFAULT_MODEL_ALIASES.get(model.casefold(), ())
     return {
         "single_per_tactic": single_per_tactic,
         "multi_per_strategy": multi_per_strategy,
-        "locales": list(locales),
+        "locales": None if locales is None else list(locales),
         "tactics": None if tactics is None else list(tactics),
         "seed": seed,
         "max_turns": max_turns,
         "temperature": temperature,
+        "top_p": top_p,
         "expected_developer": developer,
         "expected_model": model,
         "expected_model_names": [model, *expected_model_aliases],
+        "expected_lineage": sorted({d.strip().casefold() for d in expected_lineage or () if d.strip()}),
     }
 
 
@@ -103,8 +107,14 @@ def _use_spec(path: Path):
             os.environ[key] = previous
 
 
-def _write_spec(path: Path, expected_developer: str, expected_model_names: list[str]) -> None:
-    """Layer the expected identity over UserSim's packaged spec, keeping its tactics and strategies."""
+def _write_spec(
+    path: Path, expected_developer: str, expected_model_names: list[str], expected_lineage: list[str]
+) -> None:
+    """Layer the expected identity over UserSim's packaged spec, keeping its tactics and strategies.
+
+    ``expected_lineage`` lists the developers whose base model the evaluated model is built on
+    (Meta for a Llama-based Nemotron), so a reply naming them as its base is not a false attribution.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     spec = {
         "schema_version": "1",
@@ -119,6 +129,7 @@ def _write_spec(path: Path, expected_developer: str, expected_model_names: list[
                 "match": "*",
                 "developer": expected_developer,
                 "model_names": list(expected_model_names),
+                **({"lineage": list(expected_lineage)} if expected_lineage else {}),
             },
         ],
     }
@@ -128,21 +139,36 @@ def _write_spec(path: Path, expected_developer: str, expected_model_names: list[
     )
 
 
+def _written_locales(spec) -> list[str]:
+    """The locales UserSim's spec writes every verbatim opening in, in the spec's order."""
+    verbatim = [tactic.text for tactic in spec.tactics if tactic.text is not None and tactic.mode.value == "verbatim"]
+    if not verbatim:
+        return ["en_US"]
+    common = set.intersection(*(set(text.renderings) for text in verbatim))
+    return [locale for locale in verbatim[0].renderings if locale in common]
+
+
 def _cells(
     tactics: list, strategies: list[str], locales: list[str], *, single_per_tactic: int, multi_per_strategy: int
 ):
-    """Every tactic single-turn, and every pressure strategy after tactics taken in turn, per locale."""
+    """Every tactic single-turn, and every pressure strategy after tactics taken in turn, per locale.
+
+    Each locale starts the strategies at a later tactic, so a strategy meets different openings in
+    different locales rather than the same few in all of them.
+    """
     cells = []
-    for locale in locales:
+    for shift, locale in enumerate(locales):
         for tactic in tactics:
             cells.extend((locale, tactic, "none", i) for i in range(single_per_tactic))
         for s, strategy in enumerate(strategies):
             for i in range(multi_per_strategy):
-                cells.append((locale, tactics[(s * multi_per_strategy + i) % len(tactics)], strategy, i))
+                position = (s + shift) * multi_per_strategy + i
+                cells.append((locale, tactics[position % len(tactics)], strategy, i))
     return cells
 
 
 def _personas(*, seed: int, count: int, synthetic: bool) -> list[dict]:
+    """``count`` distinct en_US personas in a seeded random order (one synthetic persona for tests)."""
     if synthetic:
         example = ROOT / "resources_servers/nemo_user_sim/data/example.jsonl"
         return [json.loads(example.read_text().splitlines()[0])["resolved_row"]["persona"]]
@@ -151,14 +177,15 @@ def _personas(*, seed: int, count: int, synthetic: bool) -> list[dict]:
     # Honor the same cache settings as the canonical UserSim preparer.
     from environments.nemo_user_sim.prepare import _managed_assets_path
 
+    # TODO: sample from each row's own locale once Gym's UserSim preparer downloads every locale's personas.
     path = _managed_assets_path() / "datasets/en_US.parquet"
     if not path.is_file():
         raise FileNotFoundError(
             "Pinned personas are not cached. Run environments/nemo_user_sim/prepare.py "
             "with NGC configured, then retry model_identity preparation."
         )
-    if _digest(path) != PERSONAS_SHA256:
-        raise ValueError("Persona asset does not match pinned Nemotron-Personas 0.0.2")
+    if _digest(path) != NEMOTRON_PERSONAS_SHA256:
+        raise ValueError(f"Persona asset does not match pinned Nemotron-Personas {NEMOTRON_PERSONAS_VERSION}")
     parquet = pq.ParquetFile(path)
     indices = sorted(
         random.Random(seed).sample(range(parquet.metadata.num_rows), min(count, parquet.metadata.num_rows))
@@ -172,6 +199,8 @@ def _personas(*, seed: int, count: int, synthetic: bool) -> list[dict]:
             table = parquet.read_row_group(group)
             selected.extend(table.slice(i, 1).to_pylist()[0] for i in within)
         offset = end
+    # The sample is read in file order; shuffle it so rows do not follow the dataset's ordering.
+    random.Random(seed).shuffle(selected)
     return selected
 
 
@@ -195,15 +224,19 @@ def _build(
     multi_per_strategy: int,
     seed: int,
     max_turns: int,
-    locales=("en_US",),
+    locales=None,
     tactics=None,
     synthetic: bool = False,
-    temperature: float = 0.0,
+    temperature: float | None = DEFAULT_TEMPERATURE,
+    top_p: float | None = DEFAULT_TOP_P,
     expected_developer: str = "nvidia",
     expected_model: str = "Nemotron",
     expected_model_aliases: list[str] | None = None,
+    expected_lineage: list[str] | None = None,
 ) -> dict:
     from usersim.engine.config import ConversationSimulatorConfig
+
+    # TODO: import from usersim.engine.probes.identity_disclosure.spec once Gym pins NVIDIA-NeMo/UserSim#124.
     from usersim.engine.core.identity_spec import load_identity_spec, reset_identity_spec_cache
     from usersim.engine.external import construct_probe_episode
 
@@ -215,14 +248,25 @@ def _build(
         seed=seed,
         max_turns=max_turns,
         temperature=temperature,
+        top_p=top_p,
         expected_developer=expected_developer,
         expected_model=expected_model,
         expected_model_aliases=expected_model_aliases,
+        expected_lineage=expected_lineage,
     )
     spec_path = output.with_suffix(".spec.yaml")
-    _write_spec(spec_path, settings["expected_developer"], settings["expected_model_names"])
+    _write_spec(
+        spec_path, settings["expected_developer"], settings["expected_model_names"], settings["expected_lineage"]
+    )
     spec = load_identity_spec(spec_path)
+    if settings["locales"] is None:
+        settings["locales"] = _written_locales(spec)
     by_id = {tactic.id: tactic for tactic in spec.tactics}
+    # The report's list of openings that do not ask who the model is names UserSim tactic ids; a
+    # renamed or removed one would silently be graded as asking.
+    stale = sorted(OPENINGS_NOT_ASKING_IDENTITY - set(by_id))
+    if stale:
+        raise ValueError(f"OPENINGS_NOT_ASKING_IDENTITY names tactics UserSim no longer has: {stale}")
     if settings["tactics"] is not None:
         unknown = sorted(set(settings["tactics"]) - set(by_id))
         if unknown:
@@ -236,7 +280,7 @@ def _build(
         single_per_tactic=single_per_tactic,
         multi_per_strategy=multi_per_strategy,
     )
-    personas = _personas(seed=seed, count=64, synthetic=synthetic)
+    personas = _personas(seed=seed, count=len(cells), synthetic=synthetic)
     models = {
         alias: SimpleNamespace(model_name=name)
         for alias, name in (
@@ -252,7 +296,7 @@ def _build(
     with _use_spec(spec_path), output.open("w") as destination:
         # The spec is cached per path; drop any earlier version of this one.
         reset_identity_spec_cache()
-        for locale, tactic, strategy, index in cells:
+        for number, (locale, tactic, strategy, index) in enumerate(cells):
             task_id = f"model-identity-v{VERSION}-{locale}-{tactic.id}-{strategy}-{index}"
             case = {
                 "tactic": tactic.id,
@@ -272,7 +316,7 @@ def _build(
             )
             episode = construct_probe_episode(
                 {
-                    "persona": personas[int(hashlib.sha256(task_id.encode()).hexdigest()[:8], 16) % len(personas)],
+                    "persona": personas[number % len(personas)],
                     "probe_type": "identity_disclosure",
                     "identity_tactic_id": tactic.id,
                     "identity_strategy_id": strategy,
@@ -286,7 +330,10 @@ def _build(
             row = episode.preamble.to_row()
             row["usersim_config"] = config.model_dump(mode="json")
             provenance = json.loads(row["usersim_provenance"])
-            provenance.update(code_sha=REVISION, nemotron_personas_version="synthetic" if synthetic else "0.0.2")
+            provenance.update(
+                code_sha=USERSIM_REVISION,
+                nemotron_personas_version="synthetic" if synthetic else NEMOTRON_PERSONAS_VERSION,
+            )
             row["usersim_provenance"] = json.dumps(provenance, sort_keys=True)
             # A flat row: Gym adds the dataset's taskset and passes the rest to UserSim as the task input.
             destination.write(
@@ -295,7 +342,13 @@ def _build(
                         "task_id": task_id,
                         "resolved_row": row,
                         "role_request_params": {
-                            "assistant": {"temperature": temperature, "max_output_tokens": 4096},
+                            # The policy samples, so the rows of a cell are samples of its answers; a
+                            # setting given as None is left to the endpoint.
+                            "assistant": {
+                                **({} if temperature is None else {"temperature": temperature}),
+                                **({} if top_p is None else {"top_p": top_p}),
+                                "max_output_tokens": 8192,
+                            },
                             "user": {"temperature": 0.7},
                             "judge": {"temperature": 0.0},
                         },
@@ -308,10 +361,10 @@ def _build(
     manifest = {
         "benchmark": "model_identity",
         "version": VERSION,
-        "usersim_revision": REVISION,
+        "usersim_revision": USERSIM_REVISION,
         "usersim_spec": spec.version,
-        "personas_version": "synthetic" if synthetic else "0.0.2",
-        "personas_sha256": None if synthetic else PERSONAS_SHA256,
+        "personas_version": "synthetic" if synthetic else NEMOTRON_PERSONAS_VERSION,
+        "personas_sha256": None if synthetic else NEMOTRON_PERSONAS_SHA256,
         "dataset_sha256": _digest(output),
         "spec_sha256": _digest(spec_path),
         "generator_sha256": _digest(Path(__file__)),
@@ -329,7 +382,7 @@ def is_prepared_data_current(path: str | Path = DATA) -> bool:
     try:
         manifest = json.loads(path.with_suffix(".manifest.json").read_text())
         return (
-            manifest["usersim_revision"] == REVISION
+            manifest["usersim_revision"] == USERSIM_REVISION
             and manifest["version"] == VERSION
             and manifest["generator_sha256"] == _digest(Path(__file__))
             and manifest["dataset_sha256"] == _digest(path)
@@ -342,62 +395,74 @@ def is_prepared_data_current(path: str | Path = DATA) -> bool:
 def prepare(
     single_per_tactic: int = 5,
     multi_per_strategy: int = 10,
-    locales: list[str] = DEFAULT_LOCALES,
+    locales: list[str] | None = None,
     tactics: list[str] | None = None,
     seed: int = 1042,
     max_turns: int = 5,
-    temperature: float = 0.0,
+    temperature: float | None = DEFAULT_TEMPERATURE,
+    top_p: float | None = DEFAULT_TOP_P,
     expected_developer: str = "nvidia",
     expected_model: str = "Nemotron",
     expected_model_aliases: list[str] | None = None,
+    expected_lineage: list[str] | None = None,
 ) -> Path:
     """Create a frozen panel; preparation performs no model calls.
 
-    Per locale: `single_per_tactic` single-turn rows for each UserSim tactic (all of them, or
-    `tactics`), and `multi_per_strategy` multi-turn rows for each pressure strategy.
+    Per locale (by default, every locale UserSim's spec writes all openings in): `single_per_tactic`
+    single-turn rows for each UserSim tactic (all of them, or `tactics`), and `multi_per_strategy`
+    multi-turn rows for each pressure strategy.
+    `temperature` and `top_p` set how the policy samples (1.0 and 0.95 by default), so the rows of
+    a cell are samples of its answers rather than copies of one; None leaves one to the endpoint.
     `expected_model_aliases` lists other spellings that also count as the expected model.
     When omitted, it defaults to `DEFAULT_MODEL_ALIASES` for that model, if any.
+    `expected_lineage` lists UserSim developer ids whose base model the evaluated model is built on
+    (e.g. `["meta"]` for a Llama-based Nemotron).
     """
     options = {
         "single_per_tactic": single_per_tactic,
         "multi_per_strategy": multi_per_strategy,
-        "locales": list(locales),
+        "locales": None if locales is None else list(locales),
         "tactics": None if tactics is None else list(tactics),
         "seed": seed,
         "max_turns": max_turns,
         "temperature": temperature,
+        "top_p": top_p,
         "expected_developer": expected_developer,
         "expected_model": expected_model,
         "expected_model_aliases": None if expected_model_aliases is None else list(expected_model_aliases),
+        "expected_lineage": None if expected_lineage is None else list(expected_lineage),
     }
-    subprocess.run(
-        [
-            "uv",
-            "run",
-            "--no-config",
-            "--no-project",
-            "--isolated",
-            "--python",
-            sys.executable,
-            "--with-requirements",
-            str(REQUIREMENTS),
-            "python",
-            "-m",
-            "benchmarks.model_identity.prepare",
-            "--worker",
-            str(DATA),
-            json.dumps(options),
-        ],
-        check=True,
-        cwd=ROOT,
-        env={
-            **os.environ,
-            "PYTHONPATH": str(ROOT),
-            "USERSIM_CODE_SHA": REVISION,
-            "USERSIM_NEMOTRON_PERSONAS_VERSION": "0.0.2",
-        },
-        timeout=3600,
-    )
+    executable = shutil.which("uv")
+    if executable is None:
+        raise RuntimeError("'uv' is not on PATH; it is required to prepare model identity tasks.")
+    # Run in Gym's UserSim preparation project, which pins UserSim, as its own preparer does.
+    with tempfile.TemporaryDirectory(prefix="model-identity-prepare-") as working_dir:
+        subprocess.run(
+            [
+                executable,
+                "run",
+                "--locked",
+                "--project",
+                str(PREPARE_PROJECT),
+                "python",
+                "-m",
+                "benchmarks.model_identity.prepare",
+                "--worker",
+                str(DATA),
+                json.dumps(options),
+            ],
+            check=True,
+            cwd=ROOT,
+            env={
+                **os.environ,
+                # Never sync the preparation project into Gym's own environment.
+                "UV_PROJECT_ENVIRONMENT": str(Path(working_dir) / ".venv"),
+                "PYTHONPATH": str(ROOT),
+                "USERSIM_CODE_SHA": USERSIM_REVISION,
+                "USERSIM_NEMOTRON_PERSONAS_VERSION": NEMOTRON_PERSONAS_VERSION,
+            },
+            timeout=3600,
+        )
     print(f"Prepared model identity tasks: {DATA}")
     return DATA
 

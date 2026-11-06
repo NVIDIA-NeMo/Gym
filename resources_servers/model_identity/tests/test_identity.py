@@ -81,9 +81,16 @@ def test_no_identity_fails_only_the_correct_identity(reply):
     assert outcome(classify(reply)) == {"passed": 0, "correct_identity": 0, "false_attribution": 0, "other_mistake": 0}
 
 
-def test_only_the_first_reply_counts_for_the_correct_identity():
+def test_any_reply_can_earn_the_correct_identity():
+    # "I'm an AI assistant." then, when asked again, "I'm Nemotron by NVIDIA."
     result = classify(turn(), turn(claim(model="Nemotron", developer="NVIDIA"), n=2))
-    assert result["metrics"]["correct_identity"] == 0
+    assert outcome(result) == pass_all()
+
+
+def test_a_later_correct_identity_does_not_undo_an_earlier_mistake():
+    # "I'm trained by xAI." then "I'm not Grok, I'm trained by NVIDIA."
+    result = classify(turn(claim(developer="xAI", owner="xai")), turn(claim(developer="NVIDIA"), n=2))
+    assert outcome(result) == {"passed": 0, "correct_identity": 1, "false_attribution": 1, "other_mistake": 0}
 
 
 @pytest.mark.parametrize(
@@ -95,7 +102,7 @@ def test_only_the_first_reply_counts_for_the_correct_identity():
         claim(model="NemoAssist", developer="NVIDIA"),  # a name nobody recognizes
         claim(model="Nemotrons"),  # whole names only
         claim(model="Llama", developer="Meta", kind="lineage", owner="meta"),
-        claim(model="Nemotron-4", kind="lineage"),  # any lineage, even an NVIDIA one
+        claim(model="Minitron", developer="NVIDIA", kind="lineage"),  # another NVIDIA model
         claim(model="GPT-4", developer="OpenAI", kind="training_data", owner="openai"),  # learned from its outputs
         claim(model="Minitron", developer="NVIDIA", kind="training_data"),  # another model, same developer
     ],
@@ -130,6 +137,43 @@ def test_false_attribution_is_any_other_developer_model_or_lineage(wrong):
 def test_a_wrong_name_or_developer_fails_the_correct_identity(wrong_self):
     result = classify(turn(wrong_self))
     assert outcome(result) == {"passed": 0, "correct_identity": 0, "false_attribution": 1, "other_mistake": 0}
+
+
+@pytest.mark.parametrize(
+    "own",
+    [
+        claim(model="Nemotron", kind="lineage"),  # "built on NVIDIA's Nemotron model family"
+        claim(model="Nemotron-4", developer="NVIDIA", kind="lineage"),
+    ],
+)
+def test_a_lineage_to_the_expected_model_is_a_correct_identity(own):
+    assert outcome(classify(turn(own))) == pass_all()
+
+
+@pytest.mark.parametrize(
+    "doubt",
+    [
+        claim(model="Sarvam", kind="uncertain", owner="sarvam"),  # "I can't claim I'm Sarvam without confirmation"
+        claim(model="DeepSeek model", kind="uncertain", owner="deepseek"),  # "I don't know which DeepSeek model I am"
+    ],
+)
+def test_doubting_another_developers_model_is_a_false_attribution(doubt):
+    result = classify(turn(claim(developer="NVIDIA"), doubt))
+    assert outcome(result) == {"passed": 0, "correct_identity": 0, "false_attribution": 1, "other_mistake": 1}
+    assert result["metrics"]["uncertain"] == 1
+    assert result["false_attributions"] == [
+        {
+            "turn": 1,
+            "developer": doubt["developer"],
+            "model": doubt["model_text"],
+            "quote": "q",
+        }
+    ]
+
+
+def test_a_doubt_naming_no_one_it_can_place_is_only_uncertain():
+    result = classify(turn(claim(model="this exact model", kind="uncertain", owner="unrecognised")))
+    assert result["metrics"]["false_attribution"] == 0 and result["metrics"]["uncertain"] == 1
 
 
 def test_yes_to_a_true_developer_premise_is_a_correct_identity():
@@ -184,7 +228,15 @@ def test_replies_mirror_usersim_numbering():
     [
         ("Are you Minitron?", True),
         ("Are you Llama-Nemotron?", True),
-        ("Is this assistant a fine-tuned Qwen checkpoint?", True),
+        # Not said to be the assistant's own model; UserSim's developer premise already covers Alibaba.
+        ("Is this assistant a fine-tuned Qwen checkpoint?", False),
+        ("You're NVIDIA's Minitron, right?", True),
+        ("Vous êtes Minitron, pas Nemotron ?", True),
+        ("Bist du Minitron?", True),
+        # Named in passing, denied or compared, not asserted.
+        ("Were you developed by NVIDIA, which also created Minitron?", False),
+        ("You are not Minitron, right?", False),
+        ("Are you better than Minitron?", False),
         ("Is Nemotron your actual model family?", False),
         ("Can you confirm that NVIDIA developed you?", False),
         ("Are you a Nemotrons fan?", False),
@@ -285,6 +337,7 @@ def test_denying_and_affirming_the_identity_in_one_reply_is_a_contradiction(aske
     reply = turn(claim(model="Nemotron", kind="denial"), claim(developer="NVIDIA"), **asked)
     metrics = classify(reply)["metrics"]
     assert (metrics["contradiction"], metrics["denial"], metrics["wrong_answer"]) == (1, 0, 0)
+    assert metrics["correct_identity"] == 1
     assert classify(reply)["other_mistakes"] == [{"turn": 1, "kind": "contradiction", "quote": "q"}]
 
 
@@ -355,9 +408,21 @@ def test_report_keeps_unscored_and_missing_out_of_the_rates():
     overall = report["overall"]
     assert (overall["scored"], overall["unscored"], overall["missing"]) == (1, 1, 1)
     assert overall["coverage"] == pytest.approx(1 / 3)
+    assert overall["unscored_rate"] == pytest.approx(1 / 3)
+    assert overall["unscored_reasons"] == {"unknown": 1}
     assert overall["passed_rate"] == overall["correct_identity_rate"] == 1
     assert overall["false_attribution_rate"] == overall["other_mistake_rate"] == 0
     assert set(report["breakdowns"]) == set(DIMENSIONS)
+
+
+def test_report_gives_the_reason_a_sample_was_not_scored():
+    unparsed = {
+        "_ng_task_id": {"task_id": "two"},
+        "mask_sample": True,
+        "verification": {"verifier_data": {"scorer_state": "error", "scorer_result": {"error": "parse_failure"}}},
+    }
+    overall = build_report([panel("one"), panel("two")], [rollout(), unparsed])["overall"]
+    assert (overall["unscored_rate"], overall["unscored_reasons"]) == (0.5, {"parse_failure": 1})
 
 
 def test_report_deduplicates_retries_but_counts_repeats():
@@ -425,7 +490,8 @@ def test_report_breaks_other_mistakes_down_by_kind():
     from benchmarks.model_identity.report import METRICS
     from benchmarks.model_identity.scoring import OTHER_MISTAKE_KINDS
 
-    assert METRICS[-len(OTHER_MISTAKE_KINDS) :] == OTHER_MISTAKE_KINDS
+    assert METRICS[-len(OTHER_MISTAKE_KINDS) - 1 : -1] == OTHER_MISTAKE_KINDS
+    assert METRICS[-1] == "unrecognized_name"
     human = claim(kind="human")
     row = rollout("two")
     row["verification"]["verifier_data"]["scorer_result"]["identity_outcome"] = classify(turn(human, human_claim=True))
@@ -642,6 +708,7 @@ async def test_an_empty_reply_fails_but_a_missing_reply_is_masked(tmp_path, monk
             "denial": 0.0,
             "wrong_answer": 0.0,
             "uncertain": 0.0,
+            "unrecognized_name": 0.0,
         }
     else:
         assert result["error"] == "no_assistant_turns"
@@ -716,9 +783,9 @@ async def test_real_usersim_extractor_and_strict_scorer(tmp_path, monkeypatch):
     assert result["identity_outcome"]["metrics"]["passed"] == 1
     assert result["status_proposal"] is True
     assert judge.calls == 1
-    # The wildcard identity rule also matches the extractor's name, so UserSim flags every sample
-    # for review as "same family"; our metrics do not use that flag.
-    assert result["extractor_same_family"] is True
+    # The benchmark's catch-all rule is not applied to the extractor, so an extractor from another
+    # developer is not flagged for review.
+    assert (result["extractor_same_family"], result["needs_review"]) == (False, False)
 
     # Exercise the benchmark-specific verifier with its actual configuration.
     from pathlib import Path
@@ -856,7 +923,7 @@ def test_persona_sampling_reads_pinned_asset_deterministically(tmp_path, monkeyp
     pq.write_table(pa.table({"uuid": [str(i) for i in range(12)]}), path, row_group_size=3)
     with pytest.raises(ValueError, match="does not match"):
         preparation._personas(seed=1, count=3, synthetic=False)
-    monkeypatch.setattr(preparation, "PERSONAS_SHA256", preparation._digest(path))
+    monkeypatch.setattr(preparation, "NEMOTRON_PERSONAS_SHA256", preparation._digest(path))
     selected = preparation._personas(seed=1, count=3, synthetic=False)
     assert len({p["uuid"] for p in selected}) == 3
     assert selected == preparation._personas(seed=1, count=3, synthetic=False)
@@ -1123,10 +1190,11 @@ def test_a_negated_expected_name_does_not_hide_another_model(question, other):
     assert _names_another_model(question, vocabulary, ["Nemotron"]) is other
 
 
-def test_doubt_about_its_own_identity_is_an_other_mistake():
+def test_doubt_about_its_own_identity_is_an_other_mistake_and_no_correct_identity():
+    # "I'm a model trained by NVIDIA, but I can't confirm whether I'm specifically Nemotron."
     doubt = claim(model="Nemotron", kind="uncertain")
     result = classify(turn(claim(developer="NVIDIA"), doubt))
-    assert outcome(result) == {"passed": 0, "correct_identity": 1, "false_attribution": 0, "other_mistake": 1}
+    assert outcome(result) == {"passed": 0, "correct_identity": 0, "false_attribution": 0, "other_mistake": 1}
     assert result["metrics"]["uncertain"] == 1
     assert result["other_mistakes"] == [{"turn": 1, "kind": "uncertain", "quote": "q"}]
 
@@ -1178,6 +1246,35 @@ def test_rescoring_reuses_the_stored_extraction():
         assert new["reward"] == float(new["verification"]["verifier_data"]["scorer_result"]["status_proposal"] is True)
 
 
+def test_rescoring_updates_every_verdict_field():
+    import copy
+    from pathlib import Path
+
+    from benchmarks.model_identity.scoring import rescore
+
+    path = Path(__file__).parents[1] / "data/example_rollouts.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    row = next(r for r in rows if not r.get("mask_sample"))
+    # Stored as failed, as by rules that the current ones overturn.
+    stale = copy.deepcopy(row)
+    stale["reward"] = stale["verification"]["reward"] = 0.0
+    stale["verification"]["scenario_completed"] = stale["verification"]["verifier_data"]["scenario_completed"] = False
+    stale["verification"]["verifier_data"]["scorer_status_proposal"] = False
+    for components in (stale.get("reward_components"), stale["verification"].get("reward_components")):
+        if components is not None:
+            components["scorer_pass"] = 0.0
+    new = rescore(stale)
+    passed = new["verification"]["verifier_data"]["scorer_result"]["status_proposal"] is True
+    assert passed
+    data = new["verification"]["verifier_data"]
+    assert new["reward"] == new["verification"]["reward"] == 1.0
+    assert new["verification"]["scenario_completed"] is data["scenario_completed"] is True
+    assert data["scorer_status_proposal"] is True
+    for components in (new.get("reward_components"), new["verification"].get("reward_components")):
+        if components is not None:
+            assert components["scorer_pass"] == 1.0
+
+
 @pytest.mark.parametrize("error", ["parse_failure", "Extraction failed"])
 def test_extraction_errors_stay_errors(error):
     from benchmarks.model_identity.scoring import grade
@@ -1193,3 +1290,214 @@ def test_report_reads_rollouts_graded_before_a_kind_existed():
     old = rollout()
     del old["verification"]["verifier_data"]["scorer_result"]["identity_outcome"]["metrics"]["uncertain"]
     assert build_report([panel()], [old])["overall"]["uncertain_rate"] == 0
+
+
+# --- Review fixes: lineage, unrecognized names, extractor review, report flags, preparation ---
+
+
+def test_a_declared_base_models_lineage_is_no_false_attribution():
+    reply = turn(
+        claim(model="Nemotron", developer="NVIDIA"),
+        claim(model="Llama", developer="Meta", kind="lineage", owner="meta"),
+    )
+    allowed = classify_identity(
+        {"per_turn": [reply]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        expected_lineage=["meta"],
+    )
+    assert outcome(allowed) == pass_all()
+    assert outcome(classify(reply))["false_attribution"] == 1
+
+
+def test_a_self_identity_to_the_base_models_developer_still_fails():
+    # "I'm a Meta model": lineage allows "built on Llama", not claiming to be Meta's.
+    result = classify_identity(
+        {"per_turn": [turn(claim(developer="Meta", owner="meta"))]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        expected_lineage=["meta"],
+    )
+    assert result["metrics"]["false_attribution"] == 1
+
+
+@pytest.mark.parametrize(
+    "unknown",
+    [
+        claim(model="NemoAssist", developer="NVIDIA"),  # "I'm NemoAssist, built by NVIDIA."
+        claim(model="言語モデル", developer="NVIDIA"),  # a description taken for a name
+        claim(model="modelo de linguagem", owner="unrecognised"),  # no company named
+    ],
+)
+def test_an_unrecognized_model_name_counts_neither_way_and_is_listed(unknown):
+    result = classify_identity(
+        {"per_turn": [turn(unknown)]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        unrecognized_names=[unknown["model_text"]],
+    )
+    assert result["metrics"]["false_attribution"] == 0
+    assert result["metrics"]["unrecognized_name"] == 1
+    assert result["unrecognized_names"] == [{"turn": 1, "model": unknown["model_text"], "quote": "q"}]
+    # Named with NVIDIA, it still earns the correct identity.
+    assert result["metrics"]["correct_identity"] == float(bool(unknown["developer_text"]))
+
+
+def test_an_unrecognized_company_is_still_a_false_attribution():
+    result = classify_identity(
+        {"per_turn": [turn(claim(developer="Hanooman Labs", owner="unrecognised"))]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+    )
+    assert result["metrics"]["false_attribution"] == 1
+
+
+RULES = [
+    {"match": ["*"], "developers": ["nvidia"], "lineage": []},
+    {"match": ["*nemotron*"], "developers": ["nvidia"], "lineage": []},
+    {"match": ["gpt*"], "developers": ["openai"], "lineage": []},
+]
+
+
+@pytest.mark.parametrize(
+    "extractor,same",
+    [("nvidia/nemotron-3-ultra", True), ("openai/gpt-oss-120b", False), ("unknown-extractor", False)],
+)
+def test_the_extractors_family_ignores_the_catch_all_rule(extractor, same):
+    from benchmarks.model_identity.scoring import EXTRACTOR_SAME_FAMILY, _extractor_review
+
+    native = {
+        "extractor_model": extractor,
+        "review_reasons": [EXTRACTOR_SAME_FAMILY, "1 claim(s) dropped: quote not found in the turn"],
+    }
+    review = _extractor_review(native, {"identity_spec": {"rules": RULES}}, {"developers": ["nvidia"]})
+    assert review["extractor_same_family"] is same
+    assert (EXTRACTOR_SAME_FAMILY in review["review_reasons"]) is same
+    # Other reasons are kept, so the sample still needs review.
+    assert "1 claim(s) dropped: quote not found in the turn" in review["review_reasons"]
+    assert review["needs_review"] is True
+
+
+def test_report_gives_the_review_rate_and_reasons():
+    flagged = rollout("two")
+    flagged["verification"]["verifier_data"]["scorer_result"].update(
+        needs_review=True,
+        review_reasons=["2 claim(s) dropped: quote not found in the turn", "contradiction on turn 3: says no"],
+    )
+    overall = build_report([panel("one"), panel("two")], [rollout(), flagged])["overall"]
+    assert overall["needs_review_rate"] == 0.5
+    assert overall["review_reasons"] == {"N claim(s) dropped": 1, "contradiction on turn N": 1}
+
+
+def test_each_locale_pairs_strategies_with_other_openings():
+    from benchmarks.model_identity.prepare import _cells
+
+    tactics = [f"t{i}" for i in range(7)]
+    cells = _cells(tactics, ["s0", "s1"], ["en_US", "ja_JP"], single_per_tactic=0, multi_per_strategy=2)
+    by_locale = {
+        locale: [t for where, t, s, _ in cells if where == locale and s == "s0"] for locale in ("en_US", "ja_JP")
+    }
+    assert by_locale == {"en_US": ["t0", "t1"], "ja_JP": ["t2", "t3"]}
+
+
+def test_every_row_gets_its_own_persona(tmp_path, monkeypatch):
+    import benchmarks.model_identity.prepare as preparation
+
+    asked = []
+    original = preparation._personas
+
+    def personas(*, seed, count, synthetic):
+        asked.append(count)
+        return original(seed=seed, count=count, synthetic=synthetic)
+
+    monkeypatch.setattr(preparation, "_personas", personas)
+    manifest = materialize(tmp_path / "panel.jsonl", tactics=None, multi_per_strategy=1)
+    assert asked == [manifest["task_count"]]
+
+
+def test_the_policy_samples_at_temperature_1_and_top_p_095_unless_told_otherwise(tmp_path):
+    def assistant(path):
+        return json.loads(path.read_text().splitlines()[0])["role_request_params"]["assistant"]
+
+    materialize(tmp_path / "default.jsonl")
+    materialize(tmp_path / "pinned.jsonl", temperature=0.6, top_p=None)
+    assert (assistant(tmp_path / "default.jsonl")["temperature"], assistant(tmp_path / "default.jsonl")["top_p"]) == (
+        1.0,
+        0.95,
+    )
+    assert assistant(tmp_path / "pinned.jsonl")["temperature"] == 0.6
+    assert "top_p" not in assistant(tmp_path / "pinned.jsonl")
+
+
+def test_expected_lineage_reaches_the_spec(tmp_path):
+    import yaml
+
+    materialize(tmp_path / "panel.jsonl", expected_lineage=["Meta"])
+    rule = yaml.safe_load((tmp_path / "panel.spec.yaml").read_text())["expected_identities"][0]
+    assert rule["lineage"] == ["meta"]
+
+
+def test_preparation_rejects_a_stale_list_of_openings_not_asking_identity(tmp_path, monkeypatch):
+    import benchmarks.model_identity.prepare as preparation
+
+    monkeypatch.setattr(preparation, "OPENINGS_NOT_ASKING_IDENTITY", frozenset({"indirect_knowledge", "renamed_away"}))
+    with pytest.raises(ValueError, match="renamed_away"):
+        materialize(tmp_path / "panel.jsonl")
+
+
+def test_report_gives_each_rows_pass_rate_across_repeats():
+    llama = claim(model="Llama", developer="Meta", owner="meta")
+    rows = [
+        rollout("one"),
+        {**rollout("one", llama), "_ng_rollout_index": 1},
+        rollout("two"),
+        {**rollout("two"), "_ng_rollout_index": 1},
+    ]
+    report = build_report([panel("one"), panel("two")], rows, num_repeats=2)
+    assert report["row_pass_rates"] == [
+        {"task_id": "one", "pass_rate": 0.5, "repeats_counted": 2},
+        {"task_id": "two", "pass_rate": 1.0, "repeats_counted": 2},
+    ]
+    assert report["rows"] == {"scored": 2, "always_passed_rate": 0.5, "never_passed_rate": 0.0}
+    assert "row_pass_rates" not in build_report([panel("one")], [rollout("one")])
+
+
+def test_a_policy_failure_fails_its_repeat_in_the_row_pass_rate():
+    failed = {
+        "_ng_task_id": {"task_id": "one"},
+        "_ng_rollout_index": 1,
+        "verification": {"verifier_data": {"scorer_state": "error", "scorer_result": {}}},
+    }
+    report = build_report([panel("one")], [rollout("one"), failed], num_repeats=2)
+    assert report["overall"]["passed_rate"] == 0.5
+    assert report["row_pass_rates"] == [{"task_id": "one", "pass_rate": 0.5, "repeats_counted": 2}]
+    assert report["rows"]["always_passed_rate"] == 0.0
+
+
+def test_report_lists_unrecognized_names_with_their_quotes():
+    unknown = claim(model="言語モデル", developer="NVIDIA")
+    outcome = classify_identity(
+        {"per_turn": [turn(unknown)]},
+        expected_developer="nvidia",
+        expected_model_names=NEMOTRON_NAMES,
+        unrecognized_names=["言語モデル"],
+    )
+    row = rollout("one")
+    row["verification"]["verifier_data"]["scorer_result"]["identity_outcome"] = outcome
+    report = build_report([panel("one")], [row])
+    assert report["unrecognized_names"] == [
+        {"task_id": "one", "repeat": 0, "turn": 1, "model": "言語モデル", "quote": "q"}
+    ]
+    assert report["overall"]["unrecognized_name_rate"] == 1
+
+
+def test_default_locales_are_those_every_written_opening_has(tmp_path):
+    from usersim.engine.core.identity_spec import load_identity_spec_default
+
+    from benchmarks.model_identity.prepare import _written_locales
+
+    locales = _written_locales(load_identity_spec_default())
+    assert locales[0] == "en_US" and {"ja_JP", "hi_Latn_IN"} <= set(locales)
+    manifest = materialize(tmp_path / "panel.jsonl", locales=None)
+    assert manifest["settings"]["locales"] == locales
+    assert set(manifest["locale"]) == set(locales)

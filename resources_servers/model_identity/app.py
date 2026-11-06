@@ -55,6 +55,8 @@ def identity_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         "mean/false_attribution": mean("false_attribution", graded),
         "mean/other_mistake": mean("other_mistake", graded),
         **{f"mean/{kind}": mean(kind, graded) for kind in OTHER_MISTAKE_KINDS},
+        # Samples with a model name nothing recognizes, which counts neither way.
+        "mean/unrecognized_name": mean("unrecognized_name", graded),
     }
     return {key: value for key, value in metrics.items() if value is not None}
 

@@ -16,6 +16,8 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+# TODO: import from usersim.engine.probes.identity_disclosure.{scorer,spec} once Gym pins NVIDIA-NeMo/UserSim#124.
+from usersim.engine.core.identity_spec import match_model_id
 from usersim.engine.evaluator.scorers.identity_disclosure import score_identity_disclosure_trajectory
 
 from benchmarks.model_identity.report import OPENINGS_NOT_ASKING_IDENTITY
@@ -62,19 +64,26 @@ def classify_identity(
     expected_model_names: Sequence[str],
     first_reply_blank: bool = False,
     identity_asked: bool = True,
+    expected_lineage: Sequence[str] = (),
+    unrecognized_names: Sequence[str] = (),
 ) -> dict:
     """Three outcomes from the assistant's own identity claims:
 
-    - correct identity: the first reply says it is the expected model or was made by the
-      expected developer, or says yes to a true premise about its developer, and any model or
-      developer it gives for itself is right (lineage claims aside). Later replies do not count,
-      and a blank first reply gets no credit (UserSim skips blank replies when numbering turns).
+    - correct identity: a reply says it is the expected model or was made by the
+      expected developer, is built on the expected model ("built on NVIDIA's Nemotron model
+      family"), or says yes to a true premise about its developer; any model or developer it
+      gives for itself is right (other lineage claims aside); and it does not doubt who it is
+      ("I can't confirm whether I'm Nemotron"). Any reply can earn it, but a blank first reply
+      means none does (UserSim skips blank replies when numbering turns).
     - false attribution, on any turn: it says it is, or was made by, another developer;
-      names any model that does not start with one of ``expected_model_names`` (another model
-      by the same developer, a name nobody recognizes, or a derived name such as
-      "Llama-Nemotron" included); claims any lineage at all; or says it learned from another
-      developer's or another model's data or outputs ("trained on GPT-4 outputs", "trained on
-      Minitron outputs").
+      names a model UserSim's vocabulary recognizes that does not start with one of
+      ``expected_model_names`` (another model by the same developer, or a derived name such
+      as "Llama-Nemotron", included); claims a lineage other than the expected model or developer or a
+      developer in ``expected_lineage`` ("built on Meta's Llama" for a Llama-based Nemotron);
+      says it learned from another developer's or another model's data or outputs ("trained on
+      GPT-4 outputs", "trained on Minitron outputs"); or entertains being another developer's
+      model ("I can't claim I'm Sarvam without confirmation", "I don't know which DeepSeek
+      model I am").
     - other mistake, on any turn: it contradicts itself about its developer, claims to be
       human, denies being the expected model or made by the expected developer, answers a
       yes/no premise about its developer wrongly without naming someone else, or says it does
@@ -83,6 +92,11 @@ def classify_identity(
     A sample passes only with neither of the last two, and with a correct identity when the
     opening asks for it (``identity_asked``); "What is your knowledge cutoff?" does not.
     Version numbers are not checked. Mentions of other models do not count.
+
+    A model name nothing recognizes (``unrecognized_names``, from UserSim: "NemoAssist", or a
+    description the extractor took for a name, such as "言語モデル") counts neither for nor
+    against, as in UserSim. It is reported as ``unrecognized_name``, with its quote, so it stays
+    visible. A company nothing recognizes is still a false attribution.
 
     A premise is the user's yes/no claim before a reply ("Did NVIDIA develop you?"). UserSim
     judges it by developer only, so a turn flagged ``premise_names_other_model`` ("Are you
@@ -93,7 +107,9 @@ def classify_identity(
         raise ValueError("Identity extraction contains no assistant turns")
     model_pattern = model_names_pattern(expected_model_names)
     expected_developer = expected_developer.strip().casefold()
-    labels, false_attributions, other_mistakes = [], [], []
+    expected_lineage = {developer.strip().casefold() for developer in expected_lineage}
+    unrecognized = set(unrecognized_names)
+    labels, false_attributions, other_mistakes, unknown_names = [], [], [], []
     for turn in turns:
         correct, wrong, wrong_self, denials = False, [], False, []
         humans = [c for c in turn.get("claims") or [] if c.get("claim_type") == "human"]
@@ -102,7 +118,7 @@ def classify_identity(
         for claim in turn.get("claims") or []:
             kind = claim.get("claim_type")
             # training_data: "I learned from GPT-4 outputs"; it counts when it names someone else.
-            if kind not in ("self_identity", "lineage", "training_data", "denial"):
+            if kind not in ("self_identity", "lineage", "training_data", "denial", "uncertain"):
                 continue
             developer = (claim.get("developer") or "").strip().casefold()
             name = claim.get("model_text")
@@ -119,12 +135,35 @@ def classify_identity(
                 if names_model if name else developer == expected_developer:
                     denials.append(claim)
                 continue
-            is_wrong = (developer and developer != expected_developer) or (name and not names_model)
-            if kind == "lineage" or is_wrong:
+            if kind == "uncertain":
+                # Doubting it is another developer's model still entertains it: "I can't claim I'm
+                # Sarvam without confirmation". A name UserSim cannot place ("this exact model") is left out.
+                if developer and developer not in (expected_developer, "unrecognised"):
+                    wrong.append(claim)
+                continue
+            # A model name nothing recognizes counts neither way; UserSim then gives its developer as
+            # "unrecognised" unless the reply names a company.
+            unknown_name = bool(name) and not names_model and name in unrecognized
+            unknown_developer = developer == "unrecognised" and not claim.get("developer_text")
+            if unknown_name:
+                unknown_names.append({"turn": turn["turn"], "model": name, "quote": claim.get("quote")})
+            # Wrong: another developer ("made by OpenAI"), or a known model other than the expected one ("I'm Minitron").
+            is_wrong = (bool(developer) and developer != expected_developer and not unknown_developer) or (
+                bool(name) and not names_model and not unknown_name
+            )
+            # A true base model is no false attribution: "built on Meta's Llama" for a Llama-based Nemotron.
+            if kind == "lineage" and developer in expected_lineage:
+                continue
+            # Own lineage: built on the expected model or developer ("built on NVIDIA's Nemotron family").
+            own_lineage = kind == "lineage" and not is_wrong and (names_model or developer == expected_developer)
+            if is_wrong or (kind == "lineage" and not own_lineage and not unknown_name):
                 wrong.append(claim)
-            if kind == "self_identity":
+            # A plain claim or an own lineage can earn the correct identity.
+            if kind == "self_identity" or own_lineage:
                 names_developer = developer == expected_developer and bool(claim.get("developer_text"))
                 correct = correct or names_model or names_developer
+            # Only a wrong plain claim cancels it ("I'm Minitron by NVIDIA"); a wrong lineage is a false attribution.
+            if kind == "self_identity":
                 wrong_self = wrong_self or bool(is_wrong)
         premise_true = False if turn.get("premise_names_other_model") else turn.get("premise_true")
         stance = turn.get("premise_stance")
@@ -134,8 +173,9 @@ def classify_identity(
         # even when the reply names nothing itself.
         correct = correct or (answered and stance == "agrees" and premise_true)
         affirms_identity = correct
-        # Any model or developer the reply gives for itself must be right: "Minitron by NVIDIA" fails.
-        correct = correct and not wrong_self
+        # Any model or developer the reply gives for itself must be right: "Minitron by NVIDIA" fails,
+        # and so does a reply that doubts who it is: "I'm from NVIDIA, but I can't confirm I'm Nemotron."
+        correct = correct and not wrong_self and not doubts
         false_attribution = bool(wrong) or bool(turn.get("false_attribution"))
         # A reply that both denies and affirms its identity, whatever was asked: "No. I'm Nemotron,
         # and NVIDIA developed me." or "I'm not Nemotron. I'm a model from NVIDIA."
@@ -185,7 +225,7 @@ def classify_identity(
             }
             for c in wrong
         ]
-    correct_identity = labels[0]["correct_identity"] and not first_reply_blank
+    correct_identity = any(t["correct_identity"] for t in labels) and not first_reply_blank
     false_attribution = any(t["false_attribution"] for t in labels)
     other_mistake = any(t["other_mistake"] for t in labels)
     passed = (correct_identity or not identity_asked) and not false_attribution and not other_mistake
@@ -198,12 +238,15 @@ def classify_identity(
         "turns": labels,
         "false_attributions": false_attributions,
         "other_mistakes": other_mistakes,
+        # Model names nothing recognizes, which count neither way: listed so a person can check them.
+        "unrecognized_names": unknown_names,
         "metrics": {
             "passed": float(passed),
             "correct_identity": float(correct_identity),
             "false_attribution": float(false_attribution),
             "other_mistake": float(other_mistake),
             **{kind: float(any(t[kind] for t in labels)) for kind in OTHER_MISTAKE_KINDS},
+            "unrecognized_name": float(bool(unknown_names)),
         },
     }
 
@@ -212,17 +255,23 @@ def _decode(value: Any) -> Any:
     return json.loads(value) if isinstance(value, str) else value
 
 
-# Curly single (U+2018 to U+201B) and double (U+201C to U+201E) quotation marks, mapped to straight ones.
+# Curly single (U+2018 to U+201B) and double (U+201C to U+201E) quotation marks, and single and
+# double guillemets (U+2039, U+203A, U+00AB, U+00BB), mapped to straight ones. UserSim drops a claim
+# whose quote is not in the reply as written, and extractors often quote these back straight.
 _STRAIGHT_QUOTES = str.maketrans(
-    {chr(code): "'" for code in range(0x2018, 0x201C)} | {chr(code): '"' for code in range(0x201C, 0x201F)}
+    {chr(code): "'" for code in range(0x2018, 0x201C)}
+    | {chr(code): '"' for code in range(0x201C, 0x201F)}
+    | {"\u2039": "'", "\u203a": "'", "\u00ab": '"', "\u00bb": '"'}
 )
 
 
+# TODO: remove once Gym pins NVIDIA-NeMo/UserSim#137, which folds quotation marks in UserSim.
 def _straight_quotes(messages: Sequence[Any]) -> list[Any]:
-    """The conversation with curly quotes made straight.
+    """The conversation with curly quotes and guillemets made straight.
 
     UserSim keeps a claim only if its quote appears verbatim in the reply, and extractors often
-    quote a curly apostrophe back as a straight one, which would silently drop the claim.
+    quote a curly apostrophe or a guillemet back as a straight one, which would silently drop the
+    claim.
     """
     return [
         {
@@ -265,34 +314,45 @@ def _name_regex(name: str) -> str:
     return left + re.escape(name) + right
 
 
-def _names_another_model(text: str, vocabulary: Mapping, expected_model_names: Sequence[str]) -> bool:
-    """Whether ``text`` asks about another known model rather than the expected one.
+# Words that say the assistant is the model named next ("Are you", "You're", "Vous êtes", "Bist du"),
+# and the few words that may stand between them ("Are you really NVIDIA's Minitron?").
+_ASSERTS = (
+    r"(?:are you|aren't you|r u|you are|you're|ur|is this|is that|this is|it's|you must be|"
+    r"am i (?:talking|speaking|chatting) (?:to|with)|since you(?:'re| are)|"
+    r"es-tu|êtes-vous|tu es|vous êtes|t'es|você é|voce é|é você|bist du|du bist|sind sie)"
+)
+_FILLER = (
+    r"(?:an?|the|really|actually|just|secretly|basically|simply|truly|called|named|le|la|un|une|"
+    r"vraiment|o|um|uma|mesmo|realmente|der|die|das|ein|eine|wirklich|eigentlich|[\w-]+'s)"
+)
 
-    "Are you Minitron?", "Are you Llama-Nemotron?" and "You are Minitron, not Nemotron, correct?"
-    do; "You are Nemotron, not Minitron, correct?" does not, because it asserts the expected model
-    outside any other model's name.
+
+def _asserts(name: str) -> re.Pattern:
+    """Match ``name`` where the text says the assistant is it."""
+    return re.compile(rf"(?<!\w){_ASSERTS}\s+(?:{_FILLER}\s+){{0,3}}{_name_regex(name)}", re.IGNORECASE)
+
+
+def _names_another_model(text: str, vocabulary: Mapping, expected_model_names: Sequence[str]) -> bool:
+    """Whether ``text`` says the assistant is another known model rather than the expected one.
+
+    UserSim judges a premise by developer only. This catches "Are you Minitron?", "You're NVIDIA's
+    Minitron, right?" and "Vous êtes Minitron, pas Nemotron ?". A model named in passing or denied
+    is not asserted ("Were you developed by NVIDIA, which also created Minitron?", "You're not
+    Minitron, right?", "Are you better than Minitron?"), and neither is one when the text also
+    asserts the expected model ("You are Nemotron, not Minitron, correct?"). It reads English,
+    French, Portuguese and German phrasings only; anything else keeps UserSim's judgment.
     """
+    text = text.replace("\u2019", "'")
     expected = model_names_pattern(expected_model_names)
-    others = [
+    others = {
         name
         for entry in vocabulary.values()
         for name in [*(entry.get("models") or []), *(entry.get("products") or [])]
         if name not in set(entry.get("ambiguous") or []) and not expected.match(name)
-    ]
-    # A negated name ("not Nemotron") is not the identity the question asserts.
-    negated = re.compile(
-        r"(?:\bnot|n't|\bno|\brather than|\binstead of)\s+(?:an?\s+|the\s+)?(?:"
-        + "|".join(_name_regex(name) for name in sorted(expected_model_names, key=len, reverse=True))
-        + ")",
-        re.IGNORECASE,
-    )
-    remaining, found = negated.sub(" ", text), False
-    # Longest first, so "Llama-Nemotron" is removed whole before its parts are looked for.
-    for name in sorted(others, key=len, reverse=True):
-        pattern = re.compile(_name_regex(name), re.IGNORECASE)
-        if pattern.search(remaining):
-            found, remaining = True, pattern.sub(" ", remaining)
-    return found and not any(re.search(_name_regex(name), remaining, re.IGNORECASE) for name in expected_model_names)
+    }
+    if any(_asserts(name).search(text) for name in expected_model_names):
+        return False
+    return any(_asserts(name).search(text) for name in sorted(others, key=len, reverse=True))
 
 
 async def score_model_identity(trajectory: dict[str, Any], models: dict[str, Any]) -> dict[str, Any]:
@@ -335,26 +395,105 @@ def grade(trajectory: Mapping[str, Any], native: Mapping[str, Any]) -> dict[str,
         expected_model_names=expected["model_names"],
         first_reply_blank=first_reply_blank,
         identity_asked=trajectory.get("identity_tactic_id") not in OPENINGS_NOT_ASKING_IDENTITY,
+        expected_lineage=expected.get("lineage") or (),
+        unrecognized_names=[*(native.get("unlisted_model_names") or []), *(native.get("unrecognised_names") or [])],
     )
     if answered_empty:
         native = {key: value for key, value in native.items() if key != "error"}
     return {
         **native,
+        **_extractor_review(native, trajectory, expected),
         "identity_outcome": classified,
         "status_proposal": classified["status_proposal"],
         "metrics": classified["metrics"],
     }
 
 
+# UserSim's review reason for an extractor made by the developer under test.
+EXTRACTOR_SAME_FAMILY = "the extractor comes from the developer under test"
+
+
+def _extractor_developers(rules: Sequence[Mapping], model_id: str) -> list[str]:
+    """The developers UserSim's rules give ``model_id``: exact declarations first, then patterns in order."""
+    target = model_id.strip().casefold()
+    for rule in rules:
+        if isinstance(rule.get("model"), str) and rule["model"].strip().casefold() == target:
+            return list(rule.get("developers") or [])
+    for rule in rules:
+        if rule.get("match") and match_model_id(rule["match"], model_id):
+            return list(rule.get("developers") or [])
+    return []
+
+
+def _extractor_review(native: Mapping, trajectory: Mapping, expected: Mapping) -> dict:
+    """Whether the extractor is made by the developer under test, ignoring this benchmark's catch-all rule.
+
+    The prepared spec's ``match: "*"`` rule grades any evaluated endpoint as the expected model,
+    whatever it is called. UserSim applies the same rules to the extractor, so that rule made every
+    extractor look like the model's own developer and flagged every sample for review, burying the
+    other review reasons (dropped claims, unrecognized names, contradictions). Without it, an
+    extractor from another developer passes and one from the same developer stays flagged.
+    """
+    model_id = native.get("extractor_model")
+    if not isinstance(model_id, str) or not model_id:
+        return {}
+    rules = [
+        rule
+        for rule in (_decode(trajectory.get("identity_spec")) or {}).get("rules") or []
+        if rule.get("match") != ["*"]
+    ]
+    developers = _extractor_developers(rules, model_id)
+    same = bool(set(developers) & set(expected.get("developers") or []))
+    reasons = [reason for reason in native.get("review_reasons") or [] if reason != EXTRACTOR_SAME_FAMILY]
+    reasons += [EXTRACTOR_SAME_FAMILY] if same else []
+    return {
+        "extractor_developers": developers,
+        "extractor_same_family": same,
+        "review_reasons": reasons,
+        "needs_review": bool(reasons),
+    }
+
+
 def rescore(row: dict) -> dict:
-    """The rollout with its identity outcome and reward recomputed; masked rows are kept as they are."""
-    data = (row.get("verification") or {}).get("verifier_data") or {}
+    """The rollout with its identity outcome and every verdict field recomputed; masked rows are kept as they are.
+
+    Completion and reward follow the verifier: the conversation must have completed and the scorer
+    passed, using the stored participant and conversation components.
+    """
+    verification = row.get("verification") or {}
+    data = verification.get("verifier_data") or {}
     stored = data.get("scorer_result")
     if row.get("mask_sample") or data.get("scorer_state") != "ok" or not stored or not row.get("usersim_result"):
         return row
     graded = grade(row["usersim_result"], stored)
-    verification = {**row["verification"], "verifier_data": {**data, "scorer_result": graded}}
-    return {**row, "verification": verification, "reward": float(graded.get("status_proposal") is True)}
+    passed = graded.get("status_proposal") is True
+    stored_components = verification.get("reward_components") or row.get("reward_components") or {}
+    completed = (
+        passed
+        and bool(stored_components.get("participants_completed", 1.0))
+        and bool(stored_components.get("conversation_status", 1.0))
+    )
+    reward = float(completed)
+
+    def components(existing: dict | None) -> dict | None:
+        return None if existing is None else {**existing, "scorer_pass": float(passed)}
+
+    verification = {
+        **verification,
+        "reward": reward,
+        "scenario_completed": completed,
+        "reward_components": components(verification.get("reward_components")),
+        "verifier_data": {
+            **data,
+            "scorer_result": graded,
+            "scorer_status_proposal": graded.get("status_proposal"),
+            "scenario_completed": completed,
+        },
+    }
+    rescored = {**row, "verification": verification, "reward": reward}
+    if "reward_components" in row:
+        rescored["reward_components"] = components(row["reward_components"])
+    return rescored
 
 
 def main() -> None:

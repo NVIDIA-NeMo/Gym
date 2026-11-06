@@ -1,1 +1,0 @@
--r ../nemo_user_sim/requirements.txt
