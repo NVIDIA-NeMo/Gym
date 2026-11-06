@@ -9,11 +9,10 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.server_runtime.base_resources_server import BaseVerifyRequest
-from nemo_gym.verification.judge import call_judge, judge_failsafe
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseVerifyRequest
+from nemo_gym.verification import call_judge, judge_failsafe
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
 
