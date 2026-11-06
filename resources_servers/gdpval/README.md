@@ -65,6 +65,13 @@ default the server runs `libreoffice` from `PATH`, and with `preconvert_office_t
 Java runtime with `apt-get` on Linux when they are missing or broken. Startup then converts a small workbook with a
 formula and a chart, and fails in comparison mode if that conversion fails.
 
+To render in the task sandbox instead, set `sandbox_libreoffice_command: [libreoffice]`. The sandbox image built from
+`containers/Dockerfile` has LibreOffice and the fonts. Before `/verify` stops the sandbox, it renders every collected
+Office file, submitted or reference, to a `<name>.pdf` sidecar there. The server then needs no LibreOffice: startup
+skips the install and its check, and both modes judge the sidecars. A file that fails to render gets no sidecar and
+is judged as it would be without LibreOffice. Use this when the server runs without root, or should not open
+model-written Office files with LibreOffice itself.
+
 To run LibreOffice from a container or a wrapper script instead, set `libreoffice_command` to the command that replaces
 `libreoffice`. For example, to use Apptainer, set it like this in `configs/gdpval.yaml`, next to
 `persist_deliverables_dir`:

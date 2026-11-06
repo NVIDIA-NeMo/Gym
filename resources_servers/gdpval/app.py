@@ -319,6 +319,10 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # and the writable reference directories, and fails if the check fails; the host
     # javaldx check and apt install are skipped. None uses `libreoffice` on PATH.
     libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
+    # Command that runs LibreOffice inside the task sandbox, e.g. [libreoffice]. When set, /verify
+    # renders each Office file to its <name>.pdf sidecar in the sandbox before the sandbox stops, so
+    # the server needs no LibreOffice of its own and the host install and startup check are skipped.
+    sandbox_libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
 
     # How deliverable/reference files are presented to the judge:
     # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
@@ -713,7 +717,7 @@ class GDPValResourcesServer(SimpleResourcesServer):
                     'and must not leave files that the server cannot delete. See "Office to PDF conversion" in '
                     "resources_servers/gdpval/README.md."
                 )
-        elif self.config.preconvert_office_to_pdf:
+        elif self.config.preconvert_office_to_pdf and self.config.sandbox_libreoffice_command is None:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
             if not ensure_libreoffice() and self.config.reward_mode == "comparison":
@@ -908,7 +912,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 self.config.persist_deliverables_dir, session.task_id.task_id, session.repeat
             )
             await collect_deliverables(
-                session.sandbox, session.finish_call, session.reference_dir, task_dir, self._sandbox_workdir
+                session.sandbox,
+                session.finish_call,
+                session.reference_dir,
+                task_dir,
+                self._sandbox_workdir,
+                render_libreoffice_command=self.config.sandbox_libreoffice_command,
             )
             await self._release(session)
             session.deliverables_dir = str(task_dir)
