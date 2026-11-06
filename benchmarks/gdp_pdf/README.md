@@ -61,10 +61,12 @@ python benchmarks/gdp_pdf/report_aa.py \
   --rollouts <run_dir>/rollouts.jsonl --output <run_dir>/gdp_pdf_aa_report.json
 ```
 
-The report reads the failures file next to the rollouts, counts every missing or failed attempt as
-zero, and gives all-pass, Mean Pass (each attempt's criterion pass rate, averaged over tasks and
-attempts), Mean Pass by domain and the outcome of every attempt. `judging_complete` stays false while
-any attempt lacks a verdict for one of its criteria.
+The report reads the run through its rollout store, so a re-judged or re-verified result replaces the
+one it settles. Rollouts without a run manifest are read with the failures file next to them. It
+counts every missing or failed attempt as zero, and gives all-pass, Mean Pass (each attempt's
+criterion pass rate, averaged over tasks and attempts), Mean Pass by domain and the outcome of every
+attempt. `judging_complete` stays false while any attempt is missing, failed or lacks a verdict for
+one of its criteria; empty answers and inputs that never fit are final zeros.
 
 ## Comparability
 

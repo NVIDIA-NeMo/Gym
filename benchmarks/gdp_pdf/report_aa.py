@@ -23,7 +23,8 @@ verdict. Gym's own aggregate leaves failed rows out instead: a row whose judge c
 This script reads the original verdicts (it calls no model or judge) and keeps every expected
 task/attempt pair in the denominator. Recover judge failures first with
 ``gym eval reverify --judge-failed-only``; any attempt still without a verdict for every criterion
-scores zero here and leaves ``judging_complete`` false.
+scores zero here and leaves ``judging_complete`` false. A run collected by ``gym eval`` is read through
+its rollout store, so a re-judged or re-verified result replaces the one it settles.
 
     python benchmarks/gdp_pdf/report_aa.py --expected benchmarks/gdp_pdf/data/gdp_pdf_benchmark.jsonl \\
         --rollouts results/rollouts.jsonl --output results/gdp_pdf_aa_report.json
@@ -34,8 +35,9 @@ from __future__ import annotations
 import argparse
 import json
 from collections import Counter, defaultdict
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 
 AA_TASKS = 100
@@ -75,6 +77,18 @@ def _answer_text(row: dict[str, Any]) -> str:
     return ""
 
 
+def _passes(score: Any) -> Optional[bool]:
+    """The verifier's pass rule for a saved score (``str`` of a decimal; passes when it rounds half-up to 4 places
+    to at least 1), or None when ``score`` is not a finite decimal string."""
+    if not isinstance(score, str):
+        return None
+    try:
+        value = Decimal(score)
+        return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP) >= 1 if value.is_finite() else None
+    except InvalidOperation:
+        return None
+
+
 def _grade(row: dict[str, Any], criteria: dict[int, str]) -> Optional[tuple[float, float]]:
     """(all_pass, mean_pass) when every criterion of the expected rubric has a verdict, else None."""
     evaluations = row.get("criterion_evaluations") or []
@@ -89,7 +103,7 @@ def _grade(row: dict[str, Any], criteria: dict[int, str]) -> Optional[tuple[floa
             # The verifier skips the judge for an empty answer and fails every criterion.
             if item.get("passed") is not False:
                 raise ValueError("An empty answer received criterion credit")
-        elif item.get("score") not in ("0", "1") or type(item.get("passed")) is not bool:
+        elif type(item.get("passed")) is not bool or item["passed"] != _passes(item.get("score")):
             return None
     passed = sum(1 for item in evaluations if item["passed"])
     return float(passed == len(criteria)), passed / len(criteria)
@@ -101,8 +115,13 @@ def summarize(
     failures: list[dict[str, Any]] = (),
     *,
     repeats: int = AA_REPEATS,
+    inputs: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
-    """Aggregate a run over the fixed task-by-repeat denominator."""
+    """Aggregate a run over the fixed task-by-repeat denominator.
+
+    ``inputs`` are the run's materialized input rows. They map a task index to its task, so a failure
+    of a task with no successful rollout is still attributed to it.
+    """
     if repeats < 1:
         raise ValueError("repeats must be positive")
     tasks: dict[str, dict[str, Any]] = {}
@@ -115,11 +134,12 @@ def summarize(
     if not tasks:
         raise ValueError("No expected tasks")
 
-    task_ids_by_index = {
-        row["_ng_task_index"]: str(row["verifier_metadata"]["task_id"])
-        for row in rollouts
-        if "_ng_task_index" in row and (row.get("verifier_metadata") or {}).get("task_id") is not None
-    }
+    task_ids_by_index: dict[Any, str] = {}
+    for row in [*inputs, *rollouts]:
+        task_id = (row.get("verifier_metadata") or {}).get("task_id")
+        if "_ng_task_index" in row and task_id is not None:
+            if task_ids_by_index.setdefault(row["_ng_task_index"], str(task_id)) != str(task_id):
+                raise ValueError(f"Task index {row['_ng_task_index']} maps to more than one task")
     graded_rows: dict[tuple[str, int], dict[str, Any]] = {}
     for row in rollouts:
         key = _attempt_key(row, task_ids_by_index)
@@ -176,7 +196,9 @@ def summarize(
         )
 
     denominator = len(tasks) * repeats
-    unjudged = outcomes["incomplete_judging"] + outcomes[f"failed_{JUDGE_FAILED}"]
+    # Zeros the verifier gave without the judge (an empty answer, an input that never fit) are final;
+    # any other attempt without a complete grading is not judged yet.
+    unjudged = denominator - sum(outcomes[name] for name in ("graded", "empty_answer", "terminal_input_failure"))
     return {
         "tasks": len(tasks),
         "repeats": repeats,
@@ -186,11 +208,34 @@ def summarize(
         "mean_pass": sum(task["mean_pass"] for task in per_task) / len(per_task),
         "domain_mean_pass": {domain: sum(v) / len(v) for domain, v in sorted(domain_task_means.items())},
         "attempt_outcomes": dict(sorted(outcomes.items())),
-        # AA publishes a score only when every attempt has a verdict for every criterion.
+        # AA publishes a score only when every attempt has a verdict for every criterion. Missing and
+        # failed attempts, and attempts whose grading failed, leave this false.
         "judging_complete": unjudged == 0,
         "all_attempts_present": outcomes["missing"] == 0,
         "per_task": per_task,
     }
+
+
+def load_run(
+    rollouts_path: Path, failures_fpath: Optional[Path] = None
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """(rollouts, failures, inputs) of a run.
+
+    ``gym eval`` appends every outcome, including a re-judged or re-verified result after the one it
+    settles, and records which one is current in a manifest. Such a run is read through its rollout
+    store, which returns only the current outcome of each task/attempt pair and the run's materialized
+    inputs. Rollouts without a manifest, or with an explicit failures file, are read as they are.
+    """
+    if failures_fpath is None:
+        from nemo_gym.rollouts import RolloutStore
+
+        store = RolloutStore.read(rollouts_path)
+        if store is not None:
+            rollouts, failures = store.selected("success"), store.failures()
+            return rollouts, failures, store.inputs_for(rollouts + failures)
+        failures_fpath = failures_path(rollouts_path)
+    failures = read_jsonl(failures_fpath) if failures_fpath.is_file() else []
+    return read_jsonl(rollouts_path), failures, []
 
 
 def main() -> None:
@@ -198,14 +243,17 @@ def main() -> None:
     parser.add_argument("--expected", type=Path, required=True, help="Prepared benchmark JSONL (one row per task)")
     parser.add_argument("--rollouts", type=Path, required=True, help="Scored rollouts JSONL")
     parser.add_argument(
-        "--failures", type=Path, default=None, help="Failures sidecar (default: <rollouts_stem>_failures.jsonl)"
+        "--failures",
+        type=Path,
+        default=None,
+        help="Failures sidecar of rollouts without a run manifest; giving one reads both files as they are "
+        "(default: the run's rollout store, else <rollouts_stem>_failures.jsonl)",
     )
     parser.add_argument("--repeats", type=int, default=AA_REPEATS)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
-    failures_fpath = args.failures or failures_path(args.rollouts)
-    failures = read_jsonl(failures_fpath) if failures_fpath.is_file() else []
-    report = summarize(read_jsonl(args.expected), read_jsonl(args.rollouts), failures, repeats=args.repeats)
+    rollouts, failures, inputs = load_run(args.rollouts, args.failures)
+    report = summarize(read_jsonl(args.expected), rollouts, failures, repeats=args.repeats, inputs=inputs)
     args.output.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({key: value for key, value in report.items() if key != "per_task"}, indent=2))
 

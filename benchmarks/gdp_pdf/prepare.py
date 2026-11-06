@@ -413,8 +413,12 @@ def _prepare_rows(
 
 
 def _manifest_looks_complete(manifest_path: Path) -> bool:
-    """Structural check only (no sha comparison, since that needs the PDF present locally)."""
-    return _manifest_is_complete(manifest_path)
+    """Structure and parser version (no sha comparison, since that needs the PDF present locally).
+
+    A manifest rendered by another LiteParse version, or one that predates the recorded version, is
+    rendered again, as ``prepare_document()`` does.
+    """
+    return _manifest_is_complete(manifest_path, parser_version=_liteparse_version())
 
 
 def fetch_example_media(output_dir: Path, hf_token: Optional[str] = None) -> int:
