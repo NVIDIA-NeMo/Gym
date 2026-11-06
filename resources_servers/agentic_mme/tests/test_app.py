@@ -130,7 +130,7 @@ def judged_server() -> AgenticMMEServer:
     )
 
 
-def judged_request(text: str, value: str = "44.6 million") -> AgenticMMEVerifyRequest:
+def judged_request(text: str, value: str = "44.6 million", golden: dict | None = None) -> AgenticMMEVerifyRequest:
     return AgenticMMEVerifyRequest(
         responses_create_params={
             "input": [
@@ -146,7 +146,7 @@ def judged_request(text: str, value: str = "44.6 million") -> AgenticMMEVerifyRe
             ]
         },
         response=response(text),
-        verifier_metadata={"golden_answer": {"value": value, "match_type": "exact"}},
+        verifier_metadata={"golden_answer": golden or {"value": value, "match_type": "exact"}},
     )
 
 
@@ -200,3 +200,28 @@ async def test_judge_skipped_without_answer(judged_server, monkeypatch) -> None:
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", unexpected_call)
     result = await judged_server.verify(judged_request("<answer></answer>"))
     assert result.reward == 0.0 and result.failure_reason == "missing_answer"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("golden", "shown"),
+    [
+        ({"value": "7556", "match_type": "numeric", "tolerance": 150.0}, "within ±150 of the reference"),
+        ({"value": "7556", "match_type": "numeric"}, None),
+        ({"value": "7556", "match_type": "contains", "tolerance": 150.0}, None),
+    ],
+)
+async def test_judge_sees_numeric_tolerance(judged_server, monkeypatch, golden, shown) -> None:
+    seen = {}
+
+    async def fake_call_judge(client, *, server_name, url_path, json, response_model):
+        seen["user"] = json["messages"][1]["content"]
+        return completion('{"verdict": "equivalent"}')
+
+    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
+    result = await judged_server.verify(judged_request("<answer>7600 km</answer>", golden=golden))
+    assert result.reward == 1.0
+    if shown:
+        assert shown in seen["user"]
+    else:
+        assert "Tolerance:" not in seen["user"]

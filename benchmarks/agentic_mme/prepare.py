@@ -83,7 +83,12 @@ def convert(task: dict, root: Path) -> dict:
     answer_checks = [
         c["answer_check"] for c in task["process_evaluation"].get("checkpoints", []) if "answer_check" in c
     ]
-    match_type = MATCH_TYPES.get((answer_checks[-1].get("match_type") if answer_checks else None) or "", "contains")
+    answer_check = answer_checks[-1] if answer_checks else {}
+    match_type = MATCH_TYPES.get(answer_check.get("match_type") or "", "contains")
+    golden_answer = {"value": task["golden_answer"]["value"], "match_type": match_type}
+    # The release's golden_answer holds only the value; the final answer check carries the tolerance.
+    if match_type == "numeric" and float(answer_check.get("tolerance") or 0) > 0:
+        golden_answer["tolerance"] = float(answer_check["tolerance"])
     return {
         "responses_create_params": {
             "input": [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": content}]
@@ -92,7 +97,7 @@ def convert(task: dict, root: Path) -> dict:
             "task_id": task["task_id"],
             "level": task["meta"].get("level"),
             "domain": task["meta"].get("domain"),
-            "golden_answer": {"value": task["golden_answer"]["value"], "match_type": match_type},
+            "golden_answer": golden_answer,
             "process_evaluation": task["process_evaluation"],
         },
     }

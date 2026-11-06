@@ -24,8 +24,9 @@ retrieval).
 - **Model-visible input:** a fixed system prompt (tool conventions and the `<answer>...</answer>` format) and a
   user message with the task images, labelled `Image 0`, `Image 1`, ..., followed by the question. Images are embedded
   as data URLs and downscaled to at most 2048×2048 pixels, as in the reference harness.
-- **Hidden from the model:** task ID, level, domain, the gold answer and its match type, and process checkpoints, all
-  in `verifier_metadata`.
+- **Hidden from the model:** task ID, level, domain, the gold answer with its match type and numeric tolerance
+  (taken from the task's final answer check; 29 numeric tasks have one), and process checkpoints, all in
+  `verifier_metadata`.
 - **Tools:** 14 image tools (crop, rotate, flip, resize, enhance, grayscale, autocontrast, blur, sharpen, denoise,
   edge_detect, invert, equalize, threshold). Each successful operation appends an image the model sees in its next
   turn. Retrieval (google_search, google_lens_search, fetch_webpage) is off in `config.yaml` and enabled by the
@@ -38,8 +39,9 @@ retrieval).
 - **Reward:** 1 if the final answer is correct, else 0. Higher is better; the aggregate metric is `mean/reward`.
 - **Judge:** `config.yaml` binds an LLM correctness judge (default `gpt-4o-mini` through an OpenAI-compatible
   endpoint; override with `agentic_mme_judge_base_url` and `agentic_mme_judge_model_name`). The judge sees the
-  question text, the gold answer, and the model's final text, not the images. The released evaluator's string match
-  (`exact` / `contains` / `numeric`) is reported alongside as `string_match_reward`.
+  question text, the gold answer, the numeric tolerance when the task has one, and the model's final text, not
+  the images. The released evaluator's string match (`exact` / `contains` / `numeric`, with the same
+  tolerance) is reported alongside as `string_match_reward`.
 - **Answers:** only the terminal assistant message counts. A truncated response or a model-call failure (HTTP error,
   timeout, unparseable response) scores 0 and is recorded in `failure_reason` / `policy_error`; no rollout is dropped.
 - **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the

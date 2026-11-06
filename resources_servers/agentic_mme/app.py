@@ -81,9 +81,9 @@ reasoning. Differences that do NOT matter: units, casing, whitespace, LaTeX wrap
 spelled-out vs numeric digits, ordering where the question does not ask for an order \
 (e.g. groups of matching items), trailing punctuation, extra prose around the answer.
 
-These make it WRONG: a different number, a different option letter, a different coordinate, \
-a different colour, a different count, a different set of items, or several conflicting \
-final answers.
+These make it WRONG: a different number (outside the stated tolerance, when one is given), \
+a different option letter, a different coordinate, a different colour, a different count, \
+a different set of items, or several conflicting final answers.
 
 You are NOT solving the problem and you cannot see any image. If the model gives no final \
 answer, or you cannot tell what it asserts, answer "unsure".
@@ -97,7 +97,7 @@ JUDGE_USER = """Question:
 
 Reference answer (gold):
 {expected}
-
+{tolerance}
 What the extractor pulled out of the model's response:
 {extracted}
 
@@ -165,12 +165,15 @@ class AgenticMMEServer(SimpleResourcesServer):
     config: AgenticMMEConfig
     _judge_slots: asyncio.Semaphore | None = None
 
-    async def judge(self, question: str, expected: str, extracted: str, text: str) -> dict[str, Any]:
+    async def judge(
+        self, question: str, expected: str, extracted: str, text: str, tolerance: float = 0.0
+    ) -> dict[str, Any]:
         if self._judge_slots is None:
             self._judge_slots = asyncio.Semaphore(self.config.judge_max_concurrency)
         prompt = JUDGE_USER.format(
             question=question,
             expected=expected,
+            tolerance=f"Tolerance: a number within ±{tolerance:g} of the reference is correct.\n" if tolerance else "",
             extracted=extracted or "(nothing)",
             text=text[-self.config.judge_max_text_chars :],
         )
@@ -214,7 +217,11 @@ class AgenticMMEServer(SimpleResourcesServer):
         if self.config.judge_model_server is not None and result.extracted_answer:
             try:
                 judged = await self.judge(
-                    question_text(body.responses_create_params), str(golden.value), result.extracted_answer, final_text
+                    question_text(body.responses_create_params),
+                    str(golden.value),
+                    result.extracted_answer,
+                    final_text,
+                    tolerance=golden.tolerance if golden.match_type == "numeric" else 0.0,
                 )
             except JudgeError as exc:
                 result.reward = 0.0
