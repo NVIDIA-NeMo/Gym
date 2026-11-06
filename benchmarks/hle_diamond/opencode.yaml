@@ -33,7 +33,8 @@ hle_diamond_opencode_agent:
       # nonzero exit, the deadline) is judged on what it produced, so the row stays in the denominator (normally
       # at 0) instead of leaving it. Endpoint outages and unconfirmed cleanup stay execution errors and are retried.
       verify_after_agent_error: true
-      # Subagents off, as the sandboxed profile's `task: deny`; web tools are already off in opencode_agent.yaml.
+      # Subagents off, as the sandboxed profile's `task: deny`, with web tools off in opencode_agent.yaml. In a
+      # session these switches do not take effect yet: webfetch and task still run (README, Known limitations).
       opencode_config:
         tools:
           task: false
@@ -48,6 +49,10 @@ hle_diamond_opencode_agent:
         Internet access is disabled on this machine.
         Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
       sandbox_config:
+        # The profile's 14,400 s TTL starts when the seed creates the sandbox, but the 14,400 s run budget only
+        # after the seed (up to the profile's 1,200 s ready wait, then the runtime check). A run near its deadline
+        # would outlive its sandbox, and a lost sandbox is retried, not graded: the TTL adds 1,800 s for the seed.
+        ttl_s: 16200
         image: ${oc.env:OPENCODE_SANDBOX_IMAGE}
         workdir: /workspace
         entrypoint:

@@ -482,6 +482,17 @@ class TestConfigs:
             assert "Tavily" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
             tavily = get_first_server_config_dict(resolved, "tavily")
             assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
+            # opencode_search_full restates the session preset's Tavily server and note; keep the copies equal.
+            search = _resolve("opencode_search.yaml")
+
+            def settings(server):  # host and port are assigned per resolve
+                return {key: value for key, value in server.items() if key not in ("host", "port")}
+
+            assert settings(tavily) == settings(get_first_server_config_dict(search, "tavily"))
+            assert (
+                agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+                == (get_first_server_config_dict(search, "hle_diamond_opencode_agent")["system_prompt"])
+            )
         else:
             assert "tool_servers" not in agent and agent["network_access"] == "model_only"
         benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / config_file, strict=False)
@@ -591,8 +602,9 @@ class TestReasoningEffort:
 
         # opencode_agent sends it as chat reasoning_effort on every OpenCode request.
         assert agent["reasoning_effort"] == "high"
-        # A session's opencode_config takes permission and tools only: subagents and web tools stay off, as in
-        # the sandboxed benchmark profile, and the inherited permissions survive.
+        # A session's opencode_config takes permission and tools only: the config turns subagents and web tools
+        # off, as in the sandboxed benchmark profile, and the inherited permissions survive. (OpenCode does not
+        # honor these switches in a session yet; README, Known limitations.)
         assert set(agent["opencode_config"]) == {"permission", "tools"}
         tools = agent["opencode_config"]["tools"]
         assert (tools["task"], tools["webfetch"], tools["websearch"]) == (False, False, False)
@@ -655,7 +667,10 @@ class TestAgentSessions:
             ["tavily"] if network_access == "model_and_tools" else []
         )
         assert agent["system_prompt"].startswith(note)
-        assert agent["timeout"] == agent["sandbox_config"]["ttl_s"] == 14400
+        # The sandbox TTL starts at the seed and the run budget after it, so the TTL leaves room for the ready wait;
+        # a sandbox lost before the deadline would make the row an execution error instead of a graded run.
+        assert agent["timeout"] == 14400
+        assert agent["sandbox_config"]["ttl_s"] >= agent["timeout"] + agent["sandbox_config"]["ready_timeout_s"]
         # The relay presets scored a failed harness run 0 (execution_failure_reward_zero); a session agent drops it
         # from the denominator unless it grades the failure.
         assert agent["verify_after_agent_error"] is True
@@ -740,7 +755,7 @@ class TestLocalDockerOverride:
         )
         note = opencode["system_prompt"]
         assert "NOT restricted" in note and "disabled" not in note
-        assert opencode["sandbox_config"]["ttl_s"] == 14400  # the rest of the inherited sandbox_config survives
+        assert opencode["sandbox_config"]["ttl_s"] == 16200  # the rest of the inherited sandbox_config survives
         assert opencode["reasoning_effort"] == "high"
 
         full = get_first_server_config_dict(
@@ -867,7 +882,7 @@ class TestReferencePreset:
         note = acknowledged["system_prompt"]
         assert "NOT restricted" in note and "disabled" not in note
         assert "Python 3.11" in note and "SageMath" not in note and "Lean" not in note
-        assert acknowledged["sandbox_config"]["ttl_s"] == 14400  # the inherited sandbox_config survives
+        assert acknowledged["sandbox_config"]["ttl_s"] == 16200  # the inherited sandbox_config survives
         # The other presets are untouched by the knob: their override block stays unconditional.
         monkeypatch.delenv(ACK_ENV)
         search = get_first_server_config_dict(

@@ -403,6 +403,22 @@ multipleChoice):
   everything is allowed except listed bash commands (process killing, `rm -rf` of system paths, raw
   disk writes, git network commands and others). The sandboxed presets allowed every command and
   denied only web fetch, web search and subagents.
+- **Blocker: web fetch and subagents run in the OpenCode session presets.** The presets turn them
+  off (`tools` map: `webfetch`, `websearch` and `task` false), but OpenCode does not honor that in
+  a session. A probe on a public image with open egress fetched `https://example.com` through
+  `webfetch` and ran a `task` subagent, both with the presets as committed and with `deny` rules
+  added under `permission` after the default `"*": allow`. Subagents are therefore on in every
+  OpenCode session preset, unlike the sandboxed presets, which changes what is measured. Under
+  OpenSandbox with `model_only` or `model_and_tools` egress a fetch cannot leave the sandbox (not
+  tested in a rollout); under `sandbox_docker_local.yaml` (open egress) `webfetch` is one more way
+  to read the web besides bash (below). The fix belongs in opencode_agent; until it lands, do not
+  report OpenCode session results.
+- A session's sandbox is created at seed, before the agent's own concurrency limit (`concurrency:
+  512`) applies. `pi_agent` waits for a slot only when the activation starts, outside the run
+  budget, while the sandbox idles and its TTL runs, so a long wait can use up the 1,800 s of TTL
+  headroom and lose the sandbox before the deadline. `opencode_agent` counts the wait against the
+  run budget, but its sandbox idles too. The sandboxed Pi agent took the slot before creating the
+  sandbox. Keep `--concurrency` at or below 512 on these presets so that no session queues.
 - The search presets' leakage policy binds only the Tavily tools: under the Docker provider (open
   egress) the agent can search and fetch from bash around it, and Tavily pre-filters at most 150 of
   the 220 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
@@ -661,7 +677,7 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   exercised and the run is a no-tools run through a different prompt path, not a with-tools result.
 - Confirm effort: the captured OpenCode and Pi request bodies carry `reasoning_effort: high` (all 15
   requests of the 5-row `hle_diamond/opencode` pilot capture on `opencode_sandboxed_agent`; on the
-  agent-session presets, all 5 OpenCode and all 7 Pi requests of a 4-row smoke over synthetic
+  agent-session presets, all 6 OpenCode and all 5 Pi requests of a 4-row smoke over synthetic
   questions with the Pi preset's `provider_compat`). Check it on every pilot (Prompting > Reasoning
   effort).
 - Token and latency figures are not comparable with the announcement's mean output tokens: the
@@ -797,8 +813,10 @@ server, opens an agent session, runs one activation with the prepared prompt, cl
 verifies. The agent composes its benchmark profile (`configs/profiles/benchmark.yaml`):
 
 - Sandbox: the judge lends none, so every session creates its own through the `sandbox` (OpenSandbox)
-  provider, with the image, resources, entrypoint and 14,400 s lifetime of the sandboxed presets,
-  and destroys it on close.
+  provider, with the image, resources and entrypoint of the sandboxed presets, and destroys it on
+  close. Its lifetime (`ttl_s`) is 16,200 s: it starts when the seed creates the sandbox, while the
+  14,400 s run budget starts only after the seed, which may wait up to 1,200 s for the sandbox to
+  be ready.
 - Egress: `network_access: model_only` (code-only) or `model_and_tools` (search), as before; the
   policy allows the model server's host and, for `model_and_tools`, each granted tool server's host.
   Such a sandbox cannot download a runtime, so OpenCode runs the science image's
@@ -812,11 +830,14 @@ verifies. The agent composes its benchmark profile (`configs/profiles/benchmark.
   instructions file and Pi appends to its system prompt.
 - Failed runs: `verify_after_agent_error: true` grades a run that fails after the harness started (a
   crash, a nonzero exit, the deadline) on what it produced, so the row stays in the denominator,
-  normally at 0. The relay presets' `execution_failure_reward_zero` set such a row to 0 outright. A transient model-endpoint failure, unconfirmed
-  cleanup or a sandbox that no longer answers stays an execution error and the episode is retried.
+  normally at 0. The relay presets' `execution_failure_reward_zero` set such a row to 0 outright.
+  A transient model-endpoint failure, unconfirmed cleanup or a sandbox that no longer answers stays
+  an execution error and the episode is retried.
 
 What changes against the sandboxed presets is listed under Known limitations (OpenCode's step cap,
-compaction setting, permissions and offline plugin install).
+compaction setting, permissions and offline plugin install, when a session's sandbox is created, and
+the web fetch and subagent blocker). The full presets still run `opencode_sandboxed_agent`, so their
+text-question scores come from a different harness than `opencode` and are not comparable with it.
 
 **First run of the search presets.** A 10-row `hle_diamond/opencode_search` pilot on 2026-10-16
 (GPT-6 Astra, judge o3-mini, local Docker with host networking, egress unrestricted) was the first

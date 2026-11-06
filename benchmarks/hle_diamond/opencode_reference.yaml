@@ -43,7 +43,7 @@ hle_diamond_opencode_reference_agent:
       output_token_policy: remaining_context
       declare_model_limits: false
       verify_after_agent_error: true  # a failed run stays in the denominator, as in opencode.yaml
-      opencode_config:
+      opencode_config:  # as in opencode.yaml, and not yet effective in a session either
         tools:
           task: false
       network_access: model_and_tools
@@ -58,6 +58,7 @@ hle_diamond_opencode_reference_agent:
         Direct internet access is disabled on this machine: no downloads and no package installation. The web search and page-reading tools offered to you are the only way to reach the web; use them if useful for the task.
         Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
       sandbox_config:
+        ttl_s: 16200  # the run budget plus the seed, as in opencode.yaml
         # The reference image, never OPENCODE_SANDBOX_IMAGE (the science image of the other presets).
         image: ${oc.env:OPENCODE_REFERENCE_SANDBOX_IMAGE,gym-opencode-hle-reference:local}
         workdir: /workspace
