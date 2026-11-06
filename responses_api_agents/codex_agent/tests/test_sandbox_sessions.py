@@ -26,6 +26,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     RolloutStopRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
@@ -35,7 +36,12 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxStatus
-from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
+from responses_api_agents.codex_agent.app import (
+    _SANDBOX_SESSION_KEY,
+    CodexAgent,
+    CodexAgentConfig,
+    _model_endpoint_error,
+)
 from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE
 
 
@@ -1704,7 +1710,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     assert sandbox.disconnect.await_count == 66
 
 
-async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
+async def test_fence_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1719,7 +1725,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with pytest.raises(HTTPException) as stale_seed:
         await agent.seed_agent_session(request, seed())
     assert stale_seed.value.status_code == 409
@@ -1749,7 +1755,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1771,7 +1777,7 @@ async def test_concurrent_closes_share_receipt(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
+async def test_seed_prunes_expired_fences(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1781,7 +1787,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     clock[0] += agent.config.session_close_retry_window_seconds
     request.session.clear()
     await agent.seed_agent_session(request, seed().model_copy(update={"agent_session_id": "fresh-session"}))
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -2255,7 +2261,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
+async def test_close_before_seed_leaves_a_fence_that_expires(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -2268,11 +2274,24 @@ async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.assert_not_awaited()
     clock[0] = 110.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(stale, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(stale, body)
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
+
+
+async def test_a_sandbox_cookie_without_an_agent_session_is_refused_instead_of_running_on_the_host(setup):
+    agent, sandbox = setup
+    # A cookie from the sandbox session adapter that names no agent session the agent still holds.
+    stale = Request({"type": "http", "session": {_SANDBOX_SESSION_KEY: "gone"}, "path_params": {}})
+    with pytest.raises(
+        AgentSessionConflictError, match="^409: Codex session cookie names a session that is no longer"
+    ):
+        await agent.responses(stale, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+    with pytest.raises(AgentSessionConflictError, match="Codex session cookie"):
+        await agent.run(stale, MagicMock())
+    sandbox.exec.assert_not_awaited()
 
 
 async def test_close_waits_for_racing_seed_and_removes_completed_setup(setup):
@@ -2384,7 +2403,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         server_client=transport,
     )
     calls = []
-    close_receipts = []
+    close_replies = []
     cookies = {}
 
     class Response:
@@ -2434,7 +2453,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
             assert result.agent_session_id == body["agent_session_id"]
         elif url_path == "/v1/agent_sessions/close":
             result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
-            close_receipts.append(result)
+            close_replies.append(result)
         else:
             assert url_path.endswith("/v1/responses")
             request.scope["path_params"] = {"rollout_id": url_path.split("/")[2]}
@@ -2467,8 +2486,8 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         else:
             assert result["response"]["usage"] is None
         assert result["ng_agent_observations"]["source"] == "codex"
-    assert close_receipts[-1].agent_observations.source == "codex"
-    assert close_receipts[-1].agent_observations.records[0].status == (
+    assert close_replies[-1].agent_observations.source == "codex"
+    assert close_replies[-1].agent_observations.records[0].status == (
         "completed" if outcome == "completed" else "failed"
     )
     expected = [
@@ -2853,6 +2872,200 @@ def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
             client.post(f"/ng-rollout/{body.episode_id.capture_key}/v1/responses", json={"input": "task"}).status_code
             == 409
         )
+
+
+def owned_seed_with_search_grant() -> dict:
+    body = seed().model_dump(mode="json")
+    body["sandbox_access"] = None
+    body["tool_accesses"] = [mcp_grant("search", required=False, url="http://resources.example:7000/mcp")]
+    return body
+
+
+def seed_owned(agent, sandbox, body: dict):
+    """Seed an agent-owned session; return the spec it started the sandbox with and the seed response."""
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body)
+    return (sandbox.start.await_args.args[0] if sandbox.start.await_args else None), created
+
+
+def owned_seed_with_several_grants(*, required: bool = True) -> dict:
+    """A required and an optional MCP grant on different hosts, plus an optional direct HTTP grant Codex skips."""
+    body = owned_seed_with_search_grant()
+    body["tool_accesses"] = [
+        mcp_grant("search", required=required, url="http://resources.example:7000/mcp"),
+        mcp_grant("docs", required=False, url="http://docs.example:9000/mcp"),
+        {"kind": "direct_http", "name": "direct", "base_url": "http://direct.example", "required": False},
+    ]
+    return body
+
+
+@pytest.mark.parametrize(
+    ("network_access", "required", "allowed"),
+    [
+        ("inherit", True, None),
+        # A required grant under model_only is refused (see the required-grant test), so this case grants optional ones.
+        ("model_only", False, ["model.example"]),
+        ("model_and_tools", True, ["docs.example", "model.example", "resources.example"]),
+    ],
+)
+def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, required, allowed):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = network_access
+    sandbox.expected_workdir = "/workspace"
+
+    spec, created = seed_owned(agent, sandbox, owned_seed_with_several_grants(required=required))
+
+    assert created.status_code == 200, created.text
+    policy = spec.provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
+def test_tool_egress_leaves_out_the_mcp_grants_codex_skips(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.expected_workdir = "/workspace"
+    body = owned_seed_with_search_grant()
+    # Codex leaves out an optional grant whose name config.toml cannot hold; its host must stay closed too.
+    body["tool_accesses"].append(mcp_grant("bad.name", required=False, url="http://skipped.example:7000/mcp"))
+
+    spec, created = seed_owned(agent, sandbox, body)
+
+    assert created.status_code == 200, created.text
+    assert spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
+
+
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+def test_network_access_with_borrowed_sandbox_is_rejected_before_connecting(setup, network_access):
+    agent, sandbox = setup
+    agent.config.network_access = network_access
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        factory.connect = AsyncMock(return_value=sandbox)
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 422
+        assert "borrowed" in created.text
+        factory.connect.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "provider_options", "required", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, False, "not both"),
+        ("docker", {}, False, "requires the OpenSandbox network-policy provider"),
+        # model_only blocks a required grant's host, so the session would fail only after the sandbox exists.
+        ("opensandbox", {}, True, "model_and_tools"),
+    ],
+    ids=["explicit_policy", "provider_without_policies", "required_grant"],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(
+    setup, provider_name, provider_options, required, reason
+):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {
+        "image": "test-image",
+        "workdir": "/workspace",
+        "provider_options": provider_options,
+    }
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
+    body = owned_seed_with_several_grants(required=required)
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        refused = client.post("/v1/agent_sessions", json=body)
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+    assert body["agent_session_id"] not in agent._session_records
+
+
+@pytest.mark.parametrize(
+    ("reported", "return_code", "error_type", "outcome"),
+    [
+        ("codex-cli 0.144.4", 0, None, "accepted"),
+        ("codex-cli 0.143.0", 0, None, "refused"),
+        # The check is exact: a version that only starts with the pinned one is another version.
+        ("codex-cli 0.144.40", 0, None, "refused"),
+        ("codex-cli 0.144.4", 1, None, "refused"),
+        # A transport failure or timeout may pass on another attempt, so it stays retryable.
+        ("", None, "timeout", "retried"),
+    ],
+    ids=["pinned", "other_version", "version_prefix", "failed_run", "timeout"],
+)
+def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code, error_type, outcome):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    agent.config.sandbox_runtime_dir = "/opt/codex-runtime"
+    sandbox.expected_workdir = "/workspace"
+    execute = sandbox.execute
+
+    async def report_version(command, **kwargs):
+        if command.endswith("codex.js --version"):
+            return SimpleNamespace(error_type=error_type, return_code=return_code, stdout=reported + "\n", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = report_version
+    sandbox.start = AsyncMock()
+    body = owned_seed_with_search_grant()
+    module = "responses_api_agents.codex_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body)
+        record = agent._session_records.get(body["agent_session_id"])
+        runtime = record.state.runtime if record is not None and record.state is not None else None
+
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    (check,) = [command for command in commands if command.endswith("codex.js --version")]
+    # The check uses private Node, with no task Python and CODEX_HOME under the session directory.
+    assert "python" not in check
+    assert "CODEX_HOME=/tmp/nemo-gym-codex-sessions/" in check
+    assert check.endswith(
+        "/opt/codex-runtime/node/bin/node /opt/codex-runtime/codex/node_modules/@openai/codex/bin/codex.js --version"
+    )
+    assert not any("install_codex_runtime.sh" in command for command in commands)
+    assert not any(path.endswith("/install_codex_runtime.sh") for path in sandbox.files)
+    if outcome == "accepted":
+        assert created.status_code == 200, created.text
+        # Activation runs Codex from the preinstalled runtime, not from the default path.
+        assert runtime == "/opt/codex-runtime"
+    else:
+        assert created.status_code == (422 if outcome == "refused" else 500), created.text
+        sandbox.stop.assert_awaited_once()
+
+
+def test_runtime_dir_must_be_absolute(setup):
+    agent, _ = setup
+    with pytest.raises(ValidationError):
+        CodexAgentConfig.model_validate({**agent.config.model_dump(), "sandbox_runtime_dir": "opt/codex"})
 
 
 def test_owned_stop_failure_blocks_close_until_retry(setup):
@@ -3592,7 +3805,7 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
 
     from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
     from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper, RolloutStore
-    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
+    from tests.helpers.single_agent_turn import _environment_server, _request, _Response
     from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse, install_fake_server_client
 
     agent, sandbox = setup

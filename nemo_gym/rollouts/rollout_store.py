@@ -66,13 +66,16 @@ from nemo_gym.rollouts.rollout_recovery import (
     atomic_write_json,
     manifest_path_for,
     record_resubmit_offset,
+    saved_failure_classification,
     validate_resume,
 )
 from nemo_gym.telemetry.observer import driver_metrics
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
+    attempt_extension_path_for,
     failures_path_for,
+    rerun_masked_journal_path_for,
     resubmit_offset_path_for,
 )
 
@@ -250,7 +253,7 @@ class RolloutStore:
 
         materialize_started = perf_counter()
         rows, manifest = prepare_inputs()
-        state = RolloutRecords(manifest, rows)
+        state = RolloutRecords(manifest, rows, classification=saved_failure_classification(output))
         with materialized.open("wb") as file:
             for row in rows:
                 file.write(orjson.dumps(row) + b"\n")
@@ -261,6 +264,10 @@ class RolloutStore:
             output,
             failures_path_for(output),
             resubmit_offset_path_for(output),
+            # An attempt extension an explicit recovery recorded for the run this one replaces.
+            attempt_extension_path_for(output),
+            # Its approvals to run masked results again name attempts this run numbers from 0 again.
+            rerun_masked_journal_path_for(output),
             journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),

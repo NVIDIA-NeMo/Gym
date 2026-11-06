@@ -76,10 +76,10 @@ async def test_failed_execution_still_closes_and_returns_partial_evidence(monkey
     close_body = AgentCloseSessionRequest(agent_session_id="session", episode_id=seed().episode_id)
     with pytest.raises(type(terminal)):
         await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    receipt = await instance.close_agent_session(req, close_body)
+    saved_reply = await instance.close_agent_session(req, close_body)
     reason = NOOATerminationReason.CANCELLED if cancel else NOOATerminationReason.INFRASTRUCTURE_ERROR
-    assert reason in {gap.code for gap in receipt.agent_observations.gaps}
-    assert await instance.close_agent_session(req, close_body) == receipt
+    assert reason in {gap.code for gap in saved_reply.agent_observations.gaps}
+    assert await instance.close_agent_session(req, close_body) == saved_reply
     r.close.assert_awaited_once()
 
 
@@ -121,17 +121,17 @@ async def test_late_artifact_cannot_revive_failed_activation(monkeypatch, cancel
     state = instance._require_agent_session("session")
     with pytest.raises(type(terminal)):
         await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    receipt = await instance.close_agent_session(
+    saved_reply = await instance.close_agent_session(
         req, AgentCloseSessionRequest(agent_session_id="session", episode_id=seed().episode_id)
     )
     reason = NOOATerminationReason.CANCELLED if cancel else NOOATerminationReason.INFRASTRUCTURE_ERROR
     assert state.result.termination_reason is reason
     response, _ = finalize_run_result(state.result)
     assert response.status == ("cancelled" if cancel else "failed")
-    assert {reason, "sandbox_capture_failed"} <= {gap.code for gap in receipt.agent_observations.gaps}
+    assert {reason, "sandbox_capture_failed"} <= {gap.code for gap in saved_reply.agent_observations.gaps}
     if early_evidence:
-        assert {record.invocation_id for record in receipt.agent_observations.records} == {"root", "late"}
-    assert receipt.resources_cookies == {
+        assert {record.invocation_id for record in saved_reply.agent_observations.records} == {"root", "late"}
+    assert saved_reply.resources_cookies == {
         **(failed_result.resource_cookies if early_evidence else {}),
         "resource": "new",
     }
@@ -181,12 +181,12 @@ async def test_sandbox_capture_completes_before_activation_cancel_and_join(monke
     assert events == ["cleanup"]
     assert not activation.done()
     release_capture.set()
-    receipt = await asyncio.wait_for(closing, timeout=1)
+    saved_reply = await asyncio.wait_for(closing, timeout=1)
     with pytest.raises(HTTPException, match="Agent session is closing") as caught:
         await activation
     assert caught.value.status_code == 409
     assert events == ["cleanup", "capture", "cancel", "join"]
-    assert NOOATerminationReason.CANCELLED in {gap.code for gap in receipt.agent_observations.gaps}
+    assert NOOATerminationReason.CANCELLED in {gap.code for gap in saved_reply.agent_observations.gaps}
 
 
 @pytest.mark.parametrize("infrastructure_failure", [False, True])
@@ -216,15 +216,15 @@ async def test_environment_grades_limits_but_skips_failed_activation_after_late_
     environment, client = _environment(instance)
     response = await environment.run_request(_request())
     assert ("/verify" in _paths(client)) is not infrastructure_failure
-    receipt = next(iter(instance._closed_session_records.values())).close_response
+    saved_reply = next(iter(instance._fenced_session_records.values())).close_response
     if infrastructure_failure:
         assert response.failure.stage == "agent"
         assert response.result is None
-        assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+        assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in saved_reply.agent_observations.gaps}
     else:
         assert response.failure is None
         assert response.result.response.status == "incomplete"
         assert response.result.response.error is None
         assert NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED in {
-            gap.code for gap in receipt.agent_observations.gaps
+            gap.code for gap in saved_reply.agent_observations.gaps
         }

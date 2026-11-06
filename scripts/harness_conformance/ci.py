@@ -41,7 +41,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
                 "environment_servers/single_agent_turn_legacy/",
                 "scripts/harness_conformance/",
                 "tests/unit_tests/rollouts/harness_capabilities/",
-                "tests/unit_tests/test_harness_conformance",
+                "tests/unit_tests/tooling/test_harness_conformance",
             )
         ):
             return list(HARNESSES)
@@ -104,6 +104,9 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
+    if harness == "nooa":
+        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
+        return
     if harness in ("hermes", "stirrup", "simple", "openclaw"):
         # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
         return

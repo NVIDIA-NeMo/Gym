@@ -97,7 +97,7 @@ current authoritative default branch (`upstream/main` for a fork or
 **Quick Start:**
 
 ```bash
-# Install uv 0.11.21 or newer (required for the repository's Python version).
+# Install uv 0.13.4 or newer (required by the managed lockfiles).
 curl -LsSf https://astral.sh/uv/install.sh | sh
 source $HOME/.local/bin/env
 
@@ -112,6 +112,11 @@ uv venv --python 3.13.14 && source .venv/bin/activate
 uv sync --extra dev --extra telemetry --extra mlflow --extra wandb
 pre-commit install
 ```
+
+Existing contributors using an older uv release should run `uv self update`
+(or rerun the installer), then verify `uv --version` is at least 0.13.4. The
+managed lockfiles reject older uv versions; no lock regeneration is needed
+when upgrading uv.
 
 The `dev` extra provides development tools, but it does not install the optional
 SDKs exercised by the core unit tests. Include `telemetry`, `mlflow`, and `wandb`

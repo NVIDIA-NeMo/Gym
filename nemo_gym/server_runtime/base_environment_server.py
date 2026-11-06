@@ -32,6 +32,7 @@ from nemo_gym.server_runtime._checkpoint.participant_workers import install_serv
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
 from nemo_gym.server_runtime.base_server import SimpleServer
+from nemo_gym.telemetry.concurrency import MeteredSemaphore
 
 
 LOGGER = logging.getLogger(__name__)
@@ -188,7 +189,7 @@ _RETRYABLE_CLIENT_ERROR_STATUSES = frozenset({408, 425, 429})
 def is_retryable_dependency_status(status: int) -> bool:
     """Return whether an HTTP error status from another server is worth another episode attempt.
 
-    408, 425, 429 and every 5xx are retried; every other 4xx is final.
+    408, 425, 429 and every 5xx are retried; every other 4xx is terminal.
     """
     return status in _RETRYABLE_CLIENT_ERROR_STATUSES or status >= 500
 
@@ -261,7 +262,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._admission = (
-            asyncio.Semaphore(self.config.max_concurrent_episodes)
+            MeteredSemaphore(
+                self.config.max_concurrent_episodes,
+                component="environment_server",
+                limit_name="episodes",
+                server_name=self.config.name,
+                admission_timeout_s=self.config.queue_timeout_seconds,
+            )
             if self.config.max_concurrent_episodes is not None
             else None
         )
@@ -298,10 +305,8 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         acquired = False
         if self._admission is not None:
             try:
-                await asyncio.wait_for(
-                    self._admission.acquire(),
-                    timeout=self.config.queue_timeout_seconds,
-                )
+                # The semaphore applies queue_timeout_seconds and counts the timeout.
+                await self._admission.acquire()
             except TimeoutError as error:
                 return self.failure_response(
                     request,
