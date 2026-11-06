@@ -114,8 +114,7 @@ These behaviors apply to all Tavily configurations:
 - Each session's Tavily call metrics are returned by `/verify` in `metrics`. Verification
   releases the live session maps and retains an expiring identity and metrics record for
   `session_close_retry_window_seconds`, so an HTTP retry keeps its metrics. The judge still
-  evaluates each verify request. Tool calls after verification are refused during that window;
-  a later `/run` seed that reuses the completed run's cookie keeps its session ID and starts fresh metrics.
+  evaluates each verify request. Tool calls after verification are refused during that window.
   Typed seeds for an already verified session return 409; verify retries remain supported.
   The shared resources lifecycle owns seed identity, locking, close, and checkpoint retirement;
   Tavily supplies state initialization/release hooks and retains its own verifier metrics snapshot.
