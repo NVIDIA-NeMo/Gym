@@ -5,6 +5,8 @@
 > `legacy_agent` environment server, and will be removed after the environment-server migration.
 > Do not build new benchmarks, agents or configs on this harness. Use
 > [`pi_agent`](../pi_agent/README.md#configure-and-run) with sandbox sessions under an environment server instead.
+> `pi_agent` restricts the egress of the sandboxes it creates with the same `network_access` values
+> (`model_only`, `model_and_tools`), and its benchmark profile defaults to `model_only`, as this agent's does.
 > The HLE search presets (`pi_search.yaml`), which use `tool_servers`, have no session path yet and stay on this
 > agent until they do. Existing configs keep working; the agent logs a deprecation warning when it starts.
 
