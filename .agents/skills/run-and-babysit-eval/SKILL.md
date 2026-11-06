@@ -286,6 +286,12 @@ What is retriable is one question; whether the score can be trusted is another: 
 (section 6) counts the evaluation-side faults and never fails on model faults.
 The outcome policy never changes health, and health never changes what is retried.
 
+See the [shared outcome-policy guide](../../../fern/versions/latest/pages/observability/outcome-policies.mdx)
+for the producer policies, saved-decision contract and retry ownership. Recovery must not override an
+applied final decision or regenerate a retained answer. Its `saved_answer_default_action` fallback
+(`verify` or `fail`) is separate from the episode `default_action`; explicit status/kind/class rules
+precede both.
+
 A benchmark config changes what is retriable, before the run, with `recovery_outcome_policy` under
 `resumable`:
 
