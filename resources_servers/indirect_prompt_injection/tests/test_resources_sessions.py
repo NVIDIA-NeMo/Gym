@@ -241,6 +241,12 @@ def test_an_agents_run_verify_without_a_seed_is_masked() -> None:
     assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
 
 
+def test_offline_reverify_is_declared_unsupported() -> None:
+    client = TestClient(make_server().setup_webserver())
+
+    assert client.get("/reverify_mode").json() == "unsupported"
+
+
 @pytest.mark.parametrize("state", ["active", "verified", "closed"])
 def test_a_run_seed_cannot_overwrite_a_typed_session(state: str) -> None:
     server = make_server()
@@ -425,7 +431,7 @@ async def test_a_run_seed_racing_a_verify_waits_for_the_release_and_the_retry_re
 
 
 @pytest.mark.parametrize("mcp", [False, True])
-def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_injection(mcp: bool) -> None:
+def test_minimal_cookie_seed_remains_valid_but_typed_seed_requires_the_injection(mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=mcp)
     client = make_client(server)
     legacy = {"environment": ROW["environment"]}
@@ -440,7 +446,7 @@ def test_minimal_legacy_seed_remains_valid_but_typed_seed_requires_the_injection
     assert server._session_episodes == {}
 
 
-def test_failed_legacy_reseed_keeps_retry_evidence_until_initialization_succeeds() -> None:
+def test_failed_cookie_reseed_keeps_retry_evidence_until_initialization_succeeds() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     assert client.post("/seed_session", json=ROW).status_code == 200

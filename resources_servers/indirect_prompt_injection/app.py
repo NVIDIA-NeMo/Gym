@@ -15,7 +15,7 @@
 import copy
 import json
 import logging
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, ClassVar, Dict, List, Optional
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
@@ -30,6 +30,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionLostError,
+    ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
     reject_partial_typed_seed,
@@ -64,7 +65,8 @@ logger = logging.getLogger(__name__)
 
 
 class IPIResourcesServerConfig(BaseResourcesServerConfig):
-    pass
+    # Offline reverify posts /verify with no session, which this server masks as session_lost.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
 class InjectionSpec(BaseModel):
@@ -114,7 +116,7 @@ class IPIVerifyResponse(BaseVerifyResponse):
 
 
 class IPITypedSeedSessionRequest(TaskData, BaseSeedSessionRequest):
-    """Validate complete typed task data while preserving the legacy environment-only seed."""
+    """Validate complete typed task data while preserving the environment-only cookie seed."""
 
 
 class IPIResourcesServer(SimpleResourcesServer):
@@ -133,7 +135,7 @@ class IPIResourcesServer(SimpleResourcesServer):
         body: ResourcesSeedSessionRequest
         | Annotated[IPISeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        """Keep legacy environment-only inputs; the base validates typed tasks and owns the lifecycle."""
+        """Keep environment-only cookie seeds; the base validates typed tasks and owns the lifecycle."""
         return await super().seed_session(body, request=request)
 
     def has_session_state(self, session_id: str) -> bool:
@@ -161,6 +163,8 @@ class IPIResourcesServer(SimpleResourcesServer):
             return ToolCallResponse(output=f"Unknown tool: {tool_name}")
 
         try:
+            # No await between the session lookup and the handler (handlers are synchronous), so a tool call cannot
+            # interleave with verify or close releasing this environment; take session_lock if a handler ever awaits.
             result = handler(env, **args)
             return ToolCallResponse(output=json.dumps(result) if not isinstance(result, str) else result)
         except Exception as e:
