@@ -7,6 +7,7 @@
 import ast
 import json
 import re
+from typing import Any
 
 
 # GoalAcc rubric and judge-input labels adapted from get_goal_accuray.
@@ -38,7 +39,7 @@ If query type is subjective, the final output must be a single Python dictionary
 """.strip()
 
 
-def final_response(value):
+def final_response(value: object) -> str:
     """Extract the full response, retaining Answer/boxed/JSON content."""
     if value is None:
         return ""
@@ -53,7 +54,7 @@ def final_response(value):
     return text.strip()
 
 
-def parse_judge_score(raw, query_type):
+def parse_judge_score(raw: object, query_type: str) -> float | None:
     text = re.sub(r"^```(?:json|python)?\s*|\s*```$", "", str(raw).strip(), flags=re.I)
     left, right = text.find("{"), text.rfind("}")
     candidates = [text] + ([text[left : right + 1]] if left >= 0 and right > left else [])
@@ -83,7 +84,7 @@ def parse_judge_score(raw, query_type):
     return score
 
 
-def judge_prompt(task, candidate):
+def judge_prompt(task: dict[str, Any], candidate: str) -> str:
     return (
         f"GT answer: {task['GT_json']}\n"
         f"query_type: {task['query_type_raw']}\n"

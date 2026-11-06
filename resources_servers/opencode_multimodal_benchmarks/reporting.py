@@ -8,6 +8,7 @@
 """VLMEvalKit benchmark aggregation, without a VLMEvalKit dependency."""
 
 from collections import defaultdict
+from typing import Any
 
 
 # Original BabyVision category mapping and reporting convention:
@@ -30,7 +31,7 @@ MCQ_ABBREVIATIONS = {
 }
 
 
-def accuracy(rows):
+def accuracy(rows: list[dict[str, Any]]) -> float | None:
     """Unjudged rows invalidate their group's score, rather than count as wrong."""
     if not rows or any(row["hit"] is None for row in rows):
         return None
@@ -39,11 +40,11 @@ def accuracy(rows):
 
 # HRBench cycle aggregation adapted from VLMEvalKit:
 # https://github.com/open-compass/VLMEvalKit/blob/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval/dataset/utils/hrbench.py
-def cycle_report(rows):
+def cycle_report(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Match report_acc_hrbench: average cycle accuracies, including categories."""
     groups = defaultdict(list)
     for row in rows:
-        cycle = row["cycle_category"]
+        cycle = row.get("cycle_category")
         if cycle is None or str(cycle) == "":
             raise ValueError("HRBench8K reporting requires cycle_category")
         groups[str(cycle)].append(row)
@@ -65,10 +66,13 @@ def cycle_report(rows):
     return report
 
 
-def benchmark_report(benchmark, rows):
+def benchmark_report(benchmark: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Return VLMEvalKit report columns and units as JSON-compatible records."""
     if not rows:
         return []
+    # Category fields are optional task annotations, including on synthetic
+    # examples. Their absence must not prevent reporting the overall score.
+    rows = [{"category": "", "l2_category": ""} | row for row in rows]
     if benchmark == "ZeroBench":
         return [{"split": "zerobench", "count": len(rows), "accuracy": accuracy(rows)}]
     if benchmark == "HRBench8K":

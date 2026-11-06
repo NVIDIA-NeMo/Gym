@@ -51,9 +51,11 @@ class VisualBenchmarksConfig(BaseResourcesServerConfig):
 
 class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
     config: VisualBenchmarksConfig
+    # Direct HTTP is a compatibility transport without Gym model-call observations.
+    grading_may_use_uninstrumented_model: ClassVar[bool] = True
     _judge_sem: asyncio.Semaphore = PrivateAttr()
 
-    def model_post_init(self, context):
+    def model_post_init(self, context: Any) -> None:
         super().model_post_init(context)
         self._judge_sem = asyncio.Semaphore(self.config.judge_concurrency)
 
@@ -90,6 +92,7 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
                                 url_path="/v1/chat/completions",
                                 json=payload,
                                 response_model=NeMoGymChatCompletion,
+                                max_attempts=1,
                             )
                         return completion.choices[0].message.content or ""
                     response = await request(
@@ -155,7 +158,7 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
     def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         return self.compute_metrics(tasks)
 
-    def get_key_metrics(self, agent_metrics):
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in agent_metrics.items() if key == "accuracy" or key.endswith("/accuracy")}
 
 

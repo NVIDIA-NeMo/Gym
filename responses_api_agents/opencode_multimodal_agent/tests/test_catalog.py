@@ -80,14 +80,19 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     ]["opencode_multimodal_agent"]
     assert agent.build_system_prompt == original["build_system_prompt"]
     assert agent.context_window == agent.max_output_tokens == 131072
-    assert agent.opencode_config.get("tools", {}).get("webfetch", False) is False
+    assert agent.opencode_config.get("tools", {}).get("webfetch", False) is (benchmark == "agentx")
     assert agent.opencode_config.get("tools", {}).get("websearch", False) is (benchmark == "agentx")
-    assert agent.network_access == ("model_and_websearch" if benchmark == "agentx" else "model_only")
+    assert agent.network_access == ("inherit" if benchmark == "agentx" else "model_only")
     assert agent.max_turns == agent.turn_budget.hard_limit == 65
     assert agent.turn_budget.model_dump() == OmegaConf.to_container(
         cfg.policy_model.responses_api_models.vllm_model.turn_budget
     )
     if sessions:
+        assert cfg.environment_routing_mode == "taskset"
+        assert cfg.environment_server_routes.visual_tasks == "visual_environment"
+        assert "single_agent_turn" in cfg.visual_environment.environment_servers
+        dataset = cfg.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.datasets[0]
+        assert dataset.taskset == "visual_tasks" and "agent" not in dataset
         assert agent.command == "opencode" and not any(agent.env.values())
         assert agent.sandbox is None and agent.sandbox_provider == "sandbox"
         assert agent.tool_rewards is None and not agent.token_id_capture

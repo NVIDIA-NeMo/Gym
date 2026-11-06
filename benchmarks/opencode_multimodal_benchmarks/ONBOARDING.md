@@ -117,7 +117,10 @@ score zero.
   is present.
 
 Unresolved judge failures need rejudging before reporting a complete benchmark
-score. Recognized agent crashes are recorded with zero reward and failure metadata.
+score. For agent sessions, the Environment Server's `agent_outcome_policy`
+determines whether a failed attempt is verified, retried or left ungraded.
+The OpenCode compatibility evaluation `/run` path records recognized agent
+crashes with zero reward and failure metadata.
 
 Source implementations are linked beside the scoring code in the
 [resources server](../../resources_servers/opencode_multimodal_benchmarks/).

@@ -23,9 +23,6 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 
-SEARCH_ORIGIN = ("mcp.exa.ai", 443)
-
-
 def origin(url: str) -> tuple[str, int]:
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -155,11 +152,6 @@ async def run(args: argparse.Namespace) -> int:
         for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
             env[key] = f"http://127.0.0.1:{port}"
         env["NO_PROXY"] = env["no_proxy"] = ""
-        # Pin the stock search provider; no arbitrary pages are reachable through the proxy.
-        env["OPENCODE_WEBSEARCH_PROVIDER"] = "exa"
-        env["OPENCODE_ENABLE_EXA"] = (
-            os.environ.get("OPENCODE_ENABLE_EXA", "1") if args.mode == "model_and_websearch" else "0"
-        )
         env["OPENCODE_ENABLE_PARALLEL"] = "0"
         if args.bubblewrap:
             # Bubblewrap clears the inherited environment; forward only this wrapper's network settings.
@@ -172,8 +164,6 @@ async def run(args: argparse.Namespace) -> int:
                 "https_proxy",
                 "NO_PROXY",
                 "no_proxy",
-                "OPENCODE_WEBSEARCH_PROVIDER",
-                "OPENCODE_ENABLE_EXA",
                 "OPENCODE_ENABLE_PARALLEL",
             ):
                 settings.extend(["--setenv", key, env[key]])
@@ -181,8 +171,8 @@ async def run(args: argparse.Namespace) -> int:
         async with server:
             return await run_child(args.command, env)
     allowed = {origin(args.model_url)}
-    if args.mode == "model_and_websearch":
-        allowed.add(SEARCH_ORIGIN)
+    if args.mode == "model_and_tools":
+        allowed.update(origin(url) for url in args.tool_url)
     # /tmp keeps Unix socket addresses below Linux's length limit.
     with tempfile.TemporaryDirectory(prefix="gym-net-") as directory:
         path = str(Path(directory) / "proxy.sock")
@@ -201,6 +191,7 @@ async def run(args: argparse.Namespace) -> int:
                     "--kill-child",
                     "--mount-proc",
                     sys.executable,
+                    "-I",
                     str(Path(__file__).resolve()),
                     "--mode",
                     args.mode,
@@ -216,14 +207,20 @@ async def run(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--mode", choices=("model_only", "model_and_websearch", "inherit", "none", "websearch", "all"), required=True
+        "--mode",
+        choices=("model_only", "model_and_tools", "inherit", "none", "all"),
+        required=True,
     )
     parser.add_argument("--model-url")
+    parser.add_argument("--tool-url", action="append", default=[], help="Accepted MCP grant URL (repeatable)")
     parser.add_argument("--inside", help=argparse.SUPPRESS)
     parser.add_argument("--bubblewrap", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
-    args.mode = {"none": "model_only", "websearch": "model_and_websearch", "all": "inherit"}.get(args.mode, args.mode)
+    args.mode = {
+        "none": "model_only",
+        "all": "inherit",
+    }.get(args.mode, args.mode)
     if args.command[:1] == ["--"]:
         args.command.pop(0)
     if not args.command:

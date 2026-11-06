@@ -14,8 +14,10 @@ For judge-based benchmarks, supply `judge_model` and either `judge_server` or `j
 There is no built-in deployment endpoint or model route. Configure `judge_server`
 to route judge calls through a Gym model server with
 rollout correlation and capture. Judge failures remain errors that require
-resolution before reporting a complete dataset score. The OpenCode evaluation
-agent records recognized agent failures as zero-scored episodes with failure
+resolution before reporting a complete dataset score. For agent sessions, the
+Environment Server's `agent_outcome_policy` determines whether a failed attempt
+is verified, retried or left ungraded. The OpenCode compatibility evaluation
+`/run` path records recognized agent failures with zero reward and failure
 metadata; unclassified infrastructure errors remain unfinished.
 
 See the [benchmark guide](../../benchmarks/opencode_multimodal_benchmarks/ONBOARDING.md) for

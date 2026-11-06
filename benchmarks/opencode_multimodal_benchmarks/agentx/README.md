@@ -30,8 +30,9 @@ gym env publish opencode_multimodal_benchmarks/agentx
 ```
 
 Preparation writes `benchmarks/opencode_multimodal_benchmarks/data/agentx.jsonl`.
-The catalog uses already-prepared flat rows through `single_agent_turn_legacy`;
-that Environment Server owns the agent session and verification lifecycle.
+Collation wraps the prepared rows in typed `task_id`/`task_input` tasks.
+The `visual_tasks` route selects `single_agent_turn`, which owns the agent session
+and verification lifecycle; the source JSONL is unchanged.
 The offline verifier fixtures use synthetic answers and scripted judge replies,
 not a hosted judge or benchmark images. Publication checks are local validation,
 not certification or an upload.
@@ -62,16 +63,20 @@ for adapted evaluation code. No benchmark data is included in this entry.
 | Harness | Configuration | Status |
 | --- | --- | --- |
 | `simple_agent` | This catalog entry, with a vision-capable model | Experimental; no task tools |
-| `opencode_multimodal_agent` | [`opencode.yaml`](opencode.yaml) plus model and sandbox-provider settings | Experimental; OpenCode 1.17.11, WebFetch and WebSearch enabled, one activation |
+| `opencode_multimodal_agent` | [`opencode.yaml`](opencode.yaml) plus model and sandbox-provider settings | Experimental; OpenCode 1.17.11, WebSearch and WebFetch enabled, one activation |
 
 Configure `webfetch` and `websearch` independently under the pairing's
 `visual_agent.responses_api_agents.opencode_multimodal_agent.opencode_config.tools`.
-Both are enabled in this pairing; set either to `false` to disable it. Record
-these settings with reported scores.
-Tool permissions do not restrict networking from Bash or Python.
+Both tools are enabled in this pairing, with `network_access: inherit`.
+Bash and Python retain the sandbox's existing network access as well. Disabling a
+web tool removes its advertisement; it does not change sandbox egress. Record
+both the network policy and tool settings with the score.
 
 The OpenCode session path requires explicit sampling, embeds tool-produced images
 before cleanup, and rejects continuation and training-capture requests. The
 Environment Server owns activation, close and verification. See the
 [agent README](../../../responses_api_agents/opencode_multimodal_agent/README.md)
 for runtime requirements and configurable limits.
+
+See the shared [grading, deadlines and recovery contract](../README.md#grading-and-recovery)
+for observed judging, failure outcomes and resumable-run requirements.

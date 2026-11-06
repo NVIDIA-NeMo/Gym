@@ -13,8 +13,10 @@ and trajectory records before the workspace is cleaned up.
 ## Runtime requirements
 
 For session-based evaluation, use a Gym sandbox provider and a Linux sandbox
-image containing Bash, Python, Pillow, numpy, scipy and OpenCV. Gym installs
-the pinned OpenCode runtime inside that sandbox. No host OpenCode installation
+image containing Bash. Install Python, Pillow, numpy, scipy and OpenCV in the
+image when tasks need those tools. Gym installs the pinned OpenCode runtime and
+an adapter-owned Python interpreter for its network wrapper during session seed.
+The wrapper never uses the task image's interpreter or Python environment. No host OpenCode installation
 or Bubblewrap is required for this path.
 
 For compatibility configurations, use a Linux host with:
@@ -85,8 +87,8 @@ agent settings.
 
 For session-based evaluation, compose a benchmark catalog configuration with
 [`opencode_sessions.yaml`](../../benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml)
-and a Gym sandbox-provider configuration. Supply a Linux task image with Python,
-Pillow, numpy, scipy and OpenCV, and a model endpoint reachable from that image.
+and a Gym sandbox-provider configuration. Supply a Linux task image with the
+libraries your tasks need, and a model endpoint reachable from that image.
 The example preserves the pinned evaluation profile’s frozen OpenCode prompt, 131072 tokens,
 and a 55-turn budget with ten grace turns. The agent and model gateway share the
 budget; configure both when changing it.
@@ -105,7 +107,10 @@ before teardown. Session retries reuse the activation rather than launch it agai
 One activation is supported per session; continuation inputs are rejected.
 
 The session path implements the **Observability** capability level: evaluation,
-model-call and tool observations, and MCP task grants. Set
+model-call and tool observations. MCP task grants reuse the parent adapter.
+`model_and_tools` permits their endpoints in owned sessions; `model_only` rejects
+required MCP grants. With `inherit`, grants use the sandbox's existing network
+policy. Set
 `tool_rewards: null` and disable token-ID capture for these sessions; unsupported
 training requests are rejected. Training capture and auxiliary rewards remain
 available on the compatibility path. Qualification requires the conformance
@@ -135,7 +140,7 @@ visual_agent:
 ```
 
 Configure each tool independently; omitted tools default to disabled. The example
-enables WebFetch only when `network_access: inherit` is also explicitly selected. The adapter derives the corresponding permissions from
+enables WebFetch only when the effective `network_access` is `inherit`. The adapter derives the corresponding permissions from
 these two tool settings. On the local compatibility path, use the configured
 agent name (`visual_opencode` in the
 example recipes) instead of `visual_agent`. Use separate agent configurations
@@ -148,7 +153,7 @@ service; it is independent of the model provider and requires outbound access.
 The flag is explicitly off when WebSearch is disabled.
 
 The Agent-X [OpenCode pairing](../../benchmarks/opencode_multimodal_benchmarks/agentx/opencode.yaml)
-enables WebSearch with `network_access: model_and_websearch`; WebFetch stays disabled.
+enables WebFetch and WebSearch with `network_access: inherit`.
 Other benchmark pairings default to `network_access: model_only`.
 
 This is a tool-permission setting, not a network firewall: Bash and Python can
@@ -159,11 +164,12 @@ can give that wildcard precedence over specific denies.
 
 ## Enforced network access and per-sample tools
 
-Set `network_access` to `model_only`, `model_and_websearch`, or `inherit` to control harness and tool
-network access. The default is `model_only` for both training and evaluation.
+Set `network_access` to `model_only`, `model_and_tools`, or `inherit` to control harness and tool
+network access. The adapter default is `inherit`; the shipped offline training
+recipe and non-search benchmark profiles explicitly select `model_only`.
 `inherit` preserves the sandbox’s existing network policy without granting extra access.
-Restricted modes keep the configured model API reachable; `model_and_websearch` also permits
-OpenCode's Exa service. These controls apply to owned Linux sandbox sessions and
+Restricted modes keep the configured model API reachable; `model_and_tools` also permits
+the accepted MCP tool-grant endpoints in owned sessions. Without such grants it allows only the model. These controls apply to owned Linux sandbox sessions and
 the local Bubblewrap training path. They require nested Linux namespaces.
 
 Use `allowed_tools` to select advertised tools. Structured request metadata may
@@ -287,11 +293,26 @@ Training uses `token_id_capture` to retain data for optimization. Evaluation can
 disable training token capture while retaining model-call observability.
 `capture_message_ids` correlates OpenCode assistant messages with model calls.
 `capture_failure_artifacts` preserves available session evidence on failures.
-Recognized agent failures in the evaluation entrypoint produce zero-scored
-results with failure metadata. Judge and unclassified infrastructure errors
-remain errors rather than fabricated answers.
+The compatibility evaluation `/run` path records recognized agent failures with
+zero reward and failure metadata. In agent sessions, the adapter reports the
+failure cause and the Environment Server's `agent_outcome_policy` determines
+whether to verify, retry or leave the attempt ungraded. Judge and unclassified
+infrastructure errors remain errors rather than fabricated answers.
 
 For datasets and benchmark verification, see the
 [visual benchmark guide](../../benchmarks/opencode_multimodal_benchmarks/ONBOARDING.md).
 For scripted harness checks, run the `opencode_multimodal` conformance suite using
 the [conformance instructions](../../scripts/harness_conformance/README.md).
+
+## Private runtime installation
+
+Owned sessions seed the network wrapper's stdlib-only Python runtime using
+Gym's `SandboxPythonRuntime`. Installation probes the sandbox platform, verifies
+the pinned interpreter archive, and reuses an installed runtime only after its
+health check passes. The agent host needs access to the pinned Python release or
+a populated Gym runtime cache; the sandbox needs Bash, tar/gzip, and supported
+Linux namespaces. It does not need Python or package-index access for this wrapper.
+The interpreter is launched by absolute path with `-I`; task Python libraries and
+environment variables remain available to the tools. Session close leaves the
+shared runtime intact. Failed installation closes the session, retaining the
+handle if cleanup must be retried.

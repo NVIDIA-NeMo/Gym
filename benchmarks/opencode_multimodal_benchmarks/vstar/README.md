@@ -32,8 +32,9 @@ gym env publish opencode_multimodal_benchmarks/vstar
 ```
 
 Preparation writes `benchmarks/opencode_multimodal_benchmarks/data/vstar.jsonl`.
-The catalog uses already-prepared flat rows through `single_agent_turn_legacy`;
-that Environment Server owns the agent session and verification lifecycle.
+Collation wraps the prepared rows in typed `task_id`/`task_input` tasks.
+The `visual_tasks` route selects `single_agent_turn`, which owns the agent session
+and verification lifecycle; the source JSONL is unchanged.
 The offline verifier fixtures use synthetic answers and scripted judge replies,
 not a hosted judge or benchmark images. Publication checks are local validation,
 not certification or an upload.
@@ -71,3 +72,6 @@ before cleanup, and rejects continuation and training-capture requests. The
 Environment Server owns activation, close and verification. See the
 [agent README](../../../responses_api_agents/opencode_multimodal_agent/README.md)
 for runtime requirements and configurable limits.
+
+See the shared [grading, deadlines and recovery contract](../README.md#grading-and-recovery)
+for observed judging, failure outcomes and resumable-run requirements.

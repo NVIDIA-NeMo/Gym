@@ -3,12 +3,13 @@
 """Agent-X Goal Accuracy with full-response rubric-based judging."""
 
 import asyncio
+from typing import Any
 
 import aiohttp
 
 from nemo_gym.client import request
 from nemo_gym.core import NeMoGymChatCompletion
-from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
+from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure, record_parsed_judge_verdict
 from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import (
     OFFICIAL_GOAL_SYSTEM_PROMPT,
     judge_prompt,
@@ -36,7 +37,7 @@ class AgentXConfig(VisualBenchmarksConfig):
 class AgentXServer(AgentXVerifier, VisualBenchmarksServer):
     config: AgentXConfig
 
-    async def _judge_answer(self, task: dict, prediction: str) -> tuple[float, str]:
+    async def _judge_answer(self, task: dict[str, Any], prediction: str) -> tuple[float, str]:
         key = self._judge_credentials()
         payload = {
             "model": self.config.judge_model,
@@ -59,6 +60,7 @@ class AgentXServer(AgentXVerifier, VisualBenchmarksServer):
                                 url_path="/v1/chat/completions",
                                 json=payload,
                                 response_model=NeMoGymChatCompletion,
+                                max_attempts=1,
                             )
                         value = completion.model_dump()
                     else:
@@ -77,6 +79,7 @@ class AgentXServer(AgentXVerifier, VisualBenchmarksServer):
                     score = parse_judge_score(raw, task["query_type"])
                     if score is None:
                         raise JudgeError("Invalid Agent-X judge verdict")
+                    record_parsed_judge_verdict()
                     return score, raw
                 except (
                     aiohttp.ClientError,
@@ -96,7 +99,7 @@ class AgentXServer(AgentXVerifier, VisualBenchmarksServer):
                     await asyncio.sleep(min(30, 2 ** (attempt + 1)))
         raise AssertionError("Judge attempts exhausted")
 
-    def compute_metrics(self, tasks: list) -> dict:
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
         rows, balanced = average_repeats(tasks)
         if not rows:
             return {}

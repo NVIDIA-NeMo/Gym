@@ -5,6 +5,7 @@ config_paths:
 visual_opencode:
   responses_api_agents:
     opencode_multimodal_agent:
+      network_access: model_only
       entrypoint: app.py
       resources_server: {type: resources_servers, name: opencode_multimodal_benchmarks}
       datasets:

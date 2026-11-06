@@ -4,6 +4,7 @@
 
 import json
 from pathlib import Path
+from typing import Any
 
 from benchmarks.opencode_multimodal_benchmarks.canonical import validate_mcq_tasks
 from benchmarks.opencode_multimodal_benchmarks.data import prepare as prepare_tasks
@@ -13,7 +14,7 @@ from benchmarks.opencode_multimodal_benchmarks.data import sha256_file
 BENCHMARKS = {"vstar": "VStarBench", "hrbench8k": "HRBench8K", "vtcbench": "VTCBench", "babyvision": "BabyVision"}
 
 
-def task_row(task):
+def task_row(task: dict[str, Any]) -> dict[str, Any]:
     return {
         "responses_create_params": {
             "input": [
@@ -32,7 +33,14 @@ def task_row(task):
     }
 
 
-def prepare(benchmark, tsv, image_root=None, prepared_dir=None, limit=None, sha256=None):
+def prepare(
+    benchmark: str,
+    tsv: str,
+    image_root: str | None = None,
+    prepared_dir: str | None = None,
+    limit: int | str | None = None,
+    sha256: str | None = None,
+) -> Path:
     if benchmark not in BENCHMARKS:
         raise ValueError(f"Unknown benchmark {benchmark}")
     if sha256 is not None and sha256_file(Path(tsv)) != sha256:

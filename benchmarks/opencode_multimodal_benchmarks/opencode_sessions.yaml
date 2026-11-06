@@ -3,6 +3,10 @@
 # Compose after one catalog config, plus model and sandbox-provider configurations.
 config_paths:
 - benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml
+visual_opencode:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      network_access: model_only
 visual_agent:
   _inherit_from: visual_opencode
   responses_api_agents:

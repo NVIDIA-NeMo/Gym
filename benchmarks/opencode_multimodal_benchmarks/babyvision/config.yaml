@@ -16,7 +16,7 @@ opencode_multimodal_benchmarks:
         prepare_dependencies:
         - Pillow
         num_repeats: 1
-        agent: visual_agent
+        taskset: visual_tasks
 visual_agent:
   responses_api_agents:
     simple_agent:
@@ -29,7 +29,7 @@ visual_agent:
         name: policy_model
 visual_environment:
   environment_servers:
-    single_agent_turn_legacy:
+    single_agent_turn:
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -38,3 +38,7 @@ visual_environment:
         type: responses_api_agents
         name: visual_agent
       resources_tool_transports: []
+
+environment_routing_mode: taskset
+environment_server_routes:
+  visual_tasks: visual_environment

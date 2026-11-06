@@ -16,9 +16,10 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     SandboxNetworkAccess,
-    restrict_sandbox_network,
+    SandboxPythonRuntime,
 )
 from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputItem
 from nemo_gym.sandbox import SandboxProvider, SandboxSpec
@@ -26,6 +27,13 @@ from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.media import stage_inputs
+
+
+_NETWORK_RUNTIME = SandboxPythonRuntime(
+    harness="opencode-network",
+    requirements=(),
+    import_check="import asyncio, fcntl, socket; assert hasattr(__import__('os'), 'unshare')",
+)
 
 
 @dataclass
@@ -41,29 +49,23 @@ class MultimodalSessionMixin:
     session_state_type: ClassVar[type[OpenCodeSandboxSession]] = MultimodalSandboxSession
 
     def _sandbox_network_access(self) -> SandboxNetworkAccess:
-        return {"model_only": "model_only", "model_and_websearch": "model_and_tools", "inherit": "inherit"}[
-            self.config.network_access
-        ]
+        return self.config.network_access
 
     def _restrict_owned_sandbox_network(
         self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
     ) -> SandboxSpec:
-        # Native web tools use Exa, not the episode's MCP grants. Restricted
-        # profiles cannot serve required MCP tools on arbitrary origins.
-        if self.config.network_access != "inherit" and any(
+        if self.config.network_access == "inherit" or provider.name == "opensandbox":
+            return super()._restrict_owned_sandbox_network(spec, provider, body)
+        if provider.name not in {"enroot", "local"}:
+            raise AgentSeedRejectedError("Restricted networking requires a supported sandbox provider")
+        if "network_policy" in (spec.provider_options or {}):
+            raise AgentSeedRejectedError("Set network_access or provider network_policy, not both")
+        if self.config.network_access == "model_only" and any(
             isinstance(access, MCPToolAccess) and access.required for access in self.effective_tool_accesses(body)
         ):
-            raise AgentSeedRejectedError("Restricted multimodal networking does not allow required MCP tool grants")
-        if provider.name == "opensandbox":
-            return restrict_sandbox_network(
-                spec,
-                network_access=self._sandbox_network_access(),
-                provider=provider,
-                model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                tool_urls=["https://mcp.exa.ai"] if self.config.network_access == "model_and_websearch" else (),
-            )
-        # Enroot and local providers have no OpenSandbox egress API. Their
-        # harness launch uses the namespace/proxy boundary below instead.
+            raise AgentSeedRejectedError("model_only blocks required MCP tool grants; use model_and_tools")
+        # Enroot/local use the namespace/proxy boundary at launch. Endpoint grants
+        # come from the same effective tool accesses as the shared OpenCode agent.
         return spec
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
@@ -71,7 +73,22 @@ class MultimodalSessionMixin:
             raise AgentSeedRejectedError("Restricted networking requires an owned sandbox")
         if body.continuation is not None:
             raise AgentSeedRejectedError("Multimodal sessions accept one initial task, not continuation inputs")
-        return await super()._seed_agent_session_state(body)
+        state = await super()._seed_agent_session_state(body)
+        try:
+            # Owned sessions can narrow an inherit ceiling per request. Install
+            # before activation even when this task ultimately inherits networking.
+            if state.session.owns_sandbox and not await _NETWORK_RUNTIME.is_installed(state.session.sandbox):
+                await _NETWORK_RUNTIME.install(
+                    state.session.sandbox, timeout_s=self.config.sandbox_install_timeout_seconds
+                )
+        except BaseException as error:
+            try:
+                await state.close(self.config.session_close_timeout_seconds)
+            except BaseException:
+                # Keep the handle so the shared lifecycle can retry cleanup.
+                raise AgentSessionSetupError(state, error=error) from error
+            raise
+        return state
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         return await super()._close_agent_session_state(state)
@@ -150,6 +167,11 @@ class MultimodalSessionMixin:
         allowed_tools = self._tools_for_request(body)
         if network_access != "inherit" and state.request.sandbox_access is not None:
             raise HTTPException(422, "Restricted networking requires an owned sandbox")
+        grants = [
+            access for access in self.effective_tool_accesses(state.request) if isinstance(access, MCPToolAccess)
+        ]
+        if network_access == "model_only" and any(access.required for access in grants):
+            raise HTTPException(422, "model_only blocks required MCP tool grants")
         with TemporaryDirectory(prefix="gym-visual-session-") as temporary:
             directory = Path(temporary)
             try:
@@ -221,10 +243,16 @@ class MultimodalSessionMixin:
                 network_runner = f"{state.session.session_dir}/network_runner.py"
                 await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), network_runner)
                 payload["command"] = [
-                    "python3",
+                    _NETWORK_RUNTIME.python,
+                    "-I",
                     network_runner,
                     "--mode",
                     network_access,
+                    *(
+                        [arg for access in grants for arg in ("--tool-url", str(access.connection.url))]
+                        if network_access == "model_and_tools"
+                        else []
+                    ),
                     "--",
                     *payload["command"],
                 ]

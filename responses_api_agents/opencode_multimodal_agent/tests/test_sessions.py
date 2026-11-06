@@ -46,7 +46,12 @@ def request_body():
 
 
 @pytest.fixture
-def visual_setup(opencode_setup, tmp_path):
+def visual_setup(opencode_setup, tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
+
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=True))
     original, sandbox = opencode_setup
     config = OpenCodeMultimodalAgentConfig(
         **(
@@ -250,7 +255,7 @@ def test_visual_session_releases_only_its_owned_sandbox(visual_setup, owned):
     (sandbox.disconnect if owned else sandbox.stop).assert_not_awaited()
 
 
-@pytest.mark.parametrize("mode", ["model_only", "model_and_websearch", "inherit"])
+@pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
 @pytest.mark.parametrize("websearch", [False, True])
 def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearch):
     from unittest.mock import AsyncMock, patch
@@ -281,14 +286,82 @@ def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearc
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
         assert response.status_code == 200, response.text
         payload = sandbox.params()
-        enabled = websearch and mode != "model_only"
+        enabled = websearch and mode == "inherit"
         assert payload["env"]["OPENCODE_ENABLE_EXA"] == ("1" if enabled else "0")
         policy = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert policy["tools"]["websearch"] is enabled
         assert policy["permission"]["websearch"] == ("allow" if enabled else "deny")
         if mode != "inherit":
-            assert payload["command"][2:4] == ["--mode", mode]
+            from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
+
+            assert payload["command"][:2] == [_NETWORK_RUNTIME.python, "-I"]
+            assert payload["command"][3:5] == ["--mode", mode]
         assert (
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
         )
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch, cleanup_fails):
+    from unittest.mock import AsyncMock, patch
+
+    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
+
+    agent, sandbox = visual_setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
+    sandbox.expected_workdir = "/agent-workspace"
+    sandbox.start = AsyncMock()
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=False))
+    install = AsyncMock(side_effect=RuntimeError("scripted runtime install failure"))
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
+    if cleanup_fails:
+        sandbox.stop = AsyncMock(side_effect=[RuntimeError("scripted cleanup failure"), None])
+    body = seed()
+    body.sandbox_access = None
+    body.tool_accesses = []
+    with (
+        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
+        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
+        TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code >= 400
+        install.assert_awaited_once()
+        sandbox.launch.assert_not_awaited()
+        sandbox.stop.assert_awaited()
+    if cleanup_fails:
+        assert sandbox.stop.await_count >= 2
+
+
+@pytest.mark.parametrize("mode", ["model_only", "model_and_tools"])
+def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, mode):
+    from unittest.mock import AsyncMock, patch
+
+    from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import owned_seed_with_several_grants
+
+    agent, sandbox = visual_setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
+    sandbox.expected_workdir = "/agent-workspace"
+    sandbox.start = AsyncMock()
+    request = owned_seed_with_several_grants(required=False)
+    with (
+        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
+        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=request)
+        assert created.status_code == 200, created.text
+        body = request_body() | {"metadata": {"network_access": mode}}
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
+        assert response.status_code == 200, response.text
+        command = sandbox.params()["command"]
+        urls = [command[index + 1] for index, arg in enumerate(command) if arg == "--tool-url"]
+        assert urls == (
+            ["http://resources.example:8000/search/mcp", "http://docs.example:9000/mcp"]
+            if mode == "model_and_tools"
+            else []
+        )
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))

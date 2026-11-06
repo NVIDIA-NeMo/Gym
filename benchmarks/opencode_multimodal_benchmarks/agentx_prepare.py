@@ -76,7 +76,7 @@ def validate_rows(rows: list[dict], *, media_root: Path | None = None) -> None:
 def prepare(
     dataset: str | None = None,
     sha256: str | None = None,
-    limit=None,
+    limit: int | str | None = None,
     media_root: str | None = None,
     source_root: str | None = None,
     prepared_dir: str | None = None,
