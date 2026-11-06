@@ -53,6 +53,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.go_runtime import ensure_go_command
 from resources_servers.swebench.patch_capture import prepare_git_for_commits
 from resources_servers.swebench.repo_task_owner import RepoTaskOwnerConfig, RepoTaskOwnerResourcesServer
 from resources_servers.swemer_v2.verification import (
@@ -206,6 +207,11 @@ class SwemerV2ResourcesServer(RepoTaskOwnerResourcesServer):
 
     def _drop_patch_sections(self, patch: str, paths: Iterable[str]) -> str:
         return drop_patch_sections(patch, paths)
+
+    async def _after_start(self, sandbox: AsyncSandbox, instance: SwemerV2InstanceRequest) -> None:
+        # This hook runs for both the agent sandbox and each fresh grading sandbox.
+        if instance.test_framework == "go":
+            await ensure_go_command(sandbox)
 
     async def _prepare_repository(self, sandbox: AsyncSandbox, body: SwemerV2InstanceRequest) -> None:
         await self._ensure_git_repo(sandbox, body.workdir)

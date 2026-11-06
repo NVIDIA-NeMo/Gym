@@ -53,6 +53,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+from resources_servers.swebench.go_runtime import ensure_go_command
 from resources_servers.swebench.patch_capture import prepare_git_for_commits
 from resources_servers.swebench.repo_task_owner import RepoTaskOwnerConfig, RepoTaskOwnerResourcesServer
 from resources_servers.swemer_v1.verification import (
@@ -224,6 +225,11 @@ class SwemerV1ResourcesServer(RepoTaskOwnerResourcesServer):
         # Mirror files here too, not just the verification sandbox: an agent building/testing its
         # own changes hits the same Maven Central rate limit otherwise.
         return mirror_files(maven_settings=self.config.overwrite_maven_settings)
+
+    async def _after_start(self, sandbox: AsyncSandbox, instance: SwemerV1InstanceRequest) -> None:
+        # This hook runs for both the agent sandbox and each fresh grading sandbox.
+        if instance.test_framework == "go":
+            await ensure_go_command(sandbox)
 
     async def _prepare_repository(self, sandbox: AsyncSandbox, body: SwemerV1InstanceRequest) -> None:
         await self._ensure_git_repo(sandbox, body.workdir)
