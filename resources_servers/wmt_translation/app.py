@@ -46,7 +46,7 @@ from sacrebleu import corpus_bleu as corpus_spbleu
 from sacrebleu import corpus_chrf, sentence_chrf
 from sacrebleu.metrics import BLEU
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

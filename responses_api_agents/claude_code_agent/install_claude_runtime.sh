@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Verify or install a transferred Claude binary with bash and coreutils; no network access.
+#
+# usage: install_claude_runtime.sh --version V --runtime DIR --sha256 HEX [--check-only | --source PATH [--gzip]]
+# Prints the version of the verified runtime. --check-only exits 3 when the runtime is absent or unhealthy.
+
+set -euo pipefail
+version="" runtime="" expected="" source="" check_only="" compressed="" temporary="" queue="" ticket=""
+while (($#)); do
+    case $1 in
+        --version) version=$2 && shift 2 ;;
+        --runtime) runtime=$2 && shift 2 ;;
+        --sha256) expected=$(tr A-F a-f <<<"$2") && shift 2 ;;
+        --source) source=$2 && shift 2 ;;
+        --check-only) check_only=1 && shift ;;
+        --gzip) compressed=1 && shift ;;
+        *) echo "Unknown argument: $1" >&2 && exit 2 ;;
+    esac
+done
+[[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Claude runtime requires an exact version" >&2; exit 2; }
+[[ -n $expected ]] || { echo "A transferred Claude binary requires a trusted SHA-256" >&2; exit 2; }
+
+# Print the version when the executable has the trusted bytes and reports the expected version.
+verify() {
+    local digest actual
+    [[ -f $1 ]] || return 1
+    read -r digest _ < <(sha256sum "$1")
+    [[ $digest == "$expected" ]] || { echo "Claude executable SHA-256 mismatch" >&2; return 1; }
+    actual=$(timeout 30 "$1" --version) || return 1
+    [[ $actual == "$version "* ]] || { echo "Claude version mismatch: expected $version, got $actual" >&2; return 1; }
+    echo "$actual"
+}
+
+# A process as "PID START" from /proc, so a reused PID never matches its former owner; PID alone
+# where /proc is missing. A zombie or dead process has none: it can never finish its turn.
+process_identity() {
+    local stat=
+    IFS= read -r -d '' stat 2>/dev/null <"/proc/$1/stat" || true
+    if [[ $stat == *') '* ]]; then
+        set -- "$1" ${stat##*) }
+        case $2 in Z | X) return ;; esac
+        echo "$1 ${21}"
+    elif kill -0 "$1" 2>/dev/null; then
+        echo "$1"
+    fi
+}
+
+trap 'rm -f -- "$temporary"; [[ -z $ticket ]] || : >"$queue/$ticket.done"' EXIT
+mkdir -p -- "$(dirname -- "$runtime")"
+# Concurrent sessions in one sandbox share the runtime; only one may replace it.
+if command -v flock >/dev/null 2>&1; then
+    exec 9>>"$runtime.lock"
+    flock 9
+else
+    # Without flock, installers queue: each takes the next number in the queue directory as a
+    # symlink naming its owner, then waits until every lower number is done or its owner is gone.
+    # Numbers are never removed or reused, so no installer, however it exits, can release another.
+    queue=$runtime.lock.d
+    mkdir -p "$queue"
+    owner=$(process_identity $$)
+    while :; do
+        last=0
+        for entry in "$queue"/*; do
+            number=${entry##*/}
+            number=${number%.done}
+            if [[ $number =~ ^[0-9]+$ ]] && ((number > last)); then last=$number; fi
+        done
+        # Hold the number only once its link is ours: on exit the trap marks this ticket done.
+        ln -s "$owner" "$queue/$((last + 1))" 2>/dev/null && { ticket=$((last + 1)); break; }
+    done
+    until
+        ahead=
+        for ((number = 1; number < ticket; number++)); do
+            [[ -e $queue/$number.done ]] && continue
+            holder=$(readlink "$queue/$number" 2>/dev/null) || continue
+            [[ $(process_identity "${holder%% *}") != "$holder" ]] || { ahead=1; break; }
+        done
+        [[ -z $ahead ]]
+    do
+        sleep 0.1
+    done
+fi
+
+verify "$runtime/claude" 2>/dev/null && exit 0
+[[ -z $check_only ]] || exit 3
+[[ -n $source ]] || { echo "Claude runtime is absent; provide a transferred source binary" >&2; exit 1; }
+mkdir -p -m 700 -- "$runtime"
+temporary=$(mktemp "$runtime/.claude-XXXXXX")
+if [[ -n $compressed ]]; then
+    gzip -dc -- "$source" >"$temporary"
+else
+    cat -- "$source" >"$temporary"
+fi
+chmod 700 "$temporary"
+verify "$temporary"
+mv -f -- "$temporary" "$runtime/claude"

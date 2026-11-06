@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compose with the independent provider/deployment overrides.
+config_paths:
+  - benchmarks/swe_together/opencode.yaml
+# Keep real model, simulator, and judge execution; label this as health qualification.
+swe_together:
+  environment_servers:
+    swe_together:
+      protocol_profile: smoke
+      scoring_profile: judge_all
+      planned_trials: 109
+      repeats: 1
+      # Smoke-only budget; opencode.yaml retains the canonical 80 minutes.
+      interaction_timeout_seconds: 600
+
+swe_together_candidate:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+        - name: swe_together
+          type: benchmark
+          taskset: swe_together:full109
+          jsonl_fpath: benchmarks/swe_together/data/full109.jsonl
+          prepare_script: benchmarks/swe_together/prepare.py
+          num_repeats: 1
+          license: Apache-2.0

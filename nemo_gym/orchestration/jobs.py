@@ -24,7 +24,7 @@ k8s or a local runner later. Two consequences, both enforced by
 `test_jobs_module_is_executor_agnostic`:
 
 * Nothing here imports from `executors/`, so a reader -- today EFB's collect,
-  tomorrow `gym eval status` -- can load a record without pulling Slurm, SSH and
+  `gym eval status` -- can load a record without pulling Slurm, SSH and
   the sbatch templates into its import path.
 * No field is typed or named after one executor's vocabulary. Where a docstring
   explains a value by example, it says which executor the example comes from.
@@ -41,17 +41,21 @@ then be read as if it meant the new thing. Anything of that kind needs a
 `SCHEMA_VERSION` bump and an explicit migration, not a silent reinterpretation.
 """
 
+import getpass
+import hashlib
 import json
 import logging
 import os
+import re
 import secrets
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
 
 logger = logging.getLogger(__name__)
@@ -68,6 +72,19 @@ MANIFEST_NAME = "gym-job.json"
 # disk, which may have changed since, or the overrides, which are meaningless
 # without the file they were applied to.
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
+
+# What a benchmark's directory (`<run dir>/<benchmark>/`) holds, by name. The executors create it, the job script
+# writes into it and the exports read from it, so the names live in one place.
+LOGS_DIRNAME = "logs"
+ARTIFACTS_DIRNAME = "artifacts"
+EXPORTS_DIRNAME = "exports"
+ROLLOUTS_FILENAME = "rollouts.jsonl"
+# The exit code of `gym eval run`, which is also the job's.
+EVAL_EXIT_FILENAME = "eval.exit"
+# Created by the export tail when the evaluation succeeded; one file per attempt, so `.<Slurm job id>` follows.
+EVAL_SUCCEEDED_FILENAME = "eval.succeeded"
+# `<exports dir>/<exporter><suffix>`: the outcome of one export.
+EXPORT_RESULT_SUFFIX = ".result.json"
 
 
 # The nemo_gym package directory of the code that is running, however it got
@@ -138,6 +155,48 @@ class BenchmarkJob(BaseModel):
     job_dir: str
     job_id: str | None = None
     error: str | None = None
+    # Set by a repinned recovery: the Gym commit this benchmark's job runs, when it differs from the submission's.
+    gym_commit: str | None = None
+    # Set by a recovery that raised the walltime: the Slurm walltime this benchmark's job now runs with.
+    walltime: str | None = None
+
+
+class SubmissionTelemetry(BaseModel):
+    """Resolved submission-time telemetry controls, not credentials or a delivery claim."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+    token_env: str
+    remote_export: StrictBool
+
+    @field_validator("token_env")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+            raise ValueError("Telemetry credential metadata must be an environment variable name")
+        return name
+
+
+class SubmissionEnvironment(BaseModel):
+    """Names observed at submission, never values.
+
+    required_env names submit-shell inputs (host: references and required forwarding).
+    forwarded_env names variables actually exported by the submission transport. A
+    runtime: alias is not a submit-shell requirement unless explicitly forwarded.
+    None on the containing record means this observation was not recorded.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+    required_env: list[str]
+    forwarded_env: list[str]
+    telemetry: SubmissionTelemetry
+
+    @field_validator("required_env", "forwarded_env")
+    @classmethod
+    def validate_names(cls, names: list[str]) -> list[str]:
+        if any(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None for name in names):
+            raise ValueError("Submission environment metadata must contain only variable names")
+        return sorted(set(names))
 
 
 class SubmissionRecord(BaseModel):
@@ -174,6 +233,7 @@ class SubmissionRecord(BaseModel):
     # above cannot express -- a k8s namespace, say. Free-form because the shape
     # is the executor's business; a reader keys off `executor` before reading it.
     executor_metadata: dict[str, str] = {}
+    environment: SubmissionEnvironment | None = Field(default=None, exclude_if=lambda value: value is None)
     schema_version: int = SCHEMA_VERSION
 
     @property
@@ -240,6 +300,63 @@ class SubmissionRecord(BaseModel):
         return cls.model_validate(payload)
 
 
+# Each index entry rebuilt from a run directory's own record, one JSON line per restore, beside the entries.
+INDEX_RESTORE_JOURNAL_NAME = "index-restores.jsonl"
+
+
+def restore_index_entry(gym_job_id: str, run_dir: str | Path) -> SubmissionRecord:
+    """Rebuild this machine's job index entry for `gym_job_id` from the run directory's own record.
+
+    A recycled machine loses its index while the run directory keeps the `gym-job.json` that `persist()` wrote
+    there. That record is taken only as this submission's and this directory's: its `gym_job_id` is the one asked
+    for and names the directory, its `run_dir` is the directory, and every benchmark's `job_dir` lies inside it.
+    An existing entry is kept as it is, with a warning when it names another run directory. Each restore is
+    journaled in the index (`INDEX_RESTORE_JOURNAL_NAME`) with the source record's SHA-256, the user and the host.
+    """
+    directory = Path(run_dir).resolve()
+    if (local_index_dir() / f"{gym_job_id}.json").is_file():
+        record = load_submission_record(gym_job_id)
+        if Path(record.run_dir).resolve() != directory:
+            print(
+                f"The job index already has submission {gym_job_id!r} with run_dir {record.run_dir}; "
+                f"{directory} was not used.",
+                file=sys.stderr,
+            )
+        return record
+    manifest = directory / MANIFEST_NAME
+    if not manifest.is_file():
+        raise ValueError(f"Cannot restore submission {gym_job_id!r}: no {MANIFEST_NAME} in {directory}.")
+    content = manifest.read_bytes()
+    record = SubmissionRecord.load(json.loads(content))
+    problems = []
+    if record.gym_job_id != gym_job_id:
+        problems.append(f"the record is submission {record.gym_job_id!r}")
+    if directory.name != gym_job_id:
+        problems.append(f"the directory is named {directory.name!r}")
+    if Path(record.run_dir).resolve() != directory:
+        problems.append(f"the record's run_dir is {record.run_dir}")
+    problems += [
+        f"benchmark {job.benchmark!r} has its job_dir {job.job_dir} outside it"
+        for job in record.benchmarks
+        if not Path(job.job_dir).resolve().is_relative_to(directory)
+    ]
+    if problems:
+        raise ValueError(f"Cannot restore submission {gym_job_id!r} from {manifest}: " + "; ".join(problems) + ".")
+    if record.write_local_index() is None:
+        raise ValueError(f"Cannot restore submission {gym_job_id!r}: the local job index is not writable.")
+    entry = {
+        "at": utc_timestamp(utc_now()),
+        "gym_job_id": gym_job_id,
+        "source": str(manifest),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "user": getpass.getuser(),
+        "host": socket.gethostname(),
+    }
+    with (local_index_dir() / INDEX_RESTORE_JOURNAL_NAME).open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps(entry, sort_keys=True) + "\n")
+    return record
+
+
 def utc_now() -> datetime:
     """The clock the run directory is named from.
 
@@ -280,7 +397,10 @@ def load_submission_record(gym_job_id: str) -> SubmissionRecord:
     this machine's job index. Both are written by `BaseExecutor.persist()`."""
     index = local_index_dir() / f"{gym_job_id}.json"
     if not index.is_file():
-        raise ValueError(f"No submission {gym_job_id!r} in this machine's job index ({local_index_dir()}).")
+        raise ValueError(
+            f"No submission {gym_job_id!r} in this machine's job index ({local_index_dir()}). If its run directory "
+            "is here, `gym eval resubmit ... --run-dir RUN_DIR` restores the entry from the run's gym-job.json."
+        )
     record = SubmissionRecord.load(json.loads(index.read_text(encoding="utf-8")))
     manifest = Path(record.run_dir) / MANIFEST_NAME
     if manifest.is_file():

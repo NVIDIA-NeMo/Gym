@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 import usersim.engine.external as usersim_external
-from aiohttp import ClientConnectionError, ClientResponseError
+from aiohttp import ClientConnectionError, ClientResponseError, InvalidURL, InvalidUrlRedirectClientError
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
@@ -30,11 +30,12 @@ from environment_servers.nemo_user_sim.app import (
     _to_responses_input_items,
 )
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
-from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
-from nemo_gym.rollout_collection import _episode_record
-from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, MaterializedTask, TaskId
+from nemo_gym.data import materialize_task
+from nemo_gym.rollouts.rollout_collection import _episode_record
+from nemo_gym.server_runtime import is_handled_episode_failure
 from resources_servers.nemo_user_sim.app import UserSimResourcesServer, UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
@@ -960,7 +961,7 @@ async def test_non_retryable_assistant_response_failure_is_verified_as_reward_ze
         server_client=MagicMock(spec=ServerClient),
     )
     resources_server.session_id_to_seed = {}
-    resources_server.closed_resources_session_ids = {}
+    resources_server.fenced_resources_session_ids = {}
     resources_request = SimpleNamespace(session={SESSION_ID_KEY: "real-resources-session"})
     seed_body = next(call[2]["json"] for call in client.calls if call[1] == "/seed_session")
     verify_body = next(call[2]["json"] for call in client.calls if call[1] == "/verify")
@@ -975,19 +976,36 @@ async def test_non_retryable_assistant_response_failure_is_verified_as_reward_ze
 
 
 @pytest.mark.asyncio
-async def test_retryable_assistant_transport_failure_skips_verification(
+@pytest.mark.parametrize(
+    ("error", "terminal"),
+    [
+        (ClientConnectionError("assistant disconnected"), False),
+        (InvalidURL("http://"), True),
+        (InvalidUrlRedirectClientError("http://"), True),
+    ],
+)
+async def test_assistant_transport_failure_skips_verification(
     monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+    terminal: bool,
 ) -> None:
     server, client = _lifecycle_server()
     client.responses = [
         *_seeded_participant_responses(),
         _Response({}),
         _Response({}),
+        _Response(
+            {
+                "reward": 0.0,
+                "mask_sample": False,
+                "reward_components": {"assistant_quality": 0.0},
+                "scenario_completed": False,
+            }
+        ),
         _Response({}),
     ]
 
     async def fail_assistant(*_args: Any) -> dict[str, Any]:
-        error = ClientConnectionError("assistant disconnected")
         raise _ParticipantActivationError("assistant_model", error) from error
 
     monkeypatch.setattr(server, "_run_usersim", fail_assistant)
@@ -996,7 +1014,8 @@ async def test_retryable_assistant_transport_failure_skips_verification(
 
     assert response.failure is not None
     assert response.failure.stage == "agent"
-    assert response.failure.terminal is False
+    assert response.failure.terminal is terminal
+    assert response.result is None
     assert "/verify" not in [path for _, path, _ in client.calls]
 
 
@@ -1011,6 +1030,28 @@ def test_wrapped_participant_http_infrastructure_failures_are_retryable(status: 
 @pytest.mark.parametrize("status", [404, 409])
 def test_non_participant_http_contract_failures_are_not_retryable(status: int) -> None:
     assert _is_retryable_dependency_error(ClientResponseError(MagicMock(), (), status=status)) is False
+
+
+def test_an_agent_seed_refusal_fails_with_the_agents_reason() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"Simple Agent does not support sandbox access"}'
+
+    failure = UserSimEnvironmentServer._failure("agent", refusal)
+
+    assert is_handled_episode_failure(failure) and (failure.boundary, failure.stage) == ("environment", "agent")
+    assert failure.episode_terminal is True and failure.__cause__ is refusal
+    assert "Simple Agent does not support sandbox access" in failure.failure_reason
+
+
+def test_a_participant_turn_refusal_fails_with_the_agents_reason() -> None:
+    refusal = ClientResponseError(MagicMock(), (), status=422, message="Unprocessable Content")
+    refusal.response_content = b'{"detail":"user_model agent cannot serve this tool_choice"}'
+
+    failure = UserSimEnvironmentServer._failure("agent", _ParticipantActivationError("user_model", refusal))
+
+    assert is_handled_episode_failure(failure) and (failure.boundary, failure.stage) == ("environment", "agent")
+    assert failure.episode_terminal is True
+    assert "user_model agent cannot serve this tool_choice" in failure.failure_reason
 
 
 def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
@@ -1040,3 +1081,11 @@ def test_wrapped_assistant_invalid_response_is_not_retryable() -> None:
         _is_retryable_dependency_error(_ParticipantActivationError("assistant_model", TimeoutError("timed out")))
         is True
     )
+
+
+@pytest.mark.parametrize("error_type", [InvalidURL, InvalidUrlRedirectClientError])
+def test_invalid_assistant_url_is_terminal_and_not_scorable(error_type: type[InvalidURL]) -> None:
+    error = _ParticipantActivationError("assistant_model", error_type("http://"))
+
+    assert _is_retryable_dependency_error(error) is False
+    assert _is_scorable_assistant_activation_error(error) is False

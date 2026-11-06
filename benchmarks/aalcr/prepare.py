@@ -25,7 +25,7 @@ from zipfile import ZipFile
 import requests
 from datasets import load_dataset
 
-from nemo_gym.global_config import get_hf_token
+from nemo_gym.config import get_hf_token
 
 
 BENCHMARK_DIR = Path(__file__).parent

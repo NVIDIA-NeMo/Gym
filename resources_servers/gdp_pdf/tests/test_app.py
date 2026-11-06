@@ -34,9 +34,9 @@ from benchmarks.gdp_pdf.prepare import (
     restore_original_prompt,
     write_example,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -46,8 +46,9 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,
@@ -429,8 +430,9 @@ class TestVerify:
         # wrong answer.
         server.server_client.post = AsyncMock(side_effect=ConnectionError("judge down"))
 
-        with raises(JudgeError):
+        with raises(NgFailureEvent) as failure:
             await server.verify(_verify_request("answer"))
+        assert is_judge_failure(failure.value)
 
     @pytest.mark.asyncio
     async def test_concurrency_semaphore_disabled(self, config: GdpPdfConfig) -> None:
@@ -785,7 +787,7 @@ class TestPrepare:
         # BaseException) when the script is run with its own CLI flags.
         fake_module = MagicMock()
         fake_module.get_hf_token = MagicMock(side_effect=SystemExit(2))
-        monkeypatch.setitem(__import__("sys").modules, "nemo_gym.global_config", fake_module)
+        monkeypatch.setitem(__import__("sys").modules, "nemo_gym.config.global_config", fake_module)
 
         assert _resolve_hf_token() is None
 

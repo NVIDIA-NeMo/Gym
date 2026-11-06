@@ -4,6 +4,7 @@
 
 import json
 import random
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -11,7 +12,7 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 from benchmarks.long_transduction import prepare as generator
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
+from nemo_gym.data import apply_prompt_to_row, load_prompt_config
 
 
 def test_prepare_returns_cached_path_without_dependencies(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
@@ -32,7 +33,15 @@ def test_prepare_declares_dependencies() -> None:
     root = Path(__file__).resolve().parents[3]
     config = OmegaConf.load(root / "benchmarks/long_transduction/config.yaml")
     dataset = config.long_transduction_agent.responses_api_agents.simple_agent.datasets[0]
-    assert {"tiktoken", "wonderwords"}.issubset(dataset.prepare_dependencies)
+    project = root / dataset.prepare_project
+    assert project == root / "benchmarks/long_transduction"
+    assert "prepare_dependencies" not in dataset
+    with (project / "pyproject.toml").open("rb") as f:
+        dependencies = tomllib.load(f)["project"]["dependencies"]
+    assert {"tiktoken", "wonderwords"}.issubset(dependencies)
+    with (project / "uv.lock").open("rb") as f:
+        locked_packages = {package["name"] for package in tomllib.load(f)["package"]}
+    assert {"tiktoken", "wonderwords"}.issubset(locked_packages)
 
 
 @pytest.mark.parametrize("existing", [False, True])

@@ -423,7 +423,7 @@ python3 prepare.py \
   --force-env
 ```
 
-The managed OSWorld agent's default `requirements.txt` respects Gym's global
+The managed OSWorld agent's `pyproject.toml` and `uv.lock` preserve Gym's global
 security and codec exclusions. After `prepare.py` writes `env.yaml`, run the
 exact path-aware next steps that it prints. They pre-create the isolated agent
 environment and explicitly install the runtime packages that OSWorld imports
@@ -435,14 +435,15 @@ bash ../../responses_api_agents/osworld_agent/install_optional_runtime_deps.sh \
   /absolute/run/root/server-venvs/responses_api_agents/osworld_agent/.venv
 ```
 
-The script uses `--no-config` only for that named agent venv and installs
-cryptography, headless OpenCV, and the matching torchvision wheel. It is
-idempotent, but skips installation only when the required versions are both
-present and importable. It also reasserts the normal agent's
-`numpy>=2.1,<2.5` constraint and installs the OpenCV 4.10 abi3 wheel so the
-managed Python 3.13 environment never falls back to building NumPy 1.26 or
-OpenCV from source. These are runtime
-imports for OSWorld's desktop stack,
+The script synchronizes the separate `runtime/uv.lock` with
+`uv sync --locked --inexact` into that named agent venv, preserving the base
+agent packages while adding cryptography, headless OpenCV, and the matching
+torchvision wheel. It is idempotent, but skips installation only when the
+required versions are both present and importable. The runtime manifest retains
+the agent's `numpy>=2.1,<2.5` constraint and binds both Torch wheels to the CPU
+index. It locks the OpenCV 4.10 abi3 wheel so the managed Python 3.13 environment
+does not need to build OpenCV from source. Commit both the runtime manifest and
+lock when changing these optional packages. These are runtime imports for OSWorld's desktop stack,
 but repository policy excludes them from managed package and container
 resolution. `skip_venv_if_present: true` in the generated config then lets
 `gym env start` reuse the prepared environment. `tools/start_control.sh` checks
@@ -519,10 +520,16 @@ python3 prepare.py \
 ```
 
 - The reference runs used the E2B SDK 2.46.0, which creates sandboxes with
-  `POST /sandboxes`. Later SDK releases create them with `POST /v2/sandboxes`;
-  confirm that your deployment accepts that call before upgrading. Gym passes
-  an explicit `-c` when it builds server environments, and uv then ignores
-  `UV_CONSTRAINT`, so install a pinned SDK into the agent environment directly.
+  `POST /sandboxes`. The managed OSWorld agent's `uv.lock` currently selects
+  E2B 2.58.0, whose create call uses `POST /v2/sandboxes`; confirm that your
+  AgentENV deployment accepts that endpoint before running this recipe. The
+  root Gym lock still selects 2.46.0, but the agent runs in its own environment,
+  so the root SDK version does not establish compatibility. For a deployment
+  that supports only `POST /sandboxes`, prepare a separate agent manifest and
+  lock selecting 2.46.0 and record them with the run. Do not rely on
+  `UV_CONSTRAINT` or an ad hoc install after locked setup to select the SDK.
+  An SDK change requires a new compatibility check; the historical scores do
+  not validate the current managed lock.
 - For a control plane whose certificate comes from a private CA, point
   `SSL_CERT_FILE` at a bundle that includes the CA; the E2B SDK and aiohttp read
   it. OSWorld's guest forwarder uses `requests` with `trust_env=False` and
@@ -809,7 +816,7 @@ model-specific and do not change defaults for other runners.
 Proxy policy belongs to the Gym OSWorld adapter; VM setup belongs to the pinned
 OSWorld `nv-gym` runtime. The integration lines are independent Git refs in
 different repositories. Gym connects them only through the immutable OSWorld
-commit in `responses_api_agents/osworld_agent/requirements.txt`. That OSWorld
+commit in `responses_api_agents/osworld_agent/pyproject.toml`. That OSWorld
 commit merges upstream main `83e85344` and retains the `nv-gym` integration
 overlay.
 
@@ -817,7 +824,7 @@ overlay.
 
 | Consumer workflow | Required OSWorld version |
 | --- | --- |
-| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/requirements.txt`. |
+| Gym OSWorld benchmark | No manual checkout. The agent package installs the exact SHA from `responses_api_agents/osworld_agent/pyproject.toml`. |
 | Direct OSWorld, plain Docker/VMware, no proxy-required tasks | Upstream xlang OSWorld main is sufficient; this adapter's pre-fix baseline was `83e8534451ba8b3ab6477448ef3f0a8e563f05be`. |
 | Direct OSWorld with `provider_name=remote_docker` | `JeffPengCoder/OSWorld` `nv-gym`, pinned to `f32ab2b74e3ea66e6a8eb0d87876a12ce93904d5` or a reviewed successor that preserves the selected task corpus. |
 | Direct OSWorld with proxy-required tasks | The same `nv-gym` pinned SHA; set `PROXY_CONFIG_FILE` and construct `DesktopEnv(enable_proxy=True)`. |
@@ -1018,7 +1025,7 @@ examples. Generated full datasets are intentionally not committed.
 Nano Omni results in this README use the 361 tasks of OSWorld's
 `test_nogdrive` manifest: the 369 tasks of `test_all` without the 8 that need
 private Google Drive credentials. Build that input from the OSWorld revision
-pinned in `responses_api_agents/osworld_agent/requirements.txt`:
+pinned in `responses_api_agents/osworld_agent/pyproject.toml`:
 
 ```bash
 python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
