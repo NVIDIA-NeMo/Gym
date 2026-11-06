@@ -28,7 +28,7 @@ from fastapi import FastAPI
 from pydantic import Field, field_validator
 
 from nemo_gym.client import request
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
+from nemo_gym.core.failure_kinds import JUDGE_SKIPPED, PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -175,11 +175,11 @@ def _access_reason(exc: "CritPtAccessDenied") -> str:
     )
 
 
-# failure_kind of a row graded by nobody on purpose (smoke mode). It is namespaced, not a registered kind: recovery
-# keeps a masked row with an unregistered kind as the result, so it is neither regraded nor rerun.
-SMOKE_NOT_GRADED = "critpt:smoke_not_graded"
+# failure_kind of a row graded by nobody on purpose (smoke mode): recovery keeps it as a complete, deliberately
+# unverified result, neither re-judged nor rerun.
+SMOKE_NOT_GRADED = JUDGE_SKIPPED
 SMOKE_NOT_GRADED_REASON = (
-    "CritPt resources server smoke mode (fire_after): the batch was not sent to the grading API, "
+    "CritPt smoke mode (fire_after): the batch was not sent to the grading API, "
     "so this answer was not graded. A real score needs a full run."
 )
 

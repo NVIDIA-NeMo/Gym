@@ -103,6 +103,9 @@ ENVIRONMENT_PROTOCOL_VIOLATION = "environment_protocol_violation"
 JUDGE_FAILED = "judge_failed"
 JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
+# Verification was skipped by configuration (a smoke mode): a masked result of this kind is complete and is never
+# re-judged or rerun; the run is UNVERIFIED by construction.
+JUDGE_SKIPPED = "judge_skipped"
 
 # --- provider: sandboxes, browsers, containers ----------------------------------------- #
 PROVIDER_UNAVAILABLE = "provider_unavailable"
@@ -169,6 +172,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
+        JUDGE_SKIPPED,
         PROVIDER_UNAVAILABLE,
         PROVIDER_QUOTA_EXHAUSTED,
         PROVIDER_OOM_KILLED,

@@ -74,6 +74,7 @@ from nemo_gym.core.failure_kinds import (
     INVALID_OUTPUT_BUDGET,
     INVALID_REQUEST_PARAMETER,
     JUDGE_FAILED,
+    JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
     MODEL_CONTEXT_LIMIT,
@@ -182,6 +183,8 @@ class IdentityState(StrEnum):
     MISSING = "missing"
     MASKED = "masked"
     OMITTED = "omitted"
+    # Verification skipped by configuration: complete, never re-judged or rerun, and unverified by construction.
+    SKIPPED = "skipped"
     UNKNOWN = "unknown"
 
 
@@ -510,8 +513,13 @@ class RecoveryDecision(BaseModel):
 
     @property
     def complete(self) -> bool:
-        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED, IdentityState.SKIPPED)
         return sum(self.counts.get(state, 0) for state in settled) == self.expected
+
+    @property
+    def unverified(self) -> bool:
+        """Whether results of the run were deliberately not verified (``judge_skipped``), so it is UNVERIFIED."""
+        return bool(self.counts.get(IdentityState.SKIPPED))
 
 
 def _identity(row: Mapping[str, Any]) -> Identity | None:
@@ -1007,6 +1015,18 @@ def decide_recovery(
                 continue
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
+            if not judge and row.get("mask_sample") is True and row.get("failure_kind") == JUDGE_SKIPPED:
+                # Verification was skipped by configuration: complete and never re-judged or rerun.
+                reason = row.get("_ng_skipped_reason")
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity,
+                        state=IdentityState.SKIPPED,
+                        failure_kind=JUDGE_SKIPPED,
+                        reason=reason if isinstance(reason, str) else None,
+                    )
+                )
+                continue
             if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
@@ -1459,6 +1479,13 @@ def decide_recovery(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
                 f"resume would run nothing; the run is not complete; {populations}",
+            )
+        if counts.get(IdentityState.SKIPPED):
+            reasons = sorted({item.reason for item in evidence if item.state == IdentityState.SKIPPED and item.reason})
+            return decision(
+                RecoveryAction.NOOP,
+                f"{counts[IdentityState.SKIPPED]} result(s) not graded by configuration ({JUDGE_SKIPPED}); "
+                f"nothing is re-judged or rerun{': ' + reasons[0] if reasons else ''}",
             )
         if counts.get(IdentityState.OMITTED):
             return decision(
@@ -2648,7 +2675,7 @@ def gate_task_summary(
     """
     errors: list[str] = []
     warnings: list[str] = []
-    unverified = summary_valid is None or health_passed is None
+    unverified = summary_valid is None or health_passed is None or decision.unverified
     states = decision.counts
     for state, label in (
         (IdentityState.JUDGE_RECOVERABLE, "judge failures awaiting re-judgment"),
@@ -2661,7 +2688,11 @@ def gate_task_summary(
     ):
         if states.get(state):
             errors.append(f"{states[state]} {label}: {decision.identities[state.value][:5]}")
-    if score is None or not math.isfinite(score):
+    if decision.unverified:
+        # Deliberately unverified: there is no score to read, and that is no failure.
+        score = None
+        warnings.append(decision.reason)
+    elif score is None or not math.isfinite(score):
         # An incomplete run has no score to read yet, whatever score options were passed: say that, not the options.
         settled = sum(
             states.get(state, 0) for state in (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)

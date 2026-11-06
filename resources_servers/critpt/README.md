@@ -156,7 +156,7 @@ on the 5 example problems, the resources server has one opt-in config knob:
 
 - `fire_after: int` — fire the batch after this many real submissions arrive. The batch is **not** sent
   to AA: the submissions are written to the cache (when `cache_dir` is set) and every row comes back masked
-  (`mask_sample: true`, no accuracy) with `failure_kind: critpt:smoke_not_graded` and a reason naming smoke
+  (`mask_sample: true`, no accuracy) with `failure_kind: judge_skipped` and a reason naming smoke
   mode. A smoke run therefore proves the wiring only; a real score needs a full run of 70 problems.
 
 Defaults to `None`/unset, so production behavior is unchanged. Set it only for testing purposes:

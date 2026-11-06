@@ -18,7 +18,12 @@ over the executor's connection (or locally), that reads the job directory and pr
 Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the script and the constants it embeds.
 """
 
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED, QUOTA_RESET_REGEX
+from nemo_gym.core.failure_kinds import (
+    JUDGE_SKIPPED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
+    QUOTA_RESET_REGEX,
+)
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
@@ -60,6 +65,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
+    + "\n"
+    + "JUDGE_SKIPPED = "
+    + repr(JUDGE_SKIPPED)
     + "\n"
     + "PROVIDER_QUOTA_EXHAUSTED = "
     + repr(PROVIDER_QUOTA_EXHAUSTED)
@@ -444,6 +452,9 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if isinstance(r, dict) and r.get("failure_kind") == JUDGE_SKIPPED and isinstance(r.get("failure_reason"), str):
+                # The skip's own reason (a bounded configuration note), never an answer.
+                selected["_ng_skipped_reason"] = r["failure_reason"][:200]
             if isinstance(r, dict) and r.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED:
                 # Only the reset time of a quota stop leaves the run host, never its message.
                 reset = re.search(QUOTA_RESET_REGEX, str(r.get("_ng_failure_message") or r.get("failure_reason") or ""))
