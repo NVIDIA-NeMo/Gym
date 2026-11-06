@@ -429,6 +429,9 @@ OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
         ("https://web.archive.org/web/2024/https:/scale.com/leaderboard", "domains"),
         ("https://web.archive.org/web/2024/https:///scale.com/leaderboard", "domains"),
         ("https://wayback.archive.org/web/2024/scale.com/leaderboard", "domains"),
+        # A Wayback path with no timestamp names its target in the first segment.
+        ("https://web.archive.org/web/scale.com/leaderboard", "domains"),
+        ("https://web.archive.org/web/scale.com", "domains"),
         # A wrapper's remainder is a URL however its host is spelled; a query value may end its host with a dot.
         ("https://web.archive.org/web/2024/scale.com./leaderboard", "domains"),
         ("https://web.archive.org/web/2024/x@scale.com/leaderboard", "domains"),
