@@ -332,6 +332,7 @@ def _asserts(name: str) -> re.Pattern:
     return re.compile(rf"(?<!\w){_ASSERTS}\s+(?:{_FILLER}\s+){{0,3}}{_name_regex(name)}", re.IGNORECASE)
 
 
+# TODO: remove if UserSim judges premises by model (deferred in NVIDIA-NeMo/UserSim#137).
 def _names_another_model(text: str, vocabulary: Mapping, expected_model_names: Sequence[str]) -> bool:
     """Whether ``text`` says the assistant is another known model rather than the expected one.
 
