@@ -60,6 +60,7 @@ def _violations() -> list[str]:
 def test_only_cli_entrypoint_imports_orchestration() -> None:
     violations = _violations()
     assert not violations, (
-        "nemo_gym.orchestration may only be imported by nemo_gym/cli/main.py. Move the code being imported "
+        "nemo_gym.orchestration is a Gym-aware orchestrator, not a home for core functionality: deleting it "
+        "should leave only the CLI wiring in nemo_gym/cli/main.py to change. Move the code being imported "
         "into the package that owns it:\n" + "\n".join(violations)
     )
