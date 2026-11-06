@@ -33,7 +33,8 @@ class LentSandboxes:
     tool workspace, and calls :meth:`release_all` at shutdown. A server that grades in the lent sandbox after the
     episode reads it with :meth:`get` before the close.
 
-    The harness gets an ``operate`` descriptor: it may use the sandbox but not destroy it. Every stop runs to its end
+    The harness gets an ``operate`` descriptor, which asks the provider to let it use the sandbox but not destroy it
+    (providers without leases ignore the scope). Every stop runs to its end
     within ``STOP_TIMEOUT_S``, also when the request that asked for it is cancelled. A session that is never closed
     keeps its sandbox until shutdown, or until the provider reclaims it after ``sandbox_config.ttl_s``, so set
     ``ttl_s`` above the episode deadline plus the time that grading and cleanup take.
@@ -117,7 +118,8 @@ class LentSandboxes:
     async def _access(self, sandbox: AsyncSandbox) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
-                # The harness may operate the sandbox but not destroy it; this server stops it at close.
+                # The harness may operate the sandbox but not destroy it: this server stops it at close. Providers
+                # without leases ignore the scope.
                 provider_config_ref=self._provider,
                 descriptor=await sandbox.serialize(scope="operate"),
             ),
