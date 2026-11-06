@@ -2786,6 +2786,7 @@ def _record_rollout_health(
     outcome: str,
     ignored_checks: frozenset[str],
     dispatch_span_context: Optional["SpanContext"] = None,
+    capture_dirs: Sequence[Path] = (),
 ) -> None:
     """Evaluate the trajectory health checks on a finished rollout and count the verdict and flagged checks.
 
@@ -2796,7 +2797,7 @@ def _record_rollout_health(
     from nemo_gym.rollouts.rollout_health import evaluate_record
 
     try:
-        digest = evaluate_record(result, ignored_checks)
+        digest = evaluate_record(result, ignored_checks, capture_dirs=capture_dirs)
         checks = sorted({finding.check for finding in digest.findings})
         record_rollout_health(digest.verdict, outcome=outcome, flagged_checks=checks)
         if dispatch_span_context is not None:
@@ -5226,6 +5227,7 @@ executions → not run again (left to recovery)
                         health_outcome,
                         health_ignored_checks,
                         health_span_context,
+                        capture_dirs,
                     )
                 if health_metrics_enabled or health_span_context is not None:
                     await asyncio.to_thread(record_tool_telemetry, result, health_span_context)
