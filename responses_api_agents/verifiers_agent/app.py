@@ -22,6 +22,7 @@ import re
 import traceback
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
+from dataclasses import dataclass
 from http.cookiejar import CookieJar
 from time import time
 from typing import Any, Optional
@@ -29,15 +30,29 @@ from uuid import uuid4
 
 import verifiers as vf
 from fastapi import Body, Request, Response
-from openai import DEFAULT_TIMEOUT, AsyncOpenAI, DefaultAsyncHttpxClient, Timeout
+from openai import (
+    DEFAULT_TIMEOUT,
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncOpenAI,
+    DefaultAsyncHttpxClient,
+    Timeout,
+)
 from pydantic import ConfigDict, Field
 from verifiers.clients import NeMoRLChatCompletionsClient
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.artifacts import NG_NO_GENERATION_METADATA
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
-    AGENT_ROUTE_FAILED,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     VERIFIER_ERROR,
+    FailureBoundary,
+    FailureHeader,
+    FailureReportRow,
+    ModelFailureDetails,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -50,9 +65,18 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    OutcomeAction,
+    StageOutcomePolicyConfig,
     accumulate_response_usage,
+    choose_stage_outcome,
+    failure_report_for,
+    observe_failure,
+    rebuild_failure,
+    sdk_error_details,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier
+from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -203,7 +227,72 @@ def _as_response_usage(usage: Any) -> Optional[NeMoGymResponseUsage]:
     )
 
 
-class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
+@dataclass
+class _ModelCallOutcome:
+    """How the model calls of one rollout last ended: the failure the latest call raised, else None."""
+
+    last_failure: Optional[NgFailureEvent] = None
+
+
+# Set by ``run`` around one rollout; the clients record into it because verifiers keeps only a serialized error.
+_MODEL_CALL_OUTCOME: ContextVar[Optional[_ModelCallOutcome]] = ContextVar(
+    "verifiers_agent_model_call_outcome", default=None
+)
+
+
+def _model_call_failure(error: Exception) -> Optional[NgFailureEvent]:
+    """The model boundary's failure for an error of the policy client's SDK, from what the SDK reports; else None.
+
+    An HTTP reply names its status and nothing else, and a call that got no reply is a transport failure whose
+    delivery is unknown: neither is classified from message text, and no policy is applied here. The SDK's text is
+    not copied, only its type and status. A Gym server's own failure report on the reply is linked as the cause.
+    """
+    if isinstance(error, APIStatusError):
+        kind, status, upload = MODEL_REQUEST_ERROR, error.status_code, True
+        reason = f"HTTP {status} from the model server"
+    elif isinstance(error, APIConnectionError):
+        kind, status, upload = MODEL_TRANSPORT_ERROR, None, None
+        reason = "Model request timed out" if isinstance(error, APITimeoutError) else "Model request transport failed"
+    else:
+        return None
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=kind,
+        failure_reason=reason,
+        operation="model_request",
+        stage="agent",
+        http_status=status,
+        details=ModelFailureDetails(request_upload_complete=upload),
+        foreign_error=sdk_error_details(error, message=""),
+    )
+    forwarded = FailureHeader.decode(getattr(getattr(error, "response", None), "headers", None))
+    failure.__cause__ = rebuild_failure(forwarded) or error
+    return failure
+
+
+class _ModelFailureObservingClient(NeMoRLChatCompletionsClient):
+    """Records each policy-model call that fails in the SDK as a failure event.
+
+    verifiers wraps the SDK error in its own and keeps only a serialized form on the rollout, so the SDK error is
+    only available here, where the call is made.
+    """
+
+    async def get_native_response(self, *args: Any, **kwargs: Any) -> Any:
+        outcome = _MODEL_CALL_OUTCOME.get()
+        if outcome is not None:
+            outcome.last_failure = None
+        try:
+            return await super().get_native_response(*args, **kwargs)
+        except Exception as error:
+            failure = _model_call_failure(error)
+            if failure is not None:
+                observe_failure(failure)
+                if outcome is not None:
+                    outcome.last_failure = failure
+            raise
+
+
+class _ResponseIdRecordingClient(_ModelFailureObservingClient):
     """Records the id of every model response verifiers receives.
 
     `simple_agent` builds its `ModelCallRef`s from `model_response.id` because it
@@ -232,7 +321,7 @@ class _ResponseIdRecordingClient(NeMoRLChatCompletionsClient):
 
 # Names in a rollout error's class chain (verifiers.errors and the transport errors they wrap) and the kind each
 # suggests, first match wins: a transport timeout or connection error inside a ModelError or a ToolError is named
-# as such. A candidate only: it is recorded for counting and changes no score.
+# as such. A candidate only: it is recorded for counting and never decides a score, a mask or a retry.
 _ROLLOUT_ERROR_KIND_CANDIDATES = (
     ("OverlongPromptError", "overlong_prompt"),
     ("Timeout", "timeout"),
@@ -246,8 +335,6 @@ _ROLLOUT_ERROR_KIND_CANDIDATES = (
 )
 _STATUS_CODE = re.compile(r"(?:Error code|status(?:_code)?)\s*[:=]?\s*(\d{3})\b", re.IGNORECASE)
 _ROLLOUT_ERROR_MESSAGE_CHARS = 500
-# Rollout errors that are the harness or serving stack failing, not the model's answer: such a row is masked.
-_INFRA_ROLLOUT_ERROR_KINDS = frozenset({"http_5xx", "http_429", "connection", "infra", "timeout"})
 
 
 def _rollout_error_fact(error: Any) -> Optional[dict[str, Any]]:
@@ -314,8 +401,8 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
     ng_agent_observations: Optional[AgentObservationBundle] = Field(
         default=None, exclude_if=lambda value: value is None
     )
-    # The error the rollout ended on, on the row itself so a run's rollout errors can be counted; an infrastructure
-    # kind (_INFRA_ROLLOUT_ERROR_KINDS) also masks the sample.
+    # The error the rollout ended on, on the row itself so a run's rollout errors can be counted; recorded only, it
+    # does not change the reward or mask the sample.
     rollout_error: Optional[dict[str, Any]] = Field(default=None, exclude_if=lambda value: value is None)
 
 
@@ -409,8 +496,29 @@ class _NoStoreCookieJar(CookieJar):
         return None
 
 
+def _default_outcome_policy() -> StageOutcomePolicyConfig:
+    """What a rollout that ended on a failed policy-model call becomes, by the call's observed status and kind.
+
+    A model-side rejection (400, 413, 422) is the model's result and is counted as a zero. A reply that is worth
+    another attempt, and a call that got no reply, are retried by the collector while the rollout holds no answer.
+    Anything else leaves the rollout ungraded.
+    """
+    return StageOutcomePolicyConfig(
+        by_stage={
+            "agent": {
+                "by_failure_kind": {MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY},
+                "by_status_code": {
+                    **dict.fromkeys(filter(is_retryable_dependency_status, range(400, 600)), OutcomeAction.RETRY),
+                    **dict.fromkeys((400, 413, 422), OutcomeAction.COUNT_AS_ZERO),
+                },
+            }
+        }
+    )
+
+
 class VerifiersAgentConfig(BaseResponsesAPIAgentConfig):
     model_server: ModelServerRef
+    outcome_policy: StageOutcomePolicyConfig = Field(default_factory=_default_outcome_policy)
     model_name: str = Field(default="", description="Model name")
 
     vf_env_id: str = Field(default="", description="Verifiers environment ID")
@@ -575,7 +683,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 http_client=DefaultAsyncHttpxClient(cookies=_NoStoreCookieJar()),
                 **self._policy_client_options(),
             )
-            self.client_cache[cache_key] = NeMoRLChatCompletionsClient(openai_client)
+            self.client_cache[cache_key] = _ModelFailureObservingClient(openai_client)
 
         shared_client = self.client_cache[cache_key]
         rollout_id = self._rollout_id_for(body, request)
@@ -791,6 +899,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
                 observations = AgentObservationBundle(source="verifiers", records=list(trajectory.invocations))
 
             return VerifiersNeMoGymResponse(
+                # A rollout with no assistant turn holds only the training placeholder: say so, so that a reader
+                # does not take it for a generated answer that a rerun would replace.
+                metadata=None if _assistant_turn_groups(output) else dict(NG_NO_GENERATION_METADATA),
                 ng_trajectory=trajectory,
                 ng_agent_observations=observations,
                 id=f"verifiers-{vf_env_id}-{task_idx}",
@@ -818,34 +929,52 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         body: VerifiersAgentRunRequest = Body(),
     ) -> VerifiersAgentVerifyResponse:
         failures: list[str] = []
+        model_calls = _ModelCallOutcome()
         token = _RUBRIC_FAILURES.set(failures)
+        outcome_token = _MODEL_CALL_OUTCOME.set(model_calls)
         try:
             resp = await self.responses(request, response, body)
         finally:
             _RUBRIC_FAILURES.reset(token)
+            _MODEL_CALL_OUTCOME.reset(outcome_token)
 
         async def scored() -> VerifiersAgentVerifyResponse:
-            result = VerifiersAgentVerifyResponse(
+            row: dict[str, Any] = {}
+            call_failure = model_calls.last_failure if resp.rollout_error else None
+            if failures:
+                # verifiers scored each reward function that raised as 0.0; that zero is no grade of the answer.
+                row = {
+                    "mask_sample": True,
+                    "failure_kind": VERIFIER_ERROR,
+                    "failure_reason": f"reward function raised: {', '.join(sorted(set(failures)))}",
+                }
+            elif call_failure is not None:
+                # The rollout ended on a policy-model call the SDK reported failing. The event says what was
+                # observed; the configured agent-stage policy says whether the zero is counted or the row is not
+                # graded, and the row keeps both for its readers.
+                decision = choose_stage_outcome(
+                    failure_kind=call_failure.failure_kind,
+                    http_status=call_failure.http_status,
+                    stage="agent",
+                    config=self.config.outcome_policy,
+                )
+                row = {
+                    "mask_sample": decision.action != OutcomeAction.COUNT_AS_ZERO,
+                    "failure_kind": call_failure.failure_kind,
+                    "failure_reason": call_failure.failure_reason,
+                    "failure_outcome_action": decision.action,
+                    "failure_outcome_attribution": decision.attribution,
+                    **FailureReportRow.fields(failure_report_for(call_failure)),
+                }
+            return VerifiersAgentVerifyResponse(
                 ng_trajectory=resp.ng_trajectory,
                 ng_agent_observations=resp.ng_agent_observations,
                 responses_create_params=body.responses_create_params,
                 response=resp,
                 reward=resp.reward,
                 rollout_error=resp.rollout_error,
+                **row,
             )
-            if failures:
-                # verifiers scored each reward function that raised as 0.0; that zero is no grade of the answer.
-                result.mask_sample = True
-                result.failure_kind = VERIFIER_ERROR
-                result.failure_reason = f"reward function raised: {', '.join(sorted(set(failures)))}"
-            elif (resp.rollout_error or {}).get("kind_candidate") in _INFRA_ROLLOUT_ERROR_KINDS:
-                # The rollout ended on an infrastructure error: its reward is no grade of the model.
-                result.mask_sample = True
-                result.failure_kind = AGENT_ROUTE_FAILED
-                result.failure_reason = (
-                    f"rollout ended on {resp.rollout_error['kind_candidate']}: {resp.rollout_error['message_head']}"
-                )
-            return result
 
         # This agent is its own verifier: the rubric graded inside the rollout above. Its result is its grading
         # record when every reward function is synchronous (no model asked), observed like a resources server's.
