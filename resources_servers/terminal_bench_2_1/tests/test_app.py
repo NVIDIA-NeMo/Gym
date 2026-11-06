@@ -14,13 +14,13 @@ from fastapi import Request
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import NeMoGymResponse, NgFailureEvent, RequestFailureLog
+from nemo_gym.core import FailureHeader, NeMoGymResponse, NgFailureEvent, RequestFailureLog
 from nemo_gym.core.failure_records import SandboxFailureDetails
-from nemo_gym.core.failure_transport import FailureHeader
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
     GOLDEN_PATCH_SOLVE_SH_PATCHES,
     TEST_SH_PATCHES,
+    TerminalBench21OutcomePolicyConfig,
     TerminalBench21ResourcesServer,
     TerminalBench21ResourcesServerConfig,
     TerminalBench21SeedSessionRequest,
@@ -600,8 +600,10 @@ async def test_provider_event_at_verify_is_retained_as_the_cause_of_the_verifier
     assert (provider.failure_kind, provider.http_status) == ("provider_unavailable", 503)
     assert provider.details == provider_event.details
     assert provider.boundary == "sandbox"
-    # A typed provider failure needs no probe to decide that the grade is missing.
-    assert not [c for c in sandbox.exec.await_args_list if c.args[0].startswith("test -f")]
+    # A typed failure on the verifier's own operations needs no probe; a typed download failure does, because
+    # it does not say whether reward.txt is absent.
+    probes = [c for c in sandbox.exec.await_args_list if c.args[0].startswith("test -f")]
+    assert bool(probes) == (failing == "download")
 
 
 @pytest.mark.asyncio
@@ -631,3 +633,75 @@ async def test_structured_sandbox_error_reason_carries_the_error_type_only(tmp_p
     assert result.mask_sample is True and "sandbox" in result.failure_reason and "secret" not in result.failure_reason
     [verifier] = report.events.values()
     assert verifier.cause_id is None and verifier.exception_type == "_VerifierInfraError"
+
+
+def _typed_not_found() -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="Sandbox provider request failed",
+        http_status=404,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1"),
+        operation="sandbox.download",
+        stage="verification",
+    )
+
+
+@pytest.mark.asyncio
+async def test_typed_404_download_of_an_absent_reward_is_still_scored_zero(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, _typed_not_found())
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.failure_kind is None
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("probe", ["raises", 0])
+async def test_typed_404_download_with_an_inconclusive_probe_is_masked(tmp_path: Path, probe: str | int) -> None:
+    async def execute(command, **kwargs):
+        if command.startswith("test -f"):
+            if probe == "raises":
+                raise ConnectionError("probe lost")
+            return _ok(return_code=probe)
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute, _typed_not_found())
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is True and result.failure_kind == "provider_unavailable"
+    assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+@pytest.mark.asyncio
+async def test_configured_outcome_policy_selects_the_outcome_and_keeps_the_provider_event(tmp_path: Path) -> None:
+    provider_event = _provider_event()
+
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            raise provider_event
+        return _ok()
+
+    outcomes = {}
+    for name, policy in {
+        "default": {},
+        "zero": {"by_failure_kind": {"provider_unavailable": "count_as_zero"}},
+    }.items():
+        server, request = _infra_server(tmp_path, execute)
+        server.config = server.config.model_copy(
+            update={"outcome_policy": TerminalBench21OutcomePolicyConfig.model_validate(policy)}
+        )
+        result, report = await _verify_with_failure_log(server, request, tmp_path)
+        outcomes[name] = result
+        assert result.failure_kind == "provider_unavailable" and result.reward == 0.0
+        assert provider_event.event_id in report.events
+
+    assert outcomes["default"].mask_sample is True
+    assert outcomes["zero"].mask_sample is False
+
+
+@pytest.mark.parametrize("action", ["fail", "verify"])
+def test_verifier_outcome_policy_rejects_actions_it_cannot_execute(action: str) -> None:
+    with pytest.raises(ValueError, match="only retry and count_as_zero"):
+        TerminalBench21OutcomePolicyConfig(default_action=action)

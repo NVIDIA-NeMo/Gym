@@ -15,6 +15,7 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_UNAVAILABLE,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
@@ -99,6 +100,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            PROVIDER_UNAVAILABLE: OutcomeAction.RETRY,
             "unknown": OutcomeAction.RETRY,
         }
     )

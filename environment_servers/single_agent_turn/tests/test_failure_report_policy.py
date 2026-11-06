@@ -238,3 +238,43 @@ async def test_report_without_selected_failure_follows_outcome_policy():
     (verify,) = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
     assert verify["response"]["status"] == "failed"
     assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}
+
+
+@pytest.mark.parametrize(
+    "policy,terminal",
+    [({}, False), ({"by_failure_kind": {"provider_unavailable": "fail"}}, True)],
+)
+async def test_provider_failure_from_an_agent_follows_the_configured_kind_rule_not_the_cause_status(policy, terminal):
+    environment, client = _environment_server()
+    environment.config.agent_outcome_policy = environment.config.agent_outcome_policy.model_validate(policy)
+    sandbox = {
+        "event_id": "sandbox",
+        "boundary": "sandbox",
+        "failure_kind": "provider_unavailable",
+        "failure_reason": "Sandbox provider request failed",
+        "http_status": 404,
+        "operation": "sandbox.exec",
+    }
+    agent = {
+        "event_id": "agent",
+        "boundary": "agent",
+        "failure_kind": "provider_unavailable",
+        "failure_reason": "Sandbox provider request failed",
+        "operation": "agent.run",
+        "cause_id": "sandbox",
+    }
+    response = _agent_response().model_dump(mode="json")
+    response.update(
+        status="failed",
+        output=[],
+        error={"code": "server_error", "message": "Sandbox provider request failed"},
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind="provider_unavailable").model_dump_json()},
+        failure_report={"failure_id": "agent", "events": {"agent": agent, "sandbox": sandbox}},
+    )
+    client.responses[2] = _Response(response)
+    del client.responses[4]
+    result = await environment.run_request(_request())
+    assert result.result is None and result.failure.terminal is terminal
+    assert result.failure.failure_kind == "provider_unavailable"
+    assert result.failure_report.events["sandbox"].http_status == 404
+    assert not any(path == "/verify" for _, path, _ in client.calls)

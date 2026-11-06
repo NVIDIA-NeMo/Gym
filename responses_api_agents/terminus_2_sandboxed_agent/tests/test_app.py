@@ -12,12 +12,13 @@ import pytest
 from fastapi import HTTPException
 
 import nemo_gym.client.http_client
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentCloseSessionRequest, AgentOutcome, AgentSeedSessionRequest
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     EpisodeId,
     FailureBoundary,
+    FailureReport,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -872,7 +873,7 @@ class TestNativeSessions:
         trajectory = TrajectoryRecord(task_id="path-tracing", rollout_id="r1")
         identities = []
 
-        async def failing_execute(request, body, sandbox, task_id=None):
+        async def failing_execute(request, body, sandbox, task_id=None, report_failure=False):
             identities.append(task_id)
             raise _route_failure(
                 _provider_event(), metrics={"ng_agent_observations": bundle, "ng_trajectory": trajectory}
@@ -906,7 +907,7 @@ class TestNativeSessions:
         assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
         seen = {}
 
-        async def fake_execute(request, body, used_sandbox, task_id=None):
+        async def fake_execute(request, body, used_sandbox, task_id=None, report_failure=False):
             seen["sandbox"] = used_sandbox
             return app_module.NeMoGymResponse(
                 id="resp",
@@ -980,7 +981,7 @@ class TestSessionActivation:
     async def test_identical_retries_join_one_run(self, monkeypatch):
         started, release, runs = asyncio.Event(), asyncio.Event(), []
 
-        async def slow_execute(request, body, sandbox, task_id=None):
+        async def slow_execute(request, body, sandbox, task_id=None, report_failure=False):
             runs.append(body.input)
             started.set()
             await release.wait()
@@ -1008,7 +1009,7 @@ class TestSessionActivation:
         started = asyncio.Event()
         order_ref: list[list[str]] = []
 
-        async def hanging_execute(request, body, sandbox, task_id=None):
+        async def hanging_execute(request, body, sandbox, task_id=None, report_failure=False):
             started.set()
             try:
                 await asyncio.Event().wait()
@@ -1041,7 +1042,9 @@ def _harness_config(**overrides) -> Terminus2AgentConfig:
     return config
 
 
-async def _execute_with_harness(monkeypatch, run, *, config=None, metadata=None, sandbox_exec=None):
+async def _execute_with_harness(
+    monkeypatch, run, *, config=None, metadata=None, sandbox_exec=None, report_failure=False
+):
     """Run ``_execute`` with a fake Harbor loop whose ``run`` is the given coroutine function."""
     server = Terminus2Agent(config=config or _harness_config(), server_client=MagicMock(spec=ServerClient))
 
@@ -1078,7 +1081,7 @@ async def _execute_with_harness(monkeypatch, run, *, config=None, metadata=None,
 
     request = SimpleNamespace(json=request_json, session={app_module.SESSION_ID_KEY: "session-1"})
     body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", metadata=metadata)
-    return server, sandbox, await server._execute(request, body, sandbox)
+    return server, sandbox, await server._execute(request, body, sandbox, report_failure=report_failure)
 
 
 class TestHarnessOutcomes:
@@ -1326,6 +1329,44 @@ class TestHarnessOutcomes:
         assert "session-1" not in agent._session_sandboxes
         # Verification never ran: only the seed call reached the resources server.
         assert agent.server_client.post.await_count == 1
+
+
+class TestSessionInfrastructureFailureReply:
+    """In an agent session the provider failure is reported for the Environment Server's policy to select."""
+
+    @pytest.mark.asyncio
+    async def test_sandbox_failure_is_a_failed_response_that_keeps_the_provider_event(self, monkeypatch):
+        provider_event = _provider_event()
+
+        async def run(agent, instruction, environment, context):
+            raise provider_event
+
+        _, _, (response, route_metrics) = await _execute_with_harness(monkeypatch, run, report_failure=True)
+
+        assert response.status == "failed"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind="provider_unavailable"
+        )
+        report = FailureReport.model_validate(response.model_extra["failure_report"])
+        selected = report.events[report.failure_id]
+        assert (selected.boundary, selected.failure_kind, selected.http_status) == (
+            "agent",
+            "provider_unavailable",
+            None,
+        )
+        provider = report.events[provider_event.event_id]
+        assert (provider.boundary, provider.http_status) == ("sandbox", 503)
+        assert selected.cause_id == provider_event.event_id
+        assert route_metrics["terminus2_completed"] is False
+
+    @pytest.mark.asyncio
+    async def test_cancellation_still_raises(self, monkeypatch):
+        async def run(agent, instruction, environment, context):
+            raise asyncio.CancelledError
+
+        with pytest.raises(NgFailureEvent) as raised:
+            await _execute_with_harness(monkeypatch, run, report_failure=True)
+        assert raised.value.__cause__.failure_kind == "cancelled"
 
 
 def _provider_event():

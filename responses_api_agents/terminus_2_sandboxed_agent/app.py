@@ -26,10 +26,13 @@ from harbor.models.agent.context import AgentContext
 from harbor.models.metric.usage_info import UsageInfo
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.logger import logger as harbor_logger
+from openai.types.responses.response_error import ResponseError
 from pydantic import ConfigDict, Field
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
@@ -54,6 +57,7 @@ from nemo_gym.core import (
     NeMoGymSummary,
     NgFailureEvent,
     agent_route_failure,
+    failure_report_for,
 )
 from nemo_gym.core.failure_kinds import CANCELLED
 from nemo_gym.core.failure_records import SandboxFailureDetails
@@ -714,8 +718,13 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         sandbox: AsyncSandbox,
         task_id: str | None = None,
+        report_failure: bool = False,
     ) -> Tuple[NeMoGymResponse, Dict[str, Any]]:
-        """Run one episode; ``task_id`` is the collector's identity for a session run, whose turn body has none."""
+        """Run one episode; ``task_id`` is the collector's identity for a session run, whose turn body has none.
+
+        ``report_failure`` makes an infrastructure failure a failed response for the caller's outcome policy to select
+        from, instead of a raised route failure (an agent session sets it; the legacy ``/run`` path has no policy).
+        """
         start_time = perf_counter()
         instruction = _instruction(body.input)
         run_body = await request.json()
@@ -927,6 +936,33 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                     *observations.compactions,
                 ],
             )
+        if infrastructure_failure is not None and report_failure and infrastructure_failure.failure_kind != CANCELLED:
+            # An agent session reports the cause and its partial work in a failed response, as Simple Agent does.
+            # The Environment Server selects retry, fail or verify from the failure kind with its configured
+            # ``agent_outcome_policy``, never from the HTTP status; the provider event stays in the report.
+            print(f"Terminus 2 infrastructure failure ({error_type}): {error}", file=sys.stderr)
+            reported = NgFailureEvent(
+                boundary=FailureBoundary.AGENT,
+                failure_kind=infrastructure_failure.failure_kind,
+                failure_reason=infrastructure_failure.failure_reason,
+                operation="agent.run",
+                stage="agent",
+            )
+            reported.__cause__ = infrastructure_failure
+            response = response.model_copy(
+                update={
+                    "status": "failed",
+                    "error": ResponseError(code="server_error", message=infrastructure_failure.failure_reason),
+                    "failure_report": failure_report_for(reported).model_dump(mode="json"),
+                    "metadata": {
+                        **(response.metadata or {}),
+                        AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
+                            failure_kind=infrastructure_failure.failure_kind
+                        ).model_dump_json(),
+                    },
+                }
+            )
+            return response, metrics
         if infrastructure_failure is not None:
             print(f"Terminus 2 infrastructure failure ({error_type}): {error}", file=sys.stderr)
             route_failure = agent_route_failure(infrastructure_failure, operation="agent.run", stage="agent")
@@ -954,6 +990,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                             body,
                             state.sandbox,
                             task_id=state.request.task_id.task_id,
+                            report_failure=True,
                         )
                     except NgFailureEvent as exc:
                         state.metrics = getattr(exc, "metrics", None)

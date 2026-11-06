@@ -18,9 +18,10 @@ from traceback import format_exc
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import OutcomeAction, OutcomePolicyConfig, failure_outcome_policy
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
@@ -72,6 +73,22 @@ fi
 """
 
 
+class TerminalBench21OutcomePolicyConfig(OutcomePolicyConfig):
+    """The verify boundary can mask a sample or score it zero; it cannot fail or grade the episode."""
+
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+    @model_validator(mode="after")
+    def require_verify_actions(self) -> "TerminalBench21OutcomePolicyConfig":
+        if {OutcomeAction.FAIL, OutcomeAction.VERIFY} & {
+            self.default_action,
+            *self.by_failure_kind.values(),
+            *self.by_status_code.values(),
+        }:
+            raise ValueError("Terminal Bench 2.1 verifier outcome policy supports only retry and count_as_zero")
+        return self
+
+
 class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
@@ -90,6 +107,14 @@ class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     sandbox_config: Dict[str, Any]
 
     debug: bool = False
+
+    outcome_policy: TerminalBench21OutcomePolicyConfig = Field(
+        default_factory=TerminalBench21OutcomePolicyConfig,
+        description=(
+            "Action for a verifier that could not produce a verdict, selected by the failure's kind: retry masks the "
+            "sample (the default), count_as_zero keeps it as an unmasked zero. The failure event is recorded either way."
+        ),
+    )
 
 
 class TerminalBench21SeedSessionResponse(BaseSeedSessionResponse):
@@ -682,9 +707,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     try:
                         await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
                     except Exception as download_exc:
-                        # A typed failure is an observed fact; any other one is a failed grade only when the
-                        # sandbox itself confirms that reward.txt is absent.
-                        if isinstance(download_exc, NgFailureEvent) or await self._reward_file_exists(eval_sandbox):
+                        # Typed or not, a failed download does not say the file is missing (OpenSandbox reports a
+                        # missing file as a typed 404 too): it is a failed grade only when the sandbox itself
+                        # confirms that reward.txt is absent.
+                        if await self._reward_file_exists(eval_sandbox):
                             failure_cause = download_exc
                         raise
                     # Providers such as Docker can replace the destination file during download.
@@ -696,6 +722,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
         failure_reason: str | None = None
+        counts_as_zero = False
         # A typed provider failure keeps its kind; only a verifier-side failure is a verifier_error.
         failure_kind = failure_cause.failure_kind if isinstance(failure_cause, NgFailureEvent) else VERIFIER_ERROR
         if failure_cause is not None:
@@ -715,6 +742,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             observe_failure(failure)
             evaluation_completed = False
             reward = 0.0
+            # The configured policy decides whether the failed verification is masked or a scored zero.
+            counts_as_zero = (
+                failure_outcome_policy(failure, config=self.config.outcome_policy) == OutcomeAction.COUNT_AS_ZERO
+            )
 
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
@@ -723,7 +754,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             verification_time_taken=verification_time_taken,
             test_output=test_output,
             golden_patch_output=golden_patch_output,
-            mask_sample=failure_reason is not None,
+            mask_sample=failure_reason is not None and not counts_as_zero,
             failure_kind=failure_kind if failure_reason is not None else None,
             failure_reason=failure_reason,
         )
