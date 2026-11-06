@@ -30,9 +30,12 @@ Surge AI's own scorer (surge-ai/chartography, ``src/chartography/scorer.py``; se
 The judge sees only the final answer text, never the reasoning or the chart: reasoning arrives as separate
 ``reasoning`` items when the policy server runs with a reasoning parser, and only ``message`` items are read.
 
-``reward_mode``:
-- ``strict_pass`` (default): 1.0 when every criterion passes, else 0.0 (the benchmark metric);
-- ``mean_criteria``: the fraction of criteria that pass (partial credit for multi-part answers).
+The reward is 1.0 when every criterion passes, else 0.0 (the benchmark metric, also reported as ``all_pass``).
+The criteria are the entries the judge returns: nothing splits the golden answer into parts beforehand.
+
+The grade is recorded for ``gym eval submit`` (grading path A): the judge call and its parse run inside
+``observe_llm_judge_grading``, and ``record_parsed_judge_verdict()`` marks a reply once it parses. A row that
+needed a parse retry keeps an unknown grading outcome, since its first reply produced no verdict.
 
 Two deliberate divergences from upstream, as in ``gdp_pdf``: an empty answer scores 0 without a judge call;
 and output that stays unparseable raises ``JudgeError`` for the whole row (upstream marks it "unscored"), so
@@ -45,9 +48,9 @@ from __future__ import annotations
 import asyncio
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, ClassVar, Dict, List, Literal, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -62,12 +65,13 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge, record_parsed_judge_verdict
 from resources_servers.chartography import scorer
+from resources_servers.chartography.verifier_fixture import create_chartography_server, invoke_chartography
 
 
-RewardMode = Literal["strict_pass", "mean_criteria"]
 SERVER_DIR = Path(__file__).resolve().parent
 
 
@@ -87,9 +91,8 @@ class ChartographyConfig(BaseResourcesServerConfig):
     # Same request as upstream: no temperature or token limit; the JSON schema is added in _judge().
     judge_chat_create_params: NeMoGymChatCompletionCreateParamsNonStreaming
     judge_prompt_template_fpath: str = "prompt_templates/judge.txt"
-    reward_mode: RewardMode = "strict_pass"
-    judge_max_attempts: int = scorer.MAX_ATTEMPTS
-    judge_endpoint_max_concurrency: Optional[int] = 64
+    judge_max_attempts: int = Field(default=scorer.MAX_ATTEMPTS, ge=1)
+    judge_endpoint_max_concurrency: Optional[int] = Field(default=64, ge=1)
 
 
 # ---------------------------------------------------------------------------
@@ -115,9 +118,7 @@ class ChartographyVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
     verifier_metadata: Optional[dict[str, Any]] = None
-    reward_mode: RewardMode = "strict_pass"
     all_pass: float = 0.0
-    mean_criterion_pass: float = 0.0
     num_criteria: int = 0
     judge_attempts: int = 0
     verdicts: List[CriterionVerdict] = []
@@ -161,7 +162,7 @@ class ChartographyResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: ChartographyVerifyRequest) -> ChartographyVerifyResponse:
         meta = body.verifier_metadata or {}
-        result = ChartographyVerifyResponse(**body.model_dump(), reward=0.0, reward_mode=self.config.reward_mode)
+        result = ChartographyVerifyResponse(**body.model_dump(), reward=0.0)
         question, golden = meta.get("prompt"), meta.get("golden_answer")
         if not (isinstance(question, str) and question.strip() and isinstance(golden, str) and golden.strip()):
             result.mask_sample = True
@@ -175,25 +176,27 @@ class ChartographyResourcesServer(SimpleResourcesServer):
             return result
 
         user_prompt = scorer.render_judge_prompt(self._judge_prompt, question.strip(), golden.strip(), generated)
-        verdicts, raw, attempts = await self._judge(user_prompt)
-        passed = [scorer.verdict_passes(v["score"]) for v in verdicts]
-        result.verdicts = [
-            CriterionVerdict(
-                criterion_id=v["criterion_id"],
-                extracted_answer=v["extracted_answer"],
-                score=str(v["score"]),
-                rationale=v["rationale"],
-                passed=p,
-            )
-            for v, p in zip(verdicts, passed)
-        ]
-        result.judge_raw, result.judge_attempts, result.num_criteria = raw, attempts, len(verdicts)
-        result.all_pass = float(all(passed))
-        result.mean_criterion_pass = sum(passed) / len(passed)
-        result.reward = result.all_pass if self.config.reward_mode == "strict_pass" else result.mean_criterion_pass
-        return result
 
-    async def _judge(self, user_prompt: str) -> tuple[List[scorer.CriterionVerdict], str, int]:
+        async def grade() -> ChartographyVerifyResponse:
+            verdicts, raw, attempts = await self._judge(user_prompt)
+            passed = [scorer.verdict_passes(v["score"]) for v in verdicts]
+            result.verdicts = [
+                CriterionVerdict(
+                    criterion_id=v["criterion_id"],
+                    extracted_answer=v["extracted_answer"],
+                    score=str(v["score"]),
+                    rationale=v["rationale"],
+                    passed=p,
+                )
+                for v, p in zip(verdicts, passed)
+            ]
+            result.judge_raw, result.judge_attempts, result.num_criteria = raw, attempts, len(verdicts)
+            result.all_pass = result.reward = float(all(passed))
+            return result
+
+        return await observe_llm_judge_grading(grade)
+
+    async def _judge(self, user_prompt: str) -> tuple[List[scorer.ParsedCriterion], str, int]:
         cfg = self.config
         params = cfg.judge_chat_create_params.model_copy(deep=True)
         params.messages = [{"role": "user", "content": user_prompt}]
@@ -203,27 +206,25 @@ class ChartographyResourcesServer(SimpleResourcesServer):
         }
         last_error: Optional[Exception] = None
         for attempt in range(1, cfg.judge_max_attempts + 1):
+            # call_judge records a failed call (transport, timeout, HTTP error) and raises it as a judge failure.
             async with self._judge_sem:
-                try:
-                    response = await call_judge(
-                        self.server_client,
-                        server_name=cfg.judge_model_server.name,
-                        url_path="/v1/chat/completions",
-                        json=params,
-                        response_model=NeMoGymChatCompletion,
-                    )
-                except JUDGE_FAILURES as e:
-                    if not is_judge_failure(e):
-                        raise
-                    print(f"[chartography] judge HTTP error: {e}", flush=True)
-                    raise
+                response = await call_judge(
+                    self.server_client,
+                    server_name=cfg.judge_model_server.name,
+                    url_path="/v1/chat/completions",
+                    json=params,
+                    response_model=NeMoGymChatCompletion,
+                )
             try:
                 raw = response.choices[0].message.content
                 if not isinstance(raw, str) or not raw.strip():
                     raise scorer.ParseError("judge returned no textual content")
-                return scorer.parse_verdict(raw), raw, attempt
+                verdicts = scorer.parse_verdict(raw)
             except (scorer.ParseError, IndexError, AttributeError) as e:
                 last_error = e
+                continue
+            record_parsed_judge_verdict()
+            return verdicts, raw, attempt
         raise JudgeError(
             f"chartography judge output unparseable after {cfg.judge_max_attempts} attempts: {last_error}"
         )
@@ -234,14 +235,14 @@ class ChartographyResourcesServer(SimpleResourcesServer):
 
     @staticmethod
     def _score_fn(r: Dict[str, Any]) -> Dict[str, float]:
+        # A rollout counted as 0 without verification carries only its reward.
         return {
             "reward": float(r.get("reward", 0.0)),
             "all_pass": float(r.get("all_pass", r.get("reward", 0.0))),
-            "mean_criterion_pass": float(r.get("mean_criterion_pass", r.get("reward", 0.0))),
         }
 
     def compute_metrics(self, tasks: List[List[Dict[str, Any]]]) -> Dict[str, Any]:
-        """Reward, all-pass and mean criterion pass, overall and per domain."""
+        """Reward and all-pass, overall and per domain."""
         overall, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=self._score_fn)
         metrics: Dict[str, Any] = {**overall}
         subsets: Dict[str, List[List[Dict[str, Any]]]] = {}
@@ -258,10 +259,18 @@ class ChartographyResourcesServer(SimpleResourcesServer):
         key: Dict[str, Any] = {
             n: agent_metrics[n] for n in ("mean/input_tokens", "mean/output_tokens") if n in agent_metrics
         }
-        names = ["reward", "all_pass", "mean_criterion_pass"]
+        names = ["reward", "all_pass"]
         key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=names))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=names))
         return key
+
+
+VERIFIER_FIXTURE = VerifierFixture(
+    server_factory=create_chartography_server,
+    request_model=ChartographyVerifyRequest,
+    cases_path=SERVER_DIR / "tests" / "verifier_cases.jsonl",
+    invoke=invoke_chartography,
+)
 
 
 if __name__ == "__main__":

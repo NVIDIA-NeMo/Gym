@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from benchmarks.chartography import prepare as prepare_module
 from benchmarks.chartography.prepare import (
     SOURCE_DIR_ENV,
     ChartographySourceError,
@@ -27,8 +28,12 @@ from benchmarks.chartography.prepare import (
     domain_slug,
     prepare,
     read_source_table,
+    release_fingerprint,
 )
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.chartography.app import ChartographyVerifyRequest
+from resources_servers.chartography.task_data import TaskData
+from resources_servers.chartography.verifier_fixture import create_chartography_server, invoke_chartography
 
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 16
@@ -55,6 +60,18 @@ RECORDS = [
         "source_url": "https://example.com/chart",
     },
 ]
+
+
+@pytest.fixture
+def pinned_to(monkeypatch: pytest.MonkeyPatch):
+    """Pin the release checks to a synthetic source, so a full preparation of it passes."""
+
+    def pin(source: Path) -> None:
+        records = read_source_table(source)
+        monkeypatch.setattr(prepare_module, "EXPECTED_NUM_TASKS", len(records))
+        monkeypatch.setattr(prepare_module, "RELEASE_SHA256", release_fingerprint(records, source))
+
+    return pin
 
 
 def _write_source(root: Path, records=RECORDS, fmt: str = "jsonl") -> Path:
@@ -109,6 +126,59 @@ class TestRows:
         b = _write_source(tmp_path / "b", fmt="parquet")
         assert build_gym_rows(read_source_table(a), a) == build_gym_rows(read_source_table(b), b)
 
+    def test_chart_symlinked_into_a_cache_is_accepted(self, tmp_path: Path) -> None:
+        # A Hugging Face cache snapshot holds symlinks into a blobs/ folder outside the snapshot directory.
+        source = _write_source(tmp_path / "snapshot")
+        blob = tmp_path / "blobs" / "0123abcd"
+        blob.parent.mkdir()
+        blob.write_bytes(PNG)
+        (source / "charts" / "one.png").unlink()
+        (source / "charts" / "one.png").symlink_to(blob)
+        rows = build_gym_rows(read_source_table(source), source)
+        assert rows[0]["responses_create_params"]["input"][0]["content"][1]["image_url"].endswith(
+            base64.b64encode(PNG).decode()
+        )
+
+    @pytest.mark.asyncio
+    async def test_prepared_row_validates_and_is_graded(self, tmp_path: Path) -> None:
+        source = _write_source(tmp_path)
+        row = build_gym_rows(read_source_table(source), source)[0]
+        TaskData.model_validate(row["verifier_metadata"])
+        judge_output = json.dumps(
+            {"scores": [{"criterion_id": "criterion_1", "extracted_answer": "34.8 m", "score": 1, "rationale": "r"}]}
+        )
+        request = ChartographyVerifyRequest(
+            **row, response=_response("Head: 34.8 m"), fixture_judge_output=judge_output
+        )
+        server = create_chartography_server()
+        result = await invoke_chartography(server, request)
+        assert result.reward == 1.0 and not result.mask_sample
+        sent = server.server_client.post.await_args.kwargs["json"].messages[0]["content"]
+        assert f"Golden answer: {RECORDS[0]['golden_answer'].strip()}\n" in sent
+
+
+def _response(text: str) -> NeMoGymResponse:
+    return NeMoGymResponse.model_validate(
+        {
+            "id": "resp",
+            "created_at": 0,
+            "model": "test",
+            "object": "response",
+            "output": [
+                {
+                    "id": "msg",
+                    "type": "message",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+        }
+    )
+
 
 @pytest.mark.parametrize(
     "variant, expected",
@@ -134,6 +204,8 @@ class TestInvalidSources:
             ("task_id", None, "no task_id"),
             ("chart_path", "charts/missing.png", "missing chart"),
             ("chart_path", "../outside.png", "outside"),
+            ("chart_path", "charts/../../outside.png", "outside"),
+            ("chart_path", "/etc/hostname", "outside"),
         ],
     )
     def test_bad_record(self, tmp_path: Path, field, value, match) -> None:
@@ -159,21 +231,61 @@ class TestInvalidSources:
             read_source_table(tmp_path)
 
 
-class TestPrepare:
-    def test_writes_jsonl(self, tmp_path: Path) -> None:
+class TestReleasePin:
+    def test_published_release_is_pinned(self) -> None:
+        assert prepare_module.EXPECTED_NUM_TASKS == 100
+        assert len(prepare_module.RELEASE_SHA256) == 64
+
+    def test_fingerprint_ignores_format_and_row_order(self, tmp_path: Path) -> None:
+        a = _write_source(tmp_path / "a", fmt="jsonl")
+        b = _write_source(tmp_path / "b", fmt="parquet")
+        records = read_source_table(a)
+        assert release_fingerprint(records, a) == release_fingerprint(read_source_table(b), b)
+        assert release_fingerprint(records, a) == release_fingerprint(list(reversed(records)), a)
+
+    @pytest.mark.parametrize("edit", ["golden_answer", "chart"])
+    def test_fingerprint_changes_with_any_edit(self, tmp_path: Path, edit: str) -> None:
+        source = _write_source(tmp_path)
+        before = release_fingerprint(read_source_table(source), source)
+        if edit == "chart":
+            (source / "charts" / "one.png").write_bytes(PNG + b"\x00")
+            records = read_source_table(source)
+        else:
+            records = [dict(RECORDS[0], golden_answer="Head: 34.6 m"), RECORDS[1]]
+        assert release_fingerprint(records, source) != before
+
+    def test_full_run_needs_the_release_task_count(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "src")
+        with pytest.raises(ChartographySourceError, match="has 2 tasks; the release has 100"):
+            prepare(source_dir=str(source), output_fpath=str(tmp_path / "bench.jsonl"))
+        assert not (tmp_path / "bench.jsonl").exists()
+
+    def test_full_run_rejects_a_modified_release(self, tmp_path: Path, pinned_to) -> None:
+        source = _write_source(tmp_path / "src")
+        pinned_to(source)
+        (source / "charts" / "two.JPG").write_bytes(JPEG + b"\x00")
+        with pytest.raises(ChartographySourceError, match="does not match the published Chartography release"):
+            prepare(source_dir=str(source), output_fpath=str(tmp_path / "bench.jsonl"))
+        assert not (tmp_path / "bench.jsonl").exists()
+
+
+class TestPrepare:
+    def test_writes_jsonl(self, tmp_path: Path, pinned_to) -> None:
+        source = _write_source(tmp_path / "src")
+        pinned_to(source)
         out = prepare(source_dir=str(source), output_fpath=str(tmp_path / "out" / "bench.jsonl"))
         rows = [json.loads(line) for line in out.read_text().splitlines()]
         assert [r["verifier_metadata"]["task_id"] for r in rows] == ["t1", "t2"]
         assert not (tmp_path / "out" / "bench.jsonl.tmp").exists()
 
-    def test_limit(self, tmp_path: Path) -> None:
+    def test_limit_skips_the_release_checks(self, tmp_path: Path) -> None:
         source = _write_source(tmp_path / "src")
         out = prepare(source_dir=str(source), limit=1, output_fpath=str(tmp_path / "bench.jsonl"))
         assert len(out.read_text().splitlines()) == 1
 
-    def test_source_from_environment(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_source_from_environment(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pinned_to) -> None:
         source = _write_source(tmp_path / "src")
+        pinned_to(source)
         monkeypatch.setenv(SOURCE_DIR_ENV, str(source))
         out = prepare(output_fpath=str(tmp_path / "bench.jsonl"))
         assert len(out.read_text().splitlines()) == 2

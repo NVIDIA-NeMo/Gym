@@ -13,7 +13,6 @@ chartography:
       judge_chat_create_params:
         messages: []
       judge_prompt_template_fpath: prompt_templates/judge.txt
-      reward_mode: strict_pass  # strict_pass (all criteria pass; the benchmark metric) | mean_criteria (partial credit)
       judge_max_attempts: 5
       judge_endpoint_max_concurrency: 64
 chartography_simple_agent:

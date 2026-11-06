@@ -16,8 +16,12 @@
 
 Mirrors Surge AI's own scorer (https://github.com/surge-ai/chartography, ``src/chartography/scorer.py`` at
 commit 3f1bf837232d3918c2cc35c6e2418c9e70d2a57b). The judge prompt is ``prompt_templates/judge.txt`` (the
-upstream ``JUDGE_PROMPT_TEMPLATE``, unchanged); the response schema, the verdict parsing and the pass rule are
-kept identical. Only the Inspect AI wrappers are replaced, so the judge can be any OpenAI-compatible endpoint.
+upstream ``JUDGE_PROMPT_TEMPLATE``, unchanged), and the response schema and the pass rule are upstream's. The
+Inspect AI wrappers are replaced, so the judge can be any OpenAI-compatible endpoint, and a few details differ:
+
+- the three placeholders are filled in one pass, so placeholder text inside the response is never expanded;
+- the question, golden answer and response are stripped of surrounding whitespace before rendering;
+- parsing also rejects a non-finite score and a score too large to round, as unparseable output that is retried.
 """
 
 from __future__ import annotations
@@ -74,23 +78,32 @@ class ParseError(ValueError):
     """Judge output failed strict parsing or validation."""
 
 
-class CriterionVerdict(TypedDict):
+class ParsedCriterion(TypedDict):
     criterion_id: str
     extracted_answer: str
     score: Decimal
     rationale: str
 
 
+_PLACEHOLDER = re.compile(r"\{\{ rubric\.(response_generation_prompt|response_to_grade|all_criteria) \}\}")
+
+
 def render_judge_prompt(template: str, question: str, golden_answer: str, response_text: str) -> str:
-    """Fill the upstream template's three placeholders."""
-    return (
-        template.replace("{{ rubric.response_generation_prompt }}", question)
-        .replace("{{ rubric.response_to_grade }}", response_text)
-        .replace("{{ rubric.all_criteria }}", golden_answer)
-    )
+    """Fill the upstream template's three placeholders in one pass.
+
+    Chained ``str.replace`` calls would expand a placeholder that appears inside the response (for example
+    ``{{ rubric.all_criteria }}`` written by the policy) into the golden answer; one pass never rescans what it
+    substituted.
+    """
+    values = {
+        "response_generation_prompt": question,
+        "response_to_grade": response_text,
+        "all_criteria": golden_answer,
+    }
+    return _PLACEHOLDER.sub(lambda m: values[m.group(1)], template)
 
 
-def parse_verdict(raw_text: str) -> List[CriterionVerdict]:
+def parse_verdict(raw_text: str) -> List[ParsedCriterion]:
     """Strict parse of the judge output: markdown fences stripped, a non-empty ``scores`` array required."""
     cleaned = raw_text.strip()
     cleaned = re.sub(r"\A```(?:json)?\s*", "", cleaned, flags=re.IGNORECASE)
@@ -107,7 +120,7 @@ def parse_verdict(raw_text: str) -> List[CriterionVerdict]:
     return [_parse_criterion(entry) for entry in entries]
 
 
-def _parse_criterion(entry: Any) -> CriterionVerdict:
+def _parse_criterion(entry: Any) -> ParsedCriterion:
     if not isinstance(entry, dict):
         raise ParseError("Each 'scores' entry must be a JSON object")
     missing = {"criterion_id", "extracted_answer", "score", "rationale"} - entry.keys()
@@ -124,7 +137,12 @@ def _parse_criterion(entry: Any) -> CriterionVerdict:
         raise ParseError(f"'score' is not a valid decimal: {raw_score!r}") from e
     if not score.is_finite():
         raise ParseError(f"'score' must be finite: {raw_score!r}")
-    return CriterionVerdict(
+    try:
+        verdict_passes(score)
+    except InvalidOperation as e:
+        # Too large to round to four decimals (for example 1e30): unparseable, so it is retried.
+        raise ParseError(f"'score' is out of range: {raw_score!r}") from e
+    return ParsedCriterion(
         criterion_id=_scalar_str(entry["criterion_id"], "criterion_id"),
         extracted_answer=_scalar_str(entry["extracted_answer"], "extracted_answer"),
         score=score,

@@ -19,21 +19,27 @@ Mirrors [Surge AI's own scorer](https://github.com/surge-ai/chartography/blob/3f
 - Strict parsing (markdown fences stripped, schema validated, score coerced to Decimal) with up to
   `judge_max_attempts` attempts (default 5, upstream `MAX_RETRIES=4`). A criterion passes iff its score,
   rounded half-up to four decimals, is at least 1.
+- The reward is 1 when every criterion passes, else 0: the benchmark metric, also reported as `all_pass`.
+  The criteria are the entries the judge returns; nothing splits the golden answer into parts beforehand.
 
-`reward_mode`:
-
-- `strict_pass` (default): 1 when every criterion passes, else 0. This is the benchmark metric.
-- `mean_criteria`: the fraction of criteria that pass (partial credit for multi-part answers).
-
-Every verify response also reports `all_pass`, `mean_criterion_pass`, the per-criterion verdicts and the judge's
-raw output. A row without a question or golden answer is masked (`mask_sample`,
+Every verify response also reports the per-criterion verdicts, the number of judge attempts and the judge's raw
+output. A row without a question or golden answer is masked (`mask_sample`,
 `failure_kind: chartography:invalid_reference`), since it cannot be measured.
+
+**Grading path A** (the resources server observes it): the judge call and its parse run inside
+`observe_llm_judge_grading`, and `record_parsed_judge_verdict()` marks the reply once it parses, so
+`gym eval submit` binds each grade to the judge reply. A row that needed a parse retry keeps an unknown grading
+outcome, since its first reply produced no verdict.
 
 Two deliberate divergences from upstream, as in `gdp_pdf`:
 
 - **An empty answer scores 0 without a judge call.** Upstream sends it to the judge, which scores it 0.
 - **Unparseable judge output fails the row.** Upstream marks it "unscored"; here `JudgeError` routes the row to
   the failures sidecar, so it is excluded from the metrics rather than scored 0.
+
+Smaller differences: the question, golden answer and response are stripped of surrounding whitespace before the
+prompt is rendered; the three placeholders are filled in one pass, so placeholder text written by the policy is
+never expanded; and a non-finite score, or one too large to round, counts as unparseable output and is retried.
 
 The judge model is whatever you configure. The benchmark's leaderboard standard is Gemini 3.5 Flash with ten
 runs per task.
@@ -48,12 +54,15 @@ runs per task.
   ]}]},
   "verifier_metadata": {
     "task_id": "<id>",
-    "domain": "<chart or question type, used for per-domain metrics>",
+    "domain": "<subject-area slug, used for per-domain metrics>",
     "prompt": "<question>",
     "golden_answer": "<golden answer, one part per line>"
   }
 }
 ```
+
+`task_data.py` is the row schema: `task_id`, `prompt` and `golden_answer` are required; `domain` and the
+benchmark's provenance fields (`domain_combined`, `source_type`, `source_url`, `chart_path`) are optional.
 
 `data/example.jsonl` holds five synthetic charts drawn from known values (`make_example_data.py`; needs
 matplotlib). The Chartography benchmark itself is not included and is for evaluation only.
@@ -67,8 +76,11 @@ Set `judge_base_url`, `judge_api_key` and `judge_model_name` in `env.yaml`.
 
 ```bash
 gym env test +entrypoint=resources_servers/chartography   # unit tests, judge mocked
+gym env test chartography                                 # verifier fixture (tests/verifier_cases.jsonl)
 
-gym env start --config resources_servers/chartography/configs/chartography.yaml --model-type openai_model
+gym env start --model-type openai_model \
+  --config resources_servers/chartography/configs/chartography.yaml \
+  --config resources_servers/chartography/configs/judge_model_openai.yaml
 
 gym eval run --no-serve \
   --agent chartography_simple_agent \
