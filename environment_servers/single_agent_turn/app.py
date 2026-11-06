@@ -102,9 +102,6 @@ class SessionHandles(BaseModel):
     # Whether the agent borrows a sandbox the resources server lent in its seed reply.
     # A restore rebuilds that sandbox under a new id, so the replacement attempt seeds both sessions again.
     borrowed_sandbox: bool = False
-    # Seconds of the episode's time budget spent when the boundary was recorded, not counting parked time.
-    # A replacement attempt that continues the boundary has only the rest.
-    elapsed_s: float = 0.0
 
     @classmethod
     def new(cls) -> "SessionHandles":
@@ -172,15 +169,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if "handles" in continuation
             else SessionHandles.new()
         )
-        # A replacement attempt has what the attempt it continues left of the episode's budget.
-        self.checkpoint_charge_elapsed(request, handles.elapsed_s)
-
-        def bookmark(next_stage: str) -> dict[str, Any]:
-            elapsed = self.checkpoint_elapsed(request)
-            if elapsed is not None:
-                handles.elapsed_s = elapsed
-            return {"next": next_stage, "handles": handles.model_dump()}
-
         agent_response = (
             NeMoGymResponse.model_validate(continuation["response"]) if continuation.get("response") else None
         )
@@ -216,7 +204,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         )
 
         if stage == "seed":
-            await self.checkpoint_boundary(request, bookmark("seed"))
+            await self.checkpoint_boundary(request, {"next": "seed", "handles": handles.model_dump()})
             # Seeds are idempotent for a caller-assigned session ID, so a checkpoint need not wait for them.
             async with self.checkpoint_step(request, "replay"):
                 agent_cleanup = await self.seed_episode_sessions(
@@ -232,7 +220,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 await self.reseed_after_restore(request, handles)
 
         if stage == "invoke_agent":
-            await self.checkpoint_boundary(request, bookmark("invoke_agent"))
+            await self.checkpoint_boundary(request, {"next": "invoke_agent", "handles": handles.model_dump()})
             # The agent parks at its own boundaries and continues from them after a restore.
             try:
                 async with self.checkpoint_step(request, "replay"):
@@ -256,9 +244,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             # Park before the close, never inside it:
             # a checkpoint that counted this episode before the activation never finds it inside a wait step,
             # and a replacement restored here closes nothing before resume.
-            close_bookmark = bookmark("close_agent")
             await self.checkpoint_boundary(
-                request, lambda: close_bookmark | {"response": agent_response.model_dump(mode="json")}
+                request,
+                lambda: {
+                    "next": "close_agent",
+                    "handles": handles.model_dump(),
+                    "response": agent_response.model_dump(mode="json"),
+                },
             )
             # Closing returns the agent's observations and final resources cookies exactly once,
             # so a checkpoint waits for it and records them.
@@ -325,11 +317,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     trajectory=trajectory,
                 ) from cause
         if stage == "verify":
-            verify_bookmark = bookmark("verify")
             await self.checkpoint_boundary(
                 request,
-                lambda: verify_bookmark
-                | {
+                lambda: {
+                    "next": "verify",
+                    "handles": handles.model_dump(),
                     "response": agent_response.model_dump(mode="json"),
                     "observations": dumped_observations(),
                     "trajectory": dumped_trajectory(),
@@ -350,11 +342,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         # Every path ends here, at the return stage.
         # Record the result so a restore never runs a state-changing verification twice,
         # and park before the final cleanup, so a replacement restored here does not end before resume.
-        return_bookmark = bookmark("return")
         await self.checkpoint_boundary(
             request,
-            lambda: return_bookmark
-            | {
+            lambda: {
+                "next": "return",
+                "handles": handles.model_dump(),
                 "result": verification.model_dump(mode="json"),
                 "observations": dumped_observations(),
                 "trajectory": dumped_trajectory(),
@@ -388,7 +380,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         ``register_agent_cleanup`` runs between the two seeds, so a lost agent seed reply is still closed;
         its result is returned.
-        An episode whose agent holds resources MCP grants restarts after a crash unless the agent re-binds them.
+        An episode whose agent holds resources MCP grants restarts after a crash
+        unless the agent borrows a sandbox the resources seed lent and re-binds them.
         """
         seed = await self._seed_resources(request, handles)
         registered = register_agent_cleanup() if register_agent_cleanup is not None else None
@@ -479,6 +472,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     failure_reason=f"Unsupported resources MCP transport: {seed.resources_tools.transport}",
                     terminal=True,
                 )
+            if seed.sandbox_access is None:
+                # The MCP session token names this attempt, and only a restore's re-seed hands the agent the token
+                # of the attempt that replaces it. A restore re-seeds only an episode whose agent borrows a sandbox,
+                # so without one the agent would keep a token the Resources Server refuses, whatever it declares:
+                # the episode restarts from its input after a crash.
+                # Marked before the agent seed, so no checkpoint exports the agent session it creates.
+                await self.checkpoint_restart(request)
             url_path = seed.resources_tools.url_path.lstrip("/")
             tool_accesses.append(
                 MCPToolAccess(
@@ -510,15 +510,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             if agent_session.agent_session_id != handles.agent_session_id:
                 raise ValueError("Agent seed returned a different agent_session_id")
             handles.agent_cookies = _cookies(agent_create_http_response)
-            if seed_restarts(agent_create_http_response.headers):
-                await self.checkpoint_restart(request)
-            elif "mcp" in self.config.resources_tool_transports and not seed_rebinds_tools(
-                agent_create_http_response.headers
+            # The agent cannot capture its session, or holds an MCP session token it cannot exchange for the one a
+            # restore's re-seed carries: the Resources Server refuses the token once a restore replaces this attempt,
+            # so the episode restarts from its input after a crash.
+            # Such an agent reports the restart on its own seed reply, so no checkpoint exports its session;
+            # the MCP check covers an agent whose own check misses that case.
+            if seed_restarts(agent_create_http_response.headers) or (
+                "mcp" in self.config.resources_tool_transports
+                and not seed_rebinds_tools(agent_create_http_response.headers)
             ):
-                # The MCP session token names this attempt, and the Resources Server refuses it once a restore
-                # replaces it. An agent that keeps the token it was seeded with would see every tool call fail
-                # after a restore, so the episode restarts from its input after a crash instead.
-                # An agent that takes the new token its replacement attempt's seed carries can continue.
                 await self.checkpoint_restart(request)
         except Exception as error:
             raise dependency_failure(

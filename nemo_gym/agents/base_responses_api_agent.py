@@ -74,7 +74,7 @@ from nemo_gym.server_runtime._checkpoint.agent import (
     RestartOnlyTrackingMiddleware,
     RestoredAgentSession,
 )
-from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode, require_checkpoint_id_keyword
 from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
@@ -730,6 +730,13 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             participant = self._restart_only
             app.add_middleware(RestartOnlyTrackingMiddleware, participant=self._restart_only)
         else:
+            require_checkpoint_id_keyword(self, "export_agent_sessions")
+            if self.rebinds_tool_accesses and not self._rebinds_restored_sessions():
+                # Its seed replies would let MCP episodes continue after a restore, and the re-seed would refuse them.
+                raise ValueError(
+                    f"{type(self).__name__} declares rebinds_tool_accesses but does not override "
+                    "_rebind_restored_agent_session_state, so a restored session could not take new tool grants"
+                )
             self._checkpoint_participant = AgentSessionParticipant(self)
             participant = self._checkpoint_participant
         install_server_participant(
@@ -770,7 +777,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     async def release_external_state(self, kept: frozenset[str]) -> None:
         """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as snapshots of sandboxes the
-        agent owns. The default keeps nothing outside Gym."""
+        agent owns. The default keeps nothing outside Gym.
+
+        Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;
+        an empty ``kept`` means nothing will be restored again.
+
+        - It holds the control lock: no prepare, commit, or restore runs meanwhile, and no checkpoint is open.
+        - It is cancelled at the release request's deadline, and the controller releases again later,
+          so it must tolerate state an earlier call already deleted and resume a deletion one left half done.
+        - Admission stays open: activations keep running, so it must not touch what live sessions use.
+        - With several workers every worker runs it, so deleting what another worker already deleted must not fail.
+        - Keep by reference, not by age: keep whatever a checkpoint in ``kept`` refers to, and delete the rest.
+        """
 
     def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
         """Whether this agent cannot capture the session ``body`` seeds, so its episode starts over after a crash.
@@ -778,8 +796,11 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         An exported agent whose session state lives where no checkpoint reaches it, such as a sandbox it owns
         without a snapshot, says so here. The seed reply then carries the restart header,
         and the session is never exported nor waited for.
+        The default restarts a session granted MCP tools unless the agent declares ``rebinds_tool_accesses``:
+        its MCP session token names the seeding attempt, and the Resources Server refuses it once a restore
+        replaces that attempt. Deciding it here, before the session exists, keeps every checkpoint from exporting it.
         """
-        return False
+        return not self.rebinds_tool_accesses and any(access.kind == "mcp" for access in body.tool_accesses)
 
     async def _rebind_restored_agent_session_state(
         self, state: AgentSessionState, body: AgentSeedSessionRequest

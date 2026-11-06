@@ -273,6 +273,7 @@ async def release(
     The list must be complete: a checkpoint it leaves out can no longer be restored.
     Pass an empty list only once the run is complete for good.
     Refused while a checkpoint is open: resume first.
+    A participant refuses as stale a release for a checkpoint older than the latest one it resumed.
 
     Best effort: every participant is asked, and the failures are returned by server name instead of raised.
     What a failed release left behind is still recorded, and the next release deletes it.

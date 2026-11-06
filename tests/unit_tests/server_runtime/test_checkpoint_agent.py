@@ -1490,3 +1490,165 @@ async def test_an_episode_the_environment_reports_as_a_restart_does_not_hold_up_
     }
     assert in_tool_call_through_the_commit
     assert response.result.reward == 1.0
+
+
+async def test_a_restart_uses_a_slot_or_a_policy_reply_it_gets_during_a_checkpoint_at_once() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_ids = {"restart": EpisodeId(rollout_id="restart"), "saved": EpisodeId(rollout_id="saved")}
+    participant.open_session("restart", episode_ids["restart"], restart=True)
+    participant.open_session("saved", episode_ids["saved"])
+    slot, reply = asyncio.Semaphore(0), asyncio.Event()
+    progress: dict[str, list[str]] = {"restart": [], "saved": []}
+
+    async def activation(key: str) -> None:
+        async with participant.activation(key, episode_ids[key]) as running:
+            async with running.queued():
+                await slot.acquire()
+            progress[key].append("slot")
+            async with running.awaiting_model():
+                await reply.wait()
+            progress[key].append("reply")
+
+    tasks = [asyncio.create_task(activation(key)) for key in progress]
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    slot.release()
+    slot.release()
+    # Nothing of the restart is in the checkpoint, so it starts work with its slot, and uses its reply, at once.
+    await _until(lambda: progress["restart"] == ["slot"])
+    reply.set()
+    await _until(lambda: progress["restart"] == ["slot", "reply"])
+    await asyncio.sleep(0.05)
+    held = list(progress["saved"])
+    ready = participant.ready()
+    await participant.open_admission()
+    await asyncio.wait_for(asyncio.gather(*tasks), 5)
+
+    # The checkpoint may have counted the saved session as parked while it queued: it stays parked until resume.
+    assert held == [] and ready
+    assert progress["saved"] == ["slot", "reply"]
+
+
+async def test_a_policy_reply_held_for_a_checkpoint_still_parks_a_session_the_checkpoint_saves() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    reply = asyncio.Event()
+    replied: list[str] = []
+
+    async def activation() -> None:
+        async with participant.activation("s", episode_id) as running:
+            await running.boundary(lambda: {"step": 1})
+            async with running.awaiting_model():
+                await reply.wait()
+            replied.append("reply")
+
+    task = asyncio.create_task(activation())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    reply.set()
+    await asyncio.sleep(0.05)
+    held = list(replied)
+    await participant.open_admission()
+    await asyncio.wait_for(task, 5)
+
+    assert held == [] and replied == ["reply"]
+
+
+@pytest.mark.parametrize("ending", ["retire", "close"])
+async def test_a_slot_taken_while_a_checkpoint_is_open_is_given_back_when_the_parked_session_ends(ending: str) -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    slot = asyncio.Semaphore(1)
+    await slot.acquire()  # Held by another activation.
+    worked: list[str] = []
+
+    async def activation() -> None:
+        async with participant.activation("s", episode_id) as running:
+            async with running.slot(slot):
+                worked.append("work")
+
+    task = asyncio.create_task(activation())
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    # The other activation finishes while the checkpoint is open: this one takes the slot, and parks with it.
+    slot.release()
+    await asyncio.sleep(0.05)
+    taken_and_parked = slot.locked() and participant.ready() and not worked
+    if ending == "retire":
+        await participant.mark_retired([episode_id])
+        await participant.retire(episode_id)
+    else:
+        await participant.close_session("s")
+    await asyncio.wait([task])
+
+    assert taken_and_parked and worked == []
+    # The slot came back: the next activation takes it at once.
+    await asyncio.wait_for(slot.acquire(), 1)
+
+
+async def test_a_slot_is_given_back_after_the_work_and_its_wait_ends_at_the_deadline() -> None:
+    participant = AgentSessionParticipant(Hooks())
+    episode_id = EpisodeId(rollout_id="r")
+    participant.open_session("s", episode_id)
+    slot = asyncio.Semaphore(1)
+
+    async with participant.activation("s", episode_id) as running:
+        async with running.slot(slot):
+            assert slot.locked()
+        assert not slot.locked()
+        await slot.acquire()
+        with pytest.raises(TimeoutError):
+            async with running.slot(slot, deadline=asyncio.get_running_loop().time() + 0.05):
+                pass
+        slot.release()
+
+    assert not slot.locked()
+
+
+@pytest.mark.parametrize("wait", ["queued", "awaiting_model"])
+async def test_a_restored_session_waiting_before_its_first_boundary_is_exported_at_its_restored_one(wait: str) -> None:
+    participant = AgentSessionParticipant(Hooks())
+    first_attempt = EpisodeId(rollout_id="r", attempt=1)
+    await participant.install(
+        [AgentSessionRecord(session_key="s", episode_id=first_attempt, session={}, boundary={"step": 4})],
+        [first_attempt],
+    )
+    replacement = EpisodeId(rollout_id="r", attempt=2)
+    participant.open_session("new", EpisodeId(rollout_id="new"))
+    waited, finished = asyncio.Event(), asyncio.Event()
+    stepped: list[str] = []
+
+    async def activation(key: str, episode_id: EpisodeId) -> None:
+        async with participant.activation(key, episode_id) as running:
+            async with getattr(running, wait)():
+                await waited.wait()
+            await running.boundary(lambda: {"step": 5})
+            async with running.awaiting_model():
+                stepped.append(key)
+                await finished.wait()
+
+    tasks = [
+        asyncio.create_task(activation("s", replacement)),
+        asyncio.create_task(activation("new", EpisodeId(rollout_id="new"))),
+    ]
+    await asyncio.sleep(0.01)
+    await participant.close_admission(CLOSE)
+    while_waiting = {
+        record.session_key: record.boundary for record in await participant.export(None, checkpoint_id="c")
+    }
+    await participant.open_admission()
+    waited.set()
+    await _until(lambda: len(stepped) == 2)
+    await participant.close_admission(CLOSE)
+    after_its_own = {
+        record.session_key: record.boundary for record in await participant.export(None, checkpoint_id="c")
+    }
+    await participant.open_admission()
+    finished.set()
+    await asyncio.wait_for(asyncio.gather(*tasks), 5)
+
+    # A restore after the first checkpoint continues the restored session from step 4 again, not from its input.
+    assert while_waiting == {"s": {"step": 4}, "new": None}
+    assert after_its_own == {"s": {"step": 5}, "new": {"step": 5}}

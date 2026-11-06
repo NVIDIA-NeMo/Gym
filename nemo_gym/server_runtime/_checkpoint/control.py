@@ -37,6 +37,7 @@ and admission never disagree.
 
 import asyncio
 import hmac
+import inspect
 import logging
 import time
 from abc import ABC, abstractmethod
@@ -562,6 +563,20 @@ def next_attempt(episode_id: EpisodeId) -> EpisodeId:
     return episode_id.model_copy(update={"attempt": episode_id.attempt + 1})
 
 
+def require_checkpoint_id_keyword(owner: object, hook: str) -> None:
+    """Refuse at startup an export hook of ``owner`` that a commit could not call with ``checkpoint_id``.
+
+    Otherwise a hook written before it took the keyword fails only at the first checkpoint, with rollouts parked.
+    """
+    parameters = inspect.signature(getattr(owner, hook)).parameters.values()
+    if not any(
+        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        or (parameter.name == "checkpoint_id" and parameter.kind is not inspect.Parameter.POSITIONAL_ONLY)
+        for parameter in parameters
+    ):
+        raise ValueError(f"{type(owner).__name__}.{hook} must accept the keyword argument checkpoint_id")
+
+
 @dataclass
 class _Write:
     """A checkpoint's one export, the task storing it, and the commit's cleanup of unscoped restored state.
@@ -736,8 +751,10 @@ class ParticipantControlPlane:
                 self.phase = CheckpointPhase.PREPARING
                 self._renew(request)
                 try:
-                    await self.participant.close_admission(request)
+                    # Restarts first: closing admission asks running work to park,
+                    # and a restart's activation, on any worker, must already know it is one when it wakes.
                     await self.participant.carry_restarts(request.restarts)
+                    await self.participant.close_admission(request)
                 except BaseException:
                     await self._reopen()
                     raise
@@ -822,12 +839,20 @@ class ParticipantControlPlane:
 
         Admitted only when idle with no checkpoint open, stricter than retire and forget:
         a list the controller computed before a checkpoint existed must never release that checkpoint.
+        For the same reason a release on behalf of a checkpoint this server resumed is admitted only while that
+        checkpoint is the latest it resumed: one delayed past a later checkpoint is refused as stale.
         """
         with self._operation("release", request.checkpoint_id) as span:
             span.set(kept=len(request.kept))
             async with self._lock:
                 if self.phase != CheckpointPhase.IDLE or self.checkpoint_id is not None:
                     raise InvalidPhaseError(f"not valid in phase {self.phase.value}; resume first")
+                if request.checkpoint_id in self._resumed_ids and request.checkpoint_id != next(
+                    reversed(self._resumed_ids)
+                ):
+                    raise StaleCheckpointError(
+                        f"release for checkpoint {request.checkpoint_id!r} is stale: a later checkpoint has resumed"
+                    )
                 await _within(request, lambda: self.participant.release(frozenset(request.kept)))
             return {"released": True}
 
