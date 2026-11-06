@@ -507,6 +507,18 @@ class TestRolloutObservability:
         assert compaction.model_calls == invocation.model_calls
         assert [ref.response_id for ref in compaction.model_calls] == ["summary-response"]
 
+    def test_completed_compaction_without_helper_reports_missing_reference(self):
+        events = [
+            (1.0, {"type": "compaction_start", "reason": "overflow", "ng_compaction_id": "one"}),
+            (2.0, {"type": "compaction_end", "ng_compaction_id": "one", "result": {"summary": "Summary"}}),
+        ]
+        bundle = _build_pi_observations(
+            events, "invocation", ModelServerRef(type="responses_api_models", name="policy"), []
+        )
+        [compaction] = _records(bundle, ContextCompactionObservation)
+        assert compaction.outcome == "completed" and not compaction.model_calls
+        assert "compaction_model_call_reference_unavailable" in {gap.code for gap in bundle.gaps}
+
     def test_helper_operations_do_not_claim_other_calls(self):
         events = [
             (1.0, {"type": "compaction_start", "ng_compaction_id": "one"}),
@@ -658,6 +670,7 @@ class TestRolloutObservability:
         assert compaction.before_model_call.response_id == "resp-upstream-1"
         assert compaction.after_model_call.response_id == "resp-upstream-2"
         assert {gap.code for gap in bundle.gaps} == {
+            "compaction_model_call_reference_unavailable",
             "invocation_outcome_unavailable",
             "subagent_hierarchy_unavailable",
         }

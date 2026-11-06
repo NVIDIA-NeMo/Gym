@@ -535,6 +535,8 @@ def _build_pi_observations(
             )
             compactions.append(compaction)
             compactions_waiting_for_call.append(compaction)
+            if outcome == "completed" and not compaction.model_calls:
+                gaps.append(gap("compaction_model_call_reference_unavailable"))
             if compaction_start is None:
                 gaps.append(gap("compaction_start_unavailable"))
             if not result:
