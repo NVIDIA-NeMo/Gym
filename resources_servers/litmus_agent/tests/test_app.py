@@ -1007,6 +1007,17 @@ class TestResourcesSessions:
             verify_body=VERIFY_BODY,
         )
 
+    def test_leaving_the_lifespan_stops_the_sessions_still_open(self):
+        server, client = _session_client()
+        with client:
+            assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+            assert client.post("/stateful_python_code_exec", json={"code": "print(3)"}).status_code == 200
+            provider = _LocalFakeProvider.instances[-1]
+            assert provider.closed == 0 and "rs-1" in server._sessions
+
+        assert provider.closed == 1
+        assert server._sessions == {} and server._session_locks == {}
+
     def test_close_without_verify_stops_the_sandbox(self):
         server, client = _session_client()
         assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
@@ -1309,7 +1320,7 @@ class TestResourcesSessions:
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {} and provider.closed == 1
 
-    def test_legacy_seed_keeps_working(self):
+    def test_cookie_seed_keeps_working(self):
         server, client = _session_client()
 
         # An Agent's /run seeds with the row itself.

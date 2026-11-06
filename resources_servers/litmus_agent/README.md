@@ -187,19 +187,21 @@ Under an Environment Server, such as `litmus_agent_environment_server`
 `resources_session_id`, and `/close_session` stops the session's sandbox even
 when `/verify` never ran. Close and verify wait for a sandbox that is still
 starting or running a cell before they stop it. A stop that fails makes the close
-fail, and the sandbox stays registered, so the caller's retry stops it; a provider
+fail, and the sandbox stays registered until a later close, verify, retirement or server shutdown stops it; a provider
 that only queues the delete, such as OpenShell, logs its failures instead. A failed stop at `/verify`
-also fails that request, keeping checkpoint ownership available for cleanup on retry. The retry
-returns the recomputed score once cleanup succeeds. Closing an unknown or already closed session
+preserves the computed score and reports the cleanup failure separately. The sandbox stays registered and
+checkpoint ownership is retained until a later verify, close, or retirement successfully releases it. A verify
+retry recomputes the score. A close or verify waits for a sandbox that is still starting; if its caller gives up
+first, the sandbox is left to the next close, to shutdown, or to the provider's `ttl_s` expiry. Closing an unknown or already closed session
 succeeds, and a seed that arrives after its session closed is refused with 409
 for `session_close_retry_window_seconds`. A tool call for a closed session gets
 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked
 sample with reward 0.
 
-The deprecated agent-run seed sent by an agent's own `/run` keeps the session ID and stops any previous sandbox before
+The deprecated cookie seed sent by an agent's own `/run` keeps the session ID and stops any previous sandbox before
 resetting the run. A failed stop preserves the sandbox for retry; the first tool call after a successful reseed
 starts a fresh sandbox. After the resources session's `/verify`, a tool call on that cookie gets 404 with
-`failure_kind: session_lost` until the cookie is seeded again. An agent-run seed for a session that has closed is
+`failure_kind: session_lost` until the cookie is seeded again. A cookie seed for a session that has closed is
 refused with 409 for `session_close_retry_window_seconds`.
 
 **Statefulness (replay model).** The sandbox runs one-shot commands, not a live
