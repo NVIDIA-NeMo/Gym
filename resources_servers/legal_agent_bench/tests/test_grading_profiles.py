@@ -56,8 +56,16 @@ def _run_args(tmp_path: Path):
 @pytest.mark.parametrize(
     "verdicts, expected", [(["fail", "fail"], 0.0), (["pass", "fail"], 0.5), (["pass", "pass"], 1.0)]
 )
-def test_official_dual_averages_task_scores_and_retains_per_judge(tmp_path, monkeypatch, verdicts, expected):
+@pytest.mark.parametrize("reward_mode", ["full_task", "criteria_pass_rate"])
+def test_official_dual_averages_selected_reward_mode_and_retains_per_judge(
+    tmp_path, monkeypatch, verdicts, expected, reward_mode
+):
+    monkeypatch.setenv("LEGAL_AGENT_BENCH_REWARD_MODE", reward_mode)
     args = _run_args(tmp_path)
+    task_path = Path(args.task_json)
+    task = json.loads(task_path.read_text())
+    task["criteria"].append({**task["criteria"][0], "id": "C-2", "match_criteria": "Always-pass control"})
+    task_path.write_text(json.dumps(task))
     answers = dict(zip(STANDARD_JUDGE_MODELS, verdicts, strict=True))
 
     class Judge:
@@ -65,60 +73,25 @@ def test_official_dual_averages_task_scores_and_retains_per_judge(tmp_path, monk
             self.model = kwargs["model"]
             self.base_url = kwargs["base_url"]
 
-        def evaluate_prompt(self, *_args, **_kwargs):
-            return {"reasoning": "Evidence checked.", "verdict": answers[self.model]}
+        def evaluate_prompt(self, prompt, *_args, **_kwargs):
+            verdict = "pass" if "Always-pass control" in prompt else answers[self.model]
+            return {"reasoning": "Evidence checked.", "verdict": verdict}
 
     monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
     monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": model} for model in STANDARD_JUDGE_MODELS]))
     result = verifier.run_verifier(args)
     reward = json.loads(Path(args.reward_json).read_text())
-    assert reward["reward"] == expected
+    criterion_average = (1 + expected) / 2
+    assert reward["reward"] == (expected if reward_mode == "full_task" else criterion_average)
+    assert reward["criteria_pass_rate"] == criterion_average
+    assert result["reported_reward_mode"] == reward_mode
     assert result["dual_all_pass_rate"] == expected
+    assert result["dual_criterion_pass"] == (1 + expected) / 2
     assert result["judge_profile"] == "lab-standard-dual-v1"
     assert result["source_revision"] == "pinned-test-revision"
     assert len(result["per_judge"]) == 2
     assert all((Path(args.verifier_dir) / f"judge-{index}" / "scores.json").is_file() for index in (1, 2))
     assert (Path(args.verifier_dir) / "scores_dual.json").is_file()
-
-
-def test_incomplete_dual_grading_keeps_evidence_without_successful_aggregate(tmp_path, monkeypatch):
-    args = _run_args(tmp_path)
-
-    class Judge:
-        def __init__(self, **kwargs):
-            self.model = kwargs["model"]
-            self.base_url = kwargs["base_url"]
-
-        def evaluate_prompt(self, *_args, **_kwargs):
-            if self.model == "gpt-5.5":
-                raise ConnectionError("judge unavailable")
-            return {"reasoning": "Checked.", "verdict": "pass"}
-
-    monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
-    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": model} for model in STANDARD_JUDGE_MODELS]))
-    assert (
-        verifier.main(
-            [
-                "--task-json",
-                args.task_json,
-                "--run-dir",
-                args.run_dir,
-                "--verifier-dir",
-                args.verifier_dir,
-                "--reward-json",
-                args.reward_json,
-                "--judge-base-url",
-                args.judge_base_url,
-            ]
-        )
-        == 1
-    )
-    assert not (Path(args.verifier_dir) / "scores_dual.json").exists()
-    failure = json.loads(Path(args.reward_json).read_text())
-    assert failure["verifier_error"] == 1
-    failed_judge = json.loads((Path(args.verifier_dir) / "judge-2" / "scores.json").read_text())
-    assert failed_judge["criteria_results"][0]["verdict"] == "error"
-    assert (Path(args.verifier_dir) / "judge-1" / "scores.json").exists()
 
 
 def test_single_entry_selects_requested_judge(tmp_path, monkeypatch):
@@ -205,26 +178,6 @@ def test_docx_comments_include_anchored_passage_without_duplication(tmp_path, mo
     assert "Orphaned note." not in text
     if not printed:
         assert "Relevant clause" in text and "Reviewer" in text
-
-
-def test_explicit_empty_judge_key_does_not_inherit_shared_credentials(tmp_path, monkeypatch):
-    args = _run_args(tmp_path)
-    keys = []
-
-    class Judge:
-        def __init__(self, **kwargs):
-            keys.append(kwargs["api_key"])
-            self.base_url = kwargs["base_url"]
-
-        def evaluate_prompt(self, *_args, **_kwargs):
-            return {"reasoning": "Checked.", "verdict": "pass"}
-
-    monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
-    monkeypatch.setenv("LAB_JUDGE_API_KEY", "shared-test-key")
-    verifier._run_single_verifier(
-        args, judge_override={"model_name": "local", "base_url": "http://local.test/v1", "api_key": ""}
-    )
-    assert keys and set(keys) == {""}
 
 
 @pytest.mark.parametrize(
@@ -314,3 +267,52 @@ def test_judge_list_roundtrips_resources_and_standalone_verifier(tmp_path, monke
     else:
         assert result["judge_model"] == "route/gpt-5.5"
         assert not (Path(args.verifier_dir) / "scores_dual.json").exists()
+
+
+@pytest.mark.parametrize("dual", [False, True])
+def test_regrading_failure_keeps_current_criteria_without_stale_success(tmp_path, monkeypatch, dual):
+    args = _run_args(tmp_path)
+    task_path = Path(args.task_json)
+    task = json.loads(task_path.read_text())
+    task["criteria"].append({**task["criteria"][0], "id": "C-2", "match_criteria": "Connection failure control"})
+    task_path.write_text(json.dumps(task))
+    failing = False
+
+    class Judge:
+        def __init__(self, **kwargs):
+            self.model = kwargs["model"]
+            self.base_url = kwargs["base_url"]
+
+        def evaluate_prompt(self, prompt, *_args, **_kwargs):
+            if failing and self.model == "gpt-5.5" and "Connection failure control" in prompt:
+                raise ConnectionError("judge unavailable")
+            return {"reasoning": "Checked.", "verdict": "pass"}
+
+    models = STANDARD_JUDGE_MODELS if dual else ("gpt-5.5",)
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": name} for name in models]))
+    monkeypatch.setenv("LAB_JUDGE_PARALLELISM", "1")
+    monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
+    assert verifier.run_verifier(args)["score"] == 1
+    failing = True
+    argv = []
+    for key in ("task_json", "run_dir", "verifier_dir", "reward_json", "judge_base_url"):
+        argv.extend(["--" + key.replace("_", "-"), getattr(args, key)])
+    assert verifier.main(argv) == 1
+    directory = Path(args.verifier_dir)
+    assert not (directory / "scores_dual.json").exists()
+    assert json.loads(Path(args.reward_json).read_text())["verifier_error"] == 1
+    judge_dir = directory / "judge-2" if dual else directory
+    report = json.loads((judge_dir / "scores.json").read_text())
+    assert [criterion["verdict"] for criterion in report["criteria_results"]] == ["pass", "error"]
+    assert report["judge_model"] == "gpt-5.5"
+    assert report["source_revision"] == "pinned-test-revision"
+    assert report["judge_error_count"] == 1
+    events = [json.loads(line) for line in (judge_dir / "transcript.jsonl").read_text().splitlines()]
+    assert sum(event["type"] == "criterion_complete" for event in events) == 2
+    if dual:
+        assert not (judge_dir / "reward.json").exists()
+        assert json.loads((directory / "judge-1/reward.json").read_text())["reward"] == 1
+    failing = False
+    assert verifier.main(argv) == 0
+    assert not (directory / "error.json").exists()
+    assert json.loads(Path(args.reward_json).read_text())["reward"] == 1

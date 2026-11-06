@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -614,6 +615,82 @@ def test_directory_replacement_is_serialized_across_concurrent_publishers(monkey
     assert maximum_active_renames == 1
     assert (target / "value").read_text() in {"first", "second"}
     assert not target.with_name(".runtime.backup").exists()
+
+
+def test_concurrent_processes_preserve_both_prepared_subsets(monkeypatch, tmp_path) -> None:
+    _configure_small_snapshot(monkeypatch, tmp_path)
+    source = _write_source(tmp_path / "source")
+    script = r"""
+import shutil, sys, time
+from pathlib import Path
+from resources_servers.legal_agent_bench import prepare
+root, source, name = Path(sys.argv[1]), Path(sys.argv[2]), sys.argv[3]
+prepare.EXPECTED_TASK_COUNT = 2
+original = prepare._prepare_assets
+
+def entered(*args, **kwargs):
+    (root / (name + '-entered')).touch()
+    return original(*args, **kwargs)
+
+prepare._prepare_assets = entered
+
+def download(destination, ids, **kwargs):
+    shutil.copytree(source, destination)
+    if name == 'first':
+        (root / 'first-downloading').touch()
+        deadline = time.monotonic() + 15
+        while not (root / 'release').exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError('test did not release preparation')
+            time.sleep(0.01)
+    return tuple(sorted(set(ids) - set(kwargs.get('cached_task_ids', ()))))
+
+prepare._download_selected_source = download
+(root / (name + '-ready')).touch()
+prepare.prepare_assets('tasks', tasks_dir=root / 'tasks', task_ids=(sys.argv[4],))
+"""
+    processes = []
+
+    def wait_for(name: str) -> None:
+        deadline = time.monotonic() + 10
+        while not (tmp_path / name).exists():
+            assert time.monotonic() < deadline, f"worker did not create {name}"
+            time.sleep(0.01)
+
+    try:
+        for name, task_id in zip(("first", "second"), TASK_IDS, strict=True):
+            processes.append(
+                subprocess.Popen(
+                    [sys.executable, "-c", script, str(tmp_path), str(source), name, prepare.flatten_task_id(task_id)],
+                    env={**os.environ, "PYTHONPATH": str(prepare.NEMO_GYM_ROOT)},
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    errors="replace",
+                )
+            )
+            wait_for(f"{name}-ready")
+            if name == "first":
+                wait_for("first-downloading")
+        # The second process must wait before inspecting the first one's cache.
+        time.sleep(0.2)
+        assert not (tmp_path / "second-entered").exists()
+    finally:
+        (tmp_path / "release").touch()
+        for process in processes:
+            try:
+                stdout, stderr = process.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.communicate()
+                raise
+            assert process.returncode == 0, stdout + stderr
+    prepare.validate_harbor_tasks(tmp_path / "tasks")
+    assert prepare._cached_task_ids(tmp_path / "tasks") == tuple(sorted(map(prepare.flatten_task_id, TASK_IDS)))
+    for task_id in TASK_IDS:
+        assert (tmp_path / "tasks" / prepare.flatten_task_id(task_id) / "documents/input.txt").read_text() == (
+            source / "tasks" / task_id / "documents/input.txt"
+        ).read_text()
 
 
 def test_directory_replacement_restores_stale_backup_before_failed_publish(monkeypatch, tmp_path) -> None:

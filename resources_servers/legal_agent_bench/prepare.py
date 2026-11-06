@@ -17,9 +17,9 @@ import tarfile
 import tempfile
 import time
 import tomllib
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Iterator
 
 
 PACKAGE_DIR = Path(__file__).resolve().parent
@@ -291,7 +291,43 @@ def validate_harbor_tasks(tasks_dir: str | Path, *, require_marker: bool = True,
     return path
 
 
+@contextmanager
+def _asset_locks(paths: Iterable[Path]) -> Iterator[None]:
+    # Lock before reading the cache: locking publication alone loses additions
+    # when two processes prepare different task subsets from the same snapshot.
+    with ExitStack() as stack:
+        for path in sorted(set(paths)):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            handle = stack.enter_context(path.with_name(f".{path.name}.prepare.lock").open("a+"))
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        yield
+
+
 def prepare_assets(
+    asset: str = "all",
+    *,
+    tasks_dir: str | Path = DEFAULT_TASKS_DIR,
+    skills_dir: str | Path = DEFAULT_SKILLS_DIR,
+    force: bool = False,
+    allow_download: bool = True,
+    task_ids: tuple[str, ...] | None = None,
+) -> dict[str, Path]:
+    """Prepare pinned assets, serializing cache reads, merges and publication across processes."""
+    if asset not in {"all", "tasks", "skills"}:
+        raise ValueError(f"Unknown asset {asset!r}")
+    targets = {"tasks": resolve_repo_path(tasks_dir), "skills": resolve_repo_path(skills_dir)}
+    with _asset_locks(path for name, path in targets.items() if asset in {"all", name}):
+        return _prepare_assets(
+            asset,
+            tasks_dir=targets["tasks"],
+            skills_dir=targets["skills"],
+            force=force,
+            allow_download=allow_download,
+            task_ids=task_ids,
+        )
+
+
+def _prepare_assets(
     asset: str = "all",
     *,
     tasks_dir: str | Path = DEFAULT_TASKS_DIR,
@@ -474,26 +510,27 @@ def hydrate_runtime_tasks(
 ) -> Path:
     if reward_mode not in REWARD_MODES:
         raise ValueError(f"reward_mode must be one of {REWARD_MODES}, got {reward_mode!r}")
-    cache = resolve_repo_path(cache_dir) if cache_is_validated else validate_harbor_tasks(cache_dir)
-    runtime = resolve_repo_path(runtime_dir)
-    runtime.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=runtime.parent, prefix=f".{runtime.name}.hydrate-") as temp_dir_str:
-        stage = Path(temp_dir_str) / runtime.name
-        shutil.copytree(cache, stage, copy_function=_hardlink_or_copy)
-        env = dict(verifier_env)
-        env[REWARD_MODE_ENV_KEY] = reward_mode
-        task_dirs = sorted(child for child in stage.iterdir() if child.is_dir() and child.name != CORPORA_DIRNAME)
-        selected = _cached_task_ids(cache)
-        expected_count = len(selected) if selected is not None else EXPECTED_TASK_COUNT
-        if len(task_dirs) != expected_count:
-            raise ValueError(f"Expected {expected_count} hydrated tasks in {stage}, found {len(task_dirs)}")
-        for task_dir in task_dirs:
-            toml_path = task_dir / "task.toml"
-            clean_toml = toml_path.read_text(encoding="utf-8")
-            toml_path.unlink()  # break the hardlink before injecting runtime-only values
-            toml_path.write_text(_replace_verifier_env(clean_toml, env), encoding="utf-8")
-        _replace_directory(stage, runtime)
-    return runtime
+    with _asset_locks([resolve_repo_path(cache_dir)]):
+        cache = resolve_repo_path(cache_dir) if cache_is_validated else validate_harbor_tasks(cache_dir)
+        runtime = resolve_repo_path(runtime_dir)
+        runtime.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runtime.parent, prefix=f".{runtime.name}.hydrate-") as temp_dir_str:
+            stage = Path(temp_dir_str) / runtime.name
+            shutil.copytree(cache, stage, copy_function=_hardlink_or_copy)
+            env = dict(verifier_env)
+            env[REWARD_MODE_ENV_KEY] = reward_mode
+            task_dirs = sorted(child for child in stage.iterdir() if child.is_dir() and child.name != CORPORA_DIRNAME)
+            selected = _cached_task_ids(cache)
+            expected_count = len(selected) if selected is not None else EXPECTED_TASK_COUNT
+            if len(task_dirs) != expected_count:
+                raise ValueError(f"Expected {expected_count} hydrated tasks in {stage}, found {len(task_dirs)}")
+            for task_dir in task_dirs:
+                toml_path = task_dir / "task.toml"
+                clean_toml = toml_path.read_text(encoding="utf-8")
+                toml_path.unlink()  # break the hardlink before injecting runtime-only values
+                toml_path.write_text(_replace_verifier_env(clean_toml, env), encoding="utf-8")
+            _replace_directory(stage, runtime)
+        return runtime
 
 
 def _download_selected_source(

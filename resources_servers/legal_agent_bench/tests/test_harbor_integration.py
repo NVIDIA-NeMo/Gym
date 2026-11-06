@@ -301,6 +301,7 @@ def test_scoring_includes_docx_redlines_when_requested(monkeypatch, tmp_path) ->
         def evaluate_prompt(self, *_args, **_kwargs):
             return {"verdict": "pass", "reasoning": "redlines reviewed"}
 
+    monkeypatch.setattr(lab_scoring, "pandoc_version", lambda: "3.5")
     monkeypatch.setattr(lab_scoring, "_read_file_as_text", read_file)
     scores = score_rubric(
         criteria=[

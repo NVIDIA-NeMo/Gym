@@ -74,8 +74,12 @@ and retained in results, rather than configured separately.
 
 With two judges, the full-task reward is the mean of their independent
 all-criteria task scores: 0, 0.5, or 1. `all_pass` means both judges passed every
-criterion. Single judging produces 0 or 1. Criterion pass rate remains a
-diagnostic metric. Each judge's report is retained; `scores_dual.json` is
+criterion. Single judging produces 0 or 1 in this default `full_task` mode.
+With `reward_mode: criteria_pass_rate`, the reward is the mean of the judges'
+criterion pass rates (or the single judge's pass rate). For example, judges
+passing 2/2 and 1/2 criteria produce reward 0.75 in criterion mode and 0.5 in
+full-task mode. Both metrics are retained in the reports regardless of which
+one is selected as the reward. Each judge's report is retained; `scores_dual.json` is
 written only when both judges finish grading all criteria. Grading errors route
 to failure handling rather than becoming completed zero-score tasks. Harbor
 collects the declared LAB artifacts, stops the agent environment, then grades
