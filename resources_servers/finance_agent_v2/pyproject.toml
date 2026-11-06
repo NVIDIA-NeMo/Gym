@@ -9,6 +9,7 @@ dependencies = [
     "nemo-gym[dev]",
     "model-library==0.1.25",
     "finance-agent @ git+https://github.com/vals-ai/finance-agent-v2.git@bb460b524472ae0955abdf243bbbac06958dc8c9",
+    "frontier-finance @ git+https://github.com/samaya-ai/frontier-finance.git@3c1134e68b69528cf1afa64839493a9ce1b29fe3",
 ]
 
 [tool.uv]

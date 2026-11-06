@@ -11,24 +11,58 @@ question is re-extracted from ``responses_create_params.input`` and the model an
 data but are UNDECLARED on the wire model (which is not ``extra="allow"``), so today Pydantic's
 default ``extra="ignore"`` silently drops them at the verify boundary — they are declared here as
 Optional provenance so the dataset columns stop being invisible to tooling.
+
+FrontierFinance rows carry ``rubrics`` (a list) and ``as_of_date`` instead of ``rubric``; their
+fields are in ``FrontierFinanceTaskFields``.
 """
 
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class TaskData(BaseModel):
+class FrontierFinanceRubric(BaseModel):
+    rubric_id: int
+    rubric_text: str
+    must_have: bool = False
+    rubric_type: Optional[str] = None
+    rubric_subtype: Optional[str] = None
+    data_source_type: Optional[str] = None
+    data_source_subtype: Optional[str] = None
+    data_source_detailed: List[str] = Field(default_factory=list)
+
+
+class FrontierFinanceTaskFields(BaseModel):
+    """FrontierFinance row fields. Also a base of the server's run request, so both share one definition."""
+
+    query_id: str = Field(default="", json_schema_extra={"consumed_by": ["verify", "metrics"]})
+    as_of_date: Optional[str] = Field(
+        default=None,
+        description="YYYY-MM-DD date the query is answered as of. Caps dated tool calls and, with the "
+        "FrontierFinance grader, is passed to the judges. Null leaves tool dates uncapped.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    use_cases: List[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["metrics"]})
+    capabilities: List[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["provenance"]})
+    rubrics: List[FrontierFinanceRubric] = Field(
+        default_factory=list,
+        description="FrontierFinance binary grading criteria, scored by the FrontierFinance grader. An empty "
+        "list masks the sample under that grader.",
+        json_schema_extra={"consumed_by": ["verify", "metrics"]},
+    )
+
+
+class TaskData(FrontierFinanceTaskFields):
     model_config = ConfigDict(extra="allow")
 
     question: str = Field(
         default="",
         description=(
-            "Finance research question; typed on the wire and echoed into the verify response but not used "
-            "for scoring — the judge re-extracts the question from the last user message in "
-            "responses_create_params.input."
+            "Finance research question; typed on the wire and echoed into the verify response. The Finance "
+            "Agent v2 judge re-extracts the question from the last user message in "
+            "responses_create_params.input; the FrontierFinance grader passes this field to its judges."
         ),
-        json_schema_extra={"consumed_by": ["provenance"]},
+        json_schema_extra={"consumed_by": ["provenance", "verify"]},
     )
     expected_answer: Optional[str] = Field(
         default=None,
