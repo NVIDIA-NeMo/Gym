@@ -131,15 +131,22 @@ Status follows OpenHands' own rule at 1.59.0: `conversation.run()` raises only f
 | `finished` | `completed` | Yes |
 | `MaxIterationsReached`, `MaxBudgetReached`, stuck detection, a rollout stop, or Gym's deadline after a model call returned | `incomplete`; `stop_reason` names it | Yes |
 | Context window exceeded | `incomplete`, `stop_reason` `context_limit` | Yes |
-| Gym's deadline before any model call returned | `failed`, `LLMTimeoutError`, with `ng_agent_outcome` `model_transport_error` | No: the outcome policy retries it by default |
-| A model error after OpenHands' own retries | `failed`, with `ng_agent_outcome` `model_request_error` and the HTTP status, or `model_transport_error` | By the outcome policy: by default 400, 413 and 422 are verified, `model_transport_error` and 408, 425, 429 and 5xx are retried, and other statuses fail the episode |
-| Any other error that ends the run | `failed`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
+| Gym's deadline before any model call returned | `failed`, `stop_reason` `timeout`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
+| A model error after OpenHands' own retries | `failed`, with `ng_agent_outcome` `model_request_error` and the HTTP status the provider's error recorded, or `model_transport_error` | By the outcome policy: by default 400, 413 and 422 are verified, `model_transport_error` and 408, 425, 429 and 5xx are retried, and other statuses fail the episode |
+| Any other error that ends the run, including a model error that recorded no HTTP status | `failed`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
 | No result, unconfirmed termination, or a sandbox failure | HTTP error from `/v1/responses` | No |
 
-Each model call may take the whole budget, so Gym's deadline before any model reply means the Model Server
-never answered; that episode is retried rather than graded. Once a model call has returned, the deadline is
-graded with the work done so far, even if the next call was still waiting on the Model Server: the adapter
-cannot tell a slow reply from a Model Server that stopped answering. A rollout stop is graded either way.
+Gym's deadline before any model reply leaves nothing to grade, and the adapter cannot tell its cause: the
+runner may still have been starting, or the Model Server may not have answered. The Environment Server's
+`agent_outcome_policy` retries `unknown` by default; `by_failure_kind` changes that. Once a model call has
+returned, the deadline is graded with the work done so far, even if the next call was still waiting on the
+Model Server: the adapter cannot tell a slow reply from a Model Server that stopped answering. A rollout stop
+is graded either way.
+
+The runner records the error that ended a run as its class and the classes it was raised from
+(`raise ... from`), each with any HTTP status a provider's error carried. An error's text can hold a
+provider's response body, so it stays out of the response; the runner writes the traceback to its stderr,
+and the adapter logs the end of that stderr when a run fails.
 
 Tool errors are returned to the model and do not end the run. A terminal command that exits nonzero is
 recorded as a `failed` tool call. Usage is reported only when every model response the conversation used,

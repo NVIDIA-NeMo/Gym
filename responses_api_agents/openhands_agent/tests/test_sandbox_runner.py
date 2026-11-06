@@ -101,6 +101,14 @@ class Conversation:
                 raise error
             except RuntimeError as cause:
                 raise ValueError("conversation failed") from cause
+        elif mode == "crash":
+            # A local error raised while a provider's HTTP 400 was being handled, not from it.
+            try:
+                error = RuntimeError("bad request body")
+                error.status_code = 400
+                raise error
+            except RuntimeError:
+                raise KeyError("local crash")
         else:
             note(running=True)
             while True:
@@ -146,7 +154,10 @@ def start(tmp_path: Path, stub: Path, mode: str) -> tuple[subprocess.Popen, Path
     }
     (session / "input.json").write_text(json.dumps(runner_input))
     env = {"PYTHONPATH": str(stub), "STUB_MODE": mode, "STUB_LOG": str(tmp_path / "stub.log"), "PATH": "/usr/bin:/bin"}
-    process = subprocess.Popen([sys.executable, str(RUNNER_SOURCE), str(session / "input.json")], env=env)
+    with (tmp_path / "stderr.log").open("w") as stderr:
+        process = subprocess.Popen(
+            [sys.executable, str(RUNNER_SOURCE), str(session / "input.json")], env=env, stderr=stderr
+        )
     return process, session
 
 
@@ -212,15 +223,24 @@ def test_runner_hands_openhands_the_session_settings(tmp_path, stub):
     assert result["ended_at"] >= result["started_at"]
 
 
-def test_error_records_the_exception_chain_with_its_status(tmp_path, stub):
+def test_error_records_the_explicit_cause_chain_with_its_status(tmp_path, stub):
     process, session = start(tmp_path, stub, "error")
     assert process.wait(timeout=60) == 1
     result = json.loads((session / "result.json").read_text())
     assert result["status"] == "error"
-    assert [(entry["type"], entry["status_code"]) for entry in result["error"]] == [
-        ("ValueError", None),
-        ("RuntimeError", 503),
+    # Each error keeps its class and status; its text goes only to stderr, with the traceback.
+    assert result["error"] == [
+        {"type": "ValueError", "module": "builtins", "status_code": None},
+        {"type": "RuntimeError", "module": "builtins", "status_code": 503},
     ]
+    assert "upstream said no" in (tmp_path / "stderr.log").read_text()
+
+
+def test_an_error_raised_while_handling_another_does_not_take_its_status(tmp_path, stub):
+    process, session = start(tmp_path, stub, "crash")
+    assert process.wait(timeout=60) == 1
+    result = json.loads((session / "result.json").read_text())
+    assert result["error"] == [{"type": "KeyError", "module": "builtins", "status_code": None}]
 
 
 def test_sigterm_keeps_partial_events_and_closes_the_terminal(tmp_path, stub):

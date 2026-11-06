@@ -324,7 +324,11 @@ async def test_activation_routes_every_model_call_through_the_rollout_prefixed_m
 @pytest.mark.asyncio
 async def test_model_failure_is_classified_and_context_limit_stays_gradable(monkeypatch):
     instance = agent()
-    error = [{"type": "ConversationRunError", "message": "x"}, {"type": "LLMRateLimitError", "message": "slow down"}]
+    error = [
+        {"type": "ConversationRunError", "status_code": None},
+        {"type": "LLMRateLimitError", "status_code": None},
+        {"type": "RateLimitError", "status_code": 429},
+    ]
     failed = run_result(status="error", execution_status="error", error=error)
     monkeypatch.setattr(
         adapter.OpenHandsSandboxSession, "execute", AsyncMock(return_value=artifacts(FINISHED_EVENTS[:2], failed))
@@ -332,10 +336,13 @@ async def test_model_failure_is_classified_and_context_limit_stays_gradable(monk
     body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
     response = await instance._activate(session_state(), body, prompt="Build it", system="")
     assert response.status == "failed"
+    assert response.error.message == (
+        "The OpenHands run failed: ConversationRunError caused by LLMRateLimitError caused by RateLimitError (HTTP 429)"
+    )
     outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
     assert outcome == {"failure_kind": "model_request_error", "status_code": 429}
 
-    overflow = run_result(status="error", error=[{"type": "LLMContextWindowExceedError", "message": "too long"}])
+    overflow = run_result(status="error", error=[{"type": "LLMContextWindowExceedError"}])
     monkeypatch.setattr(
         adapter.OpenHandsSandboxSession, "execute", AsyncMock(return_value=artifacts(FINISHED_EVENTS[:2], overflow))
     )
@@ -368,7 +375,7 @@ async def test_deadline_keeps_partial_work_as_incomplete(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_deadline_before_any_model_reply_is_a_retried_transport_failure(monkeypatch):
+async def test_a_deadline_before_any_model_reply_is_a_retried_failure_of_unknown_cause(monkeypatch):
     instance = agent()
     cleanup = {"timed_out": True, "return_code": 143, "cleanup_confirmed": True, "error": None}
     opening = [
@@ -382,8 +389,9 @@ async def test_a_deadline_before_any_model_reply_is_a_retried_transport_failure(
     body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
     response = await instance._activate(state, body, prompt="Build it", system="")
     assert (response.status, response.metadata["stop_reason"], response.output) == ("failed", "timeout", [])
-    assert response.error.message == "LLMTimeoutError: no model call returned before the run's deadline"
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+    assert response.error.message == "Gym's deadline passed before any model call returned"
+    # Nothing shows a model call was made, so the cause stays unknown.
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "unknown"}
     # The Environment Server's default policy retries the episode instead of grading it.
     assert agent_outcome_policy(response) == OutcomeAction.RETRY
     sandbox = state.observations.records[-1]

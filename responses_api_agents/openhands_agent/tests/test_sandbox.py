@@ -271,14 +271,14 @@ async def test_a_rollout_stop_before_the_first_event_is_graded_as_an_empty_stopp
 
 
 @pytest.mark.asyncio
-async def test_a_deadline_without_events_is_a_model_transport_failure():
-    # Without a rollout stop, a harness that recorded nothing by its deadline got no model reply; the
-    # Environment Server's outcome policy retries the episode instead of grading it.
+async def test_a_deadline_without_events_is_a_failure_of_unknown_cause():
+    # Without a rollout stop, a harness that recorded nothing by its deadline got no model reply, and may not have
+    # made a model call; the Environment Server's outcome policy retries the episode instead of grading it.
     sandbox = SupervisedSandbox({"cleanup_confirmed": True, "return_code": 143, "timed_out": True, "error": None})
     sandbox.finish.set()
     response = await agent()._activate(supervised_state(sandbox), BODY, prompt="Build it", system="")
     assert (response.status, response.metadata["stop_reason"], response.output) == ("failed", "timeout", [])
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "unknown"}
     assert ROLLOUT_STOP_METADATA_KEY not in response.metadata
 
 

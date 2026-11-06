@@ -40,20 +40,6 @@ RUN_LIMIT_CODES = {"MaxIterationsReached": "max_iterations", "MaxBudgetReached":
 # Exception classes in a failed run's chain, from openhands.sdk.llm.exceptions (with LiteLLM's originals).
 _CONTEXT_LIMIT_ERRORS = {"LLMContextWindowExceedError", "ContextWindowExceededError"}
 _TRANSPORT_ERRORS = {"LLMTimeoutError", "Timeout", "APIConnectionError", "APITimeoutError", "LLMNoResponseError"}
-_STATUS_BY_ERROR = {
-    "LLMAuthenticationError": 401,
-    "AuthenticationError": 401,
-    "LLMRateLimitError": 429,
-    "RateLimitError": 429,
-    "LLMServiceUnavailableError": 503,
-    "ServiceUnavailableError": 503,
-    "InternalServerError": 500,
-    "LLMBadRequestError": 400,
-    "BadRequestError": 400,
-    "LLMContentPolicyViolationError": 400,
-}
-# The error a deadline before any model reply stands for: OpenHands was still waiting on its first model call.
-NO_REPLY_BY_DEADLINE = {"type": "LLMTimeoutError", "message": "no model call returned before the run's deadline"}
 
 
 def parse_events(text: str) -> tuple[list[tuple[float, dict[str, Any]]], int]:
@@ -205,15 +191,25 @@ def error_chain(result: Optional[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def error_status_code(chain: list[dict[str, Any]]) -> Optional[int]:
-    """The HTTP status a provider error carried, or the status its OpenHands error class stands for."""
+    """The HTTP status an error in the chain recorded, outermost first.
+
+    OpenHands raises its own error class from the provider's error, which carries the status. An error class alone
+    does not establish a status, so without a recorded one the status stays unknown.
+    """
     for entry in chain:
         status = entry.get("status_code")
         if type(status) is int and 400 <= status <= 599:
             return status
-    for entry in chain:
-        if entry.get("type") in _STATUS_BY_ERROR:
-            return _STATUS_BY_ERROR[entry["type"]]
     return None
+
+
+def describe_chain(chain: list[dict[str, Any]]) -> str:
+    """The error classes, outermost first, each with the HTTP status it recorded."""
+    names = []
+    for entry in chain:
+        status = entry.get("status_code")
+        names.append(f"{entry.get('type')} (HTTP {status})" if type(status) is int else str(entry.get("type")))
+    return " caused by ".join(names)
 
 
 def classify_error(chain: list[dict[str, Any]]) -> tuple[str, Optional[int]]:
@@ -254,14 +250,13 @@ def run_outcome(
     ``conversation.run()`` raises only for errors that end the run, such as a model call that still fails after
     OpenHands' own retries. Tool errors go back to the model and do not end the run. A run limit (iterations or
     budget) and stuck detection end the run with partial work, as do a rollout stop and the deadline after a model
-    call returned. Each model call may take the whole budget, so a deadline before any model reply means the Model
-    Server never answered: a transport failure, not the agent's result.
+    call returned. A deadline before any model reply leaves nothing to grade, and its cause is unknown: the runner
+    may still have been starting, or the Model Server may not have answered.
     """
     if timed_out:
         if rollout_stop or _response_ids(events) or token_usages(result):
             return RunOutcome("incomplete", "timeout")
-        message = f"{NO_REPLY_BY_DEADLINE['type']}: {NO_REPLY_BY_DEADLINE['message']}"
-        return RunOutcome("failed", "timeout", message, MODEL_TRANSPORT_ERROR)
+        return RunOutcome("failed", "timeout", "Gym's deadline passed before any model call returned", "unknown")
     if result is None:
         return RunOutcome("failed", "runner_error", "The OpenHands runner wrote no result")
     if result.get("status") == "terminated":
@@ -269,10 +264,10 @@ def run_outcome(
     chain = error_chain(result)
     if result.get("status") == "error" or chain:
         kind, status_code = classify_error(chain)
-        message = "; ".join(f"{entry.get('type')}: {entry.get('message')}" for entry in chain[:2])
+        message = f"The OpenHands run failed: {describe_chain(chain)}" if chain else "The OpenHands run failed"
         if kind == MODEL_CONTEXT_LIMIT:
             return RunOutcome("incomplete", "context_limit", message, kind)
-        return RunOutcome("failed", "error", message or "The OpenHands run failed", kind, status_code)
+        return RunOutcome("failed", "error", message, kind, status_code)
     execution_status = result.get("execution_status")
     if execution_status == "finished":
         return RunOutcome("completed", "finished")

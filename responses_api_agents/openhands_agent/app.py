@@ -50,7 +50,6 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.openhands_agent.conversion import (
-    NO_REPLY_BY_DEADLINE,
     RunOutcome,
     classify_error,
     error_chain,
@@ -390,6 +389,9 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             raise failure
         if outcome.stop_reason == "runner_error":
             raise RuntimeError(f"OpenHands runner failed before writing a result: {artifacts.stderr[-4000:]}")
+        if outcome.stop_reason == "error" and artifacts.stderr:
+            # The response names only the error classes; the runner wrote the traceback to its stderr.
+            LOG.warning("%s; the runner's stderr ends with:\n%s", outcome.message, artifacts.stderr[-4000:])
         runtime = state.runtime_info
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -412,9 +414,9 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             },
         )
         response = self.report_rollout_stop(response, state.session)
-        # Only a failed response gets an outcome; after a deadline that is one without a model reply, which
-        # recorded no error chain of its own.
-        return self.report_outcome(response, {"error": [NO_REPLY_BY_DEADLINE]} if timed_out else result or {})
+        # Only a failed response gets an outcome. After the deadline that is one without a model reply, whose
+        # cause is unknown, so no error the runner may have recorded classifies it.
+        return self.report_outcome(response, {} if timed_out else result or {})
 
     def _observations(
         self,

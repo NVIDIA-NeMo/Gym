@@ -17,6 +17,7 @@ import signal
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 
 
@@ -37,7 +38,13 @@ def _on_sigterm(signum: int, frame: object) -> None:
 
 
 def describe_error(error: BaseException) -> list[dict[str, object]]:
-    """The exception chain, outermost first, with any HTTP status code a provider error carries."""
+    """The error and the errors it was raised from, outermost first.
+
+    Only explicit causes (``raise ... from``) are followed: OpenHands raises its own error class from the
+    provider's error, but an error raised while another one was being handled was not caused by it. Each entry
+    keeps the class and any HTTP status code a provider error carries. The error's text can hold a provider's
+    response body, so it goes only to stderr, with the traceback.
+    """
     chain: list[dict[str, object]] = []
     seen: set[int] = set()
     current: BaseException | None = error
@@ -48,11 +55,10 @@ def describe_error(error: BaseException) -> list[dict[str, object]]:
             {
                 "type": type(current).__name__,
                 "module": type(current).__module__,
-                "message": str(current)[-4000:],
                 "status_code": status if isinstance(status, int) and not isinstance(status, bool) else None,
             }
         )
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
     return chain
 
 
@@ -168,6 +174,7 @@ def main(argv: list[str]) -> int:
         exit_code = 128 + signal.SIGTERM
     except Exception as error:
         result["error"] = describe_error(error)
+        traceback.print_exception(error, file=sys.stderr)
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         result["ended_at"] = time.time()

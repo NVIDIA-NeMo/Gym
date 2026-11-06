@@ -217,28 +217,58 @@ OPENING = (
 )
 
 
-def test_the_deadline_is_graded_after_a_model_reply_and_a_transport_failure_before_one():
+def test_the_deadline_is_graded_after_a_model_reply_and_a_failure_of_unknown_cause_before_one():
     replied = run_outcome(recorded(action("c1", "r1")), result("r1", status="terminated"), timed_out=True)
     assert (replied.status, replied.stop_reason, replied.failure_kind) == ("incomplete", "timeout", None)
     # A usage record also shows a reply, such as one OpenHands answered with an error event.
     assert run_outcome(recorded(*OPENING), result("r1", status="terminated"), timed_out=True).status == "incomplete"
-    silent = run_outcome(recorded(*OPENING), result(status="terminated"), timed_out=True)
-    assert (silent.status, silent.stop_reason, silent.failure_kind) == ("failed", "timeout", MODEL_TRANSPORT_ERROR)
-    assert silent.message == "LLMTimeoutError: no model call returned before the run's deadline"
-    assert run_outcome([], None, timed_out=True).failure_kind == MODEL_TRANSPORT_ERROR
-    # A rollout stop is not a Model Server failure, so the stopped run is graded.
+    # Without a reply the deadline is all that was observed: no model call needs to have started.
+    for events, runner_result in ((recorded(*OPENING), result(status="terminated")), ([], None)):
+        silent = run_outcome(events, runner_result, timed_out=True)
+        assert (silent.status, silent.stop_reason, silent.failure_kind) == ("failed", "timeout", "unknown")
+        assert silent.message == "Gym's deadline passed before any model call returned"
+    # A rollout stop is not a failure, so the stopped run is graded.
     assert run_outcome([], None, timed_out=True, rollout_stop=True).status == "incomplete"
+
+
+def test_a_model_timeout_openhands_recorded_is_a_transport_failure():
+    chain = [
+        {"type": "ConversationRunError", "module": "openhands.sdk.conversation.exceptions", "status_code": None},
+        {"type": "LLMTimeoutError", "module": "openhands.sdk.llm.exceptions.types", "status_code": None},
+        {"type": "Timeout", "module": "litellm.exceptions", "status_code": 408},
+    ]
+    outcome = run_outcome(recorded(*OPENING), result(status="error", error=chain), timed_out=False)
+    assert (outcome.status, outcome.stop_reason, outcome.failure_kind, outcome.status_code) == (
+        "failed",
+        "error",
+        MODEL_TRANSPORT_ERROR,
+        None,
+    )
+    assert outcome.message == (
+        "The OpenHands run failed: ConversationRunError caused by LLMTimeoutError caused by Timeout (HTTP 408)"
+    )
 
 
 @pytest.mark.parametrize(
     "chain,expected",
     [
         ([{"type": "ConversationRunError"}, {"type": "LLMContextWindowExceedError"}], (MODEL_CONTEXT_LIMIT, None)),
-        ([{"type": "ConversationRunError"}, {"type": "LLMRateLimitError"}], (MODEL_REQUEST_ERROR, 429)),
+        (
+            [{"type": "LLMRateLimitError"}, {"type": "RateLimitError", "status_code": 429}],
+            (MODEL_REQUEST_ERROR, 429),
+        ),
         (
             [{"type": "LLMServiceUnavailableError"}, {"type": "InternalServerError", "status_code": 502}],
             (MODEL_REQUEST_ERROR, 502),
         ),
+        (
+            [{"type": "LLMContentPolicyViolationError"}, {"type": "BadRequestError", "status_code": 400}],
+            (MODEL_REQUEST_ERROR, 400),
+        ),
+        # An error class does not establish an HTTP status; one no error recorded stays unknown.
+        ([{"type": "LLMContentPolicyViolationError"}], ("unknown", None)),
+        ([{"type": "ConversationRunError"}, {"type": "LLMRateLimitError"}], ("unknown", None)),
+        ([{"type": "ServiceUnavailableError"}], ("unknown", None)),
         ([{"type": "LLMTimeoutError"}], (MODEL_TRANSPORT_ERROR, None)),
         # LiteLLM sets status codes on its timeout and connection errors, though no response carried them.
         (
@@ -258,7 +288,6 @@ def test_the_deadline_is_graded_after_a_model_reply_and_a_transport_failure_befo
             (MODEL_TRANSPORT_ERROR, None),
         ),
         ([{"type": "BadRequestError", "status_code": 400}], (MODEL_REQUEST_ERROR, 400)),
-        ([{"type": "ServiceUnavailableError"}], (MODEL_REQUEST_ERROR, 503)),
         ([{"type": "ValueError"}], ("unknown", None)),
     ],
 )
@@ -267,10 +296,11 @@ def test_classify_error_reads_the_whole_exception_chain(chain, expected):
 
 
 def test_failed_run_and_context_limit_outcomes():
-    rate_limited = result(status="error", execution_status="error", error=[{"type": "LLMRateLimitError"}])
+    chain = [{"type": "LLMRateLimitError"}, {"type": "RateLimitError", "status_code": 429}]
+    rate_limited = result(status="error", execution_status="error", error=chain)
     outcome = run_outcome([], rate_limited, timed_out=False)
     assert (outcome.status, outcome.failure_kind, outcome.status_code) == ("failed", MODEL_REQUEST_ERROR, 429)
-    overflow = result(status="error", error=[{"type": "LLMContextWindowExceedError", "message": "too long"}])
+    overflow = result(status="error", error=[{"type": "LLMContextWindowExceedError"}])
     outcome = run_outcome([], overflow, timed_out=False)
     assert (outcome.status, outcome.stop_reason) == ("incomplete", "context_limit")
 
