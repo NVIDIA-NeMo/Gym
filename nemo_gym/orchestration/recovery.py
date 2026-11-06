@@ -2696,6 +2696,24 @@ def accounted_chain_walltime(
     return float(total)
 
 
+def unsettled_chain_note(decision: RecoveryDecision) -> str:
+    """The chain stopped before the run settled: how many rollouts are unsettled, by state, so the stop reads
+    as an incomplete run and never as a finished one. Unsettled is wider than the coverage report's ``open`` (the
+    count in the chain's own stop line): it also holds final failures that were not counted as zero."""
+    settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+    unsettled = decision.expected - sum(decision.counts.get(state, 0) for state in settled)
+    by_state = ", ".join(
+        f"{count} {state}"
+        for state, count in sorted(decision.counts.items())
+        if count and state not in {s.value for s in settled}
+    )
+    return (
+        f"the job chain stopped with {unsettled} of {decision.expected} rollouts unsettled"
+        + (f" ({by_state})" if by_state else "")
+        + "; final failures are included, the stop line's open count leaves them out (.gym_chain_incomplete)"
+    )
+
+
 def gate_task_summary(
     decision: RecoveryDecision,
     *,
@@ -5818,7 +5836,7 @@ def gate_summary_from_collected(
     task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
-        extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")
+        extra.append(unsettled_chain_note(decision))
     provenance = (collected.quality or {}).get("provenance")
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None

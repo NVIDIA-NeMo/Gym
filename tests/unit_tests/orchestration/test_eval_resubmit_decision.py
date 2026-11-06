@@ -775,7 +775,9 @@ def test_stopped_incomplete_chain_is_named_in_the_gate_errors(tmp_path, fake_exe
     fake_executor.job_dir = job
     out = submit.recover("gym-job-q", "bench")
     assert out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
-    assert any("chain stopped" in e for e in out.gate_task["errors"])
+    assert any(
+        "the job chain stopped with 1 of 2 rollouts unsettled (1 missing)" in e for e in out.gate_task["errors"]
+    )
 
 
 def mlflow_job(tmp_path: Path, *, mode: str) -> Path:

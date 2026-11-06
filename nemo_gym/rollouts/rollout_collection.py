@@ -4519,8 +4519,10 @@ executions → not run again (left to recovery)
             f"Rollout coverage: {completion['successful']}/{completion['expected']} completed, "
             f"of which {completion['measured']} measured, {completion['masked']} masked, "
             f"and {completion['unscored']} unscored; "
-            f"{completion['failed']} failed, {completion['intentionally_omitted']} intentionally omitted, "
-            f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+            f"{completion['failed']} failed ({completion['failed_masked']} masked, not scored as zero), "
+            f"{completion['intentionally_omitted']} intentionally omitted, "
+            f"{completion['not_started']} not started, {completion['missing']} missing outcomes; "
+            f"{completion['open']} open (no final result). "
             f"Details: {coverage_path_for(output_fpath)}"
         )
         # Explicitly counted failures can provide a score even when no rollout
@@ -4635,7 +4637,9 @@ executions → not run again (left to recovery)
         expected_rollouts = completion["expected"]
         scored_rollouts = completion["successful"] - completion["unscored"] + len(counted)
         store.write_coverage(
-            scored=scored_rollouts, failures_counted_as_zero=len(counted) - len(imputed), imputed=len(imputed)
+            scored=scored_rollouts,
+            failures_counted_as_zero=len(counted) - len(imputed) + completion.get("counted_zeros_in_successful", 0),
+            imputed=len(imputed),
         )
         coverage = _coverage_report(
             expected_rollouts, scored_rollouts, failure_counts, failures_fpath, imputed=len(imputed)
@@ -4658,9 +4662,11 @@ executions → not run again (left to recovery)
                     "coverage/masked": completion["masked"],
                     "coverage/unscored": completion["unscored"],
                     "coverage/failed": completion["failed"],
+                    "coverage/failed_masked": completion["failed_masked"],
                     "coverage/omitted": completion["intentionally_omitted"],
                     "coverage/not_started": completion["not_started"],
                     "coverage/missing_outcomes": completion["missing"],
+                    "coverage/open": completion["open"],
                     "coverage/failure_budget_exhausted": completion["failure_budget_exhausted"],
                     **({"coverage/imputed": len(imputed)} if config.count_missing_rollouts_as_zero else {}),
                     **failure_metrics,
@@ -6147,6 +6153,7 @@ class RolloutAggregationHelper(BaseModel):
             "unscored": unscored_rollouts,
             "failed": sum(c["failed"] for c in components) if inventory_known else None,
             "failed_final": sum(c["failed_final"] for c in components) if inventory_known else None,
+            "failed_masked": sum(c["failed_masked"] for c in components) if inventory_known else None,
             "failed_not_final": sum(c["failed_not_final"] for c in components) if inventory_known else None,
             "failed_by_class": dict(sum((Counter(c["failed_by_class"]) for c in components), Counter()))
             if inventory_known
@@ -6154,6 +6161,7 @@ class RolloutAggregationHelper(BaseModel):
             "intentionally_omitted": sum(c["intentionally_omitted"] for c in components) if inventory_known else None,
             "not_started": sum(c["not_started"] for c in components) if inventory_known else None,
             "missing": sum(c["missing"] for c in components) if inventory_known else None,
+            "open": sum(c["open"] for c in components) if inventory_known else None,
             "failure_budget_exhausted": sum(c["failure_budget_exhausted"] for c in components)
             if inventory_known
             else None,
@@ -6166,7 +6174,10 @@ class RolloutAggregationHelper(BaseModel):
             "complete": inventory_known and all(c["complete"] for c in components),
             "coverage_known": inventory_known,
             "scored": scored_rollouts,
-            "failures_counted_as_zero": len(counted) - len(missing),
+            "failures_counted_as_zero": len(counted)
+            - len(missing)
+            + sum(c.get("counted_zeros_in_successful", 0) for c in components),
+            "counted_zero_kinds": dict(sum((Counter(c.get("counted_zero_kinds", {})) for c in components), Counter())),
             "imputed": len(missing),
             "shards": components,
             "shards_without_inventory": [str(path) for path in legacy_paths],
@@ -6188,9 +6199,10 @@ class RolloutAggregationHelper(BaseModel):
             coverage += (
                 f"\nCoverage: {completion['successful']} completed "
                 f"({completion['measured']} measured, {completion['masked']} masked, {completion['unscored']} unscored), "
-                f"{completion['failed']} failed, "
+                f"{completion['failed']} failed ({completion['failed_masked']} masked, not scored as zero), "
                 f"{completion['intentionally_omitted']} intentionally omitted, "
-                f"{completion['not_started']} not started, {completion['missing']} missing outcomes. "
+                f"{completion['not_started']} not started, {completion['missing']} missing outcomes; "
+                f"{completion['open']} open (no final result). "
                 f"Details: {report_path}"
             )
         if get_exporters():  # pragma: no cover
@@ -6215,9 +6227,11 @@ class RolloutAggregationHelper(BaseModel):
                 metrics["coverage/missing"] = completion["missing"]
                 metrics["coverage/not_scored"] = completion["expected"] - scored_rollouts
                 metrics["coverage/failed"] = completion["failed"]
+                metrics["coverage/failed_masked"] = completion["failed_masked"]
                 metrics["coverage/omitted"] = completion["intentionally_omitted"]
                 metrics["coverage/not_started"] = completion["not_started"]
                 metrics["coverage/missing_outcomes"] = completion["missing"]
+                metrics["coverage/open"] = completion["open"]
                 metrics["coverage/failure_budget_exhausted"] = completion["failure_budget_exhausted"]
             export_metrics(metrics)
 
