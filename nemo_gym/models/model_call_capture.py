@@ -78,6 +78,8 @@ class ModelExecutionOutcome(TypedDict):
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
     local_response_reason: str | None
+    # Why generation stopped, as the chat backend reported it: a Responses payload cannot say it unless cut short.
+    finish_reason: NotRequired[str]
     # Set when the adapter lowered the call's output budget to fit the engine's context window and sent it again.
     requested_max_tokens: NotRequired[int]
     applied_max_tokens: NotRequired[int]

@@ -1079,8 +1079,12 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         execution = getattr(request.state, "nemo_gym_model_execution", {})
-        if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
-            response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
+        if isinstance(execution, dict):
+            finish_reason = chat_completion_response.choices[0].finish_reason
+            if finish_reason is not None:
+                execution["finish_reason"] = finish_reason
+            if execution.get("local_response_reason") == "context_length_exceeded":
+                response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
