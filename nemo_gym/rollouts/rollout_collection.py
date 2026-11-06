@@ -140,6 +140,7 @@ from nemo_gym.rollouts.model_calls import (
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
+    model_call_payloads_from_config,
     observability_enabled_from_config,
 )
 from nemo_gym.rollouts.omitted_rollouts import omitted_rollout_record
@@ -247,6 +248,7 @@ from nemo_gym.client.server_client import (
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.data.task_selection import select_task_rows, select_tasks
+from nemo_gym.models.model_call_capture import ModelCallPayloads
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -999,6 +1001,7 @@ async def enrich_run_result(
     capture_dirs: list[Path],
     observability_enabled: bool,
     include_payloads: bool = True,
+    model_call_payloads: ModelCallPayloads = "inline",
     rollout_latency_ms: Optional[float] = None,
     delete_capture: bool = False,
     trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
@@ -1013,15 +1016,14 @@ async def enrich_run_result(
     The row's rollout identity is copied onto the result where the result lacks it, because the capture key is read
     from the record. Harness output and reward are never modified. A row that names no task (no task id field,
     task index or trajectory identity) gets no ``ng_trajectory`` rather than a guessed task id.
-    ``include_payloads=False`` keeps call metadata only; ``delete_capture`` removes the rollout's capture file once it
-    has been merged, so it requires the payloads to be kept.
+    ``model_call_payloads`` says where the record keeps each call's request: ``inline`` copies it, ``reference``
+    names its capture line (``payload_ref``), ``none`` keeps call metadata only, as ``include_payloads=False`` does.
+    ``delete_capture`` removes the rollout's capture file once it has been merged, so it requires inline payloads.
     """
     if not isinstance(result, dict):
         return result
-    if delete_capture and not include_payloads:
-        raise ValueError(
-            "delete_capture would drop the model-call bodies that include_payloads=False leaves in the store"
-        )
+    if delete_capture and (not include_payloads or model_call_payloads != "inline"):
+        raise ValueError("delete_capture would drop the model-call bodies the record leaves in the capture store")
     for key in (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
         if key in row and key not in result:
             result[key] = row[key]
@@ -1034,7 +1036,8 @@ async def enrich_run_result(
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
     redacted = _has_observation_gap(result, "multimodal_history_redacted")
-    payloads_kept = include_payloads and not redacted
+    # What the record keeps of each call's payloads: none when they are redacted or not wanted.
+    kept: ModelCallPayloads = model_call_payloads if include_payloads and not redacted else "none"
     if capture_dirs and (
         not no_persist
         or NG_AGENT_OBSERVATIONS_KEY in result
@@ -1048,14 +1051,14 @@ async def enrich_run_result(
         quiesced = False
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-        # Available unredacted responses verify exact tool requests before output omission.
-        merge_model_call_capture_into_record(
-            result,
-            capture_dirs,
-            include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
+        # Available unredacted responses verify exact tool requests before output omission, so a v2 record reads
+        # them even when it keeps no payloads. Only `inline` reads request histories.
+        read: ModelCallPayloads = (
+            "reference" if kept == "none" and trajectory_schema_version == "2.0" and not redacted else kept
         )
+        merge_model_call_capture_into_record(result, capture_dirs, payloads=read)
         capture = result.get("ng_model_call_capture")
-        safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
+        safe_to_delete = quiesced and kept == "inline" and isinstance(capture, dict) and not capture.get("gaps")
 
     if _names_its_task(row) and (
         "ng_model_call_capture" in result
@@ -1064,14 +1067,17 @@ async def enrich_run_result(
         or NG_VERIFIER_INVOCATIONS_KEY in result
     ):
         _attach_trajectory_record(
-            row, result, schema_version=trajectory_schema_version, include_payloads=payloads_kept
+            row, result, schema_version=trajectory_schema_version, include_payloads=kept != "none"
         )
         trajectory = result.get(NG_TRAJECTORY_KEY)
         if isinstance(trajectory, dict):
-            if not payloads_kept:
+            if kept == "none":
                 for call in trajectory.get("model_calls", []):
                     call["request"] = None
                     call["response"] = None
+                    call.pop("payload_ref", None)
+                for turn in trajectory.get("turns", []):
+                    turn.pop("payload_ref", None)
                 if trajectory_schema_version == "2.0":
                     gaps = trajectory.setdefault("gaps", [])
                     for tool in trajectory.get("tool_calls", []):
@@ -1086,12 +1092,12 @@ async def enrich_run_result(
                             gaps.append(gap)
 
     # Omission applies even when malformed capture prevents trajectory projection.
-    if not payloads_kept:
+    if kept == "none":
         capture = result.get("ng_model_call_capture")
         calls = capture.get("calls") if isinstance(capture, dict) else None
         for call in calls if isinstance(calls, list) else []:
             if isinstance(call, dict):
-                for key in ("request", "response", "request_raw", "response_raw"):
+                for key in ("request", "response", "request_raw", "response_raw", "payload_ref"):
                     call.pop(key, None)
 
     # Assembles ng_perf from ng_trajectory when observability is enabled.
@@ -4632,6 +4638,7 @@ executions → not run again (left to recovery)
         # The post-run health check times failed rollouts from the same captures.
         self._health_capture_dirs = capture_dirs
         observability_enabled = observability_enabled_from_config(global_config)
+        model_call_payloads = model_call_payloads_from_config(global_config)
         # Live health metrics follow the metrics exporter alone: `disable_health_check` only gates the post-run
         # report. A traced dispatch also gets a `gym.rollout.health` span, whatever the metrics exporter does.
         health_metrics_enabled = is_metrics_exporter_active()
@@ -4979,6 +4986,7 @@ executions → not run again (left to recovery)
                     result,
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
+                    model_call_payloads=model_call_payloads,
                     rollout_latency_ms=rollout_latency_ms,
                     trajectory_schema_version=ModelCallCaptureConfig.model_validate(
                         global_config.get("model_call_capture") or {}
@@ -6514,7 +6522,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``enrich_results`` runs :func:`enrich_run_result` on each result before it is returned, so the caller receives
         what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
-        (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
+        (``ng_model_call_capture``, with request and response bodies as the global ``model_call_payloads`` places them,
+        or none when ``include_model_call_payloads`` is false),
         the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
         enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
         is merged, and needs the payloads kept. With ``enrich_results`` the rows are dispatched as collection
@@ -6587,12 +6596,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             global_config = self.setup_server_client(head_server_config).global_config_dict
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
+            model_call_payloads = model_call_payloads_from_config(global_config)
+            if delete_model_call_capture and model_call_payloads != "inline":
+                raise ValueError("delete_model_call_capture needs model_call_payloads: inline")
 
             async def enrich(completed: _CompletedRollout) -> None:
                 options = dict(
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
                     include_payloads=include_model_call_payloads,
+                    model_call_payloads=model_call_payloads,
                     delete_capture=delete_model_call_capture,
                     trajectory_schema_version=trajectory_schema_version
                     or ModelCallCaptureConfig.model_validate(

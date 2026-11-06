@@ -7325,6 +7325,54 @@ class TestRolloutCollection:
         assert "ng_trajectory" in observed
         assert all("reward" not in record for record in failures)
 
+    @pytest.mark.parametrize("configured", [None, "inline", "reference", "none"])
+    async def test_the_configured_payload_placement_reaches_the_capture_merge(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        configured: str | None,
+    ) -> None:
+        """``gym eval run ++model_call_payloads=<mode>`` decides what each rollout row copies from the capture."""
+        placements: list[str] = []
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection, "clear_model_call_captures_for_rollouts", MagicMock()
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
+            "merge_model_call_capture_into_record",
+            lambda record, *args, **kwargs: placements.append(kwargs["payloads"]),
+        )
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
+            "model_call_capture_dirs_from_config",
+            lambda _: [tmp_path / "capture"],
+        )
+        if configured is not None:
+            empty_global_config.return_value = {"model_call_payloads": configured}
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}}) + "\n"
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"response": {}, "reward": 1.0}, rollout_latency_ms=None)
+                )
+                return [future]
+
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            disable_aggregation=True,
+        )
+
+        await TestRolloutCollectionHelper().run_from_config(config)
+
+        assert placements == [configured or "inline"]
+
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
