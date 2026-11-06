@@ -78,6 +78,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.opensandbox.failures import opensandbox_failure
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
+from nemo_gym.sandbox.resource_telemetry import ResourceAllocation
 from nemo_gym.sandbox.utils import rewrite_image
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
@@ -1967,6 +1968,21 @@ class OpenSandboxProvider:
         elif options.skip_health_check is not None:
             kwargs["skip_health_check"] = options.skip_health_check
 
+        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+            from opentelemetry.trace import get_current_span
+
+            from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import resource_amounts
+            from nemo_gym.sandbox.resource_telemetry import amount_attributes
+            from nemo_gym.telemetry._fallbacks import safe_set_span_attributes
+
+            submitted = {}
+            for kind, resource_map in (
+                ("limits", kwargs["resource"]),
+                ("requests", kwargs.get("resource_requests", {})),
+            ):
+                submitted.update(amount_attributes(resource_amounts(resource_map), f"submitted.{kind}."))
+            safe_set_span_attributes(get_current_span(), submitted)
+
         sandbox_id: str | None = None
         sandbox: Any | None = None
         try:
@@ -2208,6 +2224,57 @@ class OpenSandboxProvider:
         """
         spec = replace(spec, metadata={**self._attribution.metadata(), **spec.metadata})
         return await self._create_with_retries(_normalize_spec(spec))
+
+    async def resource_sample(self, handle: SandboxHandle) -> dict[str, str | int | float | bool]:
+        """Read execd's existing snapshot; preserve its timestamp and measurement names."""
+        from nemo_gym.sandbox.resource_telemetry import PREFIX
+
+        sample = await handle.raw.get_metrics()
+        return {
+            PREFIX + "sample.source": "execd/metrics",
+            PREFIX + "sample.timestamp_ms": sample.timestamp,
+            PREFIX + "sample.cpu_count": sample.cpu_count,
+            PREFIX + "sample.cpu_used_percentage": sample.cpu_used_percentage,
+            PREFIX + "sample.memory_total_mib": sample.memory_total_in_mib,
+            PREFIX + "sample.memory_used_mib": sample.memory_used_in_mib,
+        }
+
+    async def resource_allocation(self, handle: SandboxHandle) -> ResourceAllocation:
+        """Read effective requests and limits from the deployment's inspection endpoint."""
+        from urllib.parse import quote
+
+        import aiohttp
+
+        from nemo_gym.client.http_client import request
+        from nemo_gym.sandbox.providers.opensandbox.resource_telemetry import parse_allocation
+
+        connection = self._connection_config()
+        headers = dict(connection.headers)
+        if connection.get_api_key():
+            headers["OPEN-SANDBOX-API-KEY"] = connection.get_api_key()
+        response = await request(
+            "GET",
+            f"{connection.get_base_url()}/sandboxes/{quote(handle.sandbox_id, safe='')}/diagnostics/inspect",
+            headers=headers,
+            ssl=self._connection.tls_verify,
+            timeout=aiohttp.ClientTimeout(total=2),
+            _max_num_tries=1,
+        )
+        try:
+            response.raise_for_status()
+            try:
+                await response.content.readexactly(65537)
+            except asyncio.IncompleteReadError as exc:
+                body = exc.partial
+            else:
+                raise ValueError("Inspection response exceeded 64 KiB")
+            # Keep credentials and query parameters out of exported identity.
+            url = urlsplit(connection.get_base_url())
+            authority = url.netloc.rsplit("@", 1)[-1]
+            scope = f"{url.scheme}://{authority}{url.path.rstrip('/')}"
+            return parse_allocation(body.decode("utf-8"), scope=scope)
+        finally:
+            response.release()
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         """Return the current OpenSandbox lifecycle status."""
