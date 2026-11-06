@@ -44,7 +44,6 @@ docker/ @nvidia-nemo/automation
 # before it, or the wildcard silently overrides it.
 
 # suggest: * @nvidia-nemo/gym_architects
-# suggest: docker/ @anwithk
 
 # Frontier Eval
 # suggest: /nemo_gym/cli/ @nvidia-nemo/gym_env_benchmarks
