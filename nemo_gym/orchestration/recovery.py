@@ -67,6 +67,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     EPISODE_FAILED,
     GRADING_WITHOUT_VERDICT,
     HARBOR_FAILED,
@@ -1498,6 +1499,18 @@ def decide_recovery(
                     "; nothing can be graded before then. After the reset continue with gym eval resubmit --recover "
                     "(re-judges the saved answers, no model calls)",
                 )
+            violations = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == ENVIRONMENT_PROTOCOL_VIOLATION
+            ]
+            if len(violations) == counts[IdentityState.TERMINAL]:
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(violations)} rollout(s) got a reply the collector cannot use "
+                    f"({ENVIRONMENT_PROTOCOL_VIOLATION}); this is a producer bug, retrying cannot help. "
+                    "Fix the server or the benchmark pairing, then `gym eval submit` again",
+                )
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.TERMINAL]} terminal unscored failure(s) need an "
@@ -2694,6 +2707,24 @@ def accounted_chain_walltime(
     if stored_walltime_s is not None and stored_walltime_s not in accepted:
         return None
     return float(total)
+
+
+def unsettled_chain_note(decision: RecoveryDecision) -> str:
+    """The chain stopped before the run settled: how many rollouts are unsettled, by state, so the stop reads
+    as an incomplete run and never as a finished one. Unsettled is wider than the coverage report's ``open`` (the
+    count in the chain's own stop line): it also holds final failures that were not counted as zero."""
+    settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+    unsettled = decision.expected - sum(decision.counts.get(state, 0) for state in settled)
+    by_state = ", ".join(
+        f"{count} {state}"
+        for state, count in sorted(decision.counts.items())
+        if count and state not in {s.value for s in settled}
+    )
+    return (
+        f"the job chain stopped with {unsettled} of {decision.expected} rollouts unsettled"
+        + (f" ({by_state})" if by_state else "")
+        + "; final failures are included, the stop line's open count leaves them out (.gym_chain_incomplete)"
+    )
 
 
 def gate_task_summary(
@@ -5818,7 +5849,7 @@ def gate_summary_from_collected(
     task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
-        extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")
+        extra.append(unsettled_chain_note(decision))
     provenance = (collected.quality or {}).get("provenance")
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
