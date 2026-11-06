@@ -275,7 +275,14 @@ async def test_leak_guard_is_invisible_to_the_model() -> None:
         {
             "tool_name": "google_search",
             "arguments": {"query": "red"},
-            "output": {"ok": True, "tool": "google_search", "context": "No results.", "raw": {}, "contaminated": 3},
+            "output": {
+                "ok": True,
+                "tool": "google_search",
+                "context": "No results.",
+                "raw": {},
+                "contaminated": 3,
+                "cache": "exact",
+            },
         },
         {"tool_name": "fetch_webpage", "arguments": {"url": "https://blog.example/post"}, "output": filtered_page},
     ]
@@ -286,6 +293,16 @@ async def test_leak_guard_is_invisible_to_the_model() -> None:
     # Exactly what an ordinary failed fetch shows.
     assert page == {"ok": False, "error": "no page content available for this URL"}
     assert [event["output"].get("contaminated") for event in result.tool_trace] == [3, 1]
+    assert result.tool_trace[0]["output"]["cache"] == "exact"
+
+
+@pytest.mark.asyncio
+async def test_trace_keeps_tool_results_without_image_data() -> None:
+    agent, seen = make_agent([response(output=[call()]), response("<answer>red</answer>")])
+    result = await agent.run(request(), body())
+    output = result.tool_trace[0]["output"]
+    assert output["ok"] and "image_url" not in output and output["new_image_index"] == 1
+    assert "data:image" in json.dumps(seen[1]["input"])  # the model still gets the image
 
 
 @pytest.mark.asyncio

@@ -215,15 +215,18 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                         "turn": turn + 1,
                         "tool_name": call.name,
                         "arguments": arguments,
-                        "output": result,
+                        # The new image is already in the next user message; keeping its data URL here
+                        # would store every image twice in the rollout row.
+                        "output": {key: value for key, value in result.items() if key != "image_url"},
                     }
                 )
                 image_url = result.get("image_url")
-                # The trace keeps the provider's answer ("raw") and the leak guard's count ("contaminated");
-                # the model sees neither. A failed call shows only its error, so a page the guard filtered
+                # The trace keeps the provider's answer ("raw"), the leak guard's count ("contaminated") and
+                # the cache outcome ("cache": a cold and a warm run must see the same prompt); the model sees
+                # none of them. A failed call shows only its error, so a page the guard filtered
                 # reads like any other failed fetch.
                 if result.get("ok"):
-                    hidden = ("image_url", "raw", "contaminated")
+                    hidden = ("image_url", "raw", "contaminated", "cache")
                     observation = {key: value for key, value in result.items() if key not in hidden}
                 else:
                     observation = {"ok": False, "error": result.get("error")}

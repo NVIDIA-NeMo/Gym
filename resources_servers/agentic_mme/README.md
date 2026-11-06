@@ -56,8 +56,8 @@ The response includes tool_trace, counts, overthink and process_scores_available
 Overthink counts successful observable interactions relative to reference_tool_calls;
 failed requests are counted separately. It never changes the reward.
 Full S/V, V-tool and V-true checkpoint judging and published-score reproduction
-remain unimplemented. Tool traces retain arguments, outputs and image artifacts
-for future process evaluation. Do not report these runs as official Track A.
+remain unimplemented. Tool traces retain arguments and outputs for future process
+evaluation; each new image is in response.output, linked by new_image_index. Do not report these runs as official Track A.
 
 The default budget is 15 interaction rounds / 15 attempted tools, plus one more
 model call to answer. There is no forced final-answer call: every model call
