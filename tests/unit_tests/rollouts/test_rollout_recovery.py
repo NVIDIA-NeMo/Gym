@@ -1010,9 +1010,11 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         "coverage/masked": 1,
         "coverage/unscored": 0,
         "coverage/failed": 1,
+        "coverage/failed_masked": 0,
         "coverage/omitted": 1,
         "coverage/not_started": 0,
         "coverage/missing_outcomes": 0,
+        "coverage/open": 2,
         "coverage/failure_budget_exhausted": 0,
     }
     progress = [metrics for metrics in exported if "progress/total/rollouts_per_min" in metrics][-1]
@@ -1056,6 +1058,8 @@ async def test_progress_masking_matches_persisted_outcomes(runner_config, monkey
     rows[2]["agent_ref"]["name"] = "dropped_agent"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
     runner_config.upload_rollouts = False
+    # The typed reply is an invalid reply from the one-task dropped agent; this test is about masking, not the stop.
+    runner_config.environment_protocol_violation_stop_after = 0
     exported = []
     monkeypatch.setattr(collection, "get_exporters", lambda: True)
     monkeypatch.setattr(collection, "export_metrics", lambda metrics, **kwargs: exported.append(metrics))
