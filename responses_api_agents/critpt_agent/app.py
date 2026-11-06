@@ -22,6 +22,7 @@ from fastapi import Request, Response
 from pydantic import ConfigDict
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -29,6 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
@@ -148,14 +150,25 @@ class CritPtAgent(SimpleResponsesAPIAgent):
 
         # Verify Turn 2 output against the Artificial Analysis API
         verify_request_data = body.model_dump() | {"response": turn2_json}
-        verify_response = await self.server_client.post(
-            server_name=self.config.resources_server.name,
-            url_path="/verify",
-            json=verify_request_data,
-            cookies=cookies,
-        )
-        await raise_for_status(verify_response)
-        return CritPtAgentVerifyResponse.model_validate(await get_response_json(verify_response))
+
+        async def verify() -> dict[str, Any]:
+            verify_response = await self.server_client.post(
+                server_name=self.config.resources_server.name,
+                url_path="/verify",
+                json=verify_request_data,
+                cookies=cookies,
+            )
+            await raise_for_status(verify_response)
+            return await get_response_json(verify_response)
+
+        try:
+            result = await verify_with_transport_retry(
+                verify, server_client=self.server_client, server_name=self.config.resources_server.name
+            )
+        except NgFailureEvent as failure:
+            # The grader failed, not the model: keep the answer and mask the row with the typed failure.
+            result = masked_verify_failure(verify_request_data, failure)
+        return CritPtAgentVerifyResponse.model_validate(result)
 
 
 def _strip_thinking_blocks(text: str) -> str:
