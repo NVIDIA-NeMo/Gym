@@ -139,3 +139,48 @@ def test_pairwise_mode_without_references_is_refused_at_startup(make_server) -> 
 
     with pytest.raises(ValueError, match="at least one pairwise reference"):
         server._require_pairwise_references()
+
+
+async def test_a_missing_deliverable_is_a_model_zero_and_is_not_judged(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="all")
+    binary = AsyncMock(return_value=PASSED)
+    monkeypatch.setattr(server, "_binary_call", binary)
+    pairwise = []
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app.run_trials", lambda **kwargs: pairwise.append(kwargs) or {}
+    )
+
+    # The agent abandoned the task: only the finish record is in the directory.
+    row = await _verify(server, tmp_path, {"finish_params.json": "null"})
+
+    assert not row.get("mask_sample")
+    assert row["reward"] == 0.0
+    assert row["rubric_passed"] == 0
+    assert row["rubric_total"] == 2
+    assert row["pairwise_losses"] == 4
+    assert row["pairwise_wins"] == 0
+    assert binary.await_count == 0
+    assert pairwise == []
+    binary_results = row["judge_response"]["binary_results"]
+    assert [r["missing_deliverables"] for r in binary_results] == [["report.md"], ["report.md"]]
+    assert all(r["passed"] is False and r["judge_name"] is None for r in binary_results)
+
+
+async def test_a_check_is_judged_when_its_own_file_was_submitted(make_server, tmp_path: Path, monkeypatch) -> None:
+    server = make_server(reward_mode="binary")
+    server._aa_checks = [
+        {**server._aa_checks[0], "taskdoer_output_file": "report.md"},
+        {**server._aa_checks[1], "taskdoer_output_file": "slides.md"},
+        server._aa_checks[2],
+    ]
+    binary = AsyncMock(return_value=PASSED)
+    monkeypatch.setattr(server, "_binary_call", binary)
+
+    row = await _verify(server, tmp_path, {"report.md": "the report"})
+
+    assert binary.await_count == 1
+    assert row["rubric_passed"] == 1
+    assert row["rubric_total"] == 2
+    assert row["reward"] == 0.5

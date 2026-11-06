@@ -586,6 +586,19 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     )
                     await self._preconvert(stages[filenames][0])
                 stage, missing = stages[filenames]
+                if missing:
+                    # A deliverable the model did not submit is the model's zero; the judge is not asked.
+                    results.append(
+                        {
+                            "check_id": check["check_id"],
+                            "check_type": check["check_type"],
+                            "judge_name": None,
+                            "passed": False,
+                            "reasoning": f"required deliverable missing: {', '.join(missing)}",
+                            "missing_deliverables": missing,
+                        }
+                    )
+                    continue
                 eligible = judges
                 modalities = dir_media_modalities(stage)
                 # Missing required media must not change this check's judge panel
@@ -602,7 +615,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 selected = sample_judge(eligible, rng)
                 cache_key = (filenames, selected.name)
                 if cache_key not in section_cache:
-                    section_cache[cache_key] = await self._section(stage, selected, missing)
+                    section_cache[cache_key] = await self._section(stage, selected, [])
                 # A failed judge call masks the row as judge_failed and keeps the saved deliverable.
                 parsed, raw = await reraise_judge_errors(
                     self._binary_call(selected, task_markdown, check, section_cache[cache_key])
@@ -670,7 +683,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         eval_sections: dict[str, list[dict[str, Any]]] = {}
         ref_sections: dict[str, list[dict[str, Any]]] = {}
         for judge in matchup_judges:
-            eval_sections[judge.name] = await self._section(eval_stage, judge, eval_missing)
+            eval_sections[judge.name] = await self._section(eval_stage, judge, [])
             ref_sections[judge.name] = await self._section(ref_stage, judge, ref_missing)
         judges = self._pairwise_judges(matchup_judges)
         sections_by_judge = {
@@ -684,6 +697,25 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         results: list[dict[str, Any]] = []
         wins = losses = ties = invalid = 0
         for check in checks:
+            absent = [name for name in _requested_filenames([check]) if name in eval_missing]
+            if absent:
+                # A deliverable the model did not submit loses every trial; the judge is not asked.
+                trials = self.config.pairwise_num_trials
+                losses += trials
+                results.append(
+                    {
+                        "check_id": check["check_id"],
+                        "check_type": check["check_type"],
+                        "reference_id": reference_id,
+                        "excluded_judges": sorted(reference.exclude_judges),
+                        "win_count_a": 0,
+                        "win_count_b": trials,
+                        "tie_count": 0,
+                        "invalid_count": 0,
+                        "missing_deliverables": absent,
+                    }
+                )
+                continue
             rng = make_rng(
                 self.config.judge_sampling_seed,
                 body.task_id,

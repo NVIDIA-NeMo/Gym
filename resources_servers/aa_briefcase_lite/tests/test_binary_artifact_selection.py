@@ -3,6 +3,8 @@
 
 from unittest.mock import AsyncMock
 
+import pytest
+
 from resources_servers.aa_briefcase_lite.app import (
     AABriefcaseLiteResourcesServer,
     AABriefcaseLiteResourcesServerConfig,
@@ -46,31 +48,35 @@ async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(
     call = AsyncMock(return_value=({"passed": True, "reasoning": "test response"}, "{}"))
     monkeypatch.setattr("resources_servers.aa_briefcase_lite.app.sample_judge", choose)
     monkeypatch.setattr(AABriefcaseLiteResourcesServer, "_binary_call", call)
-    await server._verify_binary(
+    reward, results, invalid = await server._verify_binary(
         AABriefcaseLiteVerifyRequest.model_construct(task_id="w1_t4", deliverables_dir=str(tmp_path)),
         "Create a video and captions.",
         judges,
     )
 
-    assert eligible_panels == [["gpt", "claude", "gemini"], ["gemini"], ["gpt", "claude", "gemini"]]
-    subtitle_blocks, video_blocks, missing_blocks = [entry.args[3] for entry in call.call_args_list]
+    # The check whose file was never submitted is the model's zero and does not reach a judge.
+    assert eligible_panels == [["gpt", "claude", "gemini"], ["gemini"]]
+    subtitle_blocks, video_blocks = [entry.args[3] for entry in call.call_args_list]
     assert {"type": "text", "text": subtitles} in subtitle_blocks
     assert all(block["type"] == "text" for block in subtitle_blocks)
     assert any(block["type"] != "text" for block in video_blocks)
     assert subtitles not in str(video_blocks)
     assert "Unrelated content" not in str(call.call_args_list)
-    assert {"type": "text", "text": "[required submitted file missing: absent.srt]"} in missing_blocks
-    assert subtitles not in str(missing_blocks)
+    assert reward == pytest.approx(2 / 3)
+    missing = next(item for item in results if item["check_id"] == "missing")
+    assert missing["passed"] is False
+    assert missing["judge_name"] is None
+    assert missing["missing_deliverables"] == ["absent.srt"]
+    assert invalid == 0
 
-    # Removing a required artifact changes the evidence, not the assigned judge.
+    # A required artifact that disappears is a zero for its check, and the other checks keep their judges.
     (tmp_path / "clip.mp4").unlink()
-    await server._verify_binary(
+    reward, results, _invalid = await server._verify_binary(
         AABriefcaseLiteVerifyRequest.model_construct(task_id="w1_t4", deliverables_dir=str(tmp_path)),
         "Create a video and captions.",
         judges,
     )
-    assert eligible_panels[3:] == eligible_panels[:3]
-    first_judges = [entry.args[0].name for entry in call.call_args_list[:3]]
-    second_judges = [entry.args[0].name for entry in call.call_args_list[3:]]
-    assert first_judges == second_judges
-    assert {"type": "text", "text": "[required submitted file missing: clip.mp4]"} in call.call_args_list[4].args[3]
+    assert reward == pytest.approx(1 / 3)
+    assert eligible_panels[2:] == [["gpt", "claude", "gemini"]]
+    assert call.call_args_list[2].args[0].name == call.call_args_list[0].args[0].name
+    assert [item["passed"] for item in results] == [True, False, False]
