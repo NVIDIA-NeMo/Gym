@@ -98,6 +98,7 @@ def test_overflow_must_be_followed_by_helper_not_an_ordinary_retry(compaction_ev
     record, witness = compaction_evidence
     witness["attempts"].insert(2, {"status_code": 400, "request": {}, "response": {"error": {}}})
     witness["compaction"]["overflow_after"] = 2
+    record["ng_agent_observations"]["records"][-1]["trigger"] = "overflow"
     assert checks(record, witness)["compaction.event"]["status"] == "fail"
 
 
