@@ -77,6 +77,7 @@ from nemo_gym.core import (
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 
 
 LOG = logging.getLogger(__name__)
@@ -143,7 +144,18 @@ class SpeedBenchAgent(SimpleResponsesAPIAgent):
         if not isinstance(state, _SpeedBenchSession):
             raise TypeError("Expected SPEED-Bench session state")
         await state.operations.close(timeout=_SESSION_CLOSE_TIMEOUT_SECS)
-        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=AgentObservationBundle(
+                source=self.config.name,
+                gaps=[
+                    ObservationGap(
+                        code="observation_capture_failed",
+                        detail="The fixed replay does not record agent invocations or turns.",
+                    )
+                ],
+            ),
+        )
 
     async def responses(
         self,

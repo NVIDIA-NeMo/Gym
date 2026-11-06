@@ -173,6 +173,8 @@ def test_a_session_activation_replays_each_turn_once() -> None:
         json={"agent_session_id": "agent-session", "episode_id": seed_request().episode_id.model_dump()},
     )
     assert close.status_code == 200, close.text
+    # The replay records no invocations, and close says so instead of returning no evidence.
+    assert [gap["code"] for gap in close.json()["agent_observations"]["gaps"]] == ["observation_capture_failed"]
 
 
 def test_a_call_without_a_session_still_propagates_cookies() -> None:
