@@ -24,10 +24,10 @@ import os
 import re
 import shlex
 import shutil
-import tempfile
 import signal
 import ssl
 import sys
+import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -67,7 +67,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict, get_global_config_dict
-from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     MODEL_CONTEXT_LIMIT,
@@ -87,6 +86,7 @@ from nemo_gym.core import (
     SandboxFailureDetails,
     observe_failure,
 )
+from nemo_gym.models.chat_streaming import sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -330,6 +330,8 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     build_json = _dump_with_serialized_member(build, "prompt", prompt)
     agent_json = _dump_with_serialized_member(agent, "build", build_json)
     return _dump_with_serialized_member(config, "agent", agent_json)
+
+
 _IMAGE_SUFFIXES = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp"}
 
 
@@ -459,7 +461,7 @@ def _tmp_roots(paths: list[Optional[str]]) -> list[str]:
 
 # Session-sandbox environment: the model endpoint and where OpenCode keeps its session database. Nothing else
 # of this agent's environment (which holds credentials) reaches the sandbox.
-_SANDBOX_SESSION_ENV_KEYS = ("XDG_DATA_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY")
+_SANDBOX_SESSION_ENV_KEYS = ("XDG_DATA_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENCODE_CONFIG_CONTENT")
 _SANDBOX_DEFAULT_ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root"}
 _SANDBOX_MARK = "@@ng-opencode@@"
 
@@ -582,6 +584,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
                 "or use system_prompt_mode='append'."
             )
         return self
+
     # Multimodal tasks: write the last user message's data-URL images into the project dir as
     # image_<i>.<ext> and attach them with -f. `vision` declares a generated (model_server)
     # model entry image-capable, so OpenCode sends attachments and `read` returns image files.

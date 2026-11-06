@@ -14,7 +14,7 @@
 # limitations under the License.
 from copy import deepcopy
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.token_tracking import (
     attach_parent_tokens,
     chain_output_items,
