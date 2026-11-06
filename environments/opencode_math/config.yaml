@@ -24,7 +24,6 @@ opencode_math_agent:
       model: nvinf/nvidia/qwen/qwen3-5-397b-a17b
       opencode_version: 1.17.11
       thinking: false
-      setup_timeout: 900
       timeout: 900
       system_prompt: |
         You are a precise math assistant with a bash tool. Run Python to calculate or verify numeric results when helpful.

@@ -327,6 +327,21 @@ class BaseResponsesAPIAgentConfig(BaseRunServerInstanceConfig):
         return tool_accesses
 
 
+class StrictResponsesAPIAgentConfig(BaseResponsesAPIAgentConfig):
+    """An agent config that rejects keys it does not declare, so a misspelled setting fails at startup.
+
+    A misspelled ``network_access`` would otherwise be ignored and leave a sandbox on the provider's open network.
+    The keys that other Gym components read from an agent's block stay accepted: ``datasets`` (rollout collection),
+    ``description``, and ``tool_servers`` (an Environment Server's fallback for the MCP servers it grants).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    datasets: Optional[list[Any]] = None
+    description: Optional[str] = None
+    tool_servers: Optional[list[Any]] = None
+
+
 class BaseResponsesAPIAgent(BaseServer):
     """An agent server: the harness Gym runs against the model for each task.
 

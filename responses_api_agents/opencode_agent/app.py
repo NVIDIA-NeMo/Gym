@@ -50,11 +50,11 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     resolve_agent_timeout,
     restrict_sandbox_network,
     verification_failure_fields,
@@ -318,7 +318,7 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
-class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
+class OpenCodeAgentConfig(StrictResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 8

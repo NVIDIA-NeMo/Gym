@@ -39,11 +39,11 @@ from nemo_gym.agents import (
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
-    BaseResponsesAPIAgentConfig,
     Body,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
     restrict_sandbox_network,
@@ -287,7 +287,7 @@ def _split_input_to_user_and_history(input_items) -> tuple[str, list[dict], Opti
     return user_message, history, system_message
 
 
-class HermesAgentConfig(BaseResponsesAPIAgentConfig):
+class HermesAgentConfig(StrictResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     model: Optional[str] = None

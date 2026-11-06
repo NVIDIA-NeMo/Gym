@@ -18,6 +18,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
+from pydantic import ValidationError
 
 from nemo_gym.agents.base_responses_api_agent import (
     AgentSeedRejectedError,
@@ -25,6 +26,7 @@ from nemo_gym.agents.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     ModelEndpoint,
     SimpleResponsesAPIAgent,
+    StrictResponsesAPIAgentConfig,
     assert_model_url_reachable_from_sandbox,
     is_loopback_host,
 )
@@ -242,3 +244,24 @@ class TestAssertModelUrlReachableFromSandbox:
     def test_unparseable_hosts_are_not_loopback(self, url: str) -> None:
         assert is_loopback_host(url) is False
         assert_model_url_reachable_from_sandbox(url, provider_name="opensandbox")
+
+
+class TestStrictResponsesAPIAgentConfig:
+    BASE = {"name": "agent", "host": "127.0.0.1", "port": 8000, "entrypoint": "app.py"}
+
+    def test_an_undeclared_key_is_refused(self) -> None:
+        # A misspelled network_access would otherwise be dropped and leave the sandbox open.
+        with pytest.raises(ValidationError, match="network_acess"):
+            StrictResponsesAPIAgentConfig.model_validate({**self.BASE, "network_acess": "model_only"})
+
+    def test_keys_other_components_read_are_accepted(self) -> None:
+        config = StrictResponsesAPIAgentConfig.model_validate(
+            {
+                **self.BASE,
+                "datasets": [{"name": "train", "type": "train", "jsonl_fpath": "data/train.jsonl"}],
+                "description": "an agent",
+                "tool_servers": [{"type": "resources_servers", "name": "tavily"}],
+            }
+        )
+        assert config.description == "an agent"
+        assert config.tool_servers == [{"type": "resources_servers", "name": "tavily"}]
