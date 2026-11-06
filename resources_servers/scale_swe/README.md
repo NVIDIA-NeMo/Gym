@@ -82,7 +82,7 @@ from a genuinely nondeterministic test so neither silently corrupts the other's 
 
 ## Running an agent
 
-`configs/scale_swe_opencode_single_agent_turn.yaml` runs `opencode_agent` through `single_agent_turn` against
+`configs/scale_swe_opencode.yaml` runs `opencode_agent` through `single_agent_turn` against
 `scale_swe_resources_server`, pointed at `data/scale_swe_training.jsonl`: the server lends the task sandbox to the
 agent session as described under Episode sessions below, and rows reach it through the `scale_swe` taskset. It lives
 in a separate file rather than folded into `scale_swe.yaml` so golden-patch validation (which never touches an agent)
@@ -91,12 +91,12 @@ session path as evaluation only, so check its token capture before you train on 
 
 ```bash
 gym env start \
-  --config resources_servers/scale_swe/configs/scale_swe_opencode_single_agent_turn.yaml \
+  --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
-`configs/scale_swe_opencode.yaml` is deprecated. It wires `opencode_sandboxed_agent` to the same resources server
-through the `legacy_agent` relay, and that agent
+`configs/scale_swe_opencode_legacy_agent.yaml` is deprecated. It wires `opencode_sandboxed_agent` to the same
+resources server through the `legacy_agent` relay, and that agent
 [will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx) after the Environment
 Server migration.
 

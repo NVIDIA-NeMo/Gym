@@ -49,7 +49,7 @@ MODEL=/path/to/model \
 CONTAINER=/path/to/eval/container \
 ... \
 bash benchmarks/nemotron_3.5_super/sbatch_external_vllm.sh \
-    --config benchmarks/swebench/verified/opencode.yaml \
+    --config benchmarks/swebench/verified/opencode_legacy_agent.yaml \
     ++num_samples_in_parallel=1024 \
     ++swebench_verified_opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent.opencode_model_call_timeout=10800000
 ```
