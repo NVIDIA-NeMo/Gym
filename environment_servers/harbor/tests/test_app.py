@@ -72,7 +72,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import failure_kinds
+from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -1277,7 +1277,7 @@ class TestAgentStage:
     @pytest.mark.parametrize(
         ("path", "status", "stage", "terminal"),
         [
-            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a final 422.
+            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a terminal 422.
             ("/v1/agent_sessions", 422, "agent", True),
             ("/ng-rollout/r1/v1/responses", 422, "agent", True),
             ("/v1/agent_sessions/close", 503, "cleanup", False),
@@ -2418,7 +2418,8 @@ class TestComposeAndRouting:
         verifier = FakeSandbox()
 
         async def start_compose(task, episode_key):
-            documents.append(server._compose_document(task))
+            compose.document = server._compose_document(task)
+            documents.append(compose.document)
             return compose
 
         async def create_verifier(task, *, episode_key=None):
@@ -3315,6 +3316,29 @@ class TestComposeAndRouting:
         # Everything above happened before the harness got its session.
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
+
+    @pytest.mark.parametrize("compose_user,expected_user", [("nobody", "nobody"), ("1000", 1000)])
+    async def test_task_healthcheck_uses_own_compose_user_without_job_overlay(
+        self, tmp_path, monkeypatch, compose_user, expected_user
+    ):
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        path = task.path / "environment" / "docker-compose.yaml"
+        document = yaml.safe_load(path.read_text())
+        document["services"]["main"]["user"] = compose_user
+        path.write_text(yaml.safe_dump(document))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.needs_compose and server.config.compose_overlay is None
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert documents[0]["services"]["main"]["user"] == compose_user
+        checks = [record for record in compose.services["main"].execs if record["command"] == "test -f /tmp/ready"]
+        assert len(checks) == 3
+        assert all(record["user"] == expected_user for record in checks)
+        assert response.result.reward == 1.0
+        assert compose.stopped and not server._sandboxes
 
     async def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
         server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
@@ -4579,7 +4603,8 @@ class TestGeneralization:
             async def start(self, spec):
                 starts.append(spec.image)
                 if len(starts) <= len(failures):
-                    raise SandboxCreateError(failures[len(starts) - 1])
+                    failure = failures[len(starts) - 1]
+                    raise failure if isinstance(failure, BaseException) else SandboxCreateError(failure)
 
             def __getattr__(self, name):
                 return getattr(sandbox, name)
@@ -4600,6 +4625,30 @@ class TestGeneralization:
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
+        assert not server._sandboxes
+
+    @pytest.mark.parametrize("message, failures", [("ErrImagePull", 1), ("ErrImagePull", 3), ("quota exceeded", 1)])
+    async def test_shared_sandbox_failure_preserves_pull_retry_policy(self, tmp_path, monkeypatch, message, failures):
+        cause = RuntimeError(message)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_request_failed",
+            operation="create",
+            failure_reason="Sandbox create failed",
+        )
+        error.__cause__ = cause
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, [error] * failures)
+        with RequestFailureLog.capture() as log:
+            response = await run_episode(server, task)
+        if message == "ErrImagePull" and failures == 1:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0
+            assert starts == ["ubuntu:24.04"] * 2
+            assert log.report.events[error.event_id].foreign_error.exception_type == "RuntimeError"
+        else:
+            assert response.failure is not None
+            assert len(starts) == failures
+        assert error.__cause__ is cause
         assert not server._sandboxes
 
     async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):
@@ -4706,6 +4755,7 @@ class TestGeneralization:
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = False
 
             async def start(self):
@@ -4808,6 +4858,7 @@ class TestGeneralization:
             ):
                 groups.append(self)
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = 0
 
             async def start(self):
