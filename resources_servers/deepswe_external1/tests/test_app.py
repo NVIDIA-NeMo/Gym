@@ -421,6 +421,55 @@ async def test_agent_requires_matching_seeded_session(task: InlineTask, mismatch
     assert agent.stop.await_count == (mismatch != "absent")
 
 
+def _saved_row(result) -> dict:
+    """The row recovery reads back: the verify response plus the model answer the rollout saved."""
+    row = result.model_dump()
+    row["response"] = {
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done", "annotations": []}],
+            }
+        ],
+    }
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_stage", ["patch_collection", "native_verifier"])
+async def test_agent_mode_names_the_stage_that_failed_and_keeps_recovery_aligned(
+    task: InlineTask, failing_stage: str
+) -> None:
+    """A collection failure is an environment failure; a verifier failure after a collected patch stays a verifier
+    error, so recovery grades the saved patch again only in the second case."""
+    from nemo_gym.orchestration.recovery import REVERIFY_VERIFIER, reverification_cause
+
+    server = make_server(task, mode="agent")
+    server.config.include_model_patch_in_response = True
+    agent = sandbox("A", [])
+    server._agent_sessions["session"] = AgentSandboxSession(task.data.task_id, task.data.image, agent, "A", {})
+    server._create_sandbox = AsyncMock(return_value=sandbox("B", []))
+    server._collect_model_patch = AsyncMock(
+        return_value=b"patch", side_effect=RuntimeError("capture") if failing_stage == "patch_collection" else None
+    )
+    server._run_verifier = AsyncMock(side_effect=RuntimeError("grader"))
+
+    result = await server.verify(request(), body(task))
+
+    assert result.mask_sample and not result.evaluation_completed and result.reward == 0
+    assert result.failure_stage == failing_stage
+    assert result.failure_reason
+    if failing_stage == "patch_collection":
+        assert result.failure_kind == "environment_server_failed"
+        assert reverification_cause(_saved_row(result)) is None
+    else:
+        assert result.failure_kind == "verifier_error"
+        assert reverification_cause(_saved_row(result)) == REVERIFY_VERIFIER
+
+
 @pytest.mark.asyncio
 async def test_shutdown_releases_unfinished_sessions(task: InlineTask) -> None:
     server = make_server(task, mode="agent")

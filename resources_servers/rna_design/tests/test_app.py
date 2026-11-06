@@ -453,7 +453,9 @@ def test_a_verify_with_no_campaign_is_masked_as_a_lost_session(tmp_path: Path) -
         try:
             verified = _verify(client)
         finally:
-            worker.proc.kill()
+            # Shutdown only closes the workers still registered, and this one is not. Close it on the client's own
+            # event loop, as the server does, so its process and pipes are reaped before the client exits.
+            client.portal.call(worker.close)
     assert verified["reward"] == 0.0 and verified["mask_sample"] is True
     assert verified["failure_kind"] == "session_lost"
     assert verified["failure_reason"] == "no campaign for this session"
