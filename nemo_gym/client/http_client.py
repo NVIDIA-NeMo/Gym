@@ -20,7 +20,7 @@ import socket
 import time
 from collections.abc import Callable
 from traceback import print_exc
-from typing import Any, NamedTuple, Optional, Type, Union, Unpack
+from typing import Any, ClassVar, NamedTuple, Optional, Type, Union, Unpack
 
 import orjson
 from aiohttp import (
@@ -36,8 +36,9 @@ from aiohttp import (
 )
 from aiohttp.client import _RequestOptions
 from multidict import CIMultiDict
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
+from nemo_gym.client.dependency_policy import dependency_error_evidence
 from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -47,7 +48,9 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode_context import (
     current_rollout_id,
 )
+from nemo_gym.core.failure_kinds import FailureClassificationConfig, classify_failure
 from nemo_gym.core.failure_transport import FailureHeader, observe_reply
+from nemo_gym.core.outcome_policy import OutcomeAction, OutcomePolicyConfig, choose_action
 from nemo_gym.core.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
@@ -95,7 +98,43 @@ class _PickleSafeRequestInfo(NamedTuple):
     real_url: str
 
 
+class HTTPTransportOutcomePolicyConfig(OutcomePolicyConfig):
+    """Optional selection inside the existing transport loop, never permission to replay an unsafe request.
+
+    The default preserves the transport's existing retry choices. Resend flags,
+    cancellation and budgets still gate execution independently of this selector.
+    """
+
+    supported_actions: ClassVar[frozenset[OutcomeAction]] = frozenset({OutcomeAction.RETRY, OutcomeAction.FAIL})
+    classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+    @field_validator("by_status_code")
+    @classmethod
+    def reject_status_rules(cls, value: dict[int, OutcomeAction]) -> dict[int, OutcomeAction]:
+        """HTTP responses leave this loop before the caller raises on their status."""
+        if value:
+            raise ValueError("Transport retry policy cannot select by HTTP status; configure the caller's policy")
+        return value
+
+
+def _transport_retry_allowed(error: BaseException, policy: HTTPTransportOutcomePolicyConfig) -> bool:
+    kind, status = dependency_error_evidence(error)
+    return (
+        choose_action(
+            failure_kind=kind,
+            http_status=status,
+            failure_class=classify_failure(failure_kind=kind, http_status=status, config=policy.classification),
+            config=policy,
+        )
+        == OutcomeAction.RETRY
+    )
+
+
 class GlobalAIOHTTPAsyncClientConfig(BaseModel):
+    global_aiohttp_retry_outcome_policy: HTTPTransportOutcomePolicyConfig = Field(
+        default_factory=HTTPTransportOutcomePolicyConfig
+    )
     global_aiohttp_connector_limit: int = Field(
         default=100 * 1024,
         ge=0,
@@ -401,6 +440,7 @@ async def request(
     _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     _retry_other_errors: bool = True,
+    _retry_outcome_policy: HTTPTransportOutcomePolicyConfig | None = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -462,6 +502,7 @@ async def request(
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             _retry_other_errors=_retry_other_errors,
+            _retry_outcome_policy=_retry_outcome_policy,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -483,6 +524,7 @@ async def request(
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             _retry_other_errors=_retry_other_errors,
+            _retry_outcome_policy=_retry_outcome_policy,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -505,6 +547,7 @@ async def _traced_request(
     _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     _retry_other_errors: bool = True,
+    _retry_outcome_policy: HTTPTransportOutcomePolicyConfig | None = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -551,6 +594,7 @@ async def _traced_request(
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             _retry_other_errors=_retry_other_errors,
+            _retry_outcome_policy=_retry_outcome_policy,
             **kwargs,
         )
 
@@ -634,9 +678,15 @@ async def _request_with_retries(
     _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     _retry_other_errors: bool = True,
+    _retry_outcome_policy: HTTPTransportOutcomePolicyConfig | None = None,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
+    retry_policy = _retry_outcome_policy or (
+        _GLOBAL_AIOHTTP_CLIENT_CONFIG.global_aiohttp_retry_outcome_policy
+        if _GLOBAL_AIOHTTP_CLIENT_CONFIG is not None
+        else HTTPTransportOutcomePolicyConfig()
+    )
     # Initialization stays inside the client span and sets the metrics flag before it is read.
     token = set_server_name(_server_name or "external") if _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY else None
     try:
@@ -668,7 +718,7 @@ async def _request_with_retries(
             except ServerDisconnectedError as error:
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
-                if not _resend_after_disconnect:
+                if not _resend_after_disconnect or not _transport_retry_allowed(error, retry_policy):
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
                 _NUM_SERVER_DISCONNECTED_ERROR += 1
@@ -691,6 +741,8 @@ async def _request_with_retries(
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
+                    raise
+                if not _transport_retry_allowed(error, retry_policy):
                     raise
                 global _NUM_CLIENT_OS_ERROR
                 _NUM_CLIENT_OS_ERROR += 1
@@ -716,6 +768,9 @@ async def _request_with_retries(
                 if not _resend_after_disconnect or not _retry_other_errors:
                     # A connection that was never made is a ClientOSError, handled above;
                     # anything else may have sent it, or returned part of a reply.
+                    raise
+
+                if not _transport_retry_allowed(e, retry_policy):
                     raise
 
                 # num_tries only advances on the default path, so count explicit attempts when capped.

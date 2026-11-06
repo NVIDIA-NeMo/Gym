@@ -1239,3 +1239,55 @@ def test_a_process_that_imports_only_the_client_closes_its_sessions_at_exit() ->
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "Unclosed client session" not in result.stderr
+
+
+@mark.parametrize("traced", [False, True])
+@mark.parametrize("metrics", [False, True])
+async def test_transport_policy_stops_retry_without_hiding_observation(monkeypatch, traced, metrics):
+    from nemo_gym.client.http_client import HTTPTransportOutcomePolicyConfig, request
+
+    failure = ServerDisconnectedError("peer closed")
+    send = AsyncMock(side_effect=[failure, MagicMock()])
+    observed = []
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: MagicMock(request=send))
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _: traced)
+    monkeypatch.setattr(nemo_gym.client.http_client, "is_trace_exporter_active", lambda: traced)
+    monkeypatch.setattr("nemo_gym.telemetry.spans.client_span", lambda _: nullcontext(None))
+    monkeypatch.setattr("nemo_gym.telemetry.contrib.inject_trace_context", lambda headers: None)
+    counts = SimpleNamespace(outbound_in_flight=0)
+    monkeypatch.setattr(nemo_gym.client.http_client, "request_counts", lambda: counts if metrics else None)
+    with raises(ServerDisconnectedError) as exc:
+        await request(
+            "POST",
+            "http://server.test/step",
+            _max_num_tries=3,
+            _on_transport_failure=lambda error, uploaded: observed.append(error),
+            _retry_outcome_policy=HTTPTransportOutcomePolicyConfig(by_failure_kind={"transport_peer_drop": "fail"}),
+        )
+    assert exc.value is failure
+    assert send.await_count == 1
+    assert observed == [failure]
+    assert counts.outbound_in_flight == 0
+
+
+@mark.parametrize("guard", [{"_resend_after_disconnect": False}, {"_max_num_tries": 1}])
+async def test_transport_retry_policy_cannot_override_replay_guards(monkeypatch, guard):
+    from nemo_gym.client.http_client import HTTPTransportOutcomePolicyConfig, request
+
+    send = AsyncMock(side_effect=ServerDisconnectedError("already sent"))
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: MagicMock(request=send))
+    with raises(ServerDisconnectedError):
+        await request(
+            "POST",
+            "http://server.test/step",
+            **guard,
+            _retry_outcome_policy=HTTPTransportOutcomePolicyConfig(default_action="retry"),
+        )
+    assert send.await_count == 1
+
+
+def test_transport_policy_rejects_unobservable_status_rules():
+    from nemo_gym.client.http_client import HTTPTransportOutcomePolicyConfig
+
+    with raises(ValidationError, match="cannot select by HTTP status"):
+        HTTPTransportOutcomePolicyConfig(by_status_code={503: "fail"})
