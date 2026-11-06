@@ -42,7 +42,7 @@ requires the trusted task bundle, but no active sandbox or model.
 
 ## Dependencies and tests
 
-`requirements.txt` installs the Gym development and sandbox dependencies.
+`pyproject.toml` and `uv.lock` pin the Gym development and sandbox dependencies.
 Document tools live in the [sandbox image](toolset/README.md).
 Integration code and the reference scorer are Apache-2.0; scorer provenance and
 notices are recorded in its header and [ATTRIBUTIONS.md](../../ATTRIBUTIONS.md).
