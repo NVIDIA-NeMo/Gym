@@ -13,6 +13,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_LIMIT,
     FAILURE_KINDS,
     MODEL_REQUEST_ERROR,
+    MODEL_SERVER_QUEUE_TIMEOUT,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_OOM_KILLED,
     FailureClassificationConfig,
@@ -75,6 +76,7 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            MODEL_SERVER_QUEUE_TIMEOUT: OutcomeAction.RETRY,
             PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
         }
@@ -155,4 +157,28 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
             and event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
             for event in attempts
         )
+    )
+
+
+def queued_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether a confirmed policy response timeout (``confirmed_policy_response_timeout``) waited in the model
+    server's queue: every attempt recorded the server's queue at its timeout, with requests waiting.
+
+    An attempt without a queue reading, or with an empty queue, keeps the timeout the model's.
+    """
+    if not confirmed_policy_response_timeout(report):
+        return False
+    final = report.events[report.failure_id]
+    attempts = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL
+        and event.operation == "model_request"
+        and event.operation_id == final.operation_id
+    ]
+    return all(
+        isinstance(event.details, ModelFailureDetails)
+        and event.details.server_requests_waiting is not None
+        and event.details.server_requests_waiting > 0
+        for event in attempts
     )
