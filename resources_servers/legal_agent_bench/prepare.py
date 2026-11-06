@@ -50,7 +50,7 @@ CORPORA_DIRNAME = ".corpora"
 INDEX_FILENAME = "all.jsonl"
 DEFAULT_INDEX_FPATH = PACKAGE_DIR / "data" / "generated" / INDEX_FILENAME
 CACHE_MARKER = ".nemo_gym_asset.json"
-CACHE_FORMAT_VERSION = 9
+CACHE_FORMAT_VERSION = 10
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
 LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "lab_harbor"
@@ -64,6 +64,7 @@ VERIFIER_TEMPLATE_SOURCES = {
     "tests/lab_harbor/__init__.py": LAB_HARBOR_SOURCE_DIR / "__init__.py",
     "tests/lab_harbor/judge.py": LAB_HARBOR_SOURCE_DIR / "judge.py",
     "tests/lab_harbor/scoring.py": LAB_HARBOR_SOURCE_DIR / "scoring.py",
+    "tests/lab_harbor/document_ids.py": LAB_HARBOR_SOURCE_DIR / "document_ids.py",
 }
 REQUIRED_TASK_PATHS = (
     "instruction.md",

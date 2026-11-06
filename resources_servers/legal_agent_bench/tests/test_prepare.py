@@ -8,6 +8,7 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -20,6 +21,25 @@ from resources_servers.legal_agent_bench import prepare
 
 
 TASK_IDS = ("area/task-one", "area/task-group/scenario-01")
+
+
+def test_prepared_verifier_imports_identity_correction_without_repository(monkeypatch, tmp_path: Path) -> None:
+    _, tasks, _ = _build_caches(monkeypatch, tmp_path)
+    task = tasks / prepare.flatten_task_id(TASK_IDS[0])
+    module = task / "tests" / "lab_harbor" / "document_ids.py"
+    assert module.read_bytes() == (prepare.LAB_HARBOR_SOURCE_DIR / "document_ids.py").read_bytes()
+    assert not list((task / "environment").rglob("document_ids.py"))
+    result = subprocess.run(
+        [sys.executable, str(task / "tests" / "legal_agent_bench_verify.py"), "--help"],
+        cwd=tmp_path,
+        env={"PATH": str(Path(sys.executable).parent), "PYTHONPATH": ""},
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert "--task-json" in result.stdout
 
 
 def _configure_small_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

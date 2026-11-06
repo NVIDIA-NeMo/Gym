@@ -30,12 +30,14 @@ from typing import Any
 
 
 if __package__:
+    from .lab_harbor.document_ids import CORRECTION_VERSION, document_id_aliases
     from .lab_harbor.judge import (
         OpenAICompatibleJudge,
         write_transcript_event,
     )
     from .lab_harbor.scoring import score_rubric
 else:
+    from lab_harbor.document_ids import CORRECTION_VERSION, document_id_aliases
     from lab_harbor.judge import OpenAICompatibleJudge, write_transcript_event
     from lab_harbor.scoring import score_rubric
 
@@ -98,6 +100,10 @@ def _document_tool_versions() -> dict[str, str | None]:
 
 def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, Any] | None = None) -> dict[str, Any]:
     task_config = json.loads(Path(args.task_json).read_text(encoding="utf-8"))
+    metadata = task_config.get("metadata") or {}
+    aliases = document_id_aliases(
+        task_id=metadata.get("lab_task_id"), source_revision=metadata.get("lab_source_revision")
+    )
     run_dir = Path(args.run_dir)
     verifier_dir = Path(args.verifier_dir)
     verifier_dir.mkdir(parents=True, exist_ok=True)
@@ -145,6 +151,7 @@ def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, 
         transcript_path=transcript_path,
         judge_factory=judge_factory if judge_parallelism > 1 else None,
         parallelism=judge_parallelism,
+        document_id_aliases=aliases,
     )
 
     scores = {
@@ -160,6 +167,8 @@ def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, 
         "gym_commit": config.get("gym_commit"),
         "judge_profile": "single",
         "document_tool_versions": _document_tool_versions(),
+        "grading_corrections": [CORRECTION_VERSION] if aliases else [],
+        "document_id_aliases": aliases,
     }
     if metrics:
         scores["cost"] = {
@@ -265,6 +274,8 @@ def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
         "gym_commit": values[0].get("gym_commit"),
         "pandoc_version": values[0].get("pandoc_version"),
         "document_tool_versions": values[0]["document_tool_versions"],
+        "grading_corrections": values[0].get("grading_corrections", []),
+        "document_id_aliases": values[0].get("document_id_aliases", {}),
         "summary": f"Dual task all-pass: {task_score:.1f}; criterion pass: {criterion_rate:.4f}",
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }
