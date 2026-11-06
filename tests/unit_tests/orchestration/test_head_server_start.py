@@ -18,12 +18,18 @@ import nemo_gym.orchestration.server_supervisor as env_module
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME
 from nemo_gym.core.failure_kinds import SERVER_START_FAILED
-from nemo_gym.orchestration.server_supervisor import HeadServerUnresponsiveError, RunHelper, ServerStartFailedError
+from nemo_gym.orchestration.server_supervisor import (
+    HeadServerUnresponsiveError,
+    ServerStartFailedError,
+    ServerSupervisor,
+)
 from tests.unit_tests.orchestration.test_server_start_failed import taken_port as taken_port
 
 
-def waiting_runner(monkeypatch, *, alive: bool, statuses: list[str], timeout_s: float | None = None) -> RunHelper:
-    runner = RunHelper()
+def waiting_runner(
+    monkeypatch, *, alive: bool, statuses: list[str], timeout_s: float | None = None
+) -> ServerSupervisor:
+    runner = ServerSupervisor()
     runner._server_client = MagicMock(poll_for_status=MagicMock(side_effect=statuses))
     runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=alive))
     if timeout_s is not None:
@@ -65,7 +71,7 @@ def test_a_head_server_that_died_on_a_free_port_reports_no_errno(monkeypatch) ->
 
 
 def test_a_taken_head_server_port_is_retried_once_on_a_fresh_port(taken_port: dict) -> None:
-    runner = RunHelper()
+    runner = ServerSupervisor()
     runner.shutdown = MagicMock()
     config = env_module.get_global_config_dict()
     head_ports: list[int] = []

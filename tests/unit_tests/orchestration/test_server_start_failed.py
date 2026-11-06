@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 import nemo_gym.orchestration.server_supervisor as env_module
 from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME, NEMO_GYM_LOG_DIR_KEY_NAME, UV_CACHE_DIR_KEY_NAME
 from nemo_gym.core.failure_kinds import FAILURE_KINDS, SERVER_START_FAILED
-from nemo_gym.orchestration.server_supervisor import RunHelper, ServerStartFailedError, _bind_errno
+from nemo_gym.orchestration.server_supervisor import ServerStartFailedError, ServerSupervisor, _bind_errno
 
 
 BIND_ERROR = (
@@ -34,8 +34,8 @@ def _exited_server(stderr: str) -> MagicMock:
     return process
 
 
-def _polling_runner(*, ready: bool) -> RunHelper:
-    runner = RunHelper()
+def _polling_runner(*, ready: bool) -> ServerSupervisor:
+    runner = ServerSupervisor()
     runner._servers_ready = ready
     runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
     runner._h2_ping_sidecar = None
@@ -77,7 +77,7 @@ def test_a_real_server_that_cannot_bind_an_occupied_port_reports_eaddrinuse(tmp_
         taken.bind(("127.0.0.1", 0))
         taken.listen()
         port = taken.getsockname()[1]
-        runner = RunHelper()
+        runner = ServerSupervisor()
         runner._servers_ready = False
         runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=True))
         runner._h2_ping_sidecar = None
@@ -125,8 +125,8 @@ def taken_port(monkeypatch: pytest.MonkeyPatch) -> dict:
 
 
 def _runner_whose_server_binds(taken_port: dict, *, failures: int, error_number: int | None = errno.EADDRINUSE):
-    """A RunHelper whose start fails `failures` times as a server that cannot bind its port, then succeeds."""
-    runner = RunHelper()
+    """A ServerSupervisor whose start fails `failures` times as a server that cannot bind its port, then succeeds."""
+    runner = ServerSupervisor()
     runner.shutdown = MagicMock()
     ports: list[int] = []
 
@@ -187,7 +187,7 @@ def test_a_taken_port_is_not_retried_after_the_sidecar_rewrote_the_model_urls(ta
 
 
 def test_a_head_server_that_died_ends_the_wait_with_a_typed_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    runner = RunHelper()
+    runner = ServerSupervisor()
     runner._server_client = MagicMock(poll_for_status=MagicMock(return_value="connection_error"))
     runner._head_server_thread = MagicMock(is_alive=MagicMock(return_value=False))
     monkeypatch.setattr(

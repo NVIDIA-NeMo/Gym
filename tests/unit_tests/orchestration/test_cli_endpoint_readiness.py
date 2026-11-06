@@ -26,7 +26,7 @@ import nemo_gym.orchestration.server_supervisor
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.orchestration.server_supervisor import (
     _ENDPOINT_POLL_INTERVAL_SEC,
-    RunHelper,
+    ServerSupervisor,
     _collect_model_endpoints,
     _model_endpoint_timeout_seconds,
     _probe_endpoint,
@@ -260,16 +260,16 @@ class TestCheckStopsStartupCleanly:
         sleep_mock.assert_not_called()
 
     def test_failure_is_a_config_error_not_a_system_exit(self, monkeypatch: MonkeyPatch) -> None:
-        """NeMo-RL imports RunHelper, so a library method must not exit the process."""
+        """NeMo-RL drives ServerSupervisor, so a library method must not exit the process."""
         monkeypatch.setattr(
             nemo_gym.orchestration.server_supervisor,
             "_wait_for_model_endpoints",
             MagicMock(return_value=[("openai_base_url", "http://x/v1")]),
         )
-        helper = RunHelper.__new__(RunHelper)
+        supervisor = ServerSupervisor.__new__(ServerSupervisor)
 
         with raises(ConfigError) as exc_info:
-            RunHelper.wait_for_model_endpoints(helper, _config(model_endpoint_readiness_timeout_seconds=1))
+            ServerSupervisor.wait_for_model_endpoints(supervisor, _config(model_endpoint_readiness_timeout_seconds=1))
 
         assert not isinstance(exc_info.value, SystemExit)
         # The report names the config key, since the endpoint may not be the policy model.

@@ -56,7 +56,7 @@ from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
 from nemo_gym.eval.eval_plan import EvalPlan
-from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
+from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError, ServerSupervisor
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 
 
@@ -157,10 +157,10 @@ def serve_benchmark(
         if not 0 < registry_port < 65536:
             raise ConfigError(f"registry_port must be a port number from 1 to 65535, got {registry_port!r}")
         initial = OmegaConf.merge(initial, {HEAD_SERVER_KEY_NAME: {"port": registry_port}})
-    helper = RunHelper()
+    supervisor = ServerSupervisor()
     try:
         with ignoring_command_line():
-            helper.start(
+            supervisor.start(
                 GlobalConfigDictParserConfig(
                     initial_global_config_dict=initial, skip_load_from_cli=True, skip_exporters=True
                 )
@@ -175,7 +175,7 @@ def serve_benchmark(
             )
         yield registry_server
     finally:
-        helper.shutdown()
+        supervisor.shutdown()
 
 
 def _checked_overrides(overrides: Optional[Mapping[str, Any]]) -> dict[str, Any]:

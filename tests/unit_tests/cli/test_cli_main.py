@@ -809,15 +809,16 @@ class TestFriendlyValidationError:
         self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys
     ) -> None:
         # The issue's headline: `gym env start` used to initialise Ray and spawn the head server, then die on the
-        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before RunHelper exists.
+        # bad value inside HeadServer.run_webserver. `run` now fails in its config parse, before ServerSupervisor
+        # exists.
         import nemo_gym.cli.env as cli_env
 
         class _NoServerMayStart:
             def __init__(self, *args, **kwargs) -> None:
-                raise AssertionError("RunHelper must not be built for a malformed head_server")
+                raise AssertionError("ServerSupervisor must not be built for a malformed head_server")
 
-        monkeypatch.setattr(cli_env, "RunHelper", _NoServerMayStart)
-        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "RunHelper", _NoServerMayStart)
+        monkeypatch.setattr(cli_env, "ServerSupervisor", _NoServerMayStart)
+        monkeypatch.setattr(nemo_gym.orchestration.server_supervisor, "ServerSupervisor", _NoServerMayStart)
 
         self._run_real_cli_with_a_malformed_head_server(monkeypatch, tmp_path, capsys, ["env", "start"])
 

@@ -13,19 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any
+
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.utils.compat import moved_attr_getter
 
 
 # The single `nemo_gym/cli.py` module was split into the `nemo_gym.cli` package. Its public
 # surface is re-exported lazily from the new submodules so existing `from nemo_gym.cli import X`
-# imports (e.g. NeMo-RL's `RunHelper` / `GlobalConfigDictParserConfig`) keep working. Lazy
+# imports (e.g. NeMo-RL's `GlobalConfigDictParserConfig`) keep working. Lazy
 # resolution keeps `import nemo_gym.cli` cheap — it doesn't eagerly pull in hydra, wandb or ray —
 # and avoids circular imports. Each access emits a DeprecationWarning pointing at the new path.
-__getattr__ = moved_attr_getter(
+_moved_cli_names = moved_attr_getter(
     __name__,
     {
         # Server orchestration + run/test entry points (old `nemo_gym/cli.py`)
-        "RunHelper": "nemo_gym.orchestration.server_supervisor",
         "RunConfig": "nemo_gym.cli.env",
         "TestConfig": "nemo_gym.cli.env",
         "TestAllConfig": "nemo_gym.cli.env",
@@ -45,3 +47,13 @@ __getattr__ = moved_attr_getter(
         "GlobalConfigDictParserConfig": "nemo_gym.config.global_config",
     },
 )
+# Names that moved and were renamed, such as NeMo-RL's `RunHelper`, stay importable from here until their removal
+# release; see nemo_gym/_moved_paths.py.
+_moved_names = moved_names_getattr(__name__)
+
+
+def __getattr__(name: str) -> Any:
+    try:
+        return _moved_names(name)
+    except AttributeError:
+        return _moved_cli_names(name)

@@ -260,8 +260,8 @@ def test_documented_cli_uses_imported_dataset_and_private_overrides(
                 str(output),
             ]
         )
-        monkeypatch.setattr(cli_eval.RunHelper, "start", lambda *_: None)
-        monkeypatch.setattr(cli_eval.RunHelper, "shutdown", lambda *_: None)
+        monkeypatch.setattr(cli_eval.ServerSupervisor, "start", lambda *_: None)
+        monkeypatch.setattr(cli_eval.ServerSupervisor, "shutdown", lambda *_: None)
         monkeypatch.setattr(cli_eval, "_interrupt_on_sigterm", lambda: None)
         monkeypatch.setattr(cli_eval, "_health_check_collected_rollouts", lambda *_: None)
         monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collected)

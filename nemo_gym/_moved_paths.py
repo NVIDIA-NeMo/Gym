@@ -179,6 +179,9 @@ def _names(new: str, since: str, names: str) -> dict[str, MovedPath]:
     return {name: MovedPath(new=new, since=since) for name in names.split()}
 
 
+# `RunHelper` shipped in nemo_gym.cli.env, and through it in nemo_gym.cli and nemo_gym.cli.eval.
+_RUN_HELPER = MovedPath(new="nemo_gym.orchestration.server_supervisor:ServerSupervisor", since="0.8.0")
+
 # Old module path -> {old name -> new location}, for names split out of a module that still exists.
 MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.server_utils": {
@@ -666,6 +669,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
         **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
     },
+    "nemo_gym.cli": {"RunHelper": _RUN_HELPER},
     "nemo_gym.cli.eval": {
         # Split out of eval. The helpers lost their leading underscore because other modules call them now.
         "_datasets_to_prepare": MovedPath(
@@ -693,6 +697,8 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         ),
         **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
         **_names("nemo_gym.orchestration.jobs", "0.8.0", "installed_gym_commit"),
+        # Moved and renamed.
+        "RunHelper": _RUN_HELPER,
     },
     "nemo_gym.cli.main": {
         # Split out of main. The asset lookup lost its leading underscore because other modules call it now.
@@ -719,7 +725,9 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             """,
         ),
         # Moved, and still imported by env for its own use.
-        **_names("nemo_gym.orchestration.server_supervisor", "0.8.0", "RunHelper _resolve_server_dir"),
+        **_names("nemo_gym.orchestration.server_supervisor", "0.8.0", "_resolve_server_dir"),
+        # Moved and renamed.
+        "RunHelper": _RUN_HELPER,
         # env imported these for code that moved out of it.
         **_names("nemo_gym.client.server_client", "0.8.0", "ServerClient ServerStatus"),
         **_names(

@@ -597,7 +597,7 @@ def _startup_outcome(error: BaseException) -> str:
     return "failed"
 
 
-class RunHelper:  # pragma: no cover
+class ServerSupervisor:  # pragma: no cover
     _head_server: uvicorn.Server
     _head_server_thread: Thread
     _head_server_instance: HeadServer
@@ -1144,7 +1144,7 @@ rpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been 
 
         Reads the bound from `model_endpoint_readiness_timeout_seconds`, where 0 skips the check
         entirely. Raises `ConfigError` naming the endpoints that never answered and the config key
-        each came from. It raises rather than exits because `RunHelper` is imported and driven as a
+        each came from. It raises rather than exits because `ServerSupervisor` is imported and driven as a
         library, so the caller decides what an unreachable endpoint means; the CLI entrypoints turn
         it into an exit.
         `start()` shuts down the servers it already spawned before the error reaches the caller.

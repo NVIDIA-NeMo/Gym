@@ -112,7 +112,7 @@ class TestConfig:
             _cfg(memory="1GiB")
 
     def test_nodes_is_not_a_setting(self):
-        """The sidecar always runs next to the servers RunHelper starts."""
+        """The sidecar always runs next to the servers ServerSupervisor starts."""
         with pytest.raises(ValidationError):
             _cfg(nodes="all")
 
