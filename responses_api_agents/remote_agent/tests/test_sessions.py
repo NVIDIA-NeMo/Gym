@@ -185,7 +185,9 @@ class TestSessionActivation:
         reply = activate(client)
 
         assert reply.status_code == 422
-        assert reply.json()["detail"].startswith("RemoteAgentTerminalError: remote service returned an invalid")
+        detail = reply.json()["detail"]
+        assert detail.startswith("RemoteAgentTerminalError(")
+        assert "remote service returned an invalid" in detail
 
     def test_a_service_error_is_a_retryable_500(self, monkeypatch) -> None:
         mock_remote(monkeypatch, scripted(FakeRemoteResponse(503, b"overloaded")))

@@ -327,7 +327,7 @@ knob involved.
   metrics are then empty, with a warning).
 - **A previous run's output can be reused as the input dataset** (for example, re-running the
   tasks in a failures sidecar). Output rows carry the old run's results (`reward`, `response`,
-  `error`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a
+  `error`, `timeouts`, internal `_ng_*` flags); those fields are stripped from each row on the way in, so a
   stale result can't collide with or leak into the new run's output.
 - **Exposing your service on the public internet needs network-level trust.** Gym sends no
   credential on the `/v1/responses` call (`agent_base_url` rejects embedded credentials), so an
