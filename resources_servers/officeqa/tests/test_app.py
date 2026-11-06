@@ -81,19 +81,20 @@ def verify_body():
 
 
 @pytest.mark.parametrize(
-    "text,reward,final_answer",
+    "text,reward,final_answer,has_final_answer",
     [
-        ("<think>Use <FINAL_ANSWER> tags.</think><FINAL_ANSWER>42</FINAL_ANSWER>", 1.0, "42"),
-        ("<think>First line.\nSecond line.</think><FINAL_ANSWER>42</FINAL_ANSWER>", 1.0, "42"),
-        ("<think>First.</think>\n<think>Second.</think>\n42", 1.0, "42"),
-        ("<think><FINAL_ANSWER>42</FINAL_ANSWER></think><FINAL_ANSWER>41</FINAL_ANSWER>", 0.0, "41"),
-        ("<think><FINAL_ANSWER>42</FINAL_ANSWER></think>", 0.0, ""),
-        ("<FINAL_ANSWER>42</FINAL_ANSWER>", 1.0, "42"),
+        ("<think>Use <FINAL_ANSWER> tags.</think><FINAL_ANSWER>42</FINAL_ANSWER>", 1.0, "42", True),
+        ("<think>First line.\nSecond line.</think><FINAL_ANSWER>42</FINAL_ANSWER>", 1.0, "42", True),
+        # An answer without the tag gets the reward but counts toward no_answer.
+        ("<think>First.</think>\n<think>Second.</think>\n42", 1.0, "42", False),
+        ("<think><FINAL_ANSWER>42</FINAL_ANSWER></think><FINAL_ANSWER>41</FINAL_ANSWER>", 0.0, "41", True),
+        ("<think><FINAL_ANSWER>42</FINAL_ANSWER></think>", 0.0, "", False),
+        ("<FINAL_ANSWER>42</FINAL_ANSWER>", 1.0, "42", True),
     ],
 )
 @pytest.mark.asyncio
 async def test_verify_excludes_inline_reasoning_and_preserves_raw_response(
-    server: OfficeQAResourcesServer, text: str, reward: float, final_answer: str
+    server: OfficeQAResourcesServer, text: str, reward: float, final_answer: str, has_final_answer: bool
 ) -> None:
     body = verify_body()
     body.response.output[0].content[0].text = text
@@ -102,6 +103,7 @@ async def test_verify_excludes_inline_reasoning_and_preserves_raw_response(
 
     assert result.reward == reward
     assert result.final_answer == final_answer
+    assert result.has_final_answer is has_final_answer
     assert result.evaluation_completed is True
     assert result.response.output[0].content[0].text == text
 
@@ -298,6 +300,66 @@ async def test_nonterminal_or_failed_response_cannot_receive_credit(server, stat
     result = await server.verify(Request({"type": "http"}), body)
     assert result.reward == 0
     assert result.evaluation_completed
+    assert not result.has_final_answer
+    assert all(result.model_dump()[name] == 0.0 for name in officeqa_app.TOLERANCES)
+
+
+@pytest.mark.asyncio
+async def test_tolerance_and_missing_answer_metrics_preserve_headline_accuracy(server):
+    # The eight attempts include an empty tag, an incomplete correct answer and a correct answer without the tag.
+    texts = [
+        "<FINAL_ANSWER>42</FINAL_ANSWER>",
+        "<FINAL_ANSWER>42.02</FINAL_ANSWER>",
+        "<FINAL_ANSWER>42.2</FINAL_ANSWER>",
+        "<FINAL_ANSWER>44</FINAL_ANSWER>",
+        "<FINAL_ANSWER>45</FINAL_ANSWER>",
+        "<FINAL_ANSWER></FINAL_ANSWER>",
+        "<FINAL_ANSWER>42</FINAL_ANSWER>",
+        "42",
+    ]
+    rows = []
+    for index, text in enumerate(texts):
+        body = verify_body()
+        body.response.output[0].content[0].text = text
+        if index == 6:
+            body.response.status = "incomplete"
+        result = await server.verify(http_request(), body)
+        rows.append(result.model_dump() | {TASK_INDEX_KEY_NAME: index // 4, ROLLOUT_INDEX_KEY_NAME: index % 4})
+
+    assert [row["reward"] for row in rows] == [1, 0, 0, 0, 0, 0, 0, 1]
+    assert [row["has_final_answer"] for row in rows] == [True, True, True, True, True, False, False, False]
+    aggregate = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+    metrics = aggregate.agent_metrics
+    assert aggregate.key_metrics == {"pass@1[avg-of-4]/accuracy_no_net": 25.0}
+    assert metrics["pass@1[avg-of-4]/correct_tol_0"] == 25.0
+    assert metrics["pass@1[avg-of-4]/correct_tol_0p1"] == 37.5
+    assert metrics["pass@1[avg-of-4]/correct_tol_1"] == 50.0
+    assert metrics["pass@1[avg-of-4]/correct_tol_5"] == 62.5
+    assert metrics["pass@1[avg-of-4]/no_answer"] == 37.5
+
+
+@pytest.mark.asyncio
+async def test_diagnostics_use_trusted_references_and_respect_configured_reward_tolerance(server):
+    server.config.numeric_tolerance = 0.01
+    body = verify_body().model_copy(update={"expected_answer": "43", "correct_tol_0": 1.0, "has_final_answer": False})
+    body.response.output[0].content[0].text = "<FINAL_ANSWER>42.2</FINAL_ANSWER>"
+    result = await server.verify(http_request(), body)
+    assert result.reward == 1.0
+    assert result.correct_tol_0 == result.correct_tol_0p1 == 0.0
+    assert result.correct_tol_1 == result.correct_tol_5 == 1.0
+    assert result.has_final_answer
+
+    body.task_id = "officeqa_pro_" + "1" * 24
+    unavailable = await server.verify(http_request(), body)
+    assert unavailable.mask_sample and not unavailable.evaluation_completed
+    assert not unavailable.has_final_answer
+    assert all(unavailable.model_dump()[name] is None for name in officeqa_app.TOLERANCES)
+
+
+def test_older_rollouts_do_not_gain_fabricated_diagnostics(server):
+    metrics = server.compute_metrics([[{"reward": 1.0}], [{"reward": 0.0}]])
+    assert metrics["pass@1[avg-of-1]/accuracy_no_net"] == 50.0
+    assert not any("correct_tol_" in key or "no_answer" in key for key in metrics)
 
 
 @pytest.mark.asyncio

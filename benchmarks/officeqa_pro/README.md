@@ -118,6 +118,57 @@ The prompt requests `<FINAL_ANSWER>` tags and says an absent tag fails. The
 reference scorer also accepts a bare correct answer; this integration preserves
 that behavior. Empty answers and incomplete responses score zero.
 
+Verification also scores each answer at relative numeric tolerances of 0%,
+0.1%, 1% and 5%, and records the results in `correct_tol_0`, `correct_tol_0p1`,
+`correct_tol_1` and `correct_tol_5`. These scores use the same reference answers
+and completion checks as the reward. They do not change the reward or the
+reported accuracy. Their `pass@1[avg-of-N]` values show how many answers are
+close to the reference but not exact.
+
+`pass@1[avg-of-N]/no_answer` is the percentage of attempts that did not end in
+a complete response with a nonempty `<FINAL_ANSWER>` tag. The verifier removes
+reasoning before this check. An answer without the tag counts toward
+`no_answer`, although the reward can still give it credit.
+
+The verifier masks attempts whose reference answer is missing and sets their
+tolerance fields to null. Rollouts saved before these fields existed do not
+have them. Aggregation skips the missing fields, so reverify those rollouts to
+get the tolerance and `no_answer` metrics.
+
+## Example questions
+
+Five example questions cover the June 2001 bulletin. They test retrieval and
+arithmetic without the gated Pro question CSV. They use the same pinned PDF
+corpus, prompt, document tools and OpenCode harness as the benchmark. The
+examples form a separate taskset, `officeqa_pro_examples`, with one attempt per
+question. Do not report their scores as OfficeQA Pro results.
+
+```bash
+gym eval prepare --config benchmarks/officeqa_pro/configs/examples.yaml
+gym dataset collate --config benchmarks/officeqa_pro/configs/examples.yaml \
+  --mode example_validation --output-dir benchmarks/officeqa_pro/data/example-collated
+gym env start --config benchmarks/officeqa_pro/configs/examples.yaml \
+  --model-url http://MODEL_HOST:8000/v1 --model MODEL --model-api-key KEY \
+  +officeqa_document_image=REGISTRY/IMAGE@sha256:DIGEST \
+  +officeqa_opencode_binary_sha256=BINARY_SHA256 \
+  +officeqa_documents_host_root=/cluster/document-releases \
+  +officeqa_document_prefix=RELEASE \
+  +use_absolute_ip=true
+```
+
+Then run the collated examples on these servers:
+
+```bash
+gym eval run --no-serve \
+  --input benchmarks/officeqa_pro/data/example-collated/example.jsonl \
+  --output results/officeqa-pro-examples.jsonl --num-repeats 1
+```
+
+To prepare offline, set `+officeqa_pro_corpus_root=/path/to/treasury_bulletin_pdfs`
+and leave `officeqa_pro_source_csv` unset. Preparation writes the reference
+answers for the examples to `data/example-runtime/tasks/`, outside
+`document_store/`. As with the full benchmark, deploy only the verified PDFs.
+
 ## Tests
 
 ```bash

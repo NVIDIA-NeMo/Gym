@@ -18,8 +18,14 @@ from nemo_gym.config import ModelServerRef
 from nemo_gym.core import EpisodeId
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.models import ChatCompletionsConverter
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxAccess,
+    SandboxResources,
+    SandboxSpec,
+    create_provider,
+)
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -38,8 +44,20 @@ from nemo_gym.server_runtime import (
 from nemo_gym.verification import VerifierFixture
 from resources_servers.officeqa.task_data import TaskData
 from resources_servers.officeqa.verifier_fixture import create_fixture_server, invoke_fixture
-from resources_servers.officeqa.verifiers.officeqa_pro import extract_final_answer, score_answer
+from resources_servers.officeqa.verifiers.officeqa_pro import (
+    extract_final_answer,
+    extract_final_answer_from_xml,
+    score_answer,
+)
 from resources_servers.officeqa.verifiers.officeqa_pro_task import OfficeQAProTask
+
+
+TOLERANCES: dict[str, float] = {
+    "correct_tol_0": 0.0,
+    "correct_tol_0p1": 0.001,
+    "correct_tol_1": 0.01,
+    "correct_tol_5": 0.05,
+}
 
 
 class OfficeQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -69,6 +87,11 @@ class OfficeQAVerifyResponse(BaseVerifyResponse):
     task_id: str
     uid: str | None = None
     final_answer: str
+    has_final_answer: bool = False
+    correct_tol_0: float | None = None
+    correct_tol_0p1: float | None = None
+    correct_tol_1: float | None = None
+    correct_tol_5: float | None = None
 
 
 class OfficeQAFixtureRequest(OfficeQAVerifyRequest):
@@ -227,6 +250,8 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
                     "failure_kind": "officeqa:reference_unavailable",
                     "failure_reason": "The trusted task reference is unavailable or invalid.",
                     "final_answer": "",
+                    "has_final_answer": False,
+                    **dict.fromkeys(TOLERANCES),
                 }
             )
         answer = ""
@@ -240,6 +265,14 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
         reward = (
             score_answer(task.expected_answer, answer, self.config.numeric_tolerance) if answer and complete else 0.0
         )
+        final_answer = extract_final_answer(answer)
+        # Without a FINAL_ANSWER tag, the scorer grades the whole text. no_answer counts only tagged answers.
+        tagged_answer, reasoning = extract_final_answer_from_xml(answer)
+        tagged = bool(answer) and (reasoning is not None or tagged_answer != answer)
+        scores = {
+            name: score_answer(task.expected_answer, answer, tolerance) if answer and complete else 0.0
+            for name, tolerance in TOLERANCES.items()
+        }
         return OfficeQAVerifyResponse.model_validate(
             body.model_dump()
             | {
@@ -247,14 +280,25 @@ class OfficeQAResourcesServer(SimpleResourcesServer):
                 "evaluation_completed": True,
                 "task_id": task.task_id,
                 "uid": task.uid,
-                "final_answer": extract_final_answer(answer),
+                "final_answer": final_answer,
+                "has_final_answer": complete and tagged and bool(tagged_answer.strip()),
+                **scores,
             }
         )
 
     def compute_metrics(self, tasks: list[list[dict[str, JsonValue]]]) -> dict[str, JsonValue]:
-        """Report percentage accuracy averaged across attempts, plus pass@k diagnostics."""
+        """Report mean accuracy, plus the tolerance and no_answer metrics where rows have them."""
         score_name = "accuracy_no_net" if self.config.network_access == "model_only" else "accuracy"
-        metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=lambda result: {score_name: result["reward"]})
+
+        def scores(result: dict[str, JsonValue]) -> dict[str, JsonValue]:
+            # Older saved rows have no diagnostics; omit them instead of inventing zeros.
+            values = {score_name: result["reward"]}
+            values.update({name: result[name] for name in TOLERANCES if result.get(name) is not None})
+            if "has_final_answer" in result:
+                values["no_answer"] = float(not result["has_final_answer"])
+            return values
+
+        metrics, _, _, _ = compute_pass_majority_metrics(tasks, score_fn=scores)
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, JsonValue]) -> dict[str, JsonValue]:

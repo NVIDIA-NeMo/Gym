@@ -19,6 +19,7 @@ from nemo_gym.config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     get_first_server_config_dict,
+    taskset_environment_server_name,
 )
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.data import TrainDataProcessor
@@ -78,6 +79,72 @@ def test_preparation_keeps_answers_outside_document_mount(artifacts):
     assert (artifacts["corpus_root"] / "report.pdf").stat().st_mode & 0o222  # source was not chmod'ed
     original_output = output.read_bytes()
     assert preparation.prepare(**artifacts).read_bytes() == original_output
+
+
+def test_public_examples_use_pdf_prompts_and_trusted_answers_without_downloading_pro_questions(artifacts, monkeypatch):
+    artifacts.pop("source_csv")
+
+    def reject_question_download(**kwargs):
+        raise AssertionError("public examples must not download the gated Pro questions")
+
+    monkeypatch.setattr(preparation, "hf_hub_download", reject_question_download)
+    output = preparation.prepare(**artifacts, examples=True)
+    rows = [json.loads(line) for line in output.read_text().splitlines()]
+    assert output.read_bytes() == (preparation.HERE / "data/example.jsonl").read_bytes()
+    assert [row["uid"] for row in rows] == [f"officeqa_example_{i}" for i in range(1, 6)]
+    answers = []
+    for row in rows:
+        task = OfficeQAProTask.model_validate_json(
+            (artifacts["bundle_root"] / "tasks" / (row["task_id"] + ".json")).read_bytes()
+        )
+        answers.append(task.expected_answer)
+        assert task.question == row["question"]
+        assert "expected_answer" not in row
+        assert "../docs/" in row["responses_create_params"]["input"][0]["content"]
+        assert "treasury_bulletins_parsed" not in json.dumps(row)
+    assert answers == ["217.3", "26.4", "172.6", "22.9", "7.68"]
+    assert [path.name for path in (artifacts["bundle_root"] / "document_store").iterdir()] == ["report.pdf"]
+
+
+def test_example_configuration_prepares_and_collates_five_single_attempt_tasks(artifacts, monkeypatch):
+    monkeypatch.chdir(preparation.HERE.parents[1])
+    config = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+            offline=True,
+            initial_global_config_dict=OmegaConf.create(
+                {
+                    "config_paths": ["benchmarks/officeqa_pro/configs/examples.yaml"],
+                    "policy_model_name": "fixture-model",
+                    "policy_base_url": "http://127.0.0.1:8000/v1",
+                    "policy_api_key": "fixture-key",
+                    "officeqa_pro_workspace_root": str(artifacts["bundle_root"]),
+                    "officeqa_pro_corpus_root": str(artifacts["corpus_root"]),
+                    "prepare_script_args": {"output_fpath": str(artifacts["output_fpath"])},
+                }
+            ),
+        )
+    )
+    output = preparation.prepare(**OmegaConf.to_container(config.prepare_script_args, resolve=True))
+    settings = get_first_server_config_dict(config, "officeqa_pro_resources_server")
+    assert len(settings.datasets) == 1 and settings.datasets[0].type == "example"
+    assert settings.datasets[0].num_repeats == 1
+    assert taskset_environment_server_name(config, "officeqa_pro_examples") == "officeqa_pro_environment_server"
+    settings.datasets[0].jsonl_fpath = str(output)
+    instances = [c for c in GlobalConfigDictParser().filter_for_server_instance_configs(config) if c.datasets]
+    paths = TrainDataProcessor()._collate_samples_single_type("example", instances, task_data_validation="error")
+    rows = [json.loads(line) for line in paths[0].read_text().splitlines()]
+    assert len(rows) == 5
+    assert all(row["task_id"]["taskset"] == "officeqa_pro_examples" for row in rows)
+    for row in rows:
+        task_input = SingleAgentTurnTaskInput.model_validate(row["task_input"])
+        assert "expected_answer" not in task_input.task_data and "answer" not in task_input.task_data
+
+
+def test_example_preparation_rejects_an_official_csv_override(artifacts):
+    with pytest.raises(ValueError, match="source_csv must be unset"):
+        preparation.prepare(**artifacts, examples=True)
 
 
 def test_default_source_download_is_the_pinned_huggingface_pro_dataset(artifacts, monkeypatch):

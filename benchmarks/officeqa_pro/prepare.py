@@ -13,6 +13,7 @@ from pathlib import Path
 
 from huggingface_hub import hf_hub_download, snapshot_download
 
+from benchmarks.officeqa_pro.examples import EXAMPLES
 from resources_servers.officeqa.verifiers.officeqa_pro_task import OfficeQAProTask
 
 
@@ -41,6 +42,7 @@ def prepare(
     bundle_root: str | Path = HERE / "data/runtime",
     corpus_root: str | Path | None = None,
     source_csv: str | Path | None = None,
+    examples: bool = False,
 ) -> Path:
     """Prepare all Pro questions, keeping reference answers outside the PDF mount.
 
@@ -49,30 +51,39 @@ def prepare(
     digest is SHA-256 of the sorted JSON mapping of PDF filenames to SHA-256
     digests, using Python's default JSON separators. The size manifest uses
     the same format with byte sizes in place of content digests.
+    With ``examples=True``, prepare the five example questions instead of
+    downloading the Pro CSV. The examples use the same pinned PDF corpus and
+    the same task and reference format.
     """
     bundle = Path(bundle_root).expanduser().resolve()
     output = Path(output_fpath).expanduser().resolve()
     if output.is_relative_to(bundle / "document_store"):
         raise ValueError("evaluation inputs must remain outside the document view")
     bundle.mkdir(parents=True, exist_ok=True)
-    csv_path = (
-        Path(source_csv).expanduser().resolve()
-        if source_csv is not None
-        else Path(
-            hf_hub_download(
-                repo_id=DATASET_ID,
-                repo_type="dataset",
-                filename="officeqa_pro.csv",
-                revision=DATASET_REVISION,
-                cache_dir=str(bundle / "hf-cache"),
+    if examples and source_csv is not None:
+        raise ValueError("example preparation does not read the Pro CSV, so source_csv must be unset")
+    csv_path: Path | None = None
+    if examples:
+        records = [{"uid": uid, "question": question, "answer": answer} for uid, question, answer in EXAMPLES]
+    else:
+        csv_path = (
+            Path(source_csv).expanduser().resolve()
+            if source_csv is not None
+            else Path(
+                hf_hub_download(
+                    repo_id=DATASET_ID,
+                    repo_type="dataset",
+                    filename="officeqa_pro.csv",
+                    revision=DATASET_REVISION,
+                    cache_dir=str(bundle / "hf-cache"),
+                )
             )
         )
-    )
-    with csv_path.open(encoding="utf-8-sig", newline="") as handle:
-        reader = csv.DictReader(handle)
-        if not {"uid", "question", "answer"} <= set(reader.fieldnames or []):
-            raise ValueError("OfficeQA Pro CSV requires uid, question and answer columns")
-        records = list(reader)
+        with csv_path.open(encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if not {"uid", "question", "answer"} <= set(reader.fieldnames or []):
+                raise ValueError("OfficeQA Pro CSV requires uid, question and answer columns")
+            records = list(reader)
     by_uid = {}
     for record in records:
         uid = record["uid"].strip()
@@ -81,7 +92,7 @@ def prepare(
         by_uid[uid] = record
     if not by_uid:
         raise ValueError("OfficeQA Pro CSV contains no questions")
-    if _file_sha256(csv_path) != CSV_SHA256:
+    if csv_path is not None and _file_sha256(csv_path) != CSV_SHA256:
         raise ValueError("OfficeQA Pro CSV differs from the pinned release")
     if corpus_root is None:
         snapshot = snapshot_download(
@@ -161,4 +172,5 @@ if __name__ == "__main__":
     parser.add_argument("--bundle-root", default=str(HERE / "data/runtime"))
     parser.add_argument("--corpus-root")
     parser.add_argument("--source-csv")
+    parser.add_argument("--examples", action="store_true")
     prepare(**vars(parser.parse_args()))
