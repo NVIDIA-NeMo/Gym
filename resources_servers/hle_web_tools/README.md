@@ -155,7 +155,12 @@ Beyond the families, the protocol's own refusals:
   the page work (sanitizing, the heading fallback for the title, the content checks, and the rechecks on
   a cache hit) runs in a pool of two worker processes started with `spawn`, not on the event loop. A
   thread would not do: Python's `re` keeps the GIL for a whole scan, and one scan of an adversarial page
-  takes seconds (about 4 s for 1,000,000 characters of `抱抱脸` against the pinned blocklist). A refused page is never cached. The page cache
+  takes seconds (about 4 s for 1,000,000 characters of `抱抱脸` against the pinned blocklist). The pool is
+  created on the first page check and starts its workers on demand, up to two; each worker imports the
+  server module afresh, so it is about the size of the server process (about 240 MB here), and the first
+  fetch waits about 2 s for it. `web_search`'s checks of result URLs, titles and snippets still run on the
+  event loop: a provider title or snippet of 1,000,000 such characters would hold it about 4 s (whether
+  Tavily ever returns one that long is not verified). A refused page is never cached. The page cache
   (`max_cached_pages`, keyed by requested URL) keeps the sanitized Markdown whole and runs the same
   final-URL, title and content checks on a hit, so a policy that changes after a page was cached still
   applies; those cache-hit rechecks see the sanitized cached Markdown, not the provider's raw page. A
