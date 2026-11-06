@@ -65,7 +65,8 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
-    ResourcesSessionFence,
+    ResourcesSessionFences,
+    ResourcesSessionLocks,
     SimpleResourcesServer,
 )
 
@@ -955,11 +956,12 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     _session_spans: "OrderedDict[str, QuestionSpans]" = PrivateAttr(default_factory=OrderedDict)
     # The episode and task each typed (Environment Server) session is bound to, under the same cap as the questions.
     _session_identity: "OrderedDict[str, Tuple[EpisodeId, TaskId]]" = PrivateAttr(default_factory=OrderedDict)
-    _fence: ResourcesSessionFence = PrivateAttr()
+    _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
+    _fences: "ResourcesSessionFences[EpisodeId]" = PrivateAttr()
     _page_cache: "OrderedDict[str, CachedPage]" = PrivateAttr(default_factory=OrderedDict)
 
     def model_post_init(self, __context) -> None:
-        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._fences = ResourcesSessionFences(self.config.session_close_retry_window_seconds)
         keys = self.config.tavily_api_key
         if isinstance(keys, str):
             keys = [keys]
@@ -1027,10 +1029,10 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             raise ResourcesSeedRejectedError(f"invalid typed seed: {error}") from error
         resources_session_id = typed.resources_session_id
         identity = (typed.episode_id, typed.task_id)
-        async with self._fence.locked(resources_session_id):
+        async with self._locks.locked(resources_session_id):
             # A seed that arrives after its session closed (a retry, or a reply that raced the close) must not
             # recreate it.
-            self._fence.raise_if_closed(resources_session_id)
+            self._fences.raise_if_fenced(resources_session_id)
             bound = self._session_identity.get(resources_session_id)
             if bound is not None and bound != identity:
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
@@ -1085,7 +1087,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
                 session_id = next(iter(table))
                 identity = self._session_identity.pop(session_id, None)
                 if identity is not None:
-                    self._fence.mark_closed(session_id, identity[0])
+                    self._fences.fence(session_id, identity[0])
                 if self._session_spans.pop(session_id, None) is not None:
                     logger.warning(
                         "hle_web_tools forgot the question of session %s: more than %d seeded sessions are held; "
@@ -1098,8 +1100,8 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         # Released by resources_session_id: a close after a lost seed reply carries no cookie.
         resources_session_id = body.resources_session_id
-        async with self._fence.locked(resources_session_id):
-            closed_episode = self._fence.closed_episode(resources_session_id)
+        async with self._locks.locked(resources_session_id):
+            closed_episode = self._fences.get(resources_session_id)
             if closed_episode is not None and closed_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
             bound = self._session_identity.get(resources_session_id)
@@ -1107,7 +1109,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._session_spans.pop(resources_session_id, None)
             self._session_identity.pop(resources_session_id, None)
-            self._fence.mark_closed(resources_session_id, body.episode_id)
+            self._fences.fence(resources_session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
