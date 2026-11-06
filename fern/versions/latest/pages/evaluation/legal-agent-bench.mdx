@@ -34,23 +34,53 @@ include the source revision, so old caches cannot silently serve the new pin.
 
 ## Judge profiles and score comparability
 
-The refreshed configuration selects `judge_profile: official_dual`: independent
-`claude-sonnet-4-6` and `gpt-5.5` judges grade every criterion, and the reported
-full-task reward is the mean of their all-criteria task scores: 0, 0.5, or 1.
-`all_pass` means both judges passed every criterion. Criterion pass rate remains
-a diagnostic metric. Each judge's report is retained; `scores_dual.json` is
+Set a nonempty `lab_judges` list in the gitignored root `env.yaml`. One entry
+selects single judging with that model. Two entries must be the official pair,
+`claude-sonnet-4-6` and `gpt-5.5`. Missing, empty, duplicate-pair and larger
+lists fail validation; there is no implicit judge selection.
+
+Each entry requires `model_name` and may specify its own OpenAI-compatible
+`base_url`, `api_key`, and `reasoning_effort`:
+
+```yaml
+lab_judges:
+  - model_name: claude-sonnet-4-6
+    base_url: https://your-claude-gateway.example/v1
+    api_key: your-claude-key
+  - model_name: gpt-5.5
+    base_url: https://your-openai-gateway.example/v1
+    api_key: your-openai-key
+```
+
+If both judges share an endpoint and credentials, configure those once:
+
+```yaml
+judge_base_url: https://your-judge-endpoint.example/v1
+judge_api_key: your-judge-key
+lab_judges:
+  - model_name: claude-sonnet-4-6
+  - model_name: gpt-5.5
+```
+
+Per-judge connection settings override the shared values. Provider route
+prefixes may precede the canonical model names. For single judging, keep just
+one entry (any supported judge model). An explicitly empty per-judge API key
+is preserved for unauthenticated local endpoints. Keep credentials outside
+committed YAML.
+
+Migrate existing LAB `judge_model_name` settings to `lab_judges[0].model_name`.
+Remove explicit `judge_profile` settings: the profile is derived from the list
+and retained in results, rather than configured separately.
+
+With two judges, the full-task reward is the mean of their independent
+all-criteria task scores: 0, 0.5, or 1. `all_pass` means both judges passed every
+criterion. Single judging produces 0 or 1. Criterion pass rate remains a
+diagnostic metric. Each judge's report is retained; `scores_dual.json` is
 written only when both judges finish grading all criteria. Grading errors route
 to failure handling rather than becoming completed zero-score tasks. Harbor
 collects the declared LAB artifacts, stops the agent environment, then grades
 in its separate verifier environment. Writable automatic host log mounts are
 rejected for LAB.
-
-Set `judge_profile: single` to use the existing `judge_model_name`,
-`judge_base_url`, and `judge_api_key` settings. For the official pair, `judges`
-accepts two entries with `model_name`, and optional `base_url`, `api_key`, and
-`reasoning_effort`; omitted connection settings inherit the shared judge
-endpoint. Provider route prefixes may precede the canonical model names.
-Keep credentials in local configuration, outside committed YAML.
 
 The verifier records the source revision, judge profile, per-judge results,
 Python/document-library versions, and pandoc version. The image installs the

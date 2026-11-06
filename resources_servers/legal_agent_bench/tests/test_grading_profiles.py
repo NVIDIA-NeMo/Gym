@@ -11,6 +11,7 @@ from resources_servers.legal_agent_bench import verifier
 from resources_servers.legal_agent_bench.lab_harbor import scoring
 from resources_servers.legal_agent_bench.lab_harbor.completion import CompletionState
 from resources_servers.legal_agent_bench.lab_harbor.judge import VERDICT_SCHEMA
+from resources_servers.legal_agent_bench.lab_harbor.judge_config import STANDARD_JUDGE_MODELS
 from resources_servers.legal_agent_bench.lab_harbor.tools import get_all_tool_definitions
 
 
@@ -57,7 +58,7 @@ def _run_args(tmp_path: Path):
 )
 def test_official_dual_averages_task_scores_and_retains_per_judge(tmp_path, monkeypatch, verdicts, expected):
     args = _run_args(tmp_path)
-    answers = dict(zip(verifier.STANDARD_JUDGE_MODELS, verdicts, strict=True))
+    answers = dict(zip(STANDARD_JUDGE_MODELS, verdicts, strict=True))
 
     class Judge:
         def __init__(self, **kwargs):
@@ -68,7 +69,7 @@ def test_official_dual_averages_task_scores_and_retains_per_judge(tmp_path, monk
             return {"reasoning": "Evidence checked.", "verdict": answers[self.model]}
 
     monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
-    monkeypatch.setenv("LAB_JUDGE_PROFILE", "official_dual")
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": model} for model in STANDARD_JUDGE_MODELS]))
     result = verifier.run_verifier(args)
     reward = json.loads(Path(args.reward_json).read_text())
     assert reward["reward"] == expected
@@ -94,7 +95,7 @@ def test_incomplete_dual_grading_keeps_evidence_without_successful_aggregate(tmp
             return {"reasoning": "Checked.", "verdict": "pass"}
 
     monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
-    monkeypatch.setenv("LAB_JUDGE_PROFILE", "official_dual")
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": model} for model in STANDARD_JUDGE_MODELS]))
     assert (
         verifier.main(
             [
@@ -120,7 +121,7 @@ def test_incomplete_dual_grading_keeps_evidence_without_successful_aggregate(tmp
     assert (Path(args.verifier_dir) / "judge-1" / "scores.json").exists()
 
 
-def test_single_profile_keeps_explicit_legacy_judge(tmp_path, monkeypatch):
+def test_single_entry_selects_requested_judge(tmp_path, monkeypatch):
     args = _run_args(tmp_path)
 
     class Judge:
@@ -131,8 +132,7 @@ def test_single_profile_keeps_explicit_legacy_judge(tmp_path, monkeypatch):
         def evaluate_prompt(self, *_args, **_kwargs):
             return {"reasoning": "Checked.", "verdict": "pass"}
 
-    monkeypatch.setenv("LAB_JUDGE_PROFILE", "single")
-    monkeypatch.setenv("LAB_JUDGE_MODEL", "custom-policy-judge")
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": "custom-policy-judge"}]))
     monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
     assert verifier.run_verifier(args)["score"] == 1.0
     assert not (Path(args.verifier_dir) / "scores_dual.json").exists()
@@ -225,3 +225,92 @@ def test_explicit_empty_judge_key_does_not_inherit_shared_credentials(tmp_path, 
         args, judge_override={"model_name": "local", "base_url": "http://local.test/v1", "api_key": ""}
     )
     assert keys and set(keys) == {""}
+
+
+@pytest.mark.parametrize(
+    "selection",
+    [
+        "omitted",
+        None,
+        [],
+        [{"model_name": "gpt-5.5"}] * 3,
+        [{"model_name": "gpt-5.5"}] * 2,
+        [{"model_name": "other-a"}, {"model_name": "other-b"}],
+        [{"model_name": " "}],
+        [{"model_name": 42}],
+        [{"model_name": "gpt-5.5", "modle_name": "typo"}],
+    ],
+)
+def test_invalid_judge_selection_fails_before_execution(tmp_path, monkeypatch, selection):
+    from resources_servers.legal_agent_bench.app import LegalAgentBenchResourcesServerConfig
+
+    args = _run_args(tmp_path)
+    config = {"name": "lab", "host": "127.0.0.1", "port": 0, "entrypoint": "app.py"}
+    if selection != "omitted":
+        config["judges"] = selection
+    with pytest.raises(ValueError):
+        LegalAgentBenchResourcesServerConfig.model_validate(config)
+
+    # Legacy settings cannot silently supply an omitted list.
+    monkeypatch.setenv("LAB_JUDGE_PROFILE", "single")
+    monkeypatch.setenv("LAB_JUDGE_MODEL", "old-judge")
+    if selection == "omitted":
+        monkeypatch.delenv("LAB_JUDGES", raising=False)
+    else:
+        monkeypatch.setenv("LAB_JUDGES", json.dumps(selection))
+    monkeypatch.setattr(verifier, "OpenAICompatibleJudge", lambda **_kw: pytest.fail("judge must not be called"))
+    verifier_dir = Path(args.verifier_dir)
+    verifier_dir.mkdir()
+    (verifier_dir / "scores_dual.json").write_text('{"score": 1}')
+    Path(args.reward_json).write_text('{"reward": 1}')
+    with pytest.raises(ValueError, match="lab_judges"):
+        verifier.run_verifier(args)
+    assert not Path(args.reward_json).exists()
+    assert not (verifier_dir / "scores_dual.json").exists()
+
+
+@pytest.mark.parametrize("dual", [False, True])
+def test_judge_list_roundtrips_resources_and_standalone_verifier(tmp_path, monkeypatch, dual):
+    from resources_servers.legal_agent_bench.app import LegalAgentBenchResourcesServerConfig, _build_verifier_env
+
+    selection = [{"model_name": "route/gpt-5.5", "base_url": "https://one.example/v1", "api_key": ""}]
+    if dual:
+        selection.append({"model_name": "route/claude-sonnet-4-6", "reasoning_effort": "high"})
+    config = LegalAgentBenchResourcesServerConfig(
+        name="lab",
+        host="127.0.0.1",
+        port=0,
+        entrypoint="app.py",
+        judges=selection,
+        judge_base_url="https://shared.example/v1",
+        judge_api_key="shared-test-key",
+        judge_parallelism=1,
+    )
+    for key, value in _build_verifier_env(config).items():
+        monkeypatch.setenv(key, value)
+    calls = []
+
+    class Judge:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.base_url = kwargs["base_url"]
+
+        def evaluate_prompt(self, *_args, **_kwargs):
+            return {"reasoning": "Checked output.", "verdict": "pass"}
+
+    monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
+    args = _run_args(tmp_path)
+    result = verifier.run_verifier(args)
+    assert [call["model"] for call in calls] == [judge["model_name"] for judge in selection]
+    assert calls[0]["base_url"] == "https://one.example/v1" and calls[0]["api_key"] == ""
+    assert config.judge_profile == ("official_dual" if dual else "single")
+    assert result["judge_profile"] == ("lab-standard-dual-v1" if dual else "single")
+    assert json.loads(Path(args.reward_json).read_text())["reward"] == 1
+    if dual:
+        assert calls[1]["base_url"] == "https://shared.example/v1"
+        assert calls[1]["api_key"] == "shared-test-key"
+        assert calls[1]["reasoning_effort"] == "high"
+        assert set(result["per_judge"]) == set(STANDARD_JUDGE_MODELS)
+    else:
+        assert result["judge_model"] == "route/gpt-5.5"
+        assert not (Path(args.verifier_dir) / "scores_dual.json").exists()

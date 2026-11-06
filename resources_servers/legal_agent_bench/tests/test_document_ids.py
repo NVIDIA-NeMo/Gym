@@ -64,7 +64,8 @@ def test_verifier_resolves_only_verified_task_identities(
             return {"verdict": "fail", "reasoning": "A verdict is still required."}
 
     monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
-    monkeypatch.setenv("LAB_JUDGE_PROFILE", profile)
+    models = ["gpt-5.5"] if profile == "single" else ["claude-sonnet-4-6", "gpt-5.5"]
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": model} for model in models]))
     monkeypatch.setenv("LAB_JUDGE_PARALLELISM", "1")
     args = verifier.build_parser().parse_args(
         [
@@ -151,7 +152,7 @@ def test_missing_deliverable_stays_a_failure_with_identity_context(tmp_path: Pat
             pytest.fail("A missing deliverable must not be sent to the judge")
 
     monkeypatch.setattr(verifier, "OpenAICompatibleJudge", Judge)
-    monkeypatch.setenv("LAB_JUDGE_PROFILE", "single")
+    monkeypatch.setenv("LAB_JUDGES", json.dumps([{"model_name": "gpt-5.5"}]))
     args = verifier.build_parser().parse_args(
         [
             "--task-json",
