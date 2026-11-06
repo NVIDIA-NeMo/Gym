@@ -13,6 +13,7 @@ class EvalSandboxConfig(BaseModel):
 
     bwrap_command: list[str] = Field(min_length=1)
     python_env: Path
+    rootfs: Path | None = Field(default=None, description="Optional extracted tool image, mounted read-only.")
     plugin_dependencies: Path
     workspace_tmp: bool = Field(
         default=False,
@@ -49,8 +50,11 @@ def sandbox_command(
         "/etc/hosts",
         "/etc/nsswitch.conf",
     ):
-        if Path(source).exists():
-            args += ["--ro-bind", source, source]
+        origin = Path(source)
+        if runtime.rootfs is not None and source not in {"/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"}:
+            origin = runtime.rootfs / source.lstrip("/")
+        if origin.exists():
+            args += ["--ro-bind", str(origin), source]
     python_root = (runtime.python_env / "bin/python").resolve().parents[1]
     if python_root.parent.name == "python":
         python_root = python_root.parent
@@ -69,6 +73,11 @@ def sandbox_command(
             if python_home.name != "bin":
                 raise ValueError(f"Expected a Linux Python bin directory: {home}")
             python_roots.append(python_home.parent)
+    if runtime.rootfs is not None:
+        interpreter = runtime.rootfs / str(runtime.python_env).lstrip("/") / "bin/python3"
+        if not interpreter.is_file():
+            raise ValueError(f"Tool image is missing its Python interpreter: {interpreter}")
+        python_roots = []
     for root in dict.fromkeys(python_roots):
         if not root.is_relative_to("/usr"):
             args += ["--ro-bind", str(root), str(root)]

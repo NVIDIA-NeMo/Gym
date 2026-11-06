@@ -53,6 +53,8 @@ def visual_setup(opencode_setup, tmp_path):
             original.config.model_dump()
             | {
                 "model": "vision-model",
+                # This fixture supplies a borrowed fake sandbox, with no namespace support.
+                "network_access": "all",
                 "system_prompt": "Inspect carefully.",
                 "tool_rewards": None,
             }

@@ -6,10 +6,11 @@ import asyncio
 import copy
 import json
 import shutil
+import sys
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from time import time
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -79,6 +80,10 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     # Required in concurrent production recipes. None supports explicitly trusted,
     # unsandboxed local harness tests; a unique cwd does not isolate /tmp.
     sandbox: EvalSandboxConfig | None = None
+    # Harness egress is restricted by default; the model API remains reachable.
+    network_access: Literal["all", "none", "websearch"] = "none"
+    # Optional run allowlist; request metadata may select a subset. None retains native tools.
+    allowed_tools: list[str] | None = None
     max_source_pixels: int = Field(default=150_000_000, gt=0)
     max_images: int = Field(default=33, gt=0)
     command_exec_timeout: int = Field(default=300, gt=0)
@@ -144,6 +149,99 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     """
 
     config: OpenCodeMultimodalAgentConfig
+
+    def _network_access_for_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> Literal["all", "none", "websearch"]:
+        """Select a dataset policy without exceeding the run's configured access."""
+        selected = (body.metadata or {}).get("network_access", self.config.network_access)
+        levels = {"none": 0, "websearch": 1, "all": 2}
+        if selected not in levels:
+            raise HTTPException(422, "metadata.network_access must be none, websearch or all")
+        if levels[selected] > levels[self.config.network_access]:
+            raise HTTPException(422, "Sample network_access exceeds the configured run policy")
+        return selected
+
+    def _tools_for_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> list[str] | None:
+        raw = (body.metadata or {}).get("allowed_tools")
+        if raw is None:
+            selected = self.config.allowed_tools
+        else:
+            try:
+                selected = json.loads(raw)
+            except (TypeError, ValueError) as error:
+                raise HTTPException(422, "metadata.allowed_tools must be a JSON-encoded list of tool names") from error
+        if selected is None and raw is None:
+            return None
+        supported = {"bash", "edit", "glob", "grep", "read", "task", "todowrite", "write", "websearch", "webfetch"}
+        if (
+            not isinstance(selected, list)
+            or any(not isinstance(tool, str) or tool not in supported for tool in selected)
+            or len(set(selected)) != len(selected)
+        ):
+            raise HTTPException(422, "allowed_tools must contain unique supported tool names")
+        # OpenCode uses the edit permission for both editing and writing files.
+        if ("edit" in selected) != ("write" in selected):
+            raise HTTPException(422, "OpenCode requires edit and write to be selected together")
+        if self.config.allowed_tools is not None and not set(selected) <= set(self.config.allowed_tools):
+            raise HTTPException(422, "Sample allowed_tools exceeds the configured run allowlist")
+        configured = self.config.opencode_config.get("tools", {})
+        permissions = self.config.opencode_config.get("permission", {})
+        build_permissions = self.config.opencode_config.get("agent", {}).get("build", {}).get("permission", {})
+        if any(
+            configured.get(tool) is False or permissions.get(tool) == "deny" or build_permissions.get(tool) == "deny"
+            for tool in selected
+        ):
+            raise HTTPException(422, "Sample requests a tool disabled in the run configuration")
+        mode = self._network_access_for_request(body)
+        if ("webfetch" in selected and mode != "all") or ("websearch" in selected and mode == "none"):
+            raise HTTPException(422, "Sample tools exceed its network policy")
+        if "task" in selected and not self.config.subagents_enabled:
+            raise HTTPException(422, "Subagents are disabled in the run configuration")
+        return list(selected)
+
+    def _apply_tool_allowlist(self, config: dict[str, Any]) -> None:
+        if self.config.allowed_tools is None:
+            return
+        selected = set(self.config.allowed_tools)
+        known = selected | {
+            "bash",
+            "edit",
+            "glob",
+            "grep",
+            "read",
+            "task",
+            "todowrite",
+            "write",
+            "websearch",
+            "webfetch",
+            "skill",
+            "codesearch",
+            "question",
+            "lsp",
+            "plan_enter",
+            "plan_exit",
+            "apply_patch",
+        }
+        # apply_patch shares the edit permission and replaces edit/write for GPT models.
+        if "edit" in selected:
+            selected.add("apply_patch")
+        config.setdefault("tools", {}).update({name: name in selected for name in sorted(known)})
+        top = config.setdefault("permission", {})
+        permissions = [top, *(agent.setdefault("permission", {}) for agent in config.get("agent", {}).values())]
+        for permission in permissions:
+            # An agent's wildcard also matches non-tool permissions such as
+            # external_directory. Preserve inherited rules before denying the rest.
+            original = {**top, **permission}
+            permission.clear()
+            permission.update({"*": "deny", **{key: value for key, value in original.items() if key != "*"}})
+            for name in sorted(known):
+                # Retain command/path restrictions when advertising an enabled tool.
+                prior = original.get(name, top.get(name))
+                if name not in selected or (prior == "deny" and name not in {"webfetch", "websearch"}):
+                    permission[name] = "deny"
+                else:
+                    permission[name] = prior if isinstance(prior, dict) else "allow"
 
     def _make_session_response(
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
@@ -217,6 +315,22 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
 
     def _write_opencode_config(self, work_dir: Path, rollout_id: str | None = None) -> None:
         super()._write_opencode_config(work_dir, rollout_id)
+        if self.config.network_access != "all":
+            path = work_dir / "opencode.json"
+            config = json.loads(path.read_text())
+            enabled = self.config.network_access == "websearch"
+            config.setdefault("tools", {}).update(webfetch=False, websearch=enabled)
+            permissions = [config.setdefault("permission", {})]
+            permissions.extend(agent.setdefault("permission", {}) for agent in config.get("agent", {}).values())
+            for permission in permissions:
+                permission.pop("*", None)
+                permission.update(webfetch="deny", websearch="allow" if enabled else "deny")
+            path.write_text(json.dumps(config, indent=2))
+        if self.config.allowed_tools is not None:
+            path = work_dir / "opencode.json"
+            config = json.loads(path.read_text())
+            self._apply_tool_allowlist(config)
+            path.write_text(json.dumps(config, indent=2))
         if self.config.final_answer_reserve is None:
             return
         # This version-scoped directive is replaced before both lineage and capture.
@@ -248,6 +362,10 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     def _env(self, data_home: str, rollout_id: str | None = None) -> dict[str, str]:
         env = super()._env(data_home, rollout_id)
         env.update(self._web_tool_environment())
+        if self.config.network_access != "all":
+            env["OPENCODE_ENABLE_EXA"] = "1" if self.config.network_access == "websearch" else "0"
+        if self.config.allowed_tools is not None:
+            env["OPENCODE_ENABLE_EXA"] = "1" if "websearch" in self.config.allowed_tools else "0"
         # Supported stock flags, not a separate runtime/provider.
         env["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(self.config.command_exec_timeout * 1000)
         env["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(self.config.max_output_tokens)
@@ -261,6 +379,8 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
 
     def _prepare_command(self, command: list[str], project_dir: Path, env: dict[str, str]) -> list[str]:
         if self.config.sandbox is None:
+            if self.config.network_access != "all":
+                raise ValueError("Restricted local networking requires the filesystem sandbox")
             return super()._prepare_command(command, project_dir, env)
         # The native runner constructs --file arguments from freshly staged inputs.
         # Place them beside cwd inside the sandbox, and hide every other episode.
@@ -279,7 +399,21 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             raise FileNotFoundError(f"OpenCode executable not found: {mapped[0]}")
         executable = Path(executable_path).resolve()
         mapped[0] = "/agent-bin/opencode"
-        return sandbox_command(self.config.sandbox, project_dir, executable, env, mapped)
+        launch = sandbox_command(self.config.sandbox, project_dir, executable, env, mapped)
+        if self.config.network_access == "all":
+            return launch
+        config = json.loads((project_dir / "opencode.json").read_text())
+        return [
+            sys.executable,
+            str(Path(__file__).with_name("network_runner.py")),
+            "--mode",
+            self.config.network_access,
+            "--model-url",
+            config["provider"]["nemo"]["options"]["baseURL"],
+            "--bubblewrap",
+            "--",
+            *launch,
+        ]
 
     async def _create_episode(
         self,
@@ -288,6 +422,8 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         rollout_id: str | None = None,
         collect_observations: bool = True,
     ) -> AgentEpisode:
+        network_access = self._network_access_for_request(body)
+        allowed_tools = self._tools_for_request(body)
         if self.config.sandbox_provider is not None:
             raise HTTPException(409, "Configured session sandbox requires an Environment Server and agent session")
         if body.temperature is None or body.top_p is None:
@@ -318,6 +454,8 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             # Request-local clone: sampling and files cannot leak between concurrent episodes.
             episode_config = self.config.model_copy(
                 update={
+                    "network_access": network_access,
+                    "allowed_tools": allowed_tools,
                     "opencode_config": native_config,
                     "max_output_tokens": body.max_output_tokens or self.config.max_output_tokens,
                     "extra_args": ["--agent", "build", "--file", *map(str, images), "--"],
@@ -403,6 +541,8 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     async def run(self, request: Request, body: OpenCodeMultimodalRunRequest) -> OpenCodeMultimodalVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Agent sessions must run through the Environment Server")
+        self._network_access_for_request(body.responses_create_params)
+        self._tools_for_request(body.responses_create_params)
         async with self.sem:
             resource = self.config.resources_server.name
             if body.image_tools_base_agent_ref is not None:

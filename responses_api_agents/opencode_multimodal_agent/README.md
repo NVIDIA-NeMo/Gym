@@ -60,6 +60,12 @@ sandbox:
 initialized OpenCode configuration directory. The setup helper prepares this
 layout. Use the native executable rather than npm's Node launcher in the sandbox.
 
+To use the same tool libraries as a sandbox image, set `sandbox.rootfs` to a
+read-only extracted image and `sandbox.python_env` to its Python prefix inside
+the image. For example, an image with `/usr/bin/python3` uses
+`python_env: /usr`. System libraries then come from that image; the episode's
+workspace and temporary files remain private.
+
 Choose the agent and model entrypoints together:
 
 | Purpose | Agent entrypoint | Model entrypoint |
@@ -121,6 +127,7 @@ when using `opencode_sessions.yaml`:
 visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
+      network_access: all
       opencode_config:
         tools:
           webfetch: true
@@ -128,7 +135,7 @@ visual_agent:
 ```
 
 Configure each tool independently; omitted tools default to disabled. The example
-enables WebFetch only. The adapter derives the corresponding permissions from
+enables WebFetch only when `network_access: all` is also explicitly selected. The adapter derives the corresponding permissions from
 these two tool settings. On the local compatibility path, use the configured
 agent name (`visual_opencode` in the
 example recipes) instead of `visual_agent`. Use separate agent configurations
@@ -141,13 +148,28 @@ service; it is independent of the model provider and requires outbound access.
 The flag is explicitly off when WebSearch is disabled.
 
 The Agent-X [OpenCode pairing](../../benchmarks/opencode_multimodal_benchmarks/agentx/opencode.yaml)
-enables both web tools. Other benchmark pairings retain the disabled default.
+enables WebSearch with `network_access: websearch`; WebFetch stays disabled.
+Other benchmark pairings default to `network_access: none`.
 
 This is a tool-permission setting, not a network firewall: Bash and Python can
 still make network requests if the sandbox permits them. Use sandbox network
 controls when an evaluation requires enforced network isolation. Do not add a
 top-level `permission: {"*": "allow"}` to the evaluation policy: OpenCode 1.17.11
 can give that wildcard precedence over specific denies.
+
+## Enforced network access and per-sample tools
+
+Set `network_access` to `none`, `websearch`, or `all` to control harness and tool
+network access. The default is `none` for both training and evaluation. Choose `all` explicitly
+to retain unrestricted sandbox networking.
+Restricted modes keep the configured model API reachable; `websearch` also permits
+OpenCode's Exa service. These controls apply to owned Linux sandbox sessions and
+the local Bubblewrap training path. They require nested Linux namespaces.
+
+Use `allowed_tools` to select advertised tools. Structured request metadata may
+restrict both settings for individual samples, within the run's configured
+limits. Read [Network access and per-sample tools](network-policy.md) for
+configuration examples, runtime requirements and the exact isolation boundary.
 
 ## Prompts
 

@@ -37,6 +37,8 @@ class MultimodalSessionMixin:
     session_state_type: ClassVar[type[OpenCodeSandboxSession]] = MultimodalSandboxSession
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
+        if self.config.network_access != "all" and body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Restricted networking requires an owned sandbox")
         if body.continuation is not None:
             raise AgentSeedRejectedError("Multimodal sessions accept one initial task, not continuation inputs")
         return await super()._seed_agent_session_state(body)
@@ -65,6 +67,8 @@ class MultimodalSessionMixin:
             )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+        self._network_access_for_request(body)
+        self._tools_for_request(body)
         if body.temperature is None or body.top_p is None:
             raise HTTPException(422, "Explicit temperature and top_p are required")
         if body.max_output_tokens is not None and not 0 < body.max_output_tokens <= self.config.context_window:
@@ -77,6 +81,12 @@ class MultimodalSessionMixin:
                 "temperature": None,
                 "top_p": None,
                 "max_output_tokens": None,
+                "metadata": {
+                    key: value
+                    for key, value in (body.metadata or {}).items()
+                    if key not in {"network_access", "allowed_tools"}
+                }
+                or None,
             }
         )
         super()._session_input(sanitized)
@@ -106,6 +116,10 @@ class MultimodalSessionMixin:
         self, state: OpenCodeSandboxSession, body: NeMoGymResponseCreateParamsNonStreaming, payload: dict[str, Any]
     ) -> None:
         assert isinstance(state, MultimodalSandboxSession)
+        network_access = self._network_access_for_request(body)
+        allowed_tools = self._tools_for_request(body)
+        if network_access != "all" and state.request.sandbox_access is not None:
+            raise HTTPException(422, "Restricted networking requires an owned sandbox")
         with TemporaryDirectory(prefix="gym-visual-session-") as temporary:
             directory = Path(temporary)
             try:
@@ -133,6 +147,8 @@ class MultimodalSessionMixin:
                 update={
                     "config": self.config.model_copy(
                         update={
+                            "network_access": network_access,
+                            "allowed_tools": allowed_tools,
                             "opencode_config": native_config,
                             "max_output_tokens": body.max_output_tokens or self.config.max_output_tokens,
                         }
@@ -163,6 +179,8 @@ class MultimodalSessionMixin:
             )
             payload["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
             payload["env"].update(runner._web_tool_environment())
+            if allowed_tools is not None:
+                payload["env"]["OPENCODE_ENABLE_EXA"] = "1" if "websearch" in allowed_tools else "0"
             payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(runner.config.max_output_tokens)
             payload["env"]["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(
                 self.config.command_exec_timeout * 1000
@@ -170,6 +188,17 @@ class MultimodalSessionMixin:
             payload["command"].extend(
                 ["--model", runner._effective_model(), "--agent", "build", "--file", *image_paths, "--"]
             )
+            if network_access != "all":
+                network_runner = f"{state.session.session_dir}/network_runner.py"
+                await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), network_runner)
+                payload["command"] = [
+                    "python3",
+                    network_runner,
+                    "--mode",
+                    network_access,
+                    "--",
+                    *payload["command"],
+                ]
             # Keep adapter-owned files out of a borrowed task repository.
             payload["prompt"] = "Image files: " + ", ".join(image_paths) + "\n\n" + payload["prompt"]
 

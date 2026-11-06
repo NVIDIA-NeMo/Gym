@@ -65,6 +65,9 @@ def config(**updates):
 
 
 def agent(monkeypatch, **updates):
+    # These tests exercise the existing launcher with its networking explicitly selected.
+    # Network isolation and its default are exercised in test_network_policy.
+    updates.setdefault("network_access", "all")
     monkeypatch.setattr("responses_api_agents.opencode_agent.app.ensure_opencode", lambda version: None)
     monkeypatch.setattr(
         OpenCodeMultimodalAgent,

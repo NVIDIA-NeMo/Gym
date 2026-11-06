@@ -14,6 +14,8 @@ opencode_multimodal_agent:
       # Same npm installer, CLI, provider and dependency stack as opencode_agent.
       opencode_version: 1.17.11
       command: opencode
+      # Keep the model API reachable, but block other harness/tool network access.
+      network_access: none
       # Concurrent runs need a private filesystem per episode. Install these
       # read-only dependencies and expose their paths in the outer container.
       sandbox:
