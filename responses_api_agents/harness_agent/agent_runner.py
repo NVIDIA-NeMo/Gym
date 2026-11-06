@@ -66,7 +66,8 @@ def main() -> None:
     model_ref = cfg_data.get("model_server") or {}
     global_config = {}
     if rc.get("token_id_capture"):
-        # Preserve the collector mode without forwarding capture credentials.
+        # The host already routes model calls through training-token capture. Enable the inner
+        # agent's capture behavior to match, without forwarding capture credentials.
         global_config["token_id_capture"] = {"enabled": True, "all_agents": True}
     if model_ref.get("name"):
         global_config[model_ref["name"]] = {"responses_api_models": {"sandbox_model": {"host": "", "port": 0}}}
