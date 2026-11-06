@@ -19,7 +19,9 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    OutcomeAction,
     SandboxSession,
+    agent_outcome_policy,
     check_agent_seed_rejected,
     shell_assignments,
 )
@@ -349,17 +351,62 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
     assert session.observations.records[0].error_type == "agent_error"
 
 
+# Droid 1.1.0's error events for a refused or reset connection, a context overflow, and rejected model requests,
+# captured from runs against a scripted model server.
+CONTEXT_LIMIT_ERROR = (
+    "The existing summary and compaction instructions do not fit the selected model input window. "
+    "Choose a compaction model with a larger context window."
+)
+
+
 @pytest.mark.parametrize(
     "message,kind",
     [
+        ("400 invalid tool schema", ("model_request_error", 400)),
+        ("413 payload too large", ("model_request_error", 413)),
         ("429 rate limited", ("model_request_error", 429)),
+        ("503 unavailable", ("model_request_error", 503)),
         ("Connection error.", ("model_transport_error", None)),
-        ("tool crashed", ("unknown", None)),
+        (CONTEXT_LIMIT_ERROR, ("model_context_limit", None)),
+        # Only Droid's exact messages count: a tool's own wording or a number that is not a status does not.
+        ("Command timed out after 60s", ("unknown", None)),
+        ("Connection error. Retrying with the fallback tool", ("unknown", None)),
+        ("4000 tokens left", ("unknown", None)),
+        ("Error: The request was too large for the model service to accept.", ("unknown", None)),
     ],
 )
 def test_classifier_reads_droid_error_messages(monkeypatch, message, kind):
     outcome = agent(monkeypatch).classify_outcome({"error": message})
     assert (outcome.failure_kind, outcome.status_code) == kind
+
+
+@pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
+def test_classifier_reports_unknown_for_an_untested_release(monkeypatch, message):
+    outcome = agent(monkeypatch, droid_version="1.2.0").classify_outcome({"error": message})
+    assert outcome.failure_kind == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_context_limit_keeps_partial_work_verifiable(monkeypatch):
+    instance = agent(monkeypatch)
+    session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
+    events = [*EVENTS[:4], {"type": "error", "source": "agent_loop", "message": CONTEXT_LIMIT_ERROR}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    response = await instance._sandbox_response(session, body())
+    assert (response.status, response.error) == ("incomplete", None)
+    assert response.output
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "model_context_limit"}
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    invocation = session.observations.records[0]
+    assert (invocation.status, invocation.stop_reason, invocation.error_type) == (
+        "incomplete",
+        "context_limit",
+        "context_limit",
+    )
+    # Droid itself exited with an error.
+    assert session.observations.records[-1].outcome == "failed"
 
 
 @pytest.mark.asyncio

@@ -144,6 +144,7 @@ invocation's conversation, not in the response output, and a gap records that.
 | a `completion` event and exit 0 | `completed` |
 | the time limit | `incomplete`; the invocation's `stop_reason` is `timeout` |
 | a rollout stop | `incomplete`, with `ng_rollout_stop` |
+| a context overflow that compaction cannot fit | `incomplete`, with `ng_agent_outcome` `model_context_limit`; `stop_reason` `context_limit` |
 | exit 0 without a `completion` event | `failed`, with `ng_agent_outcome` `unknown`: a cut or lost stream is not graded |
 | an `error` event, or a nonzero exit | `failed`, with `ng_agent_outcome` |
 
@@ -152,10 +153,18 @@ A failed response's `error.message` is Droid's error message, or what ended the 
 (`result_missing`, `process_exit_<code>`), cut to 2,000 characters; the Environment Server saves it
 as the failure reason.
 
-An error event that starts with an HTTP status (Droid 1.1.0 reports a failed model request as
-`404 {...}`) is classified as `model_request_error` with that status; connection failures as
-`model_transport_error`; anything else as `unknown`. The Environment Server's outcome policy then
-decides whether to verify or retry.
+Droid's stream-json error event carries only a message, so the classifier matches the messages
+Droid 1.1.0 wrote in runs against a scripted model server:
+
+| Error event message | `ng_agent_outcome` |
+| --- | --- |
+| the HTTP status, a space, then the error body's message (`429 rate limited`) | `model_request_error` with that status |
+| exactly `Connection error.` (a refused or reset connection) | `model_transport_error` |
+| exactly Droid's compaction-does-not-fit message (after a `context_length_exceeded` rejection) | `model_context_limit` |
+| anything else | `unknown` |
+
+Another `droid_version` may word these differently, so its failures are reported as `unknown`. The
+Environment Server's outcome policy then decides whether to verify or retry.
 
 Session identity, the single activation, retries, close and its retry window follow the shared
 agent-session contract. `SandboxSession` runs Droid through the shared `harness_runner.sh` under the

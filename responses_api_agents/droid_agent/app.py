@@ -29,6 +29,7 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ConfigDict, Field
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
@@ -47,6 +48,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
@@ -90,8 +92,19 @@ fi
 """
 # Environment servers keep this many characters of a failed response's error message as the failure reason.
 _FAILURE_REASON_CHARS = 2000
-# Transport failures Droid 1.1.0 reports in its error event when a model request does not reach the server.
-_TRANSPORT_ERRORS = ("Connection error", "fetch failed", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "timed out")
+# The release whose error event messages were read from runs against a scripted model server. Another release
+# may word them differently, so its failures are reported as unknown.
+_CLASSIFIED_DROID_VERSION = "1.1.0"
+# A rejected model request: the HTTP status, a space, then the message of the response's error body.
+_MODEL_REQUEST_STATUS = re.compile(r"^([45]\d{2}) ")
+# A refused or reset connection to the model server.
+_TRANSPORT_ERROR = "Connection error."
+# Droid compacts the conversation when the model rejects its context, and stops with this when the compaction
+# request does not fit either.
+_CONTEXT_LIMIT = (
+    "The existing summary and compaction instructions do not fit the selected model input window. "
+    "Choose a compaction model with a larger context window."
+)
 
 
 class DroidAgentConfig(BaseResponsesAPIAgentConfig):
@@ -135,13 +148,17 @@ class DroidAgent(SimpleResponsesAPIAgent):
         raise NotImplementedError("Use the single_agent_turn Environment Server")
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read Droid 1.1.0's error event: a failed model request starts with its HTTP status."""
+        """Match the error event against the messages Droid 1.1.0 was seen to write; tested on that release only."""
+        if self.config.droid_version != _CLASSIFIED_DROID_VERSION:
+            return AgentOutcome(failure_kind="unknown")
         message = str(native_result.get("error") or "")
-        match = re.match(r"^([45]\d{2})\b", message)
+        if message == _CONTEXT_LIMIT:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if message == _TRANSPORT_ERROR:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        match = _MODEL_REQUEST_STATUS.match(message)
         if match:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
-        if any(marker in message for marker in _TRANSPORT_ERRORS):
-            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
 
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
@@ -394,6 +411,9 @@ class DroidAgent(SimpleResponsesAPIAgent):
             status, reason = "incomplete", "cancelled"
         elif failure is not None:
             status, reason = "failed", "sandbox_error"
+        elif run.error is not None and self.classify_outcome({"error": run.error}).failure_kind == MODEL_CONTEXT_LIMIT:
+            # The conversation outgrew the model's context: the partial work is verified, not retried.
+            status, reason = "incomplete", "context_limit"
         elif run.error is not None:
             status, reason = "failed", "agent_error"
         elif return_code not in (0, None):
@@ -440,7 +460,11 @@ class DroidAgent(SimpleResponsesAPIAgent):
                 harness_session_id=run.session_id,
                 status=status,
                 # A rollout stop also ends the run as at its deadline; its response carries ng_rollout_stop instead.
-                stop_reason="timeout" if reason == "timeout" and not state.session.expired else None,
+                stop_reason="context_limit"
+                if reason == "context_limit"
+                else "timeout"
+                if reason == "timeout" and not state.session.expired
+                else None,
                 duration_ms=run.duration_ms,
                 error_type=reason,
                 conversation=[*conversation, *run.conversation],
@@ -454,9 +478,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
                     role="agent",
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
                     sandbox_id=sandbox_id,
-                    outcome={"timeout": "timeout", "cancelled": "cancelled"}.get(
-                        reason, "failed" if status == "failed" else "completed"
-                    ),
+                    outcome={"timeout": "timeout", "cancelled": "cancelled", None: "completed"}.get(reason, "failed"),
                     exit_code=return_code,
                     error_type=reason,
                 )
@@ -483,6 +505,10 @@ class DroidAgent(SimpleResponsesAPIAgent):
             metadata={"harness_execution": "sandbox", AGENT_TIMEOUT_METADATA_KEY: str(timeout)},
         )
         response = self.report_rollout_stop(response, state.session)
+        if reason == "context_limit":
+            # report_outcome describes failed responses only; the stop still tells the environment its cause.
+            outcome = AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT).model_dump_json(exclude_none=True)
+            return response.model_copy(update={"metadata": {**response.metadata, AGENT_OUTCOME_METADATA_KEY: outcome}})
         return self.report_outcome(response, {"error": run.error})
 
     async def responses(
