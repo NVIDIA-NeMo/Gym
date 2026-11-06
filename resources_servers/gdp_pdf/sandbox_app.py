@@ -33,7 +33,13 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLocks,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from resources_servers.gdp_pdf.app import GdpPdfConfig, GdpPdfResourcesServer
+from resources_servers.gdp_pdf.app import (
+    CriterionEvaluation,
+    GdpPdfConfig,
+    GdpPdfResourcesServer,
+    GdpPdfVerifyRequest,
+    GdpPdfVerifyResponse,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -101,6 +107,16 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
         if not path.is_relative_to(root) or not path.is_file() or path.suffix.lower() != ".pdf":
             raise ResourcesSeedRejectedError("source_pdf must be an existing PDF within documents_base_dir")
         return path
+
+    async def verify(self, body: GdpPdfVerifyRequest) -> GdpPdfVerifyResponse:
+        criteria = (body.verifier_metadata or {}).get("criteria") or []
+        if body.response.status == "incomplete" and criteria:
+            evaluations = [
+                CriterionEvaluation(index=c.get("index"), criterion=str(c.get("criterion", "")), passed=False)
+                for c in criteria
+            ]
+            return self._build_response(body, evaluations)
+        return await super().verify(body)
 
     async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
         session_id = body.resources_session_id

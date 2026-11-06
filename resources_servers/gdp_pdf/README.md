@@ -235,13 +235,16 @@ final answer. Rubrics and reference answers stay outside the sandbox.
 
 ```bash
 docker build -t gdp-pdf-tools resources_servers/gdp_pdf
+gym eval prepare --config benchmarks/gdp_pdf/opencode.yaml \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools
 gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml \
   +gdp_pdf_sandbox_image=gdp-pdf-tools \
   ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
   +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
-  +policy_model_name=MODEL --num-repeats 3 --output results/gdp-pdf-opencode.jsonl
+  +policy_model_name=MODEL --split benchmark --num-repeats 3 \
+  --output results/gdp-pdf-opencode.jsonl
 ```
 
 Set judge credentials in private `env.yaml`. `GYM_HOST_IP` must be reachable from

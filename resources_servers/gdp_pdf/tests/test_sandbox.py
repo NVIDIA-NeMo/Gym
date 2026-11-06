@@ -15,7 +15,7 @@ from nemo_gym.server_runtime import (
     check_resources_session_contract,
 )
 from resources_servers.gdp_pdf import sandbox_app as module
-from resources_servers.gdp_pdf.tests.test_app import config  # noqa: F401
+from resources_servers.gdp_pdf.tests.test_app import _verify_request, config  # noqa: F401
 
 
 @pytest.fixture
@@ -56,6 +56,26 @@ def test_session_contract_and_pdf_delivery(setup):
     )
     assert all(call.args == (pdf, module.DOCUMENT_PATH) for call in sandbox.upload.await_args_list)
     assert sandbox.upload.await_count == 2
+
+
+@pytest.mark.parametrize("status,tool_tail", [("completed", False), ("incomplete", False), ("incomplete", True)])
+async def test_only_completed_answers_are_judged(setup, status, tool_tail):
+    server, _, _, _ = setup
+    body = _verify_request("The cap is $5M.")
+    payload = body.model_dump()
+    payload["response"]["status"] = status
+    if tool_tail:
+        payload["response"]["output"].append(
+            {"type": "function_call", "name": "bash", "arguments": "{}", "call_id": "pending"}
+        )
+    body = module.GdpPdfVerifyRequest.model_validate(payload)
+    server._judge_criterion = AsyncMock(return_value=module.CriterionEvaluation(criterion="cap", passed=True))
+    result = await server.verify(body)
+    assert result.response == body.response
+    assert result.reward == result.all_pass == (1.0 if status == "completed" else 0.0)
+    assert result.num_criteria == 1
+    assert result.criterion_evaluations[0].passed == (status == "completed")
+    assert server._judge_criterion.await_count == (1 if status == "completed" else 0)
 
 
 @pytest.mark.parametrize("source", ["../outside.pdf", "/etc/passwd", "missing.pdf", ""])
