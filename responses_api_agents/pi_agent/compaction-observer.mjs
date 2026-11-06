@@ -9,10 +9,11 @@ import { pathToFileURL } from "node:url";
 // compaction_start/end events; leave triggering, summarization and retry intact.
 // The SDK's extension hooks do not provide a compaction-failure/end boundary.
 export function observeCompaction(AgentSession) {
-  const emit = AgentSession.prototype._emit;
+  const emit = AgentSession?.prototype?._emit;
+  if (typeof emit !== "function") return;
   const active = new WeakMap();
   AgentSession.prototype._emit = function (event) {
-    if (event.type === "compaction_start" && !active.has(this)) {
+    if (event.type === "compaction_start" && !active.has(this) && typeof this.agent?.streamFn === "function") {
       const session = this;
       const operation = { id: randomUUID(), stream: this.agent.streamFn };
       active.set(this, operation);
@@ -54,6 +55,10 @@ export function observeCompaction(AgentSession) {
 // Loaded by Node before the pinned CLI. Tests import the observer without
 // importing Pi or replacing the real CLI's execution path.
 if (process.argv[1]?.endsWith("/@earendil-works/pi-coding-agent/dist/cli.js")) {
-  const { AgentSession } = await import(new URL("./core/agent-session.js", pathToFileURL(process.argv[1])));
-  observeCompaction(AgentSession);
+  try {
+    const { AgentSession } = await import(new URL("./core/agent-session.js", pathToFileURL(process.argv[1])));
+    observeCompaction(AgentSession);
+  } catch (error) {
+    console.error("Gym could not initialize Pi compaction observation:", error.message);
+  }
 }

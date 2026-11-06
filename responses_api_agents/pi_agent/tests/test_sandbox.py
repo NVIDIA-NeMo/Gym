@@ -265,6 +265,9 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
             assert payload["command"][0].endswith("/node/bin/node")
+            observer = f"{sandbox.directory}/compaction-observer.mjs"
+            assert sandbox.files[observer] == Path(__file__).parents[1].joinpath("compaction-observer.mjs").read_text()
+            assert payload["command"][1:3] == ["--import", observer]
             assert "PATH" not in payload["env"]
             assert "HOME" not in payload["env"]
             assert not any(key.startswith("XDG_") for key in payload["env"])

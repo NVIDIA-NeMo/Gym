@@ -2,6 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { observeCompaction } from "../compaction-observer.mjs";
 
@@ -14,6 +18,37 @@ function session(streamFn) {
   observeCompaction(Session);
   return new Session();
 }
+
+test("unsupported emitter or stream boundaries leave Pi unchanged", () => {
+  class UnsupportedSession {}
+  observeCompaction(UnsupportedSession);
+  assert.equal(UnsupportedSession.prototype._emit, undefined);
+  const run = session(undefined);
+  const start = {type: "compaction_start", reason: "threshold"};
+  run._emit(start);
+  assert.equal(run.events[0], start);
+  assert.equal(run.agent.streamFn, undefined);
+});
+
+test("a moved session module does not prevent the CLI from starting", () => {
+  const root = mkdtempSync(join(tmpdir(), "gym-pi-observer-"));
+  try {
+    const directory = join(root, "@earendil-works/pi-coding-agent/dist");
+    mkdirSync(directory, {recursive: true});
+    const cli = join(directory, "cli.js");
+    writeFileSync(cli, 'console.log("CLI started");');
+    const result = spawnSync(
+      process.execPath,
+      ["--import", new URL("../compaction-observer.mjs", import.meta.url).href, cli],
+      {encoding: "utf8"},
+    );
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), "CLI started");
+    assert.match(result.stderr, /Gym could not initialize Pi compaction observation/);
+  } finally {
+    rmSync(root, {recursive: true, force: true});
+  }
+});
 
 test("only native compaction calls are observed; results and options are preserved", async () => {
   const response = { responseId: "helper", content: [{type: "text", text: "Summary"}], usage: {input: 7, output: 2} };
