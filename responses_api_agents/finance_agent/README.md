@@ -65,7 +65,7 @@ agent and the finance resources servers export no checkpoint state (`restart_onl
 still starts over from its input. What changes is that a failed model call, seed or judge becomes a classified failure
 instead of reward 0. Each finance_sec_search and finance_agent_v2 relay config has a counterpart that does this; the
 relay configs are unchanged. The big_finance configs stay on the relay until the big_finance resources server serves
-typed resources sessions:
+episode sessions:
 
 | Relay config | Environment Server config |
 |--------------|---------------------------|
@@ -76,7 +76,7 @@ typed resources sessions:
 | `benchmarks/finance_agent_v2/config.yaml` | `benchmarks/finance_agent_v2/config_single_agent_turn.yaml` |
 
 An agent session takes its tools from the Environment Server's grant, so the Environment Server must set
-`resources_tool_transports: [direct_http]`. The agent refuses, with a final 422, a session with no direct HTTP grant,
+`resources_tool_transports: [direct_http]`. The agent refuses, with a terminal 422, a session with no direct HTTP grant,
 more than one, a required MCP grant, or sandbox access. Every tool call goes to the grant's base URL with its headers
 and the resources cookie jar, and close returns the updated jar. When model calls are captured
 (`observability_enabled`), close also returns the loop's observations: one invocation with its stop reason and model
