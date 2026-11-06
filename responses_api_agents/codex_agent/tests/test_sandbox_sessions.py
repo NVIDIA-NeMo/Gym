@@ -24,6 +24,7 @@ from pydantic import ValidationError
 from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     RolloutStopRequest,
     is_harness_termination_failure,
     parse_cleanup_receipt,
@@ -33,7 +34,12 @@ from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxStatus
-from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
+from responses_api_agents.codex_agent.app import (
+    _SANDBOX_SESSION_KEY,
+    CodexAgent,
+    CodexAgentConfig,
+    _model_endpoint_error,
+)
 
 
 def seed() -> AgentSeedSessionRequest:
@@ -1668,7 +1674,7 @@ def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     assert sandbox.disconnect.await_count == 66
 
 
-async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypatch):
+async def test_fence_expires_without_extending_on_retry(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1683,7 +1689,7 @@ async def test_close_receipt_expires_without_extending_on_retry(setup, monkeypat
     with pytest.raises(HTTPException) as error:
         await agent.close_agent_session(request, close)
     assert error.value.status_code == 409
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
     with pytest.raises(HTTPException) as stale_seed:
         await agent.seed_agent_session(request, seed())
     assert stale_seed.value.status_code == 409
@@ -1713,7 +1719,7 @@ async def test_close_retry_window_starts_after_cleanup(setup, monkeypatch):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1735,7 +1741,7 @@ async def test_concurrent_closes_share_receipt(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
+async def test_seed_prunes_expired_fences(setup, monkeypatch):
     agent, _ = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -1745,7 +1751,7 @@ async def test_seed_prunes_expired_close_receipts(setup, monkeypatch):
     clock[0] += agent.config.session_close_retry_window_seconds
     request.session.clear()
     await agent.seed_agent_session(request, seed().model_copy(update={"agent_session_id": "fresh-session"}))
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
 
 
 @pytest.mark.parametrize("window", [0, -1, float("inf")])
@@ -2203,7 +2209,7 @@ async def test_cookie_less_close_cleans_lost_seed_response(setup):
     sandbox.disconnect.assert_awaited_once()
 
 
-async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
+async def test_close_before_seed_leaves_a_fence_that_expires(setup, monkeypatch):
     agent, sandbox = setup
     clock = [100.0]
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
@@ -2216,11 +2222,24 @@ async def test_close_before_seed_leaves_bounded_tombstone(setup, monkeypatch):
         await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
     sandbox.exec.assert_not_awaited()
     clock[0] = 110.0
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.close_agent_session(stale, close)
-    with pytest.raises(HTTPException, match="expired"):
+    with pytest.raises(HTTPException, match="no longer available"):
         await agent.seed_agent_session(stale, body)
-    assert not agent._closed_session_records
+    assert not agent._fenced_session_records
+
+
+async def test_a_sandbox_cookie_without_an_agent_session_is_refused_instead_of_running_on_the_host(setup):
+    agent, sandbox = setup
+    # A cookie from the sandbox session adapter that names no agent session the agent still holds.
+    stale = Request({"type": "http", "session": {_SANDBOX_SESSION_KEY: "gone"}, "path_params": {}})
+    with pytest.raises(
+        AgentSessionConflictError, match="^409: Codex session cookie names a session that is no longer"
+    ):
+        await agent.responses(stale, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+    with pytest.raises(AgentSessionConflictError, match="Codex session cookie"):
+        await agent.run(stale, MagicMock())
+    sandbox.exec.assert_not_awaited()
 
 
 async def test_close_waits_for_racing_seed_and_removes_completed_setup(setup):
@@ -2332,7 +2351,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         server_client=transport,
     )
     calls = []
-    close_receipts = []
+    close_replies = []
     cookies = {}
 
     class Response:
@@ -2382,7 +2401,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
             assert result.agent_session_id == body["agent_session_id"]
         elif url_path == "/v1/agent_sessions/close":
             result = await agent.close_agent_session(request, AgentCloseSessionRequest.model_validate(body))
-            close_receipts.append(result)
+            close_replies.append(result)
         else:
             assert url_path.endswith("/v1/responses")
             request.scope["path_params"] = {"rollout_id": url_path.split("/")[2]}
@@ -2415,8 +2434,8 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
         else:
             assert result["response"]["usage"] is None
         assert result["ng_agent_observations"]["source"] == "codex"
-    assert close_receipts[-1].agent_observations.source == "codex"
-    assert close_receipts[-1].agent_observations.records[0].status == (
+    assert close_replies[-1].agent_observations.source == "codex"
+    assert close_replies[-1].agent_observations.records[0].status == (
         "completed" if outcome == "completed" else "failed"
     )
     expected = [
