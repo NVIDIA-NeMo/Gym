@@ -29,6 +29,10 @@ A model in a Gym evaluation has two parts:
   `--model-type` of `gym eval run`). `openai_model` is the default; `vllm_model` adds reasoning
   extraction, `chat_template_kwargs`, `extra_body` and token information.
 
+Read the [shared outcome-policy guide](../../../fern/versions/latest/pages/observability/outcome-policies.mdx)
+for boundary configuration, failure recording and executable examples. Reuse the shared selector;
+keep retry safety and budgets with the executor, and preserve recovered observations.
+
 ## 1. Read the model card first
 
 Collect before writing anything: the context length, the recommended sampling settings, whether
