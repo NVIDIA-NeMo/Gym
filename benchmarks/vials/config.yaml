@@ -2,6 +2,8 @@ config_paths:
 - resources_servers/vials/configs/vials.yaml
 - resources_servers/vials/configs/judge_model.yaml
 
+# Select the policy adapter with --model-type; endpoint/model settings live in env.yaml.
+
 vials_agent:
   responses_api_agents:
     simple_agent:

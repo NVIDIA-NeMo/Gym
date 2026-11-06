@@ -57,7 +57,10 @@ exhausted judge failures. Report masked counts alongside accuracy.
 ## Evaluation configuration
 
 - Agent: `simple_agent`, one model turn, no tools.
-- Policy model: selected through the Gym model-server configuration.
+- Reference policy: Nemotron VL 3.5. Select the adapter with `--model-type` and
+  set `policy_model_name` to the exact model ID exposed by your endpoint. The
+  example uses serving alias `nemotron-vl-3.5`; this does not download or launch
+  a checkpoint. Other vision-capable policies can use the same benchmark config.
 - Upstream reproduction settings: temperature `1.0`, output budget `32768`,
   three attempts per task, provider-default reasoning effort.
 - The checked-in dataset defaults to one attempt for initial evaluation. Use the
@@ -86,7 +89,30 @@ preparation after changing prompts.
 Merge the fields from `env.example.yaml` into the repository-root `env.yaml`,
 providing your vision policy endpoint and a separate judge key. Credentials stay
 in local Gym configuration. The default judge uses OpenAI's `gpt-5-mini`; its
-endpoint and model are independently configurable. A one-task smoke evaluation is:
+endpoint and model are independently configurable with `judge_base_url`,
+`judge_api_key`, and `judge_model_name`, matching other benchmark recipes. Existing
+`vials_judge_base_url`, `vials_judge_api_key`, and `vials_judge_model_name` overrides
+take precedence when present. Do not set a scalar `vials_judge_model` value: that
+name identifies the judge server instance.
+
+The benchmark config defines the dataset, agent, and verifier. It does not bind
+the policy model implementation. Select `vllm_model` for a vLLM-served Nemotron
+policy, or `openai_model` for a policy endpoint served through that adapter.
+`--benchmark vials` is shorthand for `--config benchmarks/vials/config.yaml`;
+no separate local dataset-selection YAML is needed for this single benchmark.
+
+A one-task smoke evaluation against a vLLM-served policy is:
+
+```bash
+gym eval run --benchmark vials --model-type vllm_model \
+    --split example --limit 1 --num-repeats 1 \
+    --temperature 1.0 --max-output-tokens 32768 --concurrency 1 \
+    --output results/vials_smoke.jsonl \
+    ++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true
+```
+
+Use the thinking flag only for a checkpoint/chat template that supports it. For
+a policy using Gym's OpenAI adapter, the equivalent smoke command is:
 
 ```bash
 gym eval run --benchmark vials --model-type openai_model \
@@ -96,7 +122,33 @@ gym eval run --benchmark vials --model-type openai_model \
 ```
 
 For a full evaluation, select `--split benchmark`, remove `--limit 1`, and use
-`--num-repeats 3`.
+`--num-repeats 3`. For example:
+
+```bash
+gym eval run --config benchmarks/vials/config.yaml --model-type vllm_model \
+    --split benchmark --num-repeats 3 --concurrency 16 \
+    --temperature 1.0 --max-output-tokens 32768 \
+    --output results/vials_full.jsonl \
+    ++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true
+```
+
+The source HF split is `test`; the Gym dataset role is `benchmark`, so this recipe
+uses `--split benchmark`, not `--split validation`. The five committed smoke tasks
+have role `example`. The full dataset is regenerated from pinned HF data rather
+than retrieved from Gym's dataset registry.
+
+For separate server and collection terminals, start the same configuration with
+`gym env start --benchmark vials --model-type vllm_model` (including any thinking
+override). Then collect with:
+
+```bash
+gym eval run --no-serve --benchmark vials --model-type vllm_model \
+    --agent vials_agent --input benchmarks/vials/data/example.jsonl \
+    --output results/vials_examples.jsonl --num-repeats 1 \
+    --temperature 1.0 --max-output-tokens 32768 --concurrency 1 \
+    ++policy_model.responses_api_models.vllm_model.chat_template_kwargs.enable_thinking=true
+```
+
 Inspect policy responses, judge diagnostics, and masked samples before interpreting
 accuracy. Offline verifier fixtures do not establish agreement with live judges.
 

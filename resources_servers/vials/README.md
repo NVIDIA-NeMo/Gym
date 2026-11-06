@@ -28,8 +28,10 @@ runtime, or temporary image files are needed.
 `configs/vials.yaml` declares `judge_model_server`, `multimodal_fallback` (default
 true), and `max_concurrent_judges` (default four). `configs/judge_model.yaml` binds
 the default `vials_judge_model` to Gym's OpenAI model adapter, defaulting to
-`gpt-5-mini`. Override its URL, key, and model via `vials_judge_base_url`,
-`vials_judge_api_key`, and `vials_judge_model` in Gym's `env.yaml`. Other Gym judge
+`gpt-5-mini`. Override its URL, key, and model via `judge_base_url`,
+`judge_api_key`, and `judge_model_name` in Gym's `env.yaml`. VIALS-specific
+`vials_judge_base_url`, `vials_judge_api_key`, and `vials_judge_model_name` overrides
+remain supported and take precedence over the generic names. Other Gym judge
 adapters can be selected by changing `judge_model_server` and loading their config.
 Policy and judge bindings are independent.
 
