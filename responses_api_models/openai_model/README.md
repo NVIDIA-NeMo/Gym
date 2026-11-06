@@ -41,6 +41,11 @@ The model server learns the rollout from the `/ng-rollout/<id>` prefix that agen
 model calls. `rollout_correlation=true` makes agents add it without turning on model-call capture;
 `observability_enabled` and token capture add it too. Requests without a rollout get no header.
 
+A session is a rollout attempt: the header carries the capture key (`<rollout id>`, or `<rollout id>-a<N>` for
+a retry), and `nemo_gym.core.current_session_key()` is the one function that builds it. Agents that make model calls
+inside the same attempt, such as a policy and a user simulator, or a judge that calls through the same model server,
+share one session and therefore one replica. The vLLM model server's endpoint selection uses the same key.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A

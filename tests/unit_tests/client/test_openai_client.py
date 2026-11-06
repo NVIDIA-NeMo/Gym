@@ -187,6 +187,23 @@ class TestOpenAIUtils:
 
         assert [value for name, value in sent[0].items() if name.lower() == "authorization"] == ["Bearer abc"]
 
+    async def test_rollout_id_headers_carry_the_session_key(self, monkeypatch) -> None:
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs["headers"])
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_client_module, "request", fake_request)
+        monkeypatch.setattr(openai_client_module, "current_session_key", lambda: "session-of-the-call")
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", rollout_id_headers=["X-Session"]
+        )
+
+        await client._request(method="POST", url="https://example.test/v1/responses")
+
+        assert sent[0]["X-Session"] == "session-of-the-call"
+
     async def test_rollout_id_headers_are_off_by_default(self, monkeypatch) -> None:
         sent = []
 

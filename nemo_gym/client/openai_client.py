@@ -50,7 +50,7 @@ from nemo_gym.client.http_client import (
     raise_for_status,
     request,
 )
-from nemo_gym.core.episode_context import current_rollout_id, note_verifier_model_request
+from nemo_gym.core.episode_context import current_rollout_id, current_session_key, note_verifier_model_request
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure, observe_model_operation
@@ -392,10 +392,10 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         self._raise_permanent_error(cause)
 
     def _rollout_headers(self) -> Dict[str, str]:
-        rollout_id = current_rollout_id()
-        if rollout_id is None:
+        session_key = current_session_key()
+        if session_key is None:
             return {}
-        return {name: rollout_id for name in self.rollout_id_headers}
+        return {name: session_key for name in self.rollout_id_headers}
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:

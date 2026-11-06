@@ -46,6 +46,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
+    current_session_key,
     failure_report_for,
 )
 from nemo_gym.models import (
@@ -2462,10 +2463,11 @@ class VLLMModel(SimpleResponsesAPIModel):
 
     def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
         self._maybe_rebind_endpoint()
-        # Route by rollout when the call carries one: agents that drop cookies get a new
+        # Route by session when the call carries a rollout: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
-        # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        # collect them. Keying on the session keeps its turns on one endpoint. This is the same key
+        # the outbound session header carries, so an upstream router and this server agree.
+        session_id = current_session_key() or request.session[SESSION_ID_KEY]
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)
