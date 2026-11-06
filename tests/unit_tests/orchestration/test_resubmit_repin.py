@@ -36,7 +36,7 @@ from tests.unit_tests.orchestration.test_eval_resubmit import slurm_bin as slurm
 OLD, NEW = "a" * 40, "d" * 40
 
 
-def _repinnable_run(tmp_path: Path) -> Path:
+def _repinnable_run(tmp_path: Path, config_paths: list[str] | None = None) -> Path:
     """One benchmark staged on Gym OLD with its MLflow pin tags, one saved row, one missing row and spent budgets."""
     config = SubmitConfig.model_validate(
         {
@@ -47,8 +47,12 @@ def _repinnable_run(tmp_path: Path) -> Path:
                 "gym_install": {"repo": "https://example.invalid/gym", "ref": OLD},
                 "benchmarks": {
                     "gsm8k": {
-                        "run": {"mlflow_run_tags": {"gym_sha": f"'{OLD}'", "gym_commit": f"'{OLD}'", "model": "'m'"}},
+                        "run": {
+                            **({"config_paths": config_paths} if config_paths else {}),
+                            "mlflow_run_tags": {"gym_sha": f"'{OLD}'", "gym_commit": f"'{OLD}'", "model": "'m'"},
+                        },
                         "resumable": ResumeConfig(max_retries=3, max_walltime="16:00:00").model_dump(),
+                        **({"prepare": {"config_paths": config_paths[:1]}} if config_paths else {}),
                     }
                 },
             },
@@ -296,3 +300,77 @@ def test_no_auto_repin_needs_recover_and_excludes_repin(capsys):
         with pytest.raises(SystemExit):
             _eval_resubmit(parser.parse_args(argv), [])
         assert "--no-auto-repin needs --recover and cannot be used with --repin" in capsys.readouterr().err
+
+
+# --- An automatic repin never moves a run to an installed commit that lacks the config files the run launched with. ---
+
+BENCHMARK_CONFIG = "benchmarks/<benchmark>/config.yaml"
+
+
+@pytest.fixture
+def installed_tree(tmp_path, monkeypatch):
+    """A stand-in install root holding the files named; the recovery reads the installed Gym's files there."""
+    import nemo_gym.orchestration.submit as submit_module
+
+    root = tmp_path / "installed"
+    root.mkdir()
+    monkeypatch.setattr(submit_module, "PARENT_DIR", root)
+
+    def holds(*names):
+        for name in names:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
+            (root / name).write_text("{}\n")
+
+    return holds
+
+
+@pytest.mark.parametrize("auto_repin", [True, False])
+def test_a_repin_is_refused_when_the_installed_commit_lacks_a_config_path_of_the_run(
+    tmp_path, slurm_bin, launcher_at, monkeypatch, installed_tree, auto_repin
+):
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    launcher_at(NEW)
+    installed_tree("benchmarks/other/config.yaml")
+    job_dir = _repinnable_run(tmp_path, [BENCHMARK_CONFIG, "benchmarks/other/config.yaml"])
+    _pinned_plans_differently(monkeypatch)
+    files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
+
+    out = recover(*_handle(job_dir), auto_repin=auto_repin)
+    assert not out.ok and out.dispatched is None and out.decision.action.value == "stop"
+    assert out.pin_plan["refused"] is True and out.pin_plan["repin"] is False
+    assert out.pin_plan["missing_config_paths"] == [BENCHMARK_CONFIG]
+    assert f"lacks config_paths '{BENCHMARK_CONFIG}'" in out.decision.reason
+    assert "benchmarks/other/config.yaml" not in out.decision.reason
+    assert out.decision.reason in out.gate_task["errors"]
+    assert {path: path.read_bytes() for path in files} == files
+    assert not (slurm_bin / "env").exists() and not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
+    # --inspect reports the same refusal and changes nothing.
+    assert inspect_recovery(*_handle(job_dir), auto_repin=auto_repin).pin_plan == out.pin_plan
+
+
+def test_a_repin_proceeds_when_the_installed_commit_holds_every_config_path_of_the_run(
+    tmp_path, slurm_bin, launcher_at, monkeypatch, installed_tree
+):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    installed_tree(BENCHMARK_CONFIG)
+    # An absolute entry resolves unchanged, so it is not looked up in the installed tree.
+    job_dir = _repinnable_run(tmp_path, [BENCHMARK_CONFIG, "/elsewhere/extra.yaml"])
+    _pinned_plans_differently(monkeypatch)
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert out.pin_plan["repin"] is True and "missing_config_paths" not in out.pin_plan
+    assert NEW in (job_dir / "job.sh").read_text()
+
+
+def test_a_run_whose_pin_stays_is_not_checked_for_config_paths(tmp_path, slurm_bin, launcher_at, installed_tree):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _repinnable_run(tmp_path, [BENCHMARK_CONFIG])
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert out.pin_plan["repin"] is False and "refused" not in out.pin_plan
+    assert OLD in (job_dir / "job.sh").read_text()
