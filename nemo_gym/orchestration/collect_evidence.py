@@ -102,7 +102,7 @@ KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_in
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "_ng_elapsed_s",
-        "ng_policy_model_server", "_ng_rejudge_operation_id")
+        "ng_policy_model_server", "_ng_rejudge_operation_id", "failure_outcome_action", "failure_outcome_attribution")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.
@@ -133,7 +133,7 @@ def model_call_facts(r):
         out.append({"status_code": count(meta.get("status_code")), "upstream_status_code": count(meta.get("upstream_status_code")),
                     "error_category": category[:64] if isinstance(category, str) else None,
                     "failure_events": [{"failure_kind": event.get("failure_kind") if isinstance(event.get("failure_kind"), str) else None,
-                                        "http_status": count(event.get("http_status"))}
+                                        "http_status": count(event.get("http_status")), "stage": event.get("stage")}
                                        for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
                     "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
     return out
@@ -155,7 +155,7 @@ def trial_metadata(value):
     result["failure_report"] = None
     if isinstance(report, dict) and isinstance(report.get("events"), dict):
         result["failure_report"] = {"failure_id": report.get("failure_id"), "omitted": report.get("omitted"),
-            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id", "cause_id", "failure_kind", "http_status")}
+            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id", "cause_id", "failure_kind", "http_status", "stage")}
                        if isinstance(event, dict) else None for event_id, event in report["events"].items()}}
     return result
 import hashlib

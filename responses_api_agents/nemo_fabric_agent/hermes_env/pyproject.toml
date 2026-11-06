@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Hermes Agent v0.22.7 needs Python 3.14, while this server runs Python 3.13, so
+# the Hermes adapter runs from this separate environment through ADAPTER_PYTHON.
+
+[project]
+name = "gym-nemo-fabric-hermes-env"
+version = "0.0.0"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "nemo-fabric-adapters-hermes[relay]==0.6.1",
+    "nemo-relay==0.11.1",
+    "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@b200f5bc60e31588ba2cb60e288029c4a54ba5fa",
+]
+
+[tool.uv]
+# Installed with `uv pip install -r pyproject.toml`, so every direct dependency is pinned exactly.
+package = false
+# Hermes Agent refuses package builds unless its packager sets this, and it has no PyPI release after 0.19.
+extra-build-variables = { hermes-agent = { HERMES_NIX_BUILD = "1" } }
+# Hermes Agent's own [tool.uv] overrides, which only apply when Hermes is the root project.
+override-dependencies = [
+    "pynacl>=1.6,<1.7",
+    "cryptography==50.0.2",
+    "Pillow==13.0.0",
+    "spacy-curated-transformers; sys_platform == 'never'",
+]
