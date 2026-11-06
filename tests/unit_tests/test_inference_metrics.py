@@ -70,6 +70,8 @@ def test_labels_replicas_and_allowlist():
     values = collector.parse("replica0", GAUGES, 10)
     assert values == {
         "vllm/replica0/num_requests_running": 7,
+        "vllm/replica0/num_requests_running/engine/0": 3,
+        "vllm/replica0/num_requests_running/engine/1": 4,
     }
     assert set(values).isdisjoint(collector.parse("replica1", GAUGES, 10))
 
@@ -200,7 +202,14 @@ async def test_mooncake_scraped_once_and_does_not_change_vllm_aggregates(monkeyp
     if mooncake_rows:
         assert mooncake_rows[0]["mooncake/total/kv_cache_usage_perc"] == 0.75
     if not only_mooncake:
-        assert published[-1] == {"vllm/total/num_requests_running": 14, "vllm/mean/num_requests_running": 7}
+        assert published[-1] == {
+            "vllm/total/num_requests_running": 14,
+            "vllm/mean/num_requests_running": 7,
+            "vllm/total/num_requests_running/engine/0": 6,
+            "vllm/mean/num_requests_running/engine/0": 3,
+            "vllm/total/num_requests_running/engine/1": 8,
+            "vllm/mean/num_requests_running/engine/1": 4,
+        }
     assert not any(key.startswith(("vllm/total/allocated", "mooncake/mean/")) for row in published for key in row)
 
 
@@ -929,7 +938,11 @@ async def test_inventory_default_off_never_requests_master(monkeypatch):
     collector = InferenceMetricsCollector(config(mooncake_endpoint="http://localhost:9003/metrics"))
     request = AsyncMock()
     monkeypatch.setattr(metrics_module, "request", request)
-    assert collector.parse("replica0", GAUGES + INVENTORY, 10) == {"vllm/replica0/num_requests_running": 7}
+    assert collector.parse("replica0", GAUGES + INVENTORY, 10) == {
+        "vllm/replica0/num_requests_running": 7,
+        "vllm/replica0/num_requests_running/engine/0": 3,
+        "vllm/replica0/num_requests_running/engine/1": 4,
+    }
     assert not collector.cache_layouts
     await collector.report_cache_inventory()
     request.assert_not_called()
