@@ -217,6 +217,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
                 # so replaying them would not measure the policy.
                 lost = lost_session_verification("No seeded workplace_assistant session for this verify")
                 return WorkbenchVerifyResponse(**(body.model_dump() | lost))
+            # Grading uses the request; retain explicit proof that this session was admitted.
+            verification.retain(None)
             ground_truth = body.ground_truth
             response = body.response.output
 

@@ -341,10 +341,11 @@ async def test_retire_releases_typed_binding() -> None:
     assert server.session_id_to_tool_env == {} and server._session_episodes == {}
 
 
-async def test_typed_verify_failure_releases_tables_and_can_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("typed", [False, True])
+async def test_verify_failure_releases_tables_and_can_retry(monkeypatch: pytest.MonkeyPatch, typed: bool) -> None:
     server, webserver = make_server()
     async with client_for(webserver) as client:
-        await client.post("/ng-rollout/r/seed_session", json=typed_seed().model_dump(mode="json"))
+        await client.post("/ng-rollout/r/seed_session", json=typed_seed().model_dump(mode="json") if typed else SEED)
         await call_tools(client, BEFORE + AFTER[:1], "r")
         with monkeypatch.context() as patch:
             patch.setattr(workplace_app, "is_correct", MagicMock(side_effect=RuntimeError("verifier failed")))
@@ -352,7 +353,7 @@ async def test_typed_verify_failure_releases_tables_and_can_retry(monkeypatch: p
                 await client.post("/ng-rollout/r/verify", json=verify_body())
         assert server.session_id_to_tool_env == {} and server._session_episodes == {}
         retried = await client.post("/ng-rollout/r/verify", json=verify_body())
-        assert retried.json()["reward"] == 1.0
+        assert (retried.json()["reward"], retried.json()["mask_sample"]) == (1.0, False)
 
 
 async def test_verify_releases_typed_state_before_checkpoint_ownership_ends() -> None:
