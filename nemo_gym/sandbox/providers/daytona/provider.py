@@ -19,7 +19,7 @@ import logging
 import math
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, fields, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -33,6 +33,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import require_shell_text
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled
 from nemo_gym.telemetry.gym_metrics import record_sandbox_create_retry
 from nemo_gym.telemetry.span_groups import GymSpanGroup
@@ -1040,13 +1041,14 @@ class DaytonaProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
+        command = require_shell_text(command, provider=self.name)
         return await self._exec(handle, command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
     async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:

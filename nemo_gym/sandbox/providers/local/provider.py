@@ -22,6 +22,7 @@ import shutil
 import signal
 import tempfile
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 
 from nemo_gym.sandbox.providers.base import (
@@ -88,26 +89,32 @@ class LocalProvider:
             raw={"workspace": workspace, "env": dict(spec.env), "owned": owned},
         )
 
+    def exec_takes_argv(self) -> bool:
+        """An argument list starts as the subprocess's argv (``SupportsSandboxExecArgv``)."""
+        return True
+
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Kill the process group on timeout or cancellation."""
+        """Run shell text under the configured shell, an argument list without one.
+
+        Kill the process group on timeout or cancellation. A program that cannot be started raises its ``OSError``.
+        """
         if user is not None:
             raise ValueError("The local sandbox provider cannot run commands as another user")
         inst = handle.raw
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
+        process_argv = [self._shell, "-c", command] if isinstance(command, str) else list(command)
         async with self._semaphore:
             process = await asyncio.create_subprocess_exec(
-                self._shell,
-                "-c",
-                command,
+                *process_argv,
                 cwd=str(cwd or inst["workspace"]),
                 env={**os.environ, **inst["env"], **(env or {})},
                 stdout=asyncio.subprocess.PIPE,

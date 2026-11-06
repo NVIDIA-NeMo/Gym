@@ -19,8 +19,10 @@ opensandbox providers. They live here so there is a single implementation.
 """
 
 import posixpath
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
+
+from nemo_gym.sandbox.providers.base import SandboxExecArgvUnsupportedError
 
 
 def coerce_config(value: Any, config_cls: type[Any]) -> Any:
@@ -50,3 +52,16 @@ def path_under_mount(mount_point: str, path: str) -> str | None:
     if mp == "/":
         return normalized.lstrip("/")
     return normalized[len(mp) + 1 :]
+
+
+def require_shell_text(command: str | Sequence[str], *, provider: str) -> str:
+    """``command`` as the shell text a provider without ``SupportsSandboxExecArgv`` runs.
+
+    An argument list raises ``SandboxExecArgvUnsupportedError`` instead of being joined into shell text: its
+    caller relies on no shell running. ``AsyncSandbox.exec`` refuses one first; this covers direct provider calls.
+    """
+    if isinstance(command, str):
+        return command
+    raise SandboxExecArgvUnsupportedError(
+        f"Sandbox provider {provider!r} cannot run an argument list without a shell; pass shell text instead"
+    )

@@ -34,7 +34,7 @@ import signal
 import stat
 import tempfile
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
@@ -50,6 +50,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.utils import coerce_config as _coerce_config
 from nemo_gym.sandbox.providers.utils import path_under_mount as _path_under_mount
+from nemo_gym.sandbox.providers.utils import require_shell_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -676,7 +677,7 @@ class EnrootProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -696,6 +697,7 @@ class EnrootProvider:
 
         ``stdin``, when given, is piped to the command's standard input.
         """
+        command = require_shell_text(command, provider=self.name)
         instance = handle.raw
         if instance.container_pid is None or not self._pid_has_container_marker(instance.container_pid, instance.name):
             return SandboxExecResult(

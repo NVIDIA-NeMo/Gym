@@ -17,6 +17,7 @@ import json
 import shlex
 import shutil
 import socket
+import sys
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock
@@ -25,6 +26,7 @@ import pytest
 
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
 from nemo_gym.sandbox.providers.base import (
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -612,6 +614,40 @@ async def test_exec_user_mapping(
         assert argv[-1] == expected
     else:
         assert argv[-1] == "whoami"
+
+
+@pytest.mark.parametrize("user, expect_fakeroot", [(None, False), ("root", True), (0, True)])
+async def test_exec_hands_an_argument_list_to_apptainer_without_sh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user: Any, expect_fakeroot: bool
+) -> None:
+    """An apptainer binary that prints the arguments it receives shows the list arriving as the program's argv."""
+    apptainer = tmp_path / "apptainer"
+    apptainer.write_text(f"#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n")
+    apptainer.chmod(0o755)
+    monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _bin_path=None: str(apptainer))
+    provider = apptainer_provider.ApptainerProvider()
+    assert provider.exec_takes_argv()
+    staging = tmp_path / "staging"
+    staging.mkdir()
+
+    result = await provider.exec(_make_handle(staging), ["printf", "%s", "a;b $HOME"], cwd="/work", user=user)
+
+    received = json.loads(result.stdout)
+    assert received[:3] == ["exec", "--pwd", "/work"]
+    assert ("--fakeroot" in received) is expect_fakeroot
+    assert received[-4:] == ["instance://nemo-gym-x", "printf", "%s", "a;b $HOME"]
+
+
+@pytest.mark.parametrize("user", ["alice", 1000])
+async def test_exec_refuses_an_argument_list_for_a_user_it_switches_to_through_su(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, user: Any
+) -> None:
+    provider, rec = _make_provider(monkeypatch, lambda argv: (0, "", ""))
+
+    with pytest.raises(SandboxExecArgvUnsupportedError, match="only through su"):
+        await provider.exec(_make_handle(tmp_path), ["whoami"], user=user)
+
+    assert rec.calls == []
 
 
 async def test_exec_passes_stdin(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

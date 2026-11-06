@@ -34,12 +34,14 @@ from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, reso
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxEndpoint,
+    SupportsSandboxExecArgv,
     SupportsSandboxPauseResume,
     clamp_resource_requests,
 )
@@ -110,6 +112,46 @@ async def test_server_survival_after_command_finishes(survives: bool) -> None:
             else:
                 assert response.return_code == 1, response
                 assert "ConnectionRefusedError" in (response.stdout or "") + (response.stderr or "")
+    finally:
+        await sandbox.stop()
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.environ.get("RUN_OPENSANDBOX_TESTS") != "1", reason="Set RUN_OPENSANDBOX_TESTS=1 for live tests"
+)
+async def test_opensandbox_runs_an_argument_list_without_the_sandbox_shell() -> None:
+    """An argument list reaches execd as argv: its arguments stay literal and the sandbox's bash never runs."""
+    from omegaconf import OmegaConf
+
+    from nemo_gym.sandbox.providers.opensandbox.provider import ARGV_SDK_REQUIREMENT, _sdk_sends_argv
+
+    if not _sdk_sends_argv():
+        pytest.skip(f"Running an argument list on OpenSandbox needs {ARGV_SDK_REQUIREMENT}")
+    config_path = Path(__file__).parents[3] / "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml"
+    config = OmegaConf.to_container(OmegaConf.load(config_path), resolve=True)["sandbox"]
+    config["opensandbox"]["create"].update(retries=0, timeout_s=180, request_timeout_s=180)
+    config["opensandbox"]["operations"].update(retries=0, background_poll_interval_s=1)
+    sandbox = AsyncSandbox({"opensandbox": config["opensandbox"]})
+    tripwire = "#!/bin/dash\necho tripped >> /tmp/trip\nexit 99\n"
+    try:
+        async with asyncio.timeout(300):
+            await sandbox.start(
+                SandboxSpec(
+                    image="python:3.13-slim", ttl_s=300, ready_timeout_s=120, files={"/tmp/tripwire": tripwire}
+                )
+            )
+            argv = await sandbox.exec(["printf", "%s", "a;b $HOME"], timeout_s=30)
+            assert (argv.return_code, argv.stdout) == (0, "a;b $HOME"), argv
+            text = await sandbox.exec('printf %s "a;b $HOME"', timeout_s=30)
+            assert (text.return_code, text.stdout) == (0, "a;b /root"), text
+            # Replace the sandbox's bash, which runs shell text: an argument list does not start it.
+            for step in (["chmod", "755", "/tmp/tripwire"], ["mv", "/tmp/tripwire", "/usr/bin/bash"]):
+                moved = await sandbox.exec(step, user="root", timeout_s=30)
+                assert moved.return_code == 0, moved
+            assert (await sandbox.exec("true", timeout_s=30)).return_code == 99
+            trip = await sandbox.exec(["cat", "/tmp/trip"], timeout_s=30)
+            assert (trip.return_code, trip.stdout) == (0, "tripped\n"), trip
     finally:
         await sandbox.stop()
 
@@ -542,6 +584,113 @@ def test_sync_exec_can_preserve_background_services():
         sandbox.start(SandboxSpec(image="image:tag"))
         result = sandbox.exec("bash solve.sh", preserve_background_services=True)
     assert result.stdout == "service-preserving execution"
+
+
+class ArgvSandboxProvider(ServicePreservingSandboxProvider):
+    """A provider with ``SupportsSandboxExecArgv``; ``takes_argv`` is its ``exec_takes_argv()`` answer."""
+
+    def __init__(self, takes_argv: bool = True) -> None:
+        super().__init__()
+        self.takes_argv = takes_argv
+
+    def exec_takes_argv(self) -> bool:
+        return self.takes_argv
+
+
+@pytest.mark.parametrize("telemetry", [False, True])
+async def test_exec_hands_an_argument_list_to_a_provider_that_takes_one(monkeypatch, telemetry):
+    monkeypatch.setattr("nemo_gym.sandbox.api.is_span_group_enabled", lambda _: telemetry)
+    provider = ArgvSandboxProvider()
+    assert isinstance(provider, SupportsSandboxExecArgv)
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag", workdir="/work", user=1000))
+        await sandbox.exec(("printf", "%s", "a;b $HOME"), env={"KEY": "value"}, timeout_s=5)
+        await sandbox.exec("printf %s $HOME", user="root")
+
+    argv_call, shell_call = provider.exec_calls
+    # A tuple arrives as the list a provider passes on, with the same defaults as shell text.
+    assert argv_call["command"] == ["printf", "%s", "a;b $HOME"] and type(argv_call["command"]) is list
+    assert (argv_call["cwd"], argv_call["env"], argv_call["timeout_s"], argv_call["user"]) == (
+        "/work",
+        {"KEY": "value"},
+        5,
+        1000,
+    )
+    assert shell_call["command"] == "printf %s $HOME" and shell_call["user"] == "root"
+
+
+def test_sync_exec_hands_an_argument_list_to_the_provider():
+    provider = ArgvSandboxProvider()
+    with Sandbox(provider) as sandbox:
+        sandbox.start(SandboxSpec(image="image:tag"))
+        sandbox.exec(["true"])
+    assert provider.exec_calls[0]["command"] == ["true"]
+
+
+@pytest.mark.parametrize("takes_argv", [None, False])
+async def test_exec_refuses_an_argument_list_for_a_provider_without_argv_before_running_it(takes_argv):
+    # None: the provider lacks SupportsSandboxExecArgv; False: it has it and answers no.
+    provider = FakeSandboxProvider() if takes_argv is None else ArgvSandboxProvider(takes_argv=takes_argv)
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag"))
+        with pytest.raises(SandboxExecArgvUnsupportedError, match="cannot run an argument list without a shell"):
+            await sandbox.exec(["true"])
+        # The list is not joined into shell text for the provider instead.
+        assert provider.exec_calls == []
+        await sandbox.exec("true")
+    assert [call["command"] for call in provider.exec_calls] == ["true"]
+    # Callers that catch the generic capability error keep working.
+    assert issubclass(SandboxExecArgvUnsupportedError, NotImplementedError)
+
+
+@pytest.mark.parametrize(
+    "command, error, message",
+    [
+        ([], ValueError, "empty argument list"),
+        (["printf", 1], TypeError, "items must be strings, got int"),
+        (["printf", "secret\0value"], ValueError, "must not contain NUL"),
+        (["", "arg"], ValueError, "must start with a program name"),
+        (b"true", TypeError, "items must be strings, got int"),
+        (iter(["true"]), TypeError, "shell text or a sequence of strings"),
+    ],
+)
+async def test_exec_refuses_an_invalid_argument_list_before_running_it(command, error, message):
+    provider = ArgvSandboxProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag"))
+        with pytest.raises(error, match=message) as caught:
+            await sandbox.exec(command)
+    assert provider.exec_calls == []
+    # The message names no item: commands carry task content and secrets.
+    assert "secret" not in str(caught.value)
+
+
+async def test_exec_refuses_an_argument_list_that_would_preserve_background_services():
+    provider = ArgvSandboxProvider()
+    async with AsyncSandbox(provider) as sandbox:
+        await sandbox.start(SandboxSpec(image="image:tag"))
+        with pytest.raises(ValueError, match="preserve_background_services takes shell text"):
+            await sandbox.exec(["python3", "-m", "http.server"], preserve_background_services=True)
+    assert provider.exec_calls == []
+
+
+@pytest.mark.parametrize("name", ["docker", "apptainer", "local", "opensandbox"])
+def test_providers_that_run_an_argument_list_declare_it(name: str) -> None:
+    assert hasattr(get_provider_class(name), "exec_takes_argv")
+
+
+@pytest.mark.parametrize("name", ["daytona", "e2b", "ecs_fargate", "enroot", "openshell"])
+async def test_providers_without_argv_refuse_an_argument_list_before_running_anything(name: str) -> None:
+    """Called directly, past ``AsyncSandbox``, such a provider raises first: a stand-in ``self`` with only a name
+    and a handle with nothing in it would fail on any other step."""
+    provider_class = get_provider_class(name)
+    assert not hasattr(provider_class, "exec_takes_argv")
+    stand_in = SimpleNamespace(name=name)
+    handle = SandboxHandle(sandbox_id="sandbox-1", provider_name=name, raw=None)
+    with pytest.raises(
+        SandboxExecArgvUnsupportedError, match=f"Sandbox provider '{name}' cannot run an argument list"
+    ):
+        await provider_class.exec(stand_in, handle, ["true"])
 
 
 async def test_start_with_setup_stops_the_sandbox_when_setup_fails() -> None:
