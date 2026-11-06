@@ -83,3 +83,30 @@ def test_invalid_metrics(component, value):
     metrics[component] = value
     with pytest.raises(ValueError):
         apply_blend_a({"execution_status": "ok", "raw_score_0_to_5": 5, "final_rating_0_to_5": 5}, metrics)
+
+
+@pytest.mark.parametrize("caps, expected_judge", [([], 4.96), ([4.5, 2.5], 2.5), ([5.0], 4.96)])
+def test_capped_blend_preserves_precision_and_uses_strictest_cap(caps, expected_judge):
+    metrics = dict.fromkeys(
+        ("foreground_rgb_similarity", "foreground_tolerant_f1", "edge_tolerant_f1", "deterministic_weighted"), 1.0
+    )
+    rating = {
+        "execution_status": "ok",
+        "raw_score_0_to_5": 4.96,
+        "final_rating_0_to_5": round(min([4.96, *caps]), 1),
+        "applied_caps": [{"cap_to": cap} for cap in caps],
+    }
+    result = apply_blend_a(rating, metrics, apply_judge_caps=True)
+    assert result["llm_score_0_to_5"] == expected_judge
+    assert result["final_rating_0_to_5"] == pytest.approx(2.5 + 0.5 * expected_judge)
+    assert result["deterministic_scores"] == metrics
+    assert rating["raw_score_0_to_5"] == 4.96
+
+
+def test_capped_blend_render_failure_stays_zero():
+    result = apply_blend_a(
+        {"execution_status": "code_error", "raw_score_0_to_5": 0, "final_rating_0_to_5": 0},
+        apply_judge_caps=True,
+    )
+    assert result["final_rating_0_to_5"] == 0
+    assert result["scoring_method"] == "blend_a_capped"

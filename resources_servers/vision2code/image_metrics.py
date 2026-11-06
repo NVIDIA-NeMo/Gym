@@ -82,11 +82,20 @@ def image_metrics(reference: str | Path, candidate: str | Path) -> dict[str, Jso
     return scores
 
 
-def apply_blend_a(rating: dict[str, JsonValue], metrics: dict[str, JsonValue] | None = None) -> dict[str, JsonValue]:
-    """Preserve the uncapped LLM rubric and expose the blend as the final score."""
+def apply_blend_a(
+    rating: dict[str, JsonValue],
+    metrics: dict[str, JsonValue] | None = None,
+    *,
+    apply_judge_caps: bool = False,
+) -> dict[str, JsonValue]:
+    """Blend pixel metrics with the raw judge score, optionally applying its rubric caps."""
     result = dict(rating)
     failed = rating.get("execution_status") != "ok"
     llm = float(rating["raw_score_0_to_5"])
+    if apply_judge_caps:
+        # Keep the judge term unrounded: substituting the final rating also changes
+        # uncapped scores through its one-decimal rounding.
+        llm = min([llm, *(float(cap["cap_to"]) for cap in rating.get("applied_caps", []))])
     if failed:
         metrics = dict.fromkeys(
             ("foreground_rgb_similarity", "foreground_tolerant_f1", "edge_tolerant_f1", "deterministic_weighted"), 0.0
@@ -101,8 +110,8 @@ def apply_blend_a(rating: dict[str, JsonValue], metrics: dict[str, JsonValue] | 
     if not all(math.isfinite(v) and 0 <= v <= 1 for v in components) or not math.isfinite(llm) or not 0 <= llm <= 5:
         raise ValueError("Invalid Blend A component score")
     result.update(
-        scoring_method="blend_a",
-        score_version=BLEND_A_VERSION,
+        scoring_method="blend_a_capped" if apply_judge_caps else "blend_a",
+        score_version=BLEND_A_VERSION + ("_judge_caps" if apply_judge_caps else ""),
         llm_score_0_to_5=llm,
         llm_final_rating_0_to_5=rating["final_rating_0_to_5"],
         deterministic_scores=dict(metrics),

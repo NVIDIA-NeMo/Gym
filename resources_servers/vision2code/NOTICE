@@ -28,3 +28,14 @@ alone does not identify it.
 Image similarity and Blend A aggregation use the source protocol pinned by
 image_metrics_source_sha256 in the provenance file. Golden image-metric fixtures
 record the modified source outputs; no external repository is needed at runtime.
+The optional capped Blend A variant additionally applies the recorded rubric caps
+to the unrounded judge term before blending, leaving the pixel terms unchanged.
+
+README revision example
+Reference image: Matplotlib gallery, Errorbar function
+Source: https://matplotlib.org/stable/gallery/statistics/errorbar.html
+Copyright (c) 2012- Matplotlib Development Team; All Rights Reserved
+License: Matplotlib (see results/revision-example/LICENSE.matplotlib)
+The reference and three model-generated recreations were copied from saved Gym
+rollouts without image edits. Source identity, image hashes, and feedback are
+recorded in results/revision-example/provenance.json.

@@ -128,9 +128,11 @@ async def test_reward_curve_applies_after_rubric_caps(setup):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("power", [1, 2, 3])
-async def test_blend_uses_raw_llm_and_bypasses_power(setup, power):
+@pytest.mark.parametrize("apply_caps, expected_reward", [(False, 0.88), (True, 0.75)])
+async def test_blend_caps_only_the_judge_term_and_bypasses_power(setup, power, apply_caps, expected_reward):
     server, body, _, judge = setup
     server.config.use_blended_reward = True
+    server.config.blended_reward_apply_judge_caps = apply_caps
     server.config.reward_power = power
     ref = Path(body.verifier_metadata.image_path)
     im = Image.new("RGB", (80, 60), "white")
@@ -141,15 +143,18 @@ async def test_blend_uses_raw_llm_and_bypasses_power(setup, power):
     scores["numeric_information_fidelity"] = 1
     judge.return_value = response(json.dumps({"category_scores": scores, "rationales": {}}))
     result = await server.verify(body)
-    # Perfect pixels contribute 0.5; raw 3.8/5 contributes 0.38, despite the 2.5 cap.
-    assert result.reward == pytest.approx(0.88)
+    # Perfect pixels contribute 0.5; the judge contributes 0.38 raw or 0.25 capped.
+    assert result.reward == pytest.approx(expected_reward)
     assert not result.mask_sample and result.use_blended_reward and result.reward_power == 1
     assert result.rubric_result["llm_final_rating_0_to_5"] == 2.5
     assert result.rubric_result["raw_score_0_to_5"] == 3.8
-    assert result.rubric_result["final_rating_0_to_5"] == 4.4
+    assert result.rubric_result["final_rating_0_to_5"] == pytest.approx(5 * expected_reward)
+    assert result.blended_reward_apply_judge_caps == apply_caps
+    assert result.rubric_result["scoring_method"] == ("blend_a_capped" if apply_caps else "blend_a")
     assert result.rubric_result["deterministic_scores"]["foreground_rgb_similarity"] == 1
     saved = json.loads(Path(result.artifacts["result"]).read_text())
-    assert saved["use_blended_reward"] and saved["reward"] == pytest.approx(0.88)
+    assert saved["use_blended_reward"] and saved["reward"] == pytest.approx(expected_reward)
+    assert saved["blended_reward_apply_judge_caps"] == apply_caps
 
 
 @pytest.mark.asyncio

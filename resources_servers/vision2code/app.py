@@ -48,6 +48,10 @@ class Vision2CodeConfig(BaseResourcesServerConfig):
         default=False,
         description="Use reference Blend A / 5: 10% foreground RGB, 40% mean F1, 50% raw LLM / 5; ignores reward_power.",
     )
+    blended_reward_apply_judge_caps: bool = Field(
+        default=False,
+        description="When using Blend A, apply rubric caps to the unrounded judge term; keep pixel terms unchanged.",
+    )
     artifact_dir: str = "artifacts/vision2code"
 
     @model_validator(mode="after")
@@ -81,6 +85,7 @@ class Vision2CodeVerifyResponse(BaseVerifyResponse):
     rubric_result: dict[str, JsonValue] | None = None
     reward_power: float = 2.0
     use_blended_reward: bool = False
+    blended_reward_apply_judge_caps: bool = False
     judge_diagnostics: dict[str, JsonValue] = Field(default_factory=dict)
     artifacts: dict[str, str] = Field(default_factory=dict)
     timings: dict[str, float] = Field(default_factory=dict)
@@ -129,6 +134,8 @@ class Vision2CodeServer(SimpleResourcesServer):
             reward=0.0,
             reward_power=1.0 if self.config.use_blended_reward else self.config.reward_power,
             use_blended_reward=self.config.use_blended_reward,
+            blended_reward_apply_judge_caps=self.config.use_blended_reward
+            and self.config.blended_reward_apply_judge_caps,
         )
         instance = result.model_extra.get("instance_config")
         if isinstance(instance, dict):
@@ -174,7 +181,9 @@ class Vision2CodeServer(SimpleResourcesServer):
             if result.render.status != "ok":
                 result.rubric_result = build_render_failure_rating(result.render.status, dataset_name=ref.rubric)
                 if self.config.use_blended_reward:
-                    result.rubric_result = apply_blend_a(result.rubric_result)
+                    result.rubric_result = apply_blend_a(
+                        result.rubric_result, apply_judge_caps=result.blended_reward_apply_judge_caps
+                    )
                 return result
             candidate = directory / "output.png"
             result.artifacts["image"] = str(candidate)
@@ -225,7 +234,9 @@ class Vision2CodeServer(SimpleResourcesServer):
             if self.config.use_blended_reward:
                 stage = "image_metrics"
                 metrics = await asyncio.to_thread(image_metrics, reference_path, candidate)
-                result.rubric_result = apply_blend_a(result.rubric_result, metrics)
+                result.rubric_result = apply_blend_a(
+                    result.rubric_result, metrics, apply_judge_caps=result.blended_reward_apply_judge_caps
+                )
             result.reward = rating_to_reward(result.rubric_result["final_rating_0_to_5"], power=result.reward_power)
             return result
         except asyncio.CancelledError:

@@ -1,0 +1,5 @@
+{"id": "example", "image_path": "example.png", "rubric": "ChartQA"}
+{"id": "example-shapes", "image_path": "example-shapes.png", "rubric": "generic"}
+{"id": "example-line", "image_path": "example-line.png", "rubric": "ChartQA"}
+{"id": "example-triangle", "image_path": "example-triangle.png", "rubric": "geometry3k"}
+{"id": "example-graph", "image_path": "example-graph.png", "rubric": "Graph-Algorithms"}
