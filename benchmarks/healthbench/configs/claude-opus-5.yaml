@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Claude Opus 5 policy for Katie Link's one-sample HealthBench comparisons.
+# Opus 5 uses adaptive thinking by default at the API's default high effort;
+# leave policy effort and sampling unset here to preserve those defaults.
+# Anthropic's public Professional score used max effort, five trials, and an
+# Opus 4.8 grader. This config alone does not reproduce that separate protocol.
+policy_model:
+  responses_api_models:
+    inference_provider:
+      entrypoint: app.py
+      base_url: https://inference-api.nvidia.com/v1
+      api_key: ${oc.env:NVIDIA_API_KEY}
+      model: aws/anthropic/bedrock-claude-opus-5
+      uses_reasoning_parser: true
+      num_concurrent_requests: 16
+
+# HealthBench uses GPT-4.1. For HealthBench Professional, override
+# judge_model_name=azure/openai/gpt-5.4 on the command line; its benchmark
+# config applies low reasoning effort to the GPT-5.4 judge.
+judge_base_url: https://inference-api.nvidia.com/v1
+judge_api_key: ${oc.env:NVIDIA_API_KEY}
+judge_model_name: azure/openai/gpt-4.1
