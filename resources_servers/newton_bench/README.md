@@ -105,6 +105,51 @@ gym eval run --no-serve \
     --limit 5
 ```
 
+### Run under the single-agent-turn Environment Server
+`configs/newton_bench_single_agent_turn.yaml` runs the same rows through the `single_agent_turn_legacy` Environment
+Server. Rollout collection still sends flat rows, but the Environment Server seeds the Resources Server and the
+Simple Agent with episode sessions, grants the agent direct HTTP access to the tools, verifies, and then closes both
+sessions:
+```bash
+gym env start \
+    --config resources_servers/newton_bench/configs/newton_bench_single_agent_turn.yaml \
+    --model-type vllm_model
+
+gym eval run --no-serve \
+    --agent newton_bench_session_agent \
+    --input resources_servers/newton_bench/data/example.jsonl \
+    --output resources_servers/newton_bench/data/example_single_agent_turn_rollouts.jsonl \
+    --limit 5
+```
+
+Session allocation, release, and live-state lookup use the shared `SimpleResourcesServer` hooks, and close and
+checkpoint retirement are inherited. Newton keeps a typed seed adapter to check that a repeated seed still has
+metadata: the idle sweep can remove it before the episode closes. Ownership conflicts are
+checked before reporting that state as expired or lost.
+
+A session's first `execute_python` call starts its Python worker from a forkserver, a separate process that imports
+the server once: workers neither inherit the server's sockets nor import the numerical libraries again. The first
+worker in a server process waits a few seconds for that import, off the event loop and outside the
+`max_execution_time + 5` second response wait; later workers start in milliseconds. The session's other calls reuse
+that worker and its Python variables. If the request is cancelled during startup, the session retains the pending
+worker so verify, close, retirement, and the idle sweep can wait for it and release it. Failed termination retains
+the handle and ownership for retry; cleanup still attempts the other sessions.
+
+The typed seed reads the row's `module_name`, `difficulty`, `system`, `noise_level` and `law_version` from
+`task_data`; a row that fails validation or names an unknown module is refused with 422. A seed that reuses a session
+ID for another episode, or arrives after the session was verified or closed, is refused with 409. `/verify` releases
+metadata and the Python worker before checkpoint tracking ends. A compact result bound
+to that verification payload remains for `session_close_retry_window_seconds`; retries return the same evaluation
+without invoking the judge again, and a changed payload is masked. `/close_session` releases
+any still-active session, drops the record and fences the episode, so a later `/verify` is masked. Checkpoint retirement also releases live workers and metadata.
+The idle sweep (`session_ttl`) also releases state; a later seed retry for that session fails with 404 instead of
+confirming a session that no longer exists. A tool call for a session the server no longer holds fails with 404, and
+`/verify` for it returns a masked sample (`failure_kind` `session_lost`, or `session_expired` for the longer of
+`session_ttl` and `session_close_retry_window_seconds` after the idle sweep, even once the session is closed). A session the idle sweep expires keeps its identity record in the shared lifecycle until a close arrives.
+`/end_session` stops only the session's Python worker, and the next `execute_python` starts a fresh one. The task
+metadata stays until verify, close, checkpoint retirement or the idle sweep, so a model that calls the route as a tool
+is still scored; it is not offered as an MCP tool.
+
 ## Running Tests
 ```bash
 gym env test --resources-server newton_bench
