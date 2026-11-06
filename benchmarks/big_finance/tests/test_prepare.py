@@ -74,6 +74,7 @@ def test_convert_preserves_labels_and_bakes_upstream_surface(tmp_path) -> None:
         "final_answer",
     ]
     assert row["responses_create_params"]["parallel_tool_calls"] is True
+    assert row["responses_create_params"]["max_output_tokens"] == 65536
 
 
 def test_no_web_search_removes_the_tool_and_every_mention_of_it(tmp_path) -> None:
@@ -144,3 +145,4 @@ def test_public_fixture_preserves_provenance_prompt_and_license() -> None:
             "content": spec["system_prompt"],
             "type": "message",
         }
+        assert row["responses_create_params"]["max_output_tokens"] == prepare.MAX_OUTPUT_TOKENS

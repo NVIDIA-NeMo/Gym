@@ -130,6 +130,15 @@ semantics without adding BigFinance-specific branches to the shared loop.
 execution. A turn with no tool calls ends the run even when it contains only
 reasoning or no output; such a turn has no final answer.
 
+Prepared rows set `max_output_tokens: 65536`, the standalone harness's
+per-call default, so a policy model's own default does not apply. When a model
+turn hits this cap, the agent stops with `stop_reason: max_output_tokens`, and
+that rollout has no final answer: `answer_match` scores it 0 without a judge
+call, and the judge in `final_answer` and `rubric_points` modes sees
+"[no final answer was produced]". The standalone harness does not stop on a
+truncated turn; it ends on the turn's text if the turn has no tool calls and
+otherwise runs its tool calls and continues.
+
 Tool failures are signaled explicitly by the resources server rather than inferred
 from an `error` field in successful content. The agent records per-call error
 statuses in rollout metadata, which the verifier also uses when rejudging. Older

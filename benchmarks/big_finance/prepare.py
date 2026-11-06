@@ -30,6 +30,9 @@ SPEC_FPATH = ENV_DIR / "upstream_spec.json"
 OUTPUT_FPATH = Path("benchmarks/big_finance/data/big_finance_public_50.jsonl")
 EXPECTED_COUNT = 50
 _UPSTREAM_SHA = "d794a65fe583edc6852b44c817b0a2aef33ca831"  # pragma: allowlist secret
+# Per-call output cap of the standalone harness (`DEFAULT_MAX_OUTPUT_TOKENS` in
+# big_finance_harness/agent.py). Without it a row falls back to the model server's default.
+MAX_OUTPUT_TOKENS = 65536
 
 
 def load_spec() -> dict:
@@ -123,6 +126,7 @@ def convert_rows(rows: list[dict], *, expected_count: int | None = None, web_sea
                     ],
                     "tools": tools,
                     "parallel_tool_calls": True,
+                    "max_output_tokens": MAX_OUTPUT_TOKENS,
                 },
             }
         )
