@@ -32,7 +32,9 @@ STAGING_DIR = BENCHMARK_DIR / "data"
 # gitignored. The entry name is the taskset name in rows and results.
 ENTRIES_DIR = GYM_ROOT / "environments" / "harbor"
 DATASETS = {"with-skill": "skillsbench", "no-skill": "skillsbench_no_skill"}
+# The files an entry commits beside its tasks: what the repository's .gitignore keeps under environments/harbor/.
 ENTRY_FILES = ("README.md", "dataset.toml")
+ENTRY_SUFFIXES = (".yaml",)
 # Where the with-skill condition's skills land at seed: the environment server uploads the task's
 # `environment/skills/` there, and harnesses read the path from the task context.
 SKILLS_DIR = "/root/.agents/skills"
@@ -90,27 +92,39 @@ def _image_manifest(source_dir: Path, task_names: set[str]) -> dict[str, str] | 
     return load_image_manifest(setting or PINNED_IMAGE_MANIFEST, source_dir, task_names)
 
 
+def _is_entry_file(path: Path) -> bool:
+    return path.is_file() and (path.name in ENTRY_FILES or path.suffix in ENTRY_SUFFIXES)
+
+
 def _write_dataset(task_dirs: list[Path], skill_mode: str, images: dict[str, str] | None) -> Path:
-    """Write one condition's tasks into its entry, replacing the previous ones only once every task converted; the
-    entry's committed files stay."""
+    """Write one condition's tasks into its entry, keeping the entry's committed files.
+
+    The tasks are converted beside the entry, next to a copy of those files, and the result replaces the entry by
+    renaming, so an interrupted preparation leaves the previous tasks in place.
+    """
     folder = ENTRIES_DIR / DATASETS[skill_mode]
     staging = STAGING_DIR / f".{folder.name}.staging"
+    previous = STAGING_DIR / f".{folder.name}.previous"
+    if previous.exists():
+        if folder.exists():
+            shutil.rmtree(previous)
+        else:
+            # A preparation stopped between its two renames: the entry is still here.
+            previous.rename(folder)
     if staging.exists():
         shutil.rmtree(staging)
     staging.mkdir(parents=True)
     for source in task_dirs:
         _adapt_task(source, staging / source.name, skill_mode, images[source.name] if images else None)
-    folder.mkdir(parents=True, exist_ok=True)
-    for path in folder.iterdir():
-        if path.name in ENTRY_FILES:
-            continue
-        if path.is_dir():
-            shutil.rmtree(path)
-        else:
-            path.unlink()
-    for task in staging.iterdir():
-        task.rename(folder / task.name)
-    staging.rmdir()
+    if folder.exists():
+        for path in folder.iterdir():
+            if _is_entry_file(path):
+                shutil.copy2(path, staging / path.name)
+        folder.rename(previous)
+    folder.parent.mkdir(parents=True, exist_ok=True)
+    staging.rename(folder)
+    if previous.exists():
+        shutil.rmtree(previous)
     return folder
 
 

@@ -14,7 +14,7 @@ import benchmarks.skillsbench.prepare as prepare_module
 from benchmarks.skillsbench.prepare import adapt_task
 
 
-def testadapt_task_preserves_prompt_and_sandbox_policy(tmp_path: Path) -> None:
+def test_adapt_task_preserves_prompt_and_sandbox_policy(tmp_path: Path) -> None:
     source = tmp_path / "example-task"
     (source / "environment" / "skills" / "example").mkdir(parents=True)
     (source / "verifier").mkdir()

@@ -157,12 +157,14 @@ def test_prepare_clones_pinned_tasks_and_writes_both_conditions(tmp_path: Path, 
     monkeypatch.setattr(prepare_module, "STAGING_DIR", data_dir)
     entries = tmp_path / "environments" / "harbor"
     monkeypatch.setattr(prepare_module, "ENTRIES_DIR", entries)
-    # The committed entry files stay; tasks and loader files from an earlier prepare are replaced.
+    # The committed entry files stay, as .gitignore keeps them (README.md, dataset.toml, *.yaml); tasks and loader
+    # files from an earlier prepare are replaced.
     for name in DATASETS.values():
         (entries / name / "stale-task").mkdir(parents=True)
         (entries / name / "manifest.toml").write_text("stale\n")
         (entries / name / "README.md").write_text(f"# {name}\n")
         (entries / name / "dataset.toml").write_text('[gym]\ntype = "benchmark"\n')
+        (entries / name / "harbor_sandbox.yaml").write_text("overlay: true\n")
     (tmp_path / "images.json").write_text(
         json.dumps(
             {
@@ -186,8 +188,14 @@ def test_prepare_clones_pinned_tasks_and_writes_both_conditions(tmp_path: Path, 
     no_skill = tomllib.loads((entries / "skillsbench_no_skill" / "alpha" / "task.toml").read_text())
     assert "skills_dir" not in no_skill["environment"]
     for folder in folders:
-        assert sorted(path.name for path in folder.iterdir()) == ["README.md", "alpha", "dataset.toml"]
+        assert sorted(path.name for path in folder.iterdir()) == [
+            "README.md",
+            "alpha",
+            "dataset.toml",
+            "harbor_sandbox.yaml",
+        ]
         assert (folder / "README.md").read_text() == f"# {folder.name}\n"
+        assert (folder / "harbor_sandbox.yaml").read_text() == "overlay: true\n"
     assert sorted(path.name for path in data_dir.iterdir()) == ["source"]
     assert not (data_dir / "source" / "README.md").exists()
     # The OpenHands path's task tree and index are left to its own prepare.
@@ -202,6 +210,14 @@ def test_prepare_clones_pinned_tasks_and_writes_both_conditions(tmp_path: Path, 
     assert prepare_module.prepare() == [entries / "skillsbench_no_skill"]
     assert marker.exists()
     assert (entries / "skillsbench" / "alpha").is_dir()
+
+    # A preparation stopped between its two renames left the entry aside; the next one puts it back first, so its
+    # committed files survive.
+    no_skill_entry = entries / "skillsbench_no_skill"
+    no_skill_entry.rename(data_dir / ".skillsbench_no_skill.previous")
+    prepare_module.prepare()
+    assert (no_skill_entry / "harbor_sandbox.yaml").read_text() == "overlay: true\n"
+    assert sorted(path.name for path in data_dir.iterdir()) == ["source"]
 
     # `none` builds from the Dockerfiles.
     monkeypatch.setenv(source_module.IMAGE_MANIFEST_ENV_VAR, "none")
