@@ -31,15 +31,12 @@ gym eval run --no-serve \
 Each rollout gets its own stateful Python session in the NeMo Skills sandbox. The rollout's session cookie keys it, and
 the first `stateful_python_code_exec` call creates it.
 
-- Under an Environment Server, such as `ns_tools_environment_server` (`single_agent_turn_legacy`), `/seed_session`
-  binds the cookie to the `resources_session_id`. `/close_session` releases the Python session and the rollout's tool
-  timings, even when `/verify` never ran. Closing an unknown or already closed session succeeds, and a seed that
-  arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. A tool call for a
-  closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with
-  reward 0.
-- The deprecated cookie seed sent by an agent's own `/run` takes the row itself and releases any previous Python
-  session. A successful seed keeps the cookie ID and drops its previous verification record; Python state is still
-  created lazily. `/verify` releases that state and retains only expiring aggregate timings for retries.
+Under an Environment Server, such as `ns_tools_environment_server` (`single_agent_turn_legacy`), `/seed_session`
+binds the cookie to the `resources_session_id`. `/close_session` releases the Python session and the rollout's tool
+timings, even when `/verify` never ran. Closing an unknown or already closed session succeeds, and a seed that
+arrives after its session closed is refused with 409 for `session_close_retry_window_seconds`. A tool call for a
+closed session gets 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked sample with
+reward 0.
 
 ## Sample data format
 Each sample requires:
