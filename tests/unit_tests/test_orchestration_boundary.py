@@ -12,7 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Only the CLI entrypoint may import ``nemo_gym.orchestration``; anything else belongs in a lower package."""
+"""Only the CLI entrypoint may import ``nemo_gym.orchestration``; anything else belongs in a lower package.
+
+Covers ``nemo_gym/`` and the code built on it (servers with their own tests, benchmarks, scripts). The core suite under
+``tests/`` is not scanned: those tests move together with the code they cover.
+"""
 
 import ast
 from pathlib import Path
@@ -21,6 +25,21 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CORE = REPO_ROOT / "nemo_gym"
 ORCHESTRATION = CORE / "orchestration"
+SCANNED_ROOTS = [
+    REPO_ROOT / name
+    for name in (
+        "nemo_gym",
+        "benchmarks",
+        "environment_servers",
+        "environments",
+        "examples",
+        "nemotron_recipes",
+        "resources_servers",
+        "responses_api_agents",
+        "responses_api_models",
+        "scripts",
+    )
+]
 ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
 
 
@@ -44,7 +63,7 @@ def _imported_modules(node: ast.AST, current: str, is_package: bool) -> list[str
 
 def _violations() -> list[str]:
     found = []
-    for path in sorted(CORE.rglob("*.py")):
+    for path in sorted(p for root in SCANNED_ROOTS if root.is_dir() for p in root.rglob("*.py")):
         if path.is_relative_to(ORCHESTRATION) or path in ALLOWED_IMPORTERS:
             continue
         source = path.read_text()
