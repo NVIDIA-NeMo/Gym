@@ -533,7 +533,9 @@ def test_failed_verify_release_keeps_the_metrics_snapshot_and_ownership() -> Non
     with patch.object(
         TavilySearchResourcesServer, "release_session_state", side_effect=RuntimeError("release failed")
     ):
-        assert client.post("/verify", json=verify_json()).status_code == 500
+        verified = client.post("/verify", json=verify_json())
+        assert verified.status_code == 200
+        assert (verified.json()["reward"], verified.json()["mask_sample"]) == (1.0, False)
     # An in-flight tool can still append to the live metrics after the failed cleanup. Retry uses the saved snapshot.
     metrics.async_tavily_calls.append(metrics.async_tavily_calls[0].model_copy())
     wrong_close = close_json() | {"episode_id": {"rollout_id": "another", "attempt": 0}}
@@ -543,3 +545,25 @@ def test_failed_verify_release_keeps_the_metrics_snapshot_and_ownership() -> Non
     assert len(retried["metrics"]["async_tavily_calls"]) == 1
     assert "resources-session" not in server._session_id_to_metrics
     assert client.post("/close_session", json=close_json()).status_code == 200
+
+
+def test_failed_verify_release_preserves_the_grade_and_close_only_retries_cleanup() -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=seed_json()).status_code == 200
+    assert client.post("/web_search", json={"query": "capital of France"}).status_code == 200
+
+    with patch.object(
+        TavilySearchResourcesServer, "_verify_answer_with_regex", wraps=server._verify_answer_with_regex
+    ) as scorer:
+        with patch.object(
+            TavilySearchResourcesServer, "release_session_state", side_effect=RuntimeError("release failed")
+        ):
+            verified = client.post("/verify", json=verify_json())
+            assert verified.status_code == 200
+            assert (verified.json()["reward"], verified.json()["mask_sample"]) == (1.0, False)
+            assert "resources-session" in server._session_id_to_metrics
+            assert client.post("/close_session", json=close_json()).status_code == 500
+        assert client.post("/close_session", json=close_json()).status_code == 200
+        scorer.assert_called_once()
+    assert server._session_id_to_metrics == {} and server.session_is_closed("resources-session")
