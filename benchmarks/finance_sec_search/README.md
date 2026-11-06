@@ -109,22 +109,14 @@ Use `--limit 1` for a quick end-to-end check. For the web-search variant, use
 `finance_sec_search_web_search_benchmark_agent`, and
 `data/finance_sec_search_benchmark_web_search.jsonl`.
 
-To run through the `single_agent_turn_legacy` Environment Server instead of the
-`legacy_agent` relay, load `config_no_web_search_single_agent_turn.yaml` (or
-`config_web_search_single_agent_turn.yaml`) in place of the benchmark name. The
-agent and the resources server export no checkpoint state (`restart_only`), so
-after a crash the episode still starts over from its input. What changes is that
-a failed model call, seed or judge becomes a classified failure instead of
-reward 0, so fewer rollouts may be scored (see
-[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)):
-
-```bash
-gym eval run \
-  --config benchmarks/finance_sec_search/config_no_web_search_single_agent_turn.yaml \
-  --split benchmark \
-  --model-type openai_model \
-  --output results/finance_sec_search/rollouts.jsonl
-```
+Both `--benchmark finance_sec_search/config_no_web_search` and
+`--benchmark finance_sec_search/config_web_search` use the `single_agent_turn_legacy` Environment Server.
+The agent and the resources server export no checkpoint state (`restart_only`), so after a crash the episode still
+starts over from its input. Compared with earlier relay-based runs, a failed model call, seed or judge now becomes
+a classified failure instead of reward 0. These failures are excluded from scores by default, so fewer rollouts may
+be scored and aggregate results can differ. See
+[Running behind an Environment Server](../../responses_api_agents/finance_agent/README.md#running-behind-an-environment-server)
+for retry behavior and how to count failures as zero.
 
 ## Optional: prefetch filing metadata
 

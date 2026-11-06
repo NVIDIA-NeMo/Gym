@@ -59,21 +59,17 @@ preserved for reward assignment.
 
 # Running behind an Environment Server
 
-The loop also runs behind the `single_agent_turn_legacy` Environment Server, which seeds the resources session and an
-agent session, calls `/v1/responses` once, closes the agent session, verifies, and closes the resources session. The
-agent and the finance resources servers export no checkpoint state (`restart_only`), so after a crash the episode
-still starts over from its input. What changes is that a failed model call, seed or judge becomes a classified failure
-instead of reward 0. Each finance_sec_search and finance_agent_v2 relay config has a counterpart that does this; the
-relay configs are unchanged. The big_finance configs stay on the relay until the big_finance resources server serves
-episode sessions:
+The shipped `finance_sec_search` and `finance_agent_v2` resources and benchmark configs run through the
+`single_agent_turn_legacy` Environment Server.
+It seeds the resources session and an agent session, calls `/v1/responses` once, closes the agent session, verifies,
+and closes the resources session. Existing `--resources-server` and `--benchmark` commands select this path;
+no separate session config is needed. Instance names and dataset routing are unchanged. The `big_finance` configs
+stay on the relay until the `big_finance` resources server serves episode sessions.
 
-| Relay config | Environment Server config |
-|--------------|---------------------------|
-| `resources_servers/finance_sec_search/configs/finance_sec_search.yaml` | `resources_servers/finance_sec_search/configs/finance_sec_search_single_agent_turn.yaml` |
-| `resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml` | `resources_servers/finance_agent_v2/configs/finance_agent_v2_single_agent_turn.yaml` |
-| `benchmarks/finance_sec_search/config_no_web_search.yaml` | `benchmarks/finance_sec_search/config_no_web_search_single_agent_turn.yaml` |
-| `benchmarks/finance_sec_search/config_web_search.yaml` | `benchmarks/finance_sec_search/config_web_search_single_agent_turn.yaml` |
-| `benchmarks/finance_agent_v2/config.yaml` | `benchmarks/finance_agent_v2/config_single_agent_turn.yaml` |
+The agent and the finance resources servers export no checkpoint state (`restart_only`), so after a crash the episode
+still starts over from its input. A failed model call, seed or judge now becomes a classified failure instead of
+reward 0. This changes failure counts and can change aggregate scores when comparing with earlier relay-based runs,
+as detailed below. The agent's `/run` endpoint remains available for callers that explicitly use it.
 
 An agent session takes its tools from the Environment Server's grant, so the Environment Server must set
 `resources_tool_transports: [direct_http]`. The agent refuses, with a terminal 422, a session with no direct HTTP grant,

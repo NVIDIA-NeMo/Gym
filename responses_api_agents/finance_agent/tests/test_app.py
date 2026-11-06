@@ -73,19 +73,13 @@ _SHIPPED_CONFIGS = {
 
 #: Each config that runs the loop behind single_agent_turn_legacy, and the Environment Server it declares.
 _SINGLE_AGENT_TURN_CONFIGS = {
-    "resources_servers/finance_sec_search/configs/finance_sec_search_single_agent_turn.yaml": (
-        "finance_agent_environment_server"
-    ),
-    "resources_servers/finance_agent_v2/configs/finance_agent_v2_single_agent_turn.yaml": (
-        "finance_agent_v2_environment_server"
-    ),
-    "benchmarks/finance_sec_search/config_no_web_search_single_agent_turn.yaml": (
-        "finance_sec_search_benchmark_environment_server"
-    ),
-    "benchmarks/finance_sec_search/config_web_search_single_agent_turn.yaml": (
+    "resources_servers/finance_sec_search/configs/finance_sec_search.yaml": "finance_agent_environment_server",
+    "resources_servers/finance_agent_v2/configs/finance_agent_v2.yaml": "finance_agent_v2_environment_server",
+    "benchmarks/finance_sec_search/config_no_web_search.yaml": "finance_sec_search_benchmark_environment_server",
+    "benchmarks/finance_sec_search/config_web_search.yaml": (
         "finance_sec_search_web_search_benchmark_environment_server"
     ),
-    "benchmarks/finance_agent_v2/config_single_agent_turn.yaml": "finance_agent_v2_benchmark_environment_server",
+    "benchmarks/finance_agent_v2/config.yaml": "finance_agent_v2_benchmark_environment_server",
 }
 
 #: Fields with no default, so each profile has to state its own policy.
@@ -352,7 +346,7 @@ class TestFinanceAgentConfig:
     @pytest.mark.parametrize(("config_path", "environment_server"), sorted(_SINGLE_AGENT_TURN_CONFIGS.items()))
     def test_single_agent_turn_config_grants_the_tools(self, config_path: str, environment_server: str) -> None:
         """The agent refuses a session without a direct HTTP grant, so each such config must ask for one,
-        and keep the relay config's instances so rows still route to the one server in front of the agent."""
+        and bind the agent and verifier to the same resources server through exactly one Environment Server."""
         resolved = _resolved_config(_REPO_ROOT / config_path)
         environment_servers = [
             name for name, block in resolved.items() if isinstance(block, dict) and "environment_servers" in block
@@ -360,9 +354,14 @@ class TestFinanceAgentConfig:
         assert environment_servers == [environment_server]
         server = resolved[environment_server]["environment_servers"]
         assert list(server) == ["single_agent_turn_legacy"]
-        assert server["single_agent_turn_legacy"]["resources_tool_transports"] == ["direct_http"]
-        agent = server["single_agent_turn_legacy"]["agent_server"]["name"]
+        environment = server["single_agent_turn_legacy"]
+        assert environment["resources_tool_transports"] == ["direct_http"]
+        agent = environment["agent_server"]["name"]
         assert list(resolved[agent]["responses_api_agents"]) == ["finance_agent"]
+        resources = environment["resources_server"]
+        assert resources["type"] == "resources_servers"
+        assert resources == resolved[agent]["responses_api_agents"]["finance_agent"]["resources_server"]
+        assert "resources_servers" in resolved[resources["name"]]
 
     def test_default_config(self) -> None:
         config = _make_config()
