@@ -181,8 +181,13 @@ def resolve_model_call_payloads(trajectory: dict[str, Any], capture_dirs: Sequen
 
 
 def aggregate_model_call_metrics(store: CaptureStore, rollout_id: str) -> dict[str, Any]:
-    """Aggregate model-call metrics for one rollout id."""
-    return aggregate_model_call_records(read_model_call_records(store, rollout_id))
+    """Aggregate model-call metrics for one rollout id, reading the capture without request histories."""
+    calls = []
+    for index, exchange in store.iter_available(rollout_id, payloads=False):
+        if exchange is None:
+            raise ValueError(f"Capture line {index} of rollout {rollout_id} cannot be read")
+        calls.append(build_model_call_record(exchange, call_index=index))
+    return aggregate_model_call_records(calls)
 
 
 # --- Run-level capture helpers (rollout-collection side) ---
