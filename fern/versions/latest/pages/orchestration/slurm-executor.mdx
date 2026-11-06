@@ -105,7 +105,7 @@ The driver runs on the first node of the allocation, or on the first node of the
 | Multi-node, other unpinned service | One node, beside the driver. |
 | Service with `node_pool` | Only the nodes of that pool. See [Node Pools and Ray](/orchestration/how-to/node-pools-and-ray). |
 
-For anything that spans nodes or is pinned, the script resolves the allocation's hostnames with `scontrol show hostnames`, so addresses are never needed in the config. It exports `HEAD_NODE_IP` and `RAY_HEAD_NODE_IP` when a vLLM service spans nodes, and `GYM_POOL_<POOL>_NODES` for each node pool when services are placed by pool.
+For anything that spans nodes or is pinned, the script resolves the allocation's hostnames with `scontrol show hostnames`, so addresses are never needed in the config. It exports `HEAD_NODE_IP` and `RAY_HEAD_NODE_IP` when a vLLM service spans nodes, and `GYM_POOL_<POOL>_NODES` for each node pool when services are placed by pool. A pool that holds a single multi-node vLLM instance and does not start on the first node also gets its own Ray head: the job script exports `GYM_POOL_<POOL>_HEAD` (its first host) and `GYM_POOL_<POOL>_RAY_HEAD` (that host and port), and the pool's service uses the latter as `RAY_HEAD_NODE_IP`. Use `GYM_POOL_<POOL>_HEAD` in a config that needs the address of such a pool's API server.
 
 ## Dry-run output
 
