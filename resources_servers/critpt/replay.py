@@ -54,9 +54,11 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 from resources_servers.critpt.app import (
+    DEFAULT_MAX_JUDGE_ERRORS,
     CritPtAccessDenied,
     CritPtRateLimitExceeded,
     _call_api,
+    graded_accuracy,
     refresh_partial_metrics,
 )
 
@@ -212,7 +214,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
     # Only an accepted batch completes its submissions: one with grader errors stays pending.
     scored_ids = set()
     for rec in prior_responses:
-        if not int(rec["response"].get("judge_error_count") or 0):
+        if graded_accuracy(rec["response"], len(rec["submission_ids"]), args.max_judge_errors) is not None:
             scored_ids.update(rec["submission_ids"])
 
     pending = [s for s in submissions if s["submission_id"] not in scored_ids]
@@ -260,7 +262,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 file=sys.stderr,
             )
             if rejudged > 0:
-                refresh_partial_metrics(args.cache_dir)
+                refresh_partial_metrics(args.cache_dir, args.max_judge_errors)
             return 3
         except CritPtAccessDenied:
             # Distinct exit code from quota exhaustion (3): waiting fixes a 429,
@@ -276,7 +278,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 file=sys.stderr,
             )
             if rejudged > 0:
-                refresh_partial_metrics(args.cache_dir)
+                refresh_partial_metrics(args.cache_dir, args.max_judge_errors)
             return 4
 
         with aa_responses_path.open("a") as fh:
@@ -291,7 +293,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
                 )
                 + "\n"
             )
-        if int(response.get("judge_error_count") or 0):
+        if graded_accuracy(response, len(sub_ids), args.max_judge_errors) is None:
             rejected += 1
             print(
                 f"  not scored: AA reported judge_errors={response.get('judge_error_count')}; "
@@ -308,7 +310,7 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
             f"than {args.batch_size} submissions and AA requires exactly batch_size per call. "
             "The corresponding submissions remain in submissions.jsonl unscored."
         )
-    refresh_partial_metrics(args.cache_dir)
+    refresh_partial_metrics(args.cache_dir, args.max_judge_errors)
     if rejected:
         print(f"{rejected} batch(es) came back with grader errors and were not scored.", file=sys.stderr)
         return 5
@@ -334,6 +336,13 @@ def parse_args(argv=None) -> argparse.Namespace:
         default="https://artificialanalysis.ai/api/v2/critpt/evaluate",
     )
     p.add_argument("--batch-size", type=int, default=70)
+    p.add_argument(
+        "--max-judge-errors",
+        type=int,
+        default=DEFAULT_MAX_JUDGE_ERRORS,
+        help="Grader errors AA may report in a batch before it is rejected and left pending "
+        "(the server's max_judge_errors).",
+    )
     p.add_argument("--max-retries", type=int, default=4)
     p.add_argument("--backoff-seconds", type=float, default=5.0)
     return p.parse_args(argv)

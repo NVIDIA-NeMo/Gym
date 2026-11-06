@@ -54,6 +54,13 @@ Real runs send full batches of 70 real submissions only; a smoke run never calls
   (`AA quota exhausted, resets at <UTC time>; grade with replay or resubmit after the reset`), and
   `provider_credentials_rejected` for 401/403. Grade the saved answers with replay after the reset, or
   resubmit with an approved key.
+- **Partial grader errors are tolerated.** If AA reports `judge_error_count <= max_judge_errors` (server
+  config, default `3`: the benchmark PIC's v1 value, about 5% of a 70 batch, to be tuned empirically), the batch
+  is accepted and its accuracy is rescaled to the graded items:
+  `accuracy * batch_size / (batch_size - judge_error_count)`, clamped to 1.0. This assumes AA's accuracy is
+  correct items over the whole batch, so an ungraded item counts as incorrect. Every row records
+  `judge_error_count` and `graded_items`. With more errors than that the batch fails as `judge_failed`
+  (masked, graded again). `replay` takes the same threshold as `--max-judge-errors`.
 - **Any other AA failure** (a 4xx/5xx, a timeout) is `judge_failed`: the rows are masked and graded again.
 
 ## Dataset Format

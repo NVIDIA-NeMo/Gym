@@ -42,11 +42,12 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
     path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
 
-def _make_replay_args(cache_dir: Path, batch_size: int = 2) -> argparse.Namespace:
+def _make_replay_args(cache_dir: Path, batch_size: int = 2, max_judge_errors: int = 0) -> argparse.Namespace:
     return argparse.Namespace(
         cache_dir=cache_dir,
         api_url="https://example/api",
         batch_size=batch_size,
+        max_judge_errors=max_judge_errors,
         max_retries=1,
         backoff_seconds=0.0,
     )
@@ -253,6 +254,20 @@ class TestReplayMainAsync:
         assert partial["pending_submissions"] == 0
         assert partial["scored_batches"] == 2
         assert partial["mean_accuracy_over_scored"] == 0.25
+
+    @pytest.mark.asyncio
+    async def test_batch_within_max_judge_errors_is_accepted_by_replay(self, tmp_path):
+        _write_jsonl(tmp_path / "submissions.jsonl", [_submission_row(0, "p1"), _submission_row(1, "p2")])
+        tolerated = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1}
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.return_value = (tolerated, 0)
+            assert await main_async(_make_replay_args(tmp_path, max_judge_errors=1), api_keys=["k0"]) == 0
+            # Accepted, so a second replay has nothing pending.
+            assert await main_async(_make_replay_args(tmp_path, max_judge_errors=1), api_keys=["k0"]) == 0
+            assert call_api.await_count == 1
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 2
+        assert partial["mean_accuracy_over_scored"] == 1.0  # 0.5 * 2 / (2 - 1), clamped
 
     @pytest.mark.asyncio
     async def test_grader_error_batches_stay_pending_until_a_clean_replay(self, tmp_path):

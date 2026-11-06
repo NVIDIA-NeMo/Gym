@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
@@ -43,6 +44,7 @@ from resources_servers.critpt.app import (
     _extract_code,
     _key_fingerprint,
     _resolve_cache_dir,
+    graded_accuracy,
 )
 
 
@@ -860,11 +862,76 @@ class TestTerminalAaErrors:
             _stop_patches(patches)
 
 
+class TestPartialGraderErrors:
+    """Up to max_judge_errors grader errors are tolerated and the accuracy rescaled to the graded items."""
+
+    async def _verify_batch(self, server, aa_response: dict) -> list:
+        mock_request, patches = _mock_api(aa_response)
+        try:
+            fence = "```"
+            bodies = [
+                _make_verify_request(fence + "python" + chr(10) + f"x={i}" + chr(10) + fence, problem_id=f"p{i}")
+                for i in range(server.config.batch_size)
+            ]
+            return list(await asyncio.gather(*(judge_failsafe(server.verify)(body=b) for b in bodies)))
+        finally:
+            _stop_patches(patches)
+
+    def test_default_threshold_is_three(self):
+        assert _make_config().max_judge_errors == 3
+
+    @pytest.mark.asyncio
+    async def test_errors_at_the_threshold_are_accepted_and_rescaled(self):
+        server = _make_server(_make_config(batch_size=10, max_judge_errors=3))
+        results = await self._verify_batch(server, {"accuracy": 0.5, "timeout_rate": 0.1, "judge_error_count": 2})
+        for r in results:
+            assert not isinstance(r, JSONResponse), "an accepted batch is a scored response"
+            assert r.mask_sample is False and r.failure_kind is None
+            # 0.5 of the whole batch is 5 correct items; over the 8 graded items that is 0.625.
+            assert r.accuracy == pytest.approx(0.625) and r.reward == pytest.approx(0.625)
+            assert r.judge_error_count == 2 and r.graded_items == 8
+            assert r.timeout_rate == 0.1
+
+    @pytest.mark.asyncio
+    async def test_rescaled_accuracy_is_clamped_to_one(self):
+        server = _make_server(_make_config(batch_size=10, max_judge_errors=3))
+        results = await self._verify_batch(server, {"accuracy": 0.9, "timeout_rate": 0.0, "judge_error_count": 3})
+        assert {r.accuracy for r in results} == {1.0}
+        assert {r.graded_items for r in results} == {7}
+
+    @pytest.mark.asyncio
+    async def test_errors_above_the_threshold_fail_the_batch_as_judge_failed(self):
+        server = _make_server(_make_config(batch_size=10, max_judge_errors=3))
+        results = await self._verify_batch(server, {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 4})
+        for resp in results:
+            data = json.loads(resp.body)
+            assert data["mask_sample"] is True and data["failure_kind"] == "judge_failed"
+            assert "judge_error_count=4" in data["failure_reason"] and "max_judge_errors=3" in data["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_threshold_is_configurable(self):
+        server = _make_server(_make_config(batch_size=10, max_judge_errors=0))
+        results = await self._verify_batch(server, {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1})
+        assert all(json.loads(r.body)["failure_kind"] == "judge_failed" for r in results)
+
+    @pytest.mark.asyncio
+    async def test_accepted_batch_counts_as_scored_in_the_cache(self, tmp_path):
+        server = _make_server(_make_config(batch_size=10, cache_dir=tmp_path, unique_cache_per_run=False))
+        await self._verify_batch(server, {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 2})
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 10 and partial["pending_submissions"] == 0
+        assert partial["mean_accuracy_over_scored"] == pytest.approx(0.625)
+
+    def test_graded_accuracy_edge_cases(self):
+        assert graded_accuracy({"accuracy": 0.3}, 70, 3) == 0.3
+        assert graded_accuracy({"accuracy": 0.3, "judge_error_count": 70}, 70, 100) is None
+
+
 class TestGraderFailureTyping:
     @pytest.mark.asyncio
     async def test_judge_error_count_is_judge_failed_not_a_score(self):
         """AA reporting judge_error_count > 0 makes the batch accuracy unusable: masked, never a scored reward."""
-        server = _make_server(_make_config(batch_size=2))
+        server = _make_server(_make_config(batch_size=2, max_judge_errors=0))
         mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1})
         try:
             requests = [
@@ -883,7 +950,9 @@ class TestGraderFailureTyping:
 
     @pytest.mark.asyncio
     async def test_rejected_grader_error_batch_is_not_counted_as_scored_in_the_cache(self, tmp_path):
-        server = _make_server(_make_config(batch_size=2, cache_dir=tmp_path, unique_cache_per_run=False))
+        server = _make_server(
+            _make_config(batch_size=2, max_judge_errors=0, cache_dir=tmp_path, unique_cache_per_run=False)
+        )
         mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 1})
         try:
             requests = [

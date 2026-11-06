@@ -77,7 +77,27 @@ def _key_fingerprint(api_key: str) -> str:
     return hashlib.sha256(api_key.encode()).hexdigest()[:8]
 
 
-def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
+DEFAULT_MAX_JUDGE_ERRORS = 3
+
+
+def graded_accuracy(response: Dict[str, Any], batch_size: int, max_judge_errors: int) -> Optional[float]:
+    """The accuracy of the items AA graded, or None when the batch is not accepted.
+
+    AA reports one accuracy for the whole batch and ``judge_error_count`` items it could not grade. Assumed (AA does
+    not document it): accuracy is correct items over ``batch_size``, so an ungraded item counts as incorrect. A batch
+    with up to ``max_judge_errors`` such items is accepted and its accuracy rescaled to the graded items,
+    ``accuracy * batch_size / (batch_size - judge_error_count)``, clamped to 1.0. A batch with more is rejected.
+    """
+    errors = int(response.get("judge_error_count") or 0)
+    accuracy = float(response.get("accuracy", 0.0))
+    if errors == 0:
+        return accuracy
+    if errors > max_judge_errors or errors >= batch_size:
+        return None
+    return min(1.0, accuracy * batch_size / (batch_size - errors))
+
+
+def refresh_partial_metrics(cache_dir: Optional[Path], max_judge_errors: int = DEFAULT_MAX_JUDGE_ERRORS) -> None:
     """Recompute partial_metrics.json from the on-disk caches.
 
     Called after every successful AA call (live verify() or replay) so the file
@@ -99,12 +119,14 @@ def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
                     continue
                 rec = json.loads(line)
                 response = rec["response"]
-                # A batch with grader errors is rejected at verify time: it stays pending, never scored.
-                if int(response.get("judge_error_count") or 0):
-                    continue
                 n = len(rec["submission_ids"])
+                # A batch with more grader errors than max_judge_errors is rejected at verify time: it stays
+                # pending, never scored.
+                accuracy = graded_accuracy(response, n, max_judge_errors)
+                if accuracy is None:
+                    continue
                 scored += n
-                accuracy_sum += float(response.get("accuracy", 0.0)) * n
+                accuracy_sum += accuracy * n
                 timeout_rate_sum += float(response.get("timeout_rate", 0.0)) * n
                 n_batches += 1
     n_submissions = 0
@@ -216,6 +238,10 @@ class CritPtResourcesServerConfig(BaseResourcesServerConfig):
     # grading API is never contacted: the batch is cached (when cache_dir is set) and every row comes back masked
     # as not graded. AA only grades full batches, so a real score needs a full run.
     fire_after: Optional[int] = None
+    # Grader errors AA may report in a batch before the batch is rejected as judge_failed (then masked and graded
+    # again). Up to this many, the batch is accepted and its accuracy rescaled to the graded items. 3 is the benchmark
+    # PIC's v1 value (about 5% of a 70 batch); to be tuned empirically.
+    max_judge_errors: int = DEFAULT_MAX_JUDGE_ERRORS
     # Max time a single verify() will wait for its batch to fill (and the AA call to
     # finish) to prevent hang.
     verify_timeout_seconds: float = 9000.0  # (2.5h)
@@ -270,6 +296,9 @@ class CritPtVerifyResponse(BaseVerifyResponse):
     # None on a row that was not graded (smoke mode): there is no accuracy to report.
     accuracy: Optional[float] = None
     timeout_rate: Optional[float] = None
+    # Grader errors AA reported for this row's batch, and the items it graded. None on a row that was not graded.
+    judge_error_count: Optional[int] = None
+    graded_items: Optional[int] = None
 
 
 class CritPtResourcesServer(SimpleResourcesServer):
@@ -469,14 +498,15 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 )
             )
         judge_error_count = int(result.get("judge_error_count") or 0)
-        if judge_error_count:
-            # AA could not grade some items; the aggregate accuracy then undercounts, so it is not a score.
+        accuracy = graded_accuracy(result, self.config.batch_size, self.config.max_judge_errors)
+        if accuracy is None:
+            # AA could not grade more items than max_judge_errors allows; the aggregate accuracy then undercounts,
+            # so it is not a score.
             raise judge_call_failed(
-                f"CritPt grader reported judge_error_count={judge_error_count} for the batch",
+                f"CritPt grader reported judge_error_count={judge_error_count} for the batch "
+                f"(max_judge_errors={self.config.max_judge_errors})",
                 operation="critpt.grade",
             )
-
-        accuracy = result["accuracy"]
         timeout_rate = result.get("timeout_rate", 0.0)
         # AA returns one aggregate accuracy; distribute it as each rollout's reward (matches nemo-skills).
         return CritPtVerifyResponse(
@@ -484,6 +514,8 @@ class CritPtResourcesServer(SimpleResourcesServer):
             reward=accuracy,
             accuracy=accuracy,
             timeout_rate=timeout_rate,
+            judge_error_count=judge_error_count,
+            graded_items=self.config.batch_size - judge_error_count,
         )
 
     # ──────────────────────────────────────────────────────────
@@ -652,7 +684,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
         return bid
 
     def _refresh_partial_metrics(self) -> None:
-        refresh_partial_metrics(self.config.cache_dir)
+        refresh_partial_metrics(self.config.cache_dir, self.config.max_judge_errors)
 
 
 def _extract_output_text(body: CritPtVerifyRequest) -> str:
