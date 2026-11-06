@@ -110,7 +110,7 @@ jobs:
         run: |
           launcher=()
           # The Terminus sandbox contract creates /logs/agent as root.
-          if [[ "$HARNESS" == "terminus_2_sandboxed" ]]; then launcher=(sudo); fi
+          if [[ "$HARNESS" == "terminus_2_sandboxed" ]]; then launcher=(sudo --preserve-env=GITHUB_ACTIONS); fi
           if "${launcher[@]}" .venv/bin/python scripts/run_harness_conformance.py \
             --harness "$HARNESS" --output "$PROBE_OUTPUT"; then
             code=0
