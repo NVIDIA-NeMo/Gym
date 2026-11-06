@@ -233,6 +233,40 @@ def close_json_prefix(text: str) -> Optional[str]:
     return text + "".join(reversed(stack))
 
 
+def complete_elements_prefix(text: str) -> Optional[str]:
+    """The complete elements of the JSON array that opens `text`, closed, or None if there are none.
+
+    For a generation cut off inside the array: the elements before the cut are whole, so they are
+    kept, and the element the cut landed in is dropped rather than completed.
+    """
+    if not text.startswith("["):
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    last_end = -1
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+            if depth == 1:
+                last_end = index
+            elif depth <= 0:
+                return None
+    return text[: last_end + 1] + "]" if last_end >= 0 else None
+
+
 def _loads(text: str) -> Any:
     # strict=False admits raw control characters (e.g. a literal newline) inside
     # strings. Heredocs dominate these edits, and a base model sometimes writes a
@@ -240,18 +274,21 @@ def _loads(text: str) -> Any:
     return json.loads(text, strict=False)
 
 
-def _generated_calls(raw: str) -> Iterator[tuple[str, Dict[str, Any]]]:
+def _generated_calls(raw: str, keep_complete: bool = False) -> Iterator[tuple[str, Dict[str, Any]]]:
     """(name, arguments) for each call in the first JSON array of a generation.
 
     Accepts each call nested ({"function": {"name", "arguments"}}, the shape the
     transcript shows the model) or flat ({"name", "arguments"}), and arguments
     as a JSON object or a JSON-encoded string. Calls whose arguments are not an
-    object are skipped.
+    object are skipped. With `keep_complete`, a generation cut off inside the
+    array still yields the calls written in full before the cut.
     """
     start = raw.find("[")
     if start < 0:
         return
     closed = close_json_prefix(raw[start:])
+    if closed is None and keep_complete:
+        closed = complete_elements_prefix(raw[start:])
     if closed is None:
         return
     try:
@@ -304,9 +341,15 @@ def parse_tool_calls(raw: str, tool_names: Collection[str], max_calls: int = 3) 
     api_search / api_fetch / base64_encode): arguments are passed through as
     the model wrote them, since only the tool knows its own schema. Calls to
     other names are dropped. Empty list when none parse.
+
+    A generation cut off mid-call keeps the calls it completed before the cut;
+    the cut call is dropped, never completed. A base model batching many calls
+    otherwise loses the whole turn to its last one: on AutomationBench, Super
+    3.5 base lost a fifth of its rollouts this way, mostly to runaway batches
+    that ran past max_tokens after more calls than the cap keeps.
     """
     found: List[Dict[str, Any]] = []
-    for name, arguments in _generated_calls(raw):
+    for name, arguments in _generated_calls(raw, keep_complete=True):
         if name in tool_names:
             found.append({"name": name, "arguments": arguments})
             if len(found) >= max_calls:

@@ -228,6 +228,24 @@ class TestParseToolCalls:
     def test_truncated_inside_a_string_fails(self):
         assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "https://x', self.NAMES) == []
 
+    def test_calls_completed_before_a_cut_are_kept(self):
+        raw = (
+            '[{"function": {"name": "api_search", "arguments": "{\\"query\\": \\"a\\"}"}}, '
+            '{"name": "api_fetch", "arguments": {"url": "u"}}, '
+            '{"function": {"name": "api_fetch", "arguments": "{\\"url\\": \\"trunc'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "a"}},
+            {"name": "api_fetch", "arguments": {"url": "u"}},
+        ]
+
+    def test_a_cut_inside_the_first_call_still_fails(self):
+        assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "tr', self.NAMES) == []
+
+    def test_bash_parser_stays_strict_about_cuts(self):
+        raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "bash", "arguments": {"command": "ca'
+        assert BM.parse_bash_tool_calls(raw) == []
+
     def test_cap_applies(self):
         raw = "[" + ", ".join(f'{{"name": "api_search", "arguments": {{"query": "q{i}"}}}}' for i in range(6)) + "]"
         assert len(BM.parse_tool_calls(raw, self.NAMES)) == 3
