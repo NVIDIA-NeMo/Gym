@@ -74,7 +74,7 @@ VLLM_PREFILL_ARGS=(
     --data-parallel-size-local 1
     --moe-backend flashinfer_prims
     --dwdp-config '{"world_size":4,"port":29590,"timeout_seconds":3600,"merge_free":true}'
-    --enforce-eager
+    --compilation-config '{"mode":3,"cudagraph_mode":"NONE"}'
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
         "kv_role": "kv_producer",
