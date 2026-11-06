@@ -30,7 +30,7 @@ def test_converter_preserves_prompt_and_exposes_edgar_search() -> None:
     )
 
     params = converted["responses_create_params"]
-    assert params["input"][0]["content"] == PROMPT + "What was revenue?"
+    assert params["input"][0]["content"] == PROMPT.format(question="What was revenue?")
     assert [tool["name"] for tool in params["tools"]] == [
         "retrieve_information",
         "parse_html_page",
@@ -38,3 +38,13 @@ def test_converter_preserves_prompt_and_exposes_edgar_search() -> None:
         "submit_final_result",
     ]
     assert params["tools"][2] == EDGAR_SEARCH_TOOL
+
+
+def test_converter_renders_single_braces_in_sources_block() -> None:
+    content = convert_entry({"question": "What is {x}?", "expected_answer": ""})["responses_create_params"]["input"][
+        0
+    ]["content"]
+
+    assert "{{" not in content
+    assert '{\n    "sources": [\n        {\n' in content
+    assert content.endswith("Question:\nWhat is {x}?")
