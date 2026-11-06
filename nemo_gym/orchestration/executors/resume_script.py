@@ -36,6 +36,7 @@ from nemo_gym.core.failure_kinds import (
     DRIVER_INSTALL_FAILED,
     ENVIRONMENT_PREPARE_FAILED,
     PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     SERVER_SPINUP_TIMEOUT,
     SERVER_START_FAILED,
 )
@@ -126,18 +127,23 @@ GUARDED_DRIVER_FAILURE_KINDS = (
     COLLECTION_RESUME_REFUSED,
     PROVIDER_CREDENTIALS_REJECTED,
     ENVIRONMENT_PREPARE_FAILED,
+    PROVIDER_QUOTA_EXHAUSTED,
 )
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
 )
 CREDENTIALS_REJECTED_REASON = (
-    f"{PROVIDER_CREDENTIALS_REJECTED}: the sandbox provider refused the credentials; the chain does not retry it; "
+    f"{PROVIDER_CREDENTIALS_REJECTED}: the provider refused the credentials; the chain does not retry it; "
     "fix the credentials, then continue with gym eval resubmit --recover"
 )
 PREPARE_FAILED_REASON = (
     f"{ENVIRONMENT_PREPARE_FAILED}: EVAL STOPPED: data preparation failed; the chain does not retry it; "
     "fix the benchmark's preparation, then continue with gym eval resubmit --recover"
+)
+QUOTA_EXHAUSTED_REASON = (
+    f"{PROVIDER_QUOTA_EXHAUSTED}: the grading provider's quota is exhausted; the chain does not retry it; "
+    "after the reset continue with gym eval resubmit --recover (re-judges the saved answers, no model calls)"
 )
 RESUME_REFUSED_REASON = (
     f"{COLLECTION_RESUME_REFUSED}: the saved rollouts do not verify against this run's inputs and configuration; "
@@ -595,6 +601,8 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {credentials_rejected_reason}" ;;
         {environment_prepare_failed})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {prepare_failed_reason}" ;;
+        {provider_quota_exhausted})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {quota_exhausted_reason}" ;;
         {server_start_failed})
             # A server that did not start (its port taken, for instance) before the run saved anything: there is
             # nothing to resume, and the failure is the infrastructure's, so the segment starts the run again fresh,
@@ -1010,6 +1018,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         credentials_rejected_reason=CREDENTIALS_REJECTED_REASON,
         environment_prepare_failed=ENVIRONMENT_PREPARE_FAILED,
         prepare_failed_reason=PREPARE_FAILED_REASON,
+        provider_quota_exhausted=PROVIDER_QUOTA_EXHAUSTED,
+        quota_exhausted_reason=QUOTA_EXHAUSTED_REASON,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
         receipt_artifacts=" ".join(f"{key}:{name}" for key, name in _RECEIPT_ARTIFACTS),
     )
