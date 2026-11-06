@@ -104,6 +104,9 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
+    if harness == "nooa":
+        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
+        return
     if harness in ("hermes", "stirrup", "simple", "openclaw", "copilot"):
         # Simple is built in; Hermes is locked; Stirrup, OpenClaw and Copilot provision the task sandbox.
         return

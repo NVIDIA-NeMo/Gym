@@ -1166,6 +1166,7 @@ async def test_runner_accepts_explicit_failures_independently_of_exception_polic
         "anthropic_api_key",
         "sandbox_model_base_url",
         "num_workers",
+        "uvicorn_reuse_port",
         "switchyard_api_key",
         "switchyard_base_url",
     ],
@@ -2374,6 +2375,49 @@ async def test_rejected_sandbox_credentials_end_the_run_without_a_retry(runner_c
     assert raised.value.exit_code == 76
     assert raised.value.failure_kind == "provider_credentials_rejected"
     assert "gym eval resubmit --recover" in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    ("kind", "stop_text"),
+    [
+        ("provider_quota_exhausted", "the grading provider's quota is exhausted"),
+        ("provider_credentials_rejected", "refused the credentials"),
+    ],
+)
+@pytest.mark.parametrize("succeeded", [0, 1], ids=["all-stopped", "one-scored"])
+async def test_a_grading_provider_stop_ends_the_run_without_a_retry(
+    runner_config, monkeypatch, kind, stop_text, succeeded
+):
+    """Modelled on the rejected sandbox credentials test above, for a grading provider's judge-class failure rows."""
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+
+    runner_config.require_complete = True
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"])
+        if len(calls) <= succeeded:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "judge_failed",
+                "failure_kind": kind,
+                "failure_reason": "AA quota exhausted, resets at 2026-11-07 21:33 UTC; grade with replay or resubmit",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match=stop_text) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.exit_code == 76 and raised.value.failure_kind == kind
+    assert "gym eval resubmit --recover" in str(raised.value)
+    if kind == "provider_quota_exhausted":
+        assert "resets at 2026-11-07 21:33 UTC" in str(raised.value)
 
 
 async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):

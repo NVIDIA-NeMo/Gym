@@ -102,8 +102,10 @@ from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     JUDGE_FAILURE_KINDS,
     PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     is_namespaced,
     is_registered,
+    quota_reset_text,
 )
 from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, FailureReport
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
@@ -212,6 +214,7 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
+from nemo_gym.data.task_selection import select_tasks
 from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -1553,16 +1556,33 @@ class SharedRolloutCollectionConfig(
 
 
 def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
-    """The end of a run whose sandbox provider refused its credentials: no attempt succeeds until they are fixed."""
+    """The end of a run whose provider (sandbox, or the grading API) refused its credentials: no attempt succeeds
+    until they are fixed."""
     rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
     if not rejected:
         return None
     return IncompleteEvaluationError(
-        f"EVAL STOPPED: the sandbox provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
+        f"EVAL STOPPED: the provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
         "rollout(s); another attempt cannot succeed until they are fixed. Fix the credentials, then continue "
         "with gym eval resubmit --recover.",
         retryable=False,
         failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
+
+
+def _quota_exhausted_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+    """The end of a run whose grading provider's quota is exhausted: nothing can be graded until it resets."""
+    exhausted = [row for row in failures if row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED]
+    if not exhausted:
+        return None
+    resets = sorted({text for row in exhausted if (text := quota_reset_text(row.get("failure_reason")))})
+    when = f"resets at {resets[-1]}" if resets else "reset time unknown"
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the grading provider's quota is exhausted ({PROVIDER_QUOTA_EXHAUSTED}) on {len(exhausted)} "
+        f"rollout(s); {when}; nothing can be graded before then. After the reset continue with "
+        "gym eval resubmit --recover (re-judges the saved answers, no model calls).",
+        retryable=False,
+        failure_kind=PROVIDER_QUOTA_EXHAUSTED,
     )
 
 
@@ -3339,6 +3359,7 @@ class RolloutCollectionHelper(BaseModel):
         num_repeats: Union[int, Dict[str, int]] = 1,
         num_repeats_add_seed: Union[bool, Dict[str, bool]] = False,
         global_config_dict: Optional[DictConfig] = None,
+        task_ids: Optional[Sequence[str]] = None,
     ) -> List[Dict]:
         """Apply run-level routing and repetition to caller-held rows.
 
@@ -3349,8 +3370,9 @@ class RolloutCollectionHelper(BaseModel):
 
         Pass ``global_config_dict`` (the merged config) to also resolve task_source-only rows to
         their agents here; leave it None to defer that to ``run_examples``, which does it against
-        the head server's config. Input rows are not mutated; the expanded, stamped copies are
-        returned.
+        the head server's config. Pass ``task_ids`` to keep only those tasks, selected by the id
+        stored in each row (see ``nemo_gym.data.task_selection.select_tasks``), each task once before
+        repetition. Input rows are not mutated; the expanded, stamped copies are returned.
         """
         config = RolloutCollectionConfig(
             input_jsonl_fpath="<in-memory>",
@@ -3360,9 +3382,10 @@ class RolloutCollectionHelper(BaseModel):
             num_repeats=num_repeats,
             num_repeats_add_seed=num_repeats_add_seed,
         )
+        selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
-            (idx, orjson.dumps(row, option=orjson.OPT_SORT_KEYS).decode(), row.copy())
-            for idx, row in enumerate(examples)
+            (idx, orjson.dumps(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            for idx in selected
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
         if global_config_dict is not None:
@@ -4523,7 +4546,9 @@ executions → not run again (left to recovery)
                 if latency_tracker.drained
                 else ""
             )
-            stop = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            stop = await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
             if stop is not None:
                 raise stop
             raise IncompleteEvaluationError(
@@ -4648,7 +4673,9 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         if config.require_complete and (
-            stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            stop := await asyncio.to_thread(
+                lambda: _credentials_rejected_stop(store.failures()) or _quota_exhausted_stop(store.failures())
+            )
         ):
             raise stop
         # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in

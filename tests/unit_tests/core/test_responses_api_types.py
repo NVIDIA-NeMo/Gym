@@ -2005,9 +2005,9 @@ def _classes_the_converter_can_emit() -> List[str]:
     import ast
     import inspect
 
-    from nemo_gym.models import chat_completions_converter as responses_converter
+    from nemo_gym.models import chat_completions_converter
 
-    tree = ast.parse(inspect.getsource(responses_converter))
+    tree = ast.parse(inspect.getsource(chat_completions_converter))
     func = next(
         node
         for node in ast.walk(tree)
@@ -2060,7 +2060,7 @@ def test_every_item_the_converter_can_emit_has_a_training_variant() -> None:
     registered = {cls.__name__ for cls in RESPONSES_TO_TRAIN}
     missing = sorted(set(emitted) - registered)
     assert not missing, (
-        f"ResponsesConverter.postprocess_assistant_message_dict can emit {missing}, and "
+        f"ChatCompletionsConverter.postprocess_assistant_message_dict can emit {missing}, and "
         f"chat_completions_converter.py hands response_output[-1] to training_variant_of(), so a "
         f"rollout carrying token IDs would fail there.\n"
         f"Fix: declare `class <Name>ForTraining(<Name>, TokenIDLogProbMixin)`, add it to "
