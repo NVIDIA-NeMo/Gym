@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The task backend's typed session preserves its protocol and its cleanup ownership."""
+"""The task backend's episode session preserves its protocol and its cleanup ownership."""
 
 import json
 from copy import deepcopy

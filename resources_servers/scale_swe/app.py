@@ -27,7 +27,7 @@ files, grade FAIL_TO_PASS/PASS_TO_PASS from the output.
 Set ``is_verifying_golden_patch: true`` to grade the dataset's own patch instead of an agent's,
 the dataset-health check: a row whose golden patch does not resolve is a broken row.
 
-An Environment Server session (a typed seed) keeps its first completed verification and replays it to an identical
+An episode session keeps its first completed verification and replays it to an identical
 retry. A verification that produced no verdict is masked with a ``failure_kind`` and not kept: an identical retry
 gets a 503 that asks the caller to retry the episode.
 """
@@ -67,11 +67,11 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionFences,
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -117,7 +117,7 @@ class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
         gt=0,
         allow_inf_nan=False,
         description=(
-            "How long an Environment Server session waits for each sandbox stop: its task sandbox (at close, after a "
+            "How long an episode session waits for each sandbox stop: its task sandbox (at close, after a "
             "failed seed, after patch capture) and each verifier sandbox. The stop itself is never cut short. One "
             "that is still running, or that failed, stays with the session, and close or shutdown waits for it again "
             "or retries it. Shutdown also uses it for every sandbox still held, cookie sessions included, and as "
@@ -187,7 +187,7 @@ class ScaleSWEVerifyResponse(BaseVerifyResponse):
 
 @dataclass
 class _ResourcesSession:
-    """One Environment Server session: its lock, identity, seed reply and first completed verification.
+    """One episode session: its lock, identity, seed reply and first completed verification.
 
     The sandbox stays in ``_session_id_to_sandbox``, which keeps it until a stop succeeds.
     """
@@ -222,13 +222,13 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
         self._session_id_to_base_commit: dict[str, str] = {}
-        # Environment Server sessions by resources_session_id. A close drops the session and is remembered for
+        # Episode sessions by resources_session_id. A close drops the session and fences it for
         # session_close_retry_window_seconds, so a late seed cannot recreate it.
         self._resources_sessions: dict[str, _ResourcesSession] = {}
-        self._closed_sessions: ClosedResourcesSessionRecords[EpisodeId] = ClosedResourcesSessionRecords(
+        self._fences: ResourcesSessionFences[EpisodeId] = ResourcesSessionFences(
             self.config.session_close_retry_window_seconds
         )
-        # Verifier sandboxes of Environment Server sessions whose stop has not succeeded yet.
+        # Verifier sandboxes of episode sessions whose stop has not succeeded yet.
         self._session_id_to_verifier_sandboxes: dict[str, list[AsyncSandbox]] = {}
         # Stops that a bounded wait gave up on, still running, so a later wait joins them instead of starting another.
         self._stop_tasks: dict[AsyncSandbox, asyncio.Task[None]] = {}
@@ -245,7 +245,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                     yield state
             finally:
                 self._shutting_down = True
-                # The sandboxes Environment Server sessions still hold. The cookie path keeps its behavior: what an
+                # The sandboxes episode sessions still hold. The cookie path keeps its behavior: what an
                 # Agent's /run still holds is left to the provider's TTL.
                 session_ids = set(self._resources_sessions) | set(self._session_id_to_verifier_sandboxes)
                 await asyncio.gather(*(self._shutdown_session(session_id) for session_id in session_ids))
@@ -256,7 +256,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     async def _shutdown_session(self, session_id: str) -> None:
         """Stop every sandbox a session still holds at shutdown.
 
-        A request still in progress on an Environment Server session gets ``sandbox_stop_timeout_seconds`` to
+        A request still in progress on an episode session gets ``sandbox_stop_timeout_seconds`` to
         finish; after that the sandboxes are stopped without the session's lock. Never raises: a stop that fails
         or runs long is logged, and the provider's TTL reclaims the sandbox.
         """
@@ -385,7 +385,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 raise outcome
 
     async def _stop_verifier_sandbox(self, session_id: str, sandbox: AsyncSandbox | None) -> None:
-        """Stop an Environment Server session's verifier sandbox; one whose stop fails or runs long stays with it.
+        """Stop an episode session's verifier sandbox; one whose stop fails or runs long stays with it.
 
         The sandbox is recorded before the wait, so even a cancelled verification leaves it for close and shutdown.
         """
@@ -400,7 +400,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             self._forget_sandbox(session_id, sandbox)
 
     async def _stop_failed_seed(self, session_id: str, session: _ResourcesSession) -> None:
-        """Stop the sandbox of a typed seed that failed; its caller never got it, so nobody else can stop it.
+        """Stop the sandbox of an episode seed that failed; its caller never got it, so nobody else can stop it.
 
         A failed stop is logged, so the seed's own error propagates, and the sandbox stays with the session for close.
         Once the sandbox is stopped, a close that fenced the seed is complete.
@@ -458,7 +458,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
             await self._stop_sandbox(original_sandbox)
 
     async def _capture_model_patch(self, session_id: str, workdir: str) -> PatchCapture:
-        """Capture an Environment Server session's patch per ``config.patch_capture_mode``, then stop its sandbox.
+        """Capture an episode session's patch per ``config.patch_capture_mode``, then stop its sandbox.
 
         Raises ``_UnreadablePatchError`` when git fails on the repository the agent left, and ``_PatchCaptureError``
         when the capture failed for any other reason. The patch is graded in a fresh sandbox, so the agent's sandbox
@@ -530,7 +530,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     async def _locked_session(
         self, session_id: str, *, close_episode_id: EpisodeId | None = None
     ) -> AsyncIterator[_ResourcesSession]:
-        """Hold the Environment Server session's lock.
+        """Hold the episode session's lock.
 
         A close fences the session before it waits, so a seed still running stops its own sandbox and a close that
         times out still takes effect. A record that holds nothing is dropped on the way out.
@@ -559,12 +559,12 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 return
 
     def _finish_close(self, session_id: str, session: _ResourcesSession) -> None:
-        """Drop a session whose sandbox is stopped, and remember its close for the retry window."""
+        """Drop a session whose sandbox is stopped, and fence it for the close retry window."""
         # Only a close finishes a session, and it set episode_id when it fenced the session.
         assert session.episode_id is not None
         if self._resources_sessions.get(session_id) is session:
             del self._resources_sessions[session_id]
-        self._closed_sessions.remember(session_id, session.episode_id)
+        self._fences.fence(session_id, session.episode_id)
 
     async def _release_session(self, session_id: str, session: _ResourcesSession) -> None:
         """Stop the session's sandbox and complete its close; a failed stop raises and keeps the sandbox and fence."""
@@ -576,14 +576,14 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     ) -> ResourcesSeedSessionResponse:
         if self.config.is_verifying_golden_patch:
             # Golden-patch mode grades the row's own patch, so an agent's sandbox would go unused.
-            raise HTTPException(422, "Golden-patch mode cannot be used with Environment Server sessions")
+            raise HTTPException(422, "Golden-patch mode cannot be used with episode sessions")
         try:
             task = ScaleSWESeedSessionRequest.model_validate(body.task_data)
         except ValidationError as error:
             raise HTTPException(422, detail=error.errors(include_input=False)) from error
         session_id = body.resources_session_id
         async with self._locked_session(session_id) as session:
-            if session.closing or session_id in self._closed_sessions:
+            if session.closing or session_id in self._fences:
                 raise HTTPException(409, "Resources session is already closed")
             if self._shutting_down:
                 raise HTTPException(503, "Scale-SWE server is shutting down")
@@ -638,7 +638,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
 
         sandbox = await self._create_sandbox(body)
         if own_before_setup:
-            # An Environment Server session owns its sandbox from the start, so the failed seed's cleanup or a close
+            # An episode session owns its sandbox from the start, so the failed seed's cleanup or a close
             # can stop it when the setup below fails.
             self._session_id_to_sandbox[session_id] = sandbox
 
@@ -667,14 +667,14 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         return ScaleSWESeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Stop an Environment Server session's sandbox and remember the close for the retry window.
+        """Stop an episode session's sandbox and fence the session for the close retry window.
 
         A repeated close, or one for a session that was never seeded, succeeds; a later seed is refused. A stop that
         fails or times out raises and keeps the sandbox and the fence, so the caller can retry the close.
         """
         session_id = body.resources_session_id
-        if session_id in self._closed_sessions:
-            if self._closed_sessions.get(session_id) != body.episode_id:
+        if session_id in self._fences:
+            if self._fences.get(session_id) != body.episode_id:
                 raise HTTPException(409, "episode_id does not match the closed resources session")
             return ResourcesCloseSessionResponse(resources_session_id=session_id)
         async with self._locked_session(session_id, close_episode_id=body.episode_id) as session:
@@ -684,13 +684,13 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: ScaleSWEVerifyRequest) -> ScaleSWEVerifyResponse:
         """Grade the agent's patch in a fresh sandbox.
 
-        An Environment Server session keeps its first completed verification and replays it to an identical retry:
+        An episode session keeps its first completed verification and replays it to an identical retry:
         the first verification stopped the agent's sandbox, so grading again would score an empty patch.
         """
         session_id = request.session[SESSION_ID_KEY]
         if session_id in self._resources_sessions:
             return await self._verify_resources_session(session_id, body)
-        if session_id in self._closed_sessions:
+        if session_id in self._fences:
             raise HTTPException(409, "Resources session is closed")
         return await self._verify(session_id, body, resources_session=False)
 
@@ -729,7 +729,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     ) -> ScaleSWEVerifyResponse:
         """Capture the agent's patch (or take the golden one) and grade it.
 
-        For an Environment Server session (``resources_session``):
+        For an episode session (``resources_session``):
 
         - A patch lost to infrastructure is not graded, since an empty patch would read as a completed 0.
         - A repository git cannot read is the agent's doing and scores a completed 0.
