@@ -220,6 +220,8 @@ def main() -> None:
         str(recipe / "scripts/launch_nano35_swe_8n11.sh"),
         f"env.nemo_gym.sandbox.opensandbox.connection.domain={SANDBOX_DOMAIN}",
         "env.nemo_gym.sandbox.opensandbox.connection.protocol=https",
+        "data.train.data_path=/opt/pipeline-config/train.jsonl",
+        "data.validation.data_path=/opt/pipeline-config/train.jsonl",
     ]
     print(f"Prepared {sum(counts.values())} rows with unchanged task content. Launch explicitly when authorized:")
     print(shlex.join(command))
