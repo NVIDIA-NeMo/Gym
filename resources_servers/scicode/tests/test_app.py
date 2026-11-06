@@ -883,3 +883,35 @@ class TestApp:
         assert result.step_environment_results == [{"py_a": False, "py_b": True}, {"py_a": False, "py_b": False}]
         assert [o["environment"] for o in result.step_outputs] == ["py_b", "py_b"]
         assert [o["passed"] for o in result.step_outputs] == [True, False]
+
+
+def test_a_saved_answer_can_be_graded_again():
+    from resources_servers.scicode.app import ScicodeResourcesServerConfig
+
+    assert ScicodeResourcesServerConfig.REVERIFY_MODE.value == "stateless"
+
+
+@pytest.mark.asyncio
+async def test_a_regrade_payload_carries_the_solutions_the_original_verify_saw():
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_route_failure
+    from nemo_gym.eval.rollout_reverification import InputRolloutPair, _build_verify_payload
+
+    original = _request(solutions={"1.1": "x = 1", "1.2": "x = 1\ny = 2"}).model_dump()
+    original["token_usage_version"] = 1
+    original["step_usage"] = [{"step_number": "1.1", "status": "generated", "usage": None}]
+    error = ClientResponseError(MagicMock(real_url="http://verifier/verify"), (), status=500, message="boom")
+    failure = verify_route_failure(error, operation_id="op", attempt=1)
+    failure.__cause__ = error
+    masked_row = masked_verify_failure(original, failure)
+    materialized = {k: original[k] for k in ("responses_create_params", "problem_id", "sub_steps")}
+
+    payload = _build_verify_payload(InputRolloutPair(input=materialized, rollout=masked_row))
+
+    assert {k: payload[k] for k in ("solutions", "token_usage_version", "step_usage")} == {
+        k: original[k] for k in ("solutions", "token_usage_version", "step_usage")
+    }
+    with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+        result = await _server(h5.name).verify(ScicodeVerifyRequest.model_validate(payload))
+    assert (result.reward, result.num_steps_total) == (1.0, 2)

@@ -400,6 +400,10 @@ _DRIVER_FAILURE_STOPS = {
         "'https://example.invalid/gym.git/': Could not resolve host: example.invalid; the chain does not retry it; "
         "see logs/driver-100.log"
     ),
+    "environment_prepare_failed": (
+        "Previous job 100 ended FAILED: environment_prepare_failed: EVAL STOPPED: data preparation failed; the chain "
+        "does not retry it; fix the benchmark's preparation, then continue with gym eval resubmit --recover"
+    ),
     "collection_resume_refused": (
         "Previous job 100 ended FAILED: collection_resume_refused: the saved rollouts do not verify against this "
         "run's inputs and configuration; the chain does not retry it; start a fresh run or set "

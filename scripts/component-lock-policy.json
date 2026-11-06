@@ -82,6 +82,11 @@
       "protobuf==6.33.6"
     ]
   },
+  "responses_api_agents/harbor_agent": {
+    "override-dependencies": [
+      "pathspec"
+    ]
+  },
   "responses_api_agents/harbor_agent_general": {
     "override-dependencies": [
       "pathspec",
