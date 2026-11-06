@@ -17,7 +17,8 @@ Intentional differences from upstream:
 - uses the configured OpenAI-compatible judge instead of provider SDKs;
 - creates isolated judges for parallel criteria;
 - records per-criterion transcripts and judge errors;
-- records missing deliverables as failures and extraction errors as ungraded criteria; and
+- records missing deliverables as failures and extraction errors as ungraded criteria;
+- resolves verified task document IDs to filenames in judge prompts; and
 - uses deterministic filename matching without Anthropic-specific LLM fallback.
 """
 
@@ -40,6 +41,9 @@ from .judge import PROMPT_TEMPLATE, VERDICT_SCHEMA, OpenAICompatibleJudge, write
 SKIP_DIRS = {"node_modules", ".npm", "__pycache__", ".git", "venv", ".venv"}
 SKIP_EXTENSIONS = {".lock", ".map"}
 SKIP_FILES = {"package-lock.json"}
+# Keep coverage ranges such as DOC_001 through DOC_025 intact: they describe
+# the whole production, rather than a single document's identity.
+_DOCUMENT_ID_REFERENCE = re.compile(r"\bDOC_[0-9]{3}(?:\s+through\s+DOC_[0-9]{3})?\b")
 
 
 class DocxTrackChanges(StrEnum):
@@ -338,6 +342,7 @@ def score_rubric(
     transcript_path: Path | None = None,
     judge_factory: Callable[[], OpenAICompatibleJudge] | None = None,
     parallelism: int = 1,
+    document_id_aliases: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     output_dir = run_dir / "output"
     pandoc = pandoc_version()
@@ -427,11 +432,16 @@ def score_rubric(
         else:
             agent_output = full_output or "(No agent output found)"
 
+        def resolve_identity(text: str) -> str:
+            return _DOCUMENT_ID_REFERENCE.sub(
+                lambda match: (document_id_aliases or {}).get(match.group(), match.group()), text
+            )
+
         variables = {
             "task_description": task_desc,
             "agent_output": agent_output,
-            "criterion_title": criterion["title"],
-            "match_criteria": criterion["match_criteria"],
+            "criterion_title": resolve_identity(criterion["title"]),
+            "match_criteria": resolve_identity(criterion["match_criteria"]),
         }
         prompt = PROMPT_TEMPLATE.format(**variables)
         criterion_judge: OpenAICompatibleJudge | None = None
