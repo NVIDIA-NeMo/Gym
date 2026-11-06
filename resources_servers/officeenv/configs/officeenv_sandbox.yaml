@@ -40,6 +40,8 @@ oe:
         # with the file API command. Gmail's attachments too: get_attachment saves one in the workspace, and a
         # message attaches a workspace file by its path. null answers and takes content in full.
         inline_file_bytes: 8192
+        # How Pi names the MCP tools (`<mcp_server_name>_<tool>`), for the workspace guide
+        mcp_tool_prefix: company_
 
 pi_agent:
   responses_api_agents:
