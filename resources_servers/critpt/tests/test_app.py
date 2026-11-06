@@ -413,6 +413,47 @@ class TestApp:
             _stop_patches(patches)
 
     @pytest.mark.asyncio
+    async def test_a_partial_batch_times_out_typed_with_the_pending_count_and_sends_nothing(self):
+        """A re-judge of fewer than batch_size saved answers cannot be graded alone: every waiter of the short batch
+        fails as a masked, re-judgeable judge_failed naming the pending count, with no AA call and no padding."""
+        server = _make_server(_make_config(batch_size=5, verify_timeout_seconds=0.1))
+        mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0})
+        try:
+            fence = "```"
+            bodies = [
+                _make_verify_request(fence + "python" + chr(10) + f"x={i}" + chr(10) + fence, problem_id=f"p{i}")
+                for i in range(3)
+            ]
+            rows = [
+                json.loads(r.body)
+                for r in await asyncio.gather(*(judge_failsafe(server.verify)(body=b) for b in bodies))
+            ]
+            mock_request.assert_not_called()
+        finally:
+            _stop_patches(patches)
+        for row in rows:
+            assert row["mask_sample"] is True and row["failure_kind"] == "judge_failed"
+            assert row["failure_reason"].startswith(
+                "3 saved answers pending, fewer than batch_size (5); grade them with replay"
+            )
+            assert row["response"]
+        assert server._batches == []  # the stale short batch does not absorb later rows
+
+    @pytest.mark.asyncio
+    async def test_a_full_batch_still_fires_under_a_short_verify_timeout(self):
+        server = _make_server(_make_config(batch_size=2, verify_timeout_seconds=5.0))
+        mock_request, patches = _mock_api({"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 0})
+        try:
+            results = await asyncio.gather(
+                server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
+                server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
+            )
+            assert mock_request.call_count == 1
+        finally:
+            _stop_patches(patches)
+        assert {r.reward for r in results} == {0.5} and not any(r.mask_sample for r in results)
+
+    @pytest.mark.asyncio
     async def test_empty_code_still_included_in_batch(self):
         """A verify() with no extractable code still contributes to the batch (slot must be filled)."""
         server = _make_server(_make_config(batch_size=2))

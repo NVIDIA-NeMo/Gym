@@ -63,6 +63,12 @@ Real runs send full batches of 70 real submissions only; a smoke run never calls
   correct items over the whole batch, so an ungraded item counts as incorrect. Every row records
   `judge_error_count` and `graded_items`. With more errors than that the batch fails as `judge_failed`
   (masked, graded again). `replay` takes the same threshold as `--max-judge-errors`.
+- **A re-judge of fewer than `batch_size` rows cannot be graded alone.** AA only grades full batches and nothing
+  is padded, so a smaller set (the last 23 rows of a run, say) waits for more rows. When
+  `verify_timeout_seconds` passes, every waiter fails as `judge_failed` ("N saved answers pending, fewer than
+  batch_size; grade them with replay together with other runs or after more rows arrive"): masked, saved answer
+  kept. Set `verify_timeout_seconds` low for re-judge jobs, and `num_samples_in_parallel` to at least
+  `batch_size`, or a full re-judge never fills a batch.
 - **Any other AA failure** (a 4xx/5xx, a timeout) is `judge_failed`: the rows are masked and graded again.
 
 ## Dataset Format

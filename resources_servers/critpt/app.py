@@ -356,10 +356,30 @@ class CritPtResourcesServer(SimpleResourcesServer):
             "batch_size": self.config.batch_size,
         }
 
-    async def _await_batch(self, future: "asyncio.Future", problem_id: str) -> Dict:
+    async def _await_batch(self, future: "asyncio.Future", problem_id: str, batch: Dict) -> Dict:
         try:
-            return await asyncio.wait_for(future, timeout=self.config.verify_timeout_seconds)
-        except asyncio.TimeoutError:
+            # Shielded: a waiter's timeout must not cancel the batch's future for its siblings.
+            return await asyncio.wait_for(asyncio.shield(future), timeout=self.config.verify_timeout_seconds)
+        except asyncio.TimeoutError as timeout:
+            pending = len(batch["submissions"])
+            waiting = any(b is batch for b in self._batches)
+            if batch.get("short") or (waiting and pending < self.config.batch_size):
+                batch["short"] = True  # every waiter of this batch fails the same way
+                self._batches[:] = [b for b in self._batches if b is not batch]
+                # AA only grades full batches and nothing is padded, so a short batch (a re-judge of fewer than
+                # batch_size saved answers) can never be graded alone: fail it typed, masked and re-judgeable.
+                LOG.error(
+                    "CritPt verify timed out after %ss: %d submissions pending, fewer than batch_size=%d (problem_id=%s).",
+                    self.config.verify_timeout_seconds,
+                    pending,
+                    self.config.batch_size,
+                    problem_id,
+                )
+                raise judge_call_failed(
+                    f"{pending} saved answers pending, fewer than batch_size ({self.config.batch_size}); grade them "
+                    "with replay together with other runs or after more rows arrive",
+                    operation="critpt.grade",
+                ) from timeout
             LOG.error(
                 "CritPt verify timed out after %ss waiting for batch to fire (problem_id=%s). "
                 "Likely a sibling rollout failed before reaching verify().",
@@ -485,7 +505,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
         # A quota or key error is terminal: it stops the run and keeps the saved answer for a later re-judge (see
         # `_provider_stop` below). Any other failed AA call (4xx/5xx, timeouts) is a grader failure, not a
         # model failure: type it as judge_failed so judge_failsafe masks the row and it is judged again.
-        result = await reraise_judge_errors(self._await_batch(future, body.problem_id))
+        result = await reraise_judge_errors(self._await_batch(future, body.problem_id, target_batch))
         if "_provider_stop" in result:
             # Typed like a judge failure, so the row keeps its saved answer in the failures sidecar and recovery
             # grades it again after the operator acts; the kind stops the run and the chain meanwhile.
