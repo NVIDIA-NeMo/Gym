@@ -891,6 +891,26 @@ class TestOwnershipLifetime:
         clock[0] = 20.0
         assert lifetimes.sweep() == ["s"] and not lifetimes._expiries and len(lifetimes) == 0
 
+    def test_successful_verify_keeps_its_worker_until_pending_release_succeeds(self, monkeypatch) -> None:
+        clock = [0.0]
+        pending = {"s"}
+        monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+        lifetimes = ResourcesSessionLifetimes(
+            10,
+            starts=("/seed_session",),
+            ends=("/close_session", "/verify"),
+            session_release_pending=pending.__contains__,
+        )
+        # This also covers a lazy tool-created session which has never passed through seed.
+        lifetimes.served("s", {"path": "/verify", "headers": []}, 200)
+        clock[0] = 1000
+        assert lifetimes.sweep() == [] and lifetimes.holds("s")
+        pending.clear()
+        lifetimes.served("s", {"path": "/close_session", "headers": []}, 200)
+        assert lifetimes.holds("s")
+        clock[0] += 10
+        assert lifetimes.sweep() == ["s"] and not lifetimes.holds("s")
+
     def test_an_agent_session_owner_is_released_once_it_drops_the_closed_record(self, socket_dir: str) -> None:
         a = AgentWorker("a", socket_dir, close_retry_window_seconds=0.1)
         b = AgentWorker("b", socket_dir, close_retry_window_seconds=0.1)
