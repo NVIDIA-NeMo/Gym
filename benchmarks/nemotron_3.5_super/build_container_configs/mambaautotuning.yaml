@@ -1,5 +1,5 @@
 input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___dwdp.sqsh
-output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___expertmetrics.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mambaautotuning.sqsh
 
 slurm:
   account: nemotron_rl_algo
@@ -11,13 +11,13 @@ slurm:
 
 vllm:
   repo: https://github.com/bxyu-nvidia/vllm.git
-  branch: bxyu/v0.32.0-expertmetrics
+  branch: bxyu/v0.32.0-mambaautotuning
   version: "0.32.0"
   precompiled_wheel_commit: v0.32.0
 
 shared_run_warmup_env_vars:
   MODEL: ${oc.env:PWD}/results/Nemotron-3.5-Super-VL-120B-A12B-GA-candidate-MTP-boosted-20261001
-  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_expertmetrics.sh
+  VLLM_CONFIG: benchmarks/nemotron_3.5_super/vllm_configs/nemotron_3.5_super_dwdp.sh
   NUM_PREFILL_NODES: 2
   NUM_DECODE_NODES: 2
   ENABLE_MOONCAKE: 1
@@ -31,7 +31,7 @@ shared_run_warmup_env_vars:
 run:
   env:
     _copy: shared_run_warmup_env_vars
-    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-prefill-dp4tp1-decode
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-mambaautotuning
     SBATCH_TIMELIMIT: "01:30:00"
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
