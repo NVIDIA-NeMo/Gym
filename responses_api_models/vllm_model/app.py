@@ -67,6 +67,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -1079,12 +1080,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         execution = getattr(request.state, "nemo_gym_model_execution", {})
-        if isinstance(execution, dict):
-            finish_reason = chat_completion_response.choices[0].finish_reason
-            if finish_reason is not None:
-                execution["finish_reason"] = finish_reason
-            if execution.get("local_response_reason") == "context_length_exceeded":
-                response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
+        if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
+            response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
