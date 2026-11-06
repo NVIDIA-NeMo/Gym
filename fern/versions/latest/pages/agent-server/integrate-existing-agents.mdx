@@ -25,7 +25,7 @@ These adapters run a harness inside a sandbox and are driven by the `single_agen
 | Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared |
 | OpenCode (`opencode_agent`) | Chat Completions | MCP only | Off by default; the session path is evaluation only | Not declared | Declared |
 | OpenClaw (`openclaw_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Not declared | Declared |
-| NeMo Fabric 0.5 (`nemo_fabric_agent`) | Selected adapter's API | None in sessions | Not wired up; evaluation only; invocation/compaction gaps | Not declared | Not declared |
+| NeMo Fabric 0.6.1 (`nemo_fabric_agent`) | Selected adapter's API | None in sessions | Not wired up; evaluation only; invocation/compaction gaps | Not declared | Not declared |
 
 *Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 

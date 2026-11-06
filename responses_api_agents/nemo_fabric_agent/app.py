@@ -5,6 +5,8 @@ import asyncio
 import json
 import logging
 import os
+import signal
+import subprocess
 import sys
 import tempfile
 from asyncio import Semaphore
@@ -526,6 +528,8 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     # Adapters whose model schema has no base_url (Factory Droid reads custom endpoints from its own settings)
     # reject a config that sets it. False leaves models.default.base_url out.
     send_model_base_url: bool = True
+    # Optional host-only adapter environment, installed on first use. Sessions install inside their sandbox.
+    adapter_project: str | None = None
     # Agent sessions keep process-local state, so they require one worker. The host /run path accepts more.
     num_workers: PositiveInt = 1
     # Provider block for a sandbox this agent creates when Resources lends none. Null requires sandbox_access.
@@ -552,6 +556,64 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
     sem: Semaphore | None = None
     model_config = ConfigDict(arbitrary_types_allowed=True)
     _relay_supported: Optional[bool] = None
+    _adapter_python: str | None = None
+    _adapter_setup: asyncio.Task[str] | None = None
+
+    async def _ensure_host_adapter(self) -> None:
+        """Share first-use installation; surface failures and allow a subsequent call to retry."""
+        if not self.config.adapter_project or self._adapter_python:
+            return
+        if self._adapter_setup is None or self._adapter_setup.done():
+            self._adapter_setup = asyncio.create_task(asyncio.to_thread(self._install_host_adapter))
+        self._adapter_python = await asyncio.shield(self._adapter_setup)
+
+    def _install_host_adapter(self) -> str:
+        project = Path(__file__).parent / self.config.adapter_project
+        python = str(project / ".venv" / "bin" / "python")
+        for command in (
+            ["uv", "venv", "--python", "3.14", "--allow-existing", ".venv"],
+            ["uv", "pip", "install", "--python", python, "-r", "pyproject.toml"],
+        ):
+            subprocess.run(command, cwd=project, check=True, timeout=self.config.sandbox_install_timeout_seconds)
+        return python
+
+    async def _run_host_adapter(self, config: FabricConfig, *, workspace: str, request: RunRequest) -> dict[str, Any]:
+        """Use a separate process for a separate interpreter, without changing other host agents' environment."""
+        with tempfile.TemporaryDirectory(prefix="nemo_gym_fabric_host_") as directory:
+            path = Path(directory)
+            (path / "input.json").write_text(
+                json.dumps(
+                    {
+                        "config": config.to_mapping(),
+                        "input": request.input,
+                        "request_id": request.request_id,
+                        "workdir": workspace,
+                    }
+                )
+            )
+            with (path / "worker.log").open("wb") as output:
+                process = await asyncio.create_subprocess_exec(
+                    self._adapter_python,
+                    "-I",
+                    "-B",
+                    str(Path(__file__).with_name("sandbox_runner.py")),
+                    directory,
+                    start_new_session=True,
+                    stdout=output,
+                    stderr=subprocess.STDOUT,
+                )
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=self.config.timeout + 30)
+                finally:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    await process.wait()
+            if process.returncode:
+                detail = (path / "worker.log").read_text(errors="replace")[-8000:]
+                raise RuntimeError(f"Fabric adapter worker exited {process.returncode}: {detail}")
+            return json.loads((path / "result.json").read_text())
 
     def _adapter_supports_relay(self, fabric_config: FabricConfig, base_dir: str) -> bool:
         """Whether the adapter descriptor declares the Relay telemetry provider. Planned once per agent."""
@@ -559,13 +621,21 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             adapter = _mapping(Fabric().plan(fabric_config, base_dir=base_dir).to_mapping().get("adapter"))
             self._relay_supported = "relay" in _mapping(_mapping(adapter.get("telemetry")).get("providers"))
             if self._relay_supported and self.config.adapter_id == "nvidia.fabric.hermes":
-                # Hermes declares Relay, but only a Hermes Agent build with Relay support can start with it.
-                from nemo_fabric_adapters.hermes.telemetry import validate_hermes_relay_compatibility
-
-                try:
-                    validate_hermes_relay_compatibility()
-                except RuntimeError as error:
-                    LOG.warning("%s", error)
+                # Validate in the interpreter that will actually run Hermes.
+                check = subprocess.run(
+                    [
+                        self._adapter_python or sys.executable,
+                        "-I",
+                        "-c",
+                        "from nemo_fabric_adapters.hermes.telemetry import validate_hermes_relay_compatibility as v; v()",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    errors="replace",
+                    timeout=30,
+                )
+                if check.returncode:
+                    LOG.warning("Hermes Relay compatibility check failed: %s", check.stderr[-2000:])
                     self._relay_supported = False
             if not self._relay_supported:
                 LOG.warning("%s does not support NeMo Relay, so it runs without Relay", self.config.adapter_id)
@@ -684,6 +754,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         skills_path: Optional[str] = None,
         rollout_id: Optional[str] = None,
     ) -> tuple[NeMoGymResponse, dict[str, Any]]:
+        await self._ensure_host_adapter()
         request_input, input_system = _extract_request_input(body.input)
         system_parts = [part for part in (self.config.system_prompt, body.instructions, input_system) if part]
         system_prompt = "\n\n".join(system_parts) or None
@@ -708,25 +779,27 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 mcp_servers=mcp_servers or {},
                 skills=_skill_paths(skills_path),
             )
-            if relay_dir and not self._adapter_supports_relay(self._fabric_config(**config_kwargs), workspace):
+            if relay_dir and not await asyncio.to_thread(
+                self._adapter_supports_relay, self._fabric_config(**config_kwargs), workspace
+            ):
                 relay_dir = None
             fabric_config = self._fabric_config(**config_kwargs, relay_dir=Path(relay_dir) if relay_dir else None)
-            # Fabric otherwise starts Python adapters on VIRTUAL_ENV's interpreter, which in R2E-style task
-            # images is the repo's venv and lacks the adapter. This agent's interpreter has the adapters installed.
-            os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
-            result = await Fabric().run(
-                fabric_config,
-                base_dir=workspace,
-                request=RunRequest(
-                    input=request_input,
-                    request_id=rollout_id or f"request-{uuid4().hex}",
-                    context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
-                ),
+            request = RunRequest(
+                input=request_input,
+                request_id=rollout_id or f"request-{uuid4().hex}",
+                context={"nemo_gym_rollout_id": rollout_id} if rollout_id else {},
             )
+            if self._adapter_python:
+                result_mapping = await self._run_host_adapter(fabric_config, workspace=workspace, request=request)
+            else:
+                # Fabric otherwise starts Python adapters on the task venv, which lacks its adapter.
+                os.environ.setdefault("ADAPTER_PYTHON", sys.executable)
+                result = await Fabric().run(fabric_config, base_dir=workspace, request=request)
+                result_mapping = result.to_mapping()
             # The trajectory files live in relay_dir, so read them before it is removed.
-            trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
+            trajectories = _atif_trajectories(_mapping(result_mapping.get("output"))) if relay_dir else []
 
-        return self._response_from_result(body, result.to_mapping(), trajectories)
+        return self._response_from_result(body, result_mapping, trajectories)
 
     def _response_from_result(
         self,
@@ -814,6 +887,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             runtime_requirements(self.config.adapter_id, relay=self.config.relay)
         except ValueError as error:
             raise AgentSeedRejectedError(str(error)) from error
+        if self.config.adapter_project not in {None, "hermes_env"} or (
+            self.config.adapter_project and self.config.adapter_id != "nvidia.fabric.hermes"
+        ):
+            raise AgentSeedRejectedError("Fabric sessions use built-in sandbox runtimes, not host adapter projects")
         if self.config.num_workers != 1:
             raise AgentSeedRejectedError("Fabric sessions require num_workers=1")
         if any(access.required for access in self.effective_tool_accesses(body)):
@@ -1071,7 +1148,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             state.observations.gaps.append(
                 ObservationGap(
                     code="harness_trajectory_unavailable",
-                    detail="Fabric 0.5 mini-SWE returns final output and API-call count without intermediate turns when Relay is off",
+                    detail="Fabric mini-SWE returns final output and API-call count without intermediate turns when Relay is off",
                 )
             )
         return response

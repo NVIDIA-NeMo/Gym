@@ -7,13 +7,12 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,sandbox]",
-    "nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent,nooa,openclaw,openhands,relay]==0.5.0",
+    "nemo-fabric[claude,codex,deepagents,hermes-agent,mini-swe-agent,nooa,openclaw,openhands,relay]==0.6.1",
     # The OpenHands extra installs only the adapter; these are its validated runtime packages.
     "openhands-sdk==1.50.0",
     "openhands-tools==1.50.0",
     # LiteLLM 1.103 imports MCP 2 types; Gym requires MCP <2.
-    "litellm<1.103",
-    "hermes-agent @ git+https://github.com/NousResearch/hermes-agent@0ee05d72f2b30385d4861fd8e30511c6d51100e4",
+    "litellm>=1.83.0,<1.103",
     "tokenizers>=0.22.2",
 ]
 
@@ -39,8 +38,6 @@ override-dependencies = [
     "pathspec",
     "openai==2.44.0",
     "pyjwt==2.15.1",
-    # Hermes pins 12.2.0, but OpenHands SDK 1.50.0 requires >=12.3.0.
-    "pillow==12.3.0",
     "certifi>=2026.10.19",
 ]
 exclude-dependencies = [

@@ -224,9 +224,39 @@ def test_sandbox_runtime_pins_match_the_host_requirements():
         "nvidia.fabric.openhands", relay=False
     )
 
-    for pin in ["openhands-sdk==1.50.0", "openhands-tools==1.50.0", "litellm<1.103"]:
+    for pin in ["openhands-sdk==1.50.0", "openhands-tools==1.50.0", "litellm>=1.83.0,<1.103"]:
         assert pin in host and pin in installed, pin
-    commit = re.search(r"hermes-agent @ git\+https://github.com/NousResearch/hermes-agent@([0-9a-f]{40})", host)[1]
-    assert f"hermes-agent @ https://github.com/NousResearch/hermes-agent/archive/{commit}.tar.gz" in installed
+    hermes = tomllib.loads(sandbox_runtime.HERMES_PROJECT.read_text())["project"]["dependencies"]
+    assert runtime_requirements("nvidia.fabric.hermes", relay=False) == hermes
+    assert not any("hermes-agent @" in dependency for dependency in project["project"]["dependencies"])
     assert re.search(rf"nemo-fabric\[[^\]]+\]=={re.escape(sandbox_runtime.FABRIC_VERSION)}", host)
     assert f"'{sandbox_runtime.FABRIC_VERSION}'" in HEALTH
+
+
+async def test_hermes_installs_python314_with_its_own_dependency_overrides(python_archive, monkeypatch):
+    monkeypatch.setattr(sandbox_runtime, "HERMES_PYTHON_SHA256", {"x86_64/gnu": python_archive.digest})
+    sandbox = _Sandbox()
+
+    await prepare_fabric_runtime(sandbox, adapter_id="nvidia.fabric.hermes", relay=True, timeout=60)
+
+    url = python_archive.download.call_args.args[0]
+    assert "cpython-3.14.9%2B20261021-x86_64" in url
+    assert "(3,14,9)" in sandbox.run("install")[0]
+    source = next(data for path, data in sandbox.uploads.items() if path.endswith("source.tar.gz"))
+    with tarfile.open(fileobj=io.BytesIO(source)) as archive:
+        requirements = archive.extractfile("runtime-requirements.txt").read().decode()
+        overrides = archive.extractfile("runtime-overrides.txt").read().decode()
+    assert "nemo-relay==0.11.1" in requirements
+    assert "hermes-agent[anthropic] @" in requirements
+    assert "b200f5bc60e31588ba2cb60e288029c4a54ba5fa.tar.gz" in requirements
+    assert "litellm>=1.83.0,<1.103" not in requirements  # belongs to the Python 3.13 adapter environment
+    assert "cryptography==50.0.2" in overrides and "Pillow==13.0.0" in overrides
+
+
+def test_hermes_overrides_are_part_of_the_cached_runtime_identity(monkeypatch):
+    requirements = runtime_requirements("nvidia.fabric.hermes", relay=True)
+    before = runtime_archive(requirements, hermes=True)[1]
+    project = sandbox_runtime._hermes_project()
+    project["tool"]["uv"]["override-dependencies"].append("example==1")
+    monkeypatch.setattr(sandbox_runtime, "_hermes_project", lambda: project)
+    assert runtime_archive(requirements, hermes=True)[1] != before

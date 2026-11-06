@@ -20,6 +20,7 @@ nemo_fabric_agent:
       fabric_config: ???
       relay: false
       send_model_base_url: true
+      adapter_project: null
       sandbox_provider: null
       sandbox_config: {}
       sandbox_install_timeout_seconds: 600

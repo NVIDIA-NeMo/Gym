@@ -292,6 +292,11 @@ def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) 
     )
 
     assert Fabric().plan(config, base_dir=tmp_path).adapter.adapter_id == merged["adapter_id"]
+    if preset_name == "nemo_fabric_mini_swe_agent":
+        # 0.6.1 ignores MSWEA_COST_TRACKING; an unpriced Gym alias otherwise fails after its first model call.
+        mapping = config.to_mapping()
+        assert mapping["models"]["default"]["settings"]["cost_tracking"] == "disabled"
+        assert mapping["runtime"]["max_turns"] > 0
 
 
 def test_rollout_mcp_metadata_is_optional_and_headers_are_optional(caplog) -> None:
@@ -544,8 +549,8 @@ def test_relay_is_skipped_when_hermes_agent_cannot_run_it(tmp_path: Path) -> Non
         patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
         patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
         patch(
-            "nemo_fabric_adapters.hermes.telemetry.validate_hermes_relay_compatibility",
-            side_effect=RuntimeError("Hermes Agent without Relay support"),
+            "responses_api_agents.nemo_fabric_agent.app.subprocess.run",
+            return_value=MagicMock(returncode=1, stderr="Hermes Agent without Relay support"),
         ),
     ):
         _, fabric_result = asyncio.run(
@@ -1055,3 +1060,52 @@ def test_atif_trajectories_skips_partial_or_undecodable_artifacts(tmp_path: Path
     whole.write_text(json.dumps({"steps": []}))
     artifacts = [{"kind": "atif", "path": str(p)} for p in (cut_utf8, truncated, whole)]
     assert _atif_trajectories({"relay_artifacts": artifacts}) == [{"steps": []}]
+
+
+async def test_host_adapter_setup_is_lazy_shared_and_retries_after_failure(monkeypatch):
+    import threading
+
+    agent = _agent(adapter_project="hermes_env")
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def install():
+        calls.append(True)
+        entered.set()
+        assert release.wait(10)
+        return "/private/hermes/bin/python"
+
+    monkeypatch.setattr(NeMoFabricAgent, "_install_host_adapter", lambda _: install())
+    assert not calls  # construction must not install an unused host runtime for sandbox sessions
+    first = asyncio.create_task(agent._ensure_host_adapter())
+    assert await asyncio.to_thread(entered.wait, 10)
+    second = asyncio.create_task(agent._ensure_host_adapter())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+    assert len(calls) == 1 and agent._adapter_python == "/private/hermes/bin/python"
+
+    agent = _agent(adapter_project="hermes_env")
+    with patch.object(NeMoFabricAgent, "_install_host_adapter", side_effect=RuntimeError("install failed")):
+        with pytest.raises(RuntimeError, match="install failed"):
+            await agent._ensure_host_adapter()
+    assert agent._adapter_python is None
+    await agent._ensure_host_adapter()
+    assert agent._adapter_python == "/private/hermes/bin/python"
+
+
+async def test_separate_host_adapter_uses_worker_result_without_global_python_mutation(tmp_path, monkeypatch):
+    agent = _agent(cwd=str(tmp_path), adapter_project="hermes_env")
+    agent._adapter_python = "/hermes/python"
+    monkeypatch.setenv("ADAPTER_PYTHON", "/other-agent/python")
+    result = _FakeResult().to_mapping()
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://model/v1"),
+        patch.object(NeMoFabricAgent, "_run_host_adapter", new=AsyncMock(return_value=result)) as run,
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric") as fabric,
+    ):
+        response, _ = await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+    assert response.output[0].content[0].text == "fabric answer"
+    assert run.call_args.kwargs["workspace"] == str(tmp_path)
+    fabric.assert_not_called()
+    assert os.environ["ADAPTER_PYTHON"] == "/other-agent/python"

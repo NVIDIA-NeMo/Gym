@@ -107,8 +107,16 @@ tar -xzf "$scratch/python.tar.gz" -C "$generation/python" --strip-components=1
 tar -xzf "$scratch/source.tar.gz" -C "$generation/source"
 # Installed console scripts reference this permanent path, so never rename the generation.
 # The installer alone owns the lock; an orphaned pip process cannot retain it after a kill.
-"$generation/python/bin/python3" -I -B -m pip --isolated install --no-cache-dir \
-  -r "$generation/source/runtime-requirements.txt" 9>&-
+if [[ -f "$generation/source/runtime-overrides.txt" ]]; then
+  # Hermes needs uv's dependency overrides and explicitly permits this package build.
+  "$generation/python/bin/python3" -I -B -m pip --isolated install --no-cache-dir uv==0.13.4 9>&-
+  HERMES_NIX_BUILD=1 "$generation/python/bin/python3" -I -B -m uv --no-config pip install \
+    --python "$generation/python/bin/python3" --no-cache \
+    --overrides "$generation/source/runtime-overrides.txt" -r "$generation/source/runtime-requirements.txt" 9>&-
+else
+  "$generation/python/bin/python3" -I -B -m pip --isolated install --no-cache-dir \
+    -r "$generation/source/runtime-requirements.txt" 9>&-
+fi
 health "$generation"
 printf '%s\n' "$fingerprint" > "$generation/ready"
 publish="$parent/.${generation##*/}.publish"

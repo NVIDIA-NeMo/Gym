@@ -195,9 +195,9 @@ def test_runtime_fingerprint_varies_with_adapter_and_relay():
         ]
     ]
     assert len({runtime_archive(profile)[1] for profile in profiles}) == 3
-    assert all("==0.5.0" in profile[0] for profile in profiles)
+    assert all("==0.6.1" in profile[0] for profile in profiles)
     assert (
-        runtime_requirements("nvidia.fabric.langchain.deepagents", relay=False)[0] == "nemo-fabric[deepagents]==0.5.0"
+        runtime_requirements("nvidia.fabric.langchain.deepagents", relay=False)[0] == "nemo-fabric[deepagents]==0.6.1"
     )
     with pytest.raises(ValueError, match="No sandbox runtime profile"):
         runtime_requirements("nvidia.fabric.unknown", relay=False)

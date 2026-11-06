@@ -10,6 +10,7 @@ import logging
 import shlex
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 from uuid import uuid4
 
@@ -18,7 +19,7 @@ from nemo_gym.sandbox import AsyncSandbox
 
 
 LOG = logging.getLogger(__name__)
-FABRIC_VERSION = "0.5.0"
+FABRIC_VERSION = "0.6.1"
 # Astral python-build-standalone 20260805, also used by Gym's NOOA adapter.
 PYTHON_SHA256 = {
     "x86_64/gnu": "9f9ebf776b2d4913fe5a91508ab42e6ce17d266138f76a7782c05fa1c3cba1d1",  # pragma: allowlist secret
@@ -28,6 +29,22 @@ HEALTH = (
     "import sys, importlib.metadata as m; assert sys.version_info[:3] == (3,13,14); "
     f"assert m.version('nemo-fabric') == '{FABRIC_VERSION}'; from nemo_fabric import Fabric"
 )
+
+# Python artifacts pinned by Hermes v0.22.7's pm/lock.json; checked against the
+# python-build-standalone 20261021 release. Other adapters retain Python 3.13.
+HERMES_PYTHON_SHA256 = {
+    "x86_64/gnu": "dfa4c5a40c47f338f41658017be550c72247c391e6bfb1fa4da03ebc8451abdf",  # pragma: allowlist secret
+    "aarch64/gnu": "847895ba727440b012207bb0192282d7e182eb991ae5c7bb5c35c6a12a99e732",  # pragma: allowlist secret
+}
+HERMES_HEALTH = (
+    HEALTH.replace("(3,13,14)", "(3,14,9)")
+    + "; import importlib.util; assert importlib.util.find_spec('run_agent') is not None"
+)
+HERMES_PROJECT = Path(__file__).with_name("hermes_env") / "pyproject.toml"
+
+
+def _hermes_project() -> dict:
+    return tomllib.loads(HERMES_PROJECT.read_text())
 
 
 def runtime_requirements(adapter_id: str, *, relay: bool) -> list[str]:
@@ -42,29 +59,37 @@ def runtime_requirements(adapter_id: str, *, relay: bool) -> list[str]:
     if relay:
         extras.append("relay")
     suffix = f"[{','.join(sorted(extras))}]" if extras else ""
-    requirements = [f"nemo-fabric{suffix}=={FABRIC_VERSION}", "litellm<1.103"]
+    requirements = [f"nemo-fabric{suffix}=={FABRIC_VERSION}", "litellm>=1.83.0,<1.103"]
     if adapter == "openhands":
         requirements += ["openhands-sdk==1.50.0", "openhands-tools==1.50.0"]
     if adapter == "hermes":
-        requirements += [
-            "hermes-agent @ https://github.com/NousResearch/hermes-agent/archive/0ee05d72f2b30385d4861fd8e30511c6d51100e4.tar.gz",
-            "tokenizers>=0.22.2",
-        ]
+        # Hermes owns its dependency set (including newer LiteLLM/MCP) in Python 3.14,
+        # separately from the Gym host and the other adapters' Python 3.13 runtime.
+        requirements = list(_hermes_project()["project"]["dependencies"])
     return requirements
 
 
-def runtime_archive(requirements: list[str]) -> tuple[bytes, str]:
+def runtime_archive(requirements: list[str], *, hermes: bool = False) -> tuple[bytes, str]:
     """Fingerprint installer, dependency specification and interpreter together."""
     contents = ("\n".join(requirements) + "\n").encode()
     installer = Path(__file__).with_name("install_fabric_runtime.sh").read_bytes()
+    overrides = (
+        ("\n".join(_hermes_project()["tool"]["uv"]["override-dependencies"]) + "\n").encode() if hermes else b""
+    )
+    digests = HERMES_PYTHON_SHA256 if hermes else PYTHON_SHA256
+    health = HERMES_HEALTH if hermes else HEALTH
     fingerprint = hashlib.sha256(
-        contents + installer + json.dumps(PYTHON_SHA256, sort_keys=True).encode() + HEALTH.encode()
+        contents + overrides + installer + json.dumps(digests, sort_keys=True).encode() + health.encode()
     )
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as archive:
         entry = tarfile.TarInfo("runtime-requirements.txt")
         entry.size = len(contents)
         archive.addfile(entry, io.BytesIO(contents))
+        if hermes:
+            entry = tarfile.TarInfo("runtime-overrides.txt")
+            entry.size = len(overrides)
+            archive.addfile(entry, io.BytesIO(overrides))
     return output.getvalue(), fingerprint.hexdigest()
 
 
@@ -84,7 +109,11 @@ async def prepare_fabric_runtime(sandbox: AsyncSandbox, *, adapter_id: str, rela
     verified on the controller, and pip then resolves the pinned top-level packages and their dependencies in the
     private interpreter. The task's Python, PATH, HOME and dependencies are not modified.
     """
-    source, fingerprint = runtime_archive(runtime_requirements(adapter_id, relay=relay))
+    hermes = adapter_id == "nvidia.fabric.hermes"
+    digests = HERMES_PYTHON_SHA256 if hermes else PYTHON_SHA256
+    health = HERMES_HEALTH if hermes else HEALTH
+    version, release = ("3.14.9", "20261021") if hermes else ("3.13.14", "20260805")
+    source, fingerprint = runtime_archive(runtime_requirements(adapter_id, relay=relay), hermes=hermes)
     scratch = f"/tmp/nemo-gym-fabric-setup-{uuid4().hex}"
     script = scratch + ".sh"
     completed = False
@@ -95,22 +124,22 @@ async def prepare_fabric_runtime(sandbox: AsyncSandbox, *, adapter_id: str, rela
         if probe.error_type:
             # The provider failed to run the probe, which a retry can survive.
             raise RuntimeError(f"Fabric platform probe could not run: {probe.error_type}: {probe.stderr}")
-        if probe.return_code != 0 or target not in PYTHON_SHA256:
+        if probe.return_code != 0 or target not in digests:
             # The probe ran and refused this image: no retry changes the answer.
             raise AgentSeedRejectedError(f"Unsupported Fabric sandbox platform: {target!r}; {probe.stderr}")
         arch, libc = target.split("/")
         runtime = f"/opt/nemo-gym-fabric/{fingerprint}-{arch}-{libc}"
         python = f"{runtime}/python/bin/python3"
         cached = await sandbox.exec(
-            shlex.join(["bash", script, "check", runtime, fingerprint, HEALTH]), cwd="/", timeout_s=60
+            shlex.join(["bash", script, "check", runtime, fingerprint, health]), cwd="/", timeout_s=60
         )
         if cached.return_code == 0 and not cached.error_type:
             completed = True
             return python
-        expected = PYTHON_SHA256[target]
+        expected = digests[target]
         url = (
-            "https://github.com/astral-sh/python-build-standalone/releases/download/20260805/"
-            f"cpython-3.13.14%2B20260805-{arch}-unknown-linux-{libc}-install_only.tar.gz"
+            f"https://github.com/astral-sh/python-build-standalone/releases/download/{release}/"
+            f"cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only.tar.gz"
         )
         # Imported here because the in-sandbox worker imports app.py from a bundle of only nemo_gym and this package.
         from responses_api_agents.miniswe_sandboxed_agent.bootstrap import cached_download
@@ -127,7 +156,7 @@ async def prepare_fabric_runtime(sandbox: AsyncSandbox, *, adapter_id: str, rela
             await sandbox.upload(source_archive, f"{scratch}/source.tar.gz")
         result = await sandbox.exec(
             shlex.join(
-                ["bash", script, "install", runtime, fingerprint, hashlib.sha256(source).hexdigest(), expected, HEALTH]
+                ["bash", script, "install", runtime, fingerprint, hashlib.sha256(source).hexdigest(), expected, health]
             ),
             cwd="/",
             timeout_s=timeout,

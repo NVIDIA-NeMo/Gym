@@ -101,7 +101,6 @@
       "pathspec",
       "openai==2.44.0",
       "pyjwt==2.15.1",
-      "pillow==12.3.0",
       "certifi>=2026.10.19"
     ]
   },
