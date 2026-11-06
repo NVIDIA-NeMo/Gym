@@ -37,7 +37,7 @@ if TYPE_CHECKING:
         is_propagated_refusal,
     )
     from nemo_gym.models.chat_completions_converter import (
-        ResponsesConverter,
+        ChatCompletionsConverter,
         VLLMConverter,
         VLLMConverterResponsesToChatCompletionsState,
         chat_completion_usage_to_response_usage,
@@ -72,11 +72,11 @@ _PUBLIC_API = {
     "BaseResponsesAPIModelConfig": "base_responses_api_model",
     "Body": "base_responses_api_model",
     "CaptureStore": "model_call_capture",
+    "ChatCompletionsConverter": "chat_completions_converter",
     "ExternalCaptureHandler": "token_capture.external_capture",
     "ModelCallCaptureConfig": "model_call_capture",
     "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "PolicyModelParticipant": "_checkpoint",
-    "ResponsesConverter": "chat_completions_converter",
     "SimpleResponsesAPIModel": "base_responses_api_model",
     "VLLMConverter": "chat_completions_converter",
     "VLLMConverterResponsesToChatCompletionsState": "chat_completions_converter",

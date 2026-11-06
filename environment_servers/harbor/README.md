@@ -89,7 +89,9 @@ the server refuses either at seed. Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
-[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed as main's Compose `user:` when one is set, including for a task
+with its own `environment/docker-compose.yaml` and no job-level overlay. A decimal string is passed as an integer
+user ID; an absent or empty `user:` falls back to the image account. This does not change the agent's configured user.
 A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
 `[environment].env`, the process environment, then `environment/.env`; a name none of them sets is an empty string
 at prepare, with one warning. The server's `compose_variables` fill such names at seed, below everything the task
@@ -604,9 +606,10 @@ credentials of the sandbox provider block (`images.auth`), the same way as any p
 is created with the Dockerfile's final `USER` (or `[agent].user`) as the default for every command, on every
 provider, not only for the overlay `RUN` lines. An overlay task starts without that default, because its
 `RUN` lines may be what creates the user, and switches to it once they have run. A numeric `USER 1000` is
-resolved to its name in the image with `getent` first, because OpenSandbox and PTY sessions switch user by
-name. When the uid names no user, the number stays and the seed logs a warning: Docker accepts a uid as
-it is, the other providers cannot run commands as it.
+resolved to its name in the image with `getent` first. When the uid names no user, it is passed as an integer
+user ID: Docker and OpenSandbox's plain exec support it. Other providers, and OpenSandbox's PTY and bash
+sessions, still need a named user. A `uid:gid` pair is supported only on Docker. These limits apply with or
+without a job-level Compose overlay.
 
 | Setting or feature | Behavior in this layer |
 | --- | --- |

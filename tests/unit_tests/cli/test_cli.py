@@ -154,7 +154,11 @@ class TestServerJunitReports:
 
 
 @pytest.mark.parametrize("internal_error", [True, False])
-def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capfd, internal_error: bool) -> None:
+@pytest.mark.parametrize("metadata_present", [True, False])
+def test_server_suite_exit_status(
+    tmp_path: Path, monkeypatch: MonkeyPatch, capfd, internal_error: bool, metadata_present: bool
+) -> None:
+    """Packaging metadata must not change shard ownership or bypass the completeness gate."""
     servers = [tmp_path / "responses_api_models" / name for name in ("first", "second")]
     for server in servers:
         server.mkdir(parents=True)
@@ -162,12 +166,15 @@ def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capf
         (server / "pyproject.toml").touch()
         (server / "uv.lock").touch()
         (server / "test_app.py").write_text("from pathlib import Path\n\ndef test_runs():\n    Path('ran').touch()\n")
+    if metadata_present:
+        for suffix in (".egg-info", ".dist-info"):
+            (servers[0].parent / f"first{suffix}").mkdir()
     if internal_error:
         (servers[0] / "conftest.py").write_text(
             "def pytest_configure(config):\n    raise RuntimeError('server setup failed')\n"
         )
 
-    config = OmegaConf.create({"uv_cache_dir": str(tmp_path / "uv-cache")})
+    config = OmegaConf.create({"uv_cache_dir": str(tmp_path / "uv-cache"), "fail_on_total_and_test_mismatch": True})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
     monkeypatch.setattr("nemo_gym.orchestration.server_venv.get_global_config_dict", lambda: config)

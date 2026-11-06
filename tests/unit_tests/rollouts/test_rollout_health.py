@@ -18,9 +18,10 @@ import nemo_gym.rollouts.rollout_collection as rollout_collection
 import nemo_gym.rollouts.rollout_health as health
 from nemo_gym.rollouts import trajectory_builder
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
-from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, run_health_checks
+from nemo_gym.rollouts.rollout_health import CHECK_REGISTRY, RolloutStore, run_health_checks
+from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.trajectory.model_call_record import build_model_call_record
-from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
+from nemo_gym.trajectory.trajectory_record import AgentInvocation, TrajectoryModelCall, TrajectoryRecord
 
 
 MODEL_CALL_CHECKS = {
@@ -288,6 +289,11 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         (_record(8, 0, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=500)]),
         (_record(8, 1, usage={"input_tokens": 3, "output_tokens": 2}), [_call(status_code=408)]),
     ]
+    failed_tool = _record(9, 0)
+    failed_tool["ng_trajectory"]["tool_calls"] = [
+        {"invocation_id": "root", "tool_call_id": "t1", "output": "ripgrep execution failed: x", "tool_name": "grep"}
+    ]
+    rows.append((failed_tool, [_call()]))
     rows.append(deepcopy(rows[0]))
     rollout_path = _write_fixture(tmp_path, rows)
 
@@ -443,6 +449,10 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
         if not disabled:
             assert "Finished rollout collection" in stdout
             assert "Rollout health checks skipped" not in stdout
+
+        if not disabled:
+            assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
+            assert stdout.index("Finished rollout collection") < stdout.index("run health (failures vs limit)")
             assert not caplog.records
 
     assert artifacts[False] == artifacts[True]
@@ -1190,6 +1200,10 @@ _REASONING_ONLY = {
     "responses": {"output": [{"type": "reasoning", "summary": [{"type": "summary_text", "text": "partial"}]}]},
     "chat": {"choices": [{"message": {"content": "", "reasoning_content": "partial"}}]},
     "messages": {"content": [{"type": "thinking", "thinking": "partial"}]},
+    "messages_redacted": {"content": [{"type": "redacted_thinking", "data": "opaque"}]},
+    "messages_signature_only": {"content": [{"type": "thinking", "thinking": "", "signature": "sig"}]},
+    # A chat content part typed as thinking is reasoning too, never an answer.
+    "chat_thinking_part": {"choices": [{"message": {"content": [{"type": "thinking", "thinking": "partial"}]}}]},
 }
 _ACTIONABLE = {
     "responses_function_call": {
@@ -1249,6 +1263,49 @@ def test_a_length_limited_call_with_only_reasoning_is_a_runaway_generation(
     assert flagged_calls == (["clipped"] if flagged else [])
 
 
+_MESSAGES_TURN_CONTENT = {
+    "thinking": ([{"type": "thinking", "thinking": "inspect first", "signature": ""}], False),
+    "redacted_thinking": ([{"type": "redacted_thinking", "data": "opaque"}], False),
+    "signature_only": ([{"type": "thinking", "thinking": "", "signature": "sig"}], False),
+    "text": ([{"type": "text", "text": "Answer: 18"}], False),
+    "tool_use": ([{"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": "ls"}}], False),
+    "no_content": ([], True),
+    "empty_thinking": ([{"type": "thinking", "thinking": "", "signature": ""}], True),
+    "empty_redacted_thinking": ([{"type": "redacted_thinking", "data": ""}], True),
+}
+
+
+@pytest.mark.parametrize(
+    ("content", "hollow"), list(_MESSAGES_TURN_CONTENT.values()), ids=list(_MESSAGES_TURN_CONTENT)
+)
+def test_a_messages_turn_with_only_thinking_is_not_hollow(tmp_path: Path, content: list[dict], hollow: bool) -> None:
+    """A turn built from a captured Anthropic Messages call counts its thinking blocks as content, the way a
+    Responses reasoning item counts; only a turn with nothing in it is hollow."""
+    response = {"type": "message", "role": "assistant", "content": content, "stop_reason": "end_turn"}
+    call = TrajectoryModelCall.model_validate(
+        {
+            "model_call_id": "c1",
+            "started_at": 1.0,
+            "request": {"messages": [{"role": "user", "content": "question"}]},
+            "response": response,
+            "response_metadata": {"response_id": "r1", "status_code": 200, "response_status": "completed"},
+        }
+    )
+    root = AgentInvocation.model_validate({"invocation_id": "root", "model_calls": [{"model_call_id": "c1"}]})
+    turns = trajectory_builder._turns_from_model_calls("0", "0-0", [root], [call], resolved=True)
+    [turn] = turns
+    # The turn keeps the captured blocks: thinking is its reasoning, never its answer.
+    thinking = [block for block in content if block["type"] in ("thinking", "redacted_thinking")]
+    assert turn.reasoning_content == (thinking or None)
+    record = _record(0, 0)
+    record["ng_trajectory"]["turns"] = [turn.model_dump(mode="json")]
+    rollout_path = _write_fixture(tmp_path, [(record, [_call(response=response, finish_reason="stop")])])
+
+    [digest] = run_health_checks(rollout_path, workers=1).rollouts
+
+    assert any(finding.check == "agent_turn_hollow" for finding in digest.findings) is hollow
+
+
 def test_runaway_generation_is_unobserved_without_a_saved_response(tmp_path: Path) -> None:
     rollout_path = _write_fixture(
         tmp_path,
@@ -1289,6 +1346,7 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
         "trajectory_capture_mismatch",
         "rollout_token_count_mismatch",
         "model_call_runaway_generation",
+        "rollout_tool_call_failed",
     }
 
     # A malformed line must not be grouped with a valid rollout whose numeric
@@ -1400,12 +1458,139 @@ def test_process_pool_success_path_and_explicit_rollout_file(
     result = health.health_check_run_dir(run_dir, workers=2)
 
     assert len(result.rollouts) == 2
-    assert "2 checked" in capsys.readouterr().out
+    assert "rollout quality: 0 healthy / 2 unhealthy / 0 unobserved" in capsys.readouterr().out
 
     custom_path = run_dir / "custom-name.jsonl"
     rollout_path.rename(custom_path)
     file_result = health.health_check_run_dir(run_dir, rollout_file="custom-name.jsonl", workers=1)
     assert len(file_result.rollouts) == 2
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("change", ["replace", "append"])
+@pytest.mark.parametrize("journal_backed,timing", [(False, "indexed"), (True, "indexed"), (True, "store_read")])
+def test_health_rejects_replaced_files_but_allows_append(
+    tmp_path, monkeypatch, workers, change, journal_backed, timing
+):
+    path = tmp_path / "rollouts.jsonl"
+    rows = [_record(0, 0), _record(1, 0)]
+    if journal_backed:
+        inputs = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(2)]
+        source = tmp_path / "source.jsonl"
+        source.write_text("{}\n")
+        manifest = RunManifest.create(source, inputs, {}, {})
+        with RolloutStore.start_or_resume(path, lambda: (inputs, manifest), resume=False) as store:
+            for row, result in zip(store.pending(3), rows):
+                store.record_dispatch(row)
+                store.record_outcome(row | result | {"reward": 1.0})
+    else:
+        path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+    def change_source():
+        if change == "replace":
+            replacement = tmp_path / "replacement.jsonl"
+            replacement.write_bytes(path.read_bytes().replace(b'"_ng_task_index":0', b'"_ng_task_index":9'))
+            replacement.replace(path)
+        else:
+            with path.open("ab") as file:
+                file.write(orjson.dumps(_record(9, 0)) + b"\n")
+
+    if timing == "indexed":
+        index = health._index_jsonl
+
+        def index_then_change(paths, **kwargs):
+            result = index(paths, **kwargs)
+            change_source()
+            return result
+
+        monkeypatch.setattr(health, "_index_jsonl", index_then_change)
+    else:
+        read = RolloutStore.read
+
+        def read_then_change(*args, **kwargs):
+            result = read(*args, **kwargs)
+            change_source()
+            return result
+
+        monkeypatch.setattr(RolloutStore, "read", read_then_change)
+    result = run_health_checks(path, workers=workers, output_dir=tmp_path / "report")
+    assert len(result.rollouts) == 2
+    assert 9 not in {row.task_index for row in result.rollouts}
+    if change == "replace":
+        assert result.summary["run"]["issues"]["record_unreadable"] == 2
+        assert all("replaced" in finding.detail["error"] for row in result.rollouts for finding in row.findings)
+    else:
+        assert {row.task_index for row in result.rollouts} == {0, 1}
+        assert result.summary["run"]["issues"]["record_unreadable"] == 0
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_journal_health_workers_read_selected_offsets_from_original_shards(tmp_path, monkeypatch, workers):
+    paths = []
+    selected = []
+    for shard in range(2):
+        output = tmp_path / f"shard-{shard}.jsonl"
+        rows = [{"_ng_task_index": shard * 10 + index, "_ng_rollout_index": 0} for index in range(3)]
+        source = tmp_path / f"source-{shard}.jsonl"
+        source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+        manifest = RunManifest.create(source, rows, {}, {})
+        with RolloutStore.start_or_resume(output, lambda: (rows, manifest), resume=False) as store:
+            for index, row in enumerate(store.pending(3)):
+                original = row | _record(row["_ng_task_index"], 0, answer="old 雪")
+                store.record_dispatch(original)
+                store.record_outcome(original)
+                retry = original | {"_ng_attempt_index": 1}
+                store.record_dispatch(retry)
+                if index == 0:
+                    completed = retry | _record(row["_ng_task_index"], 0, answer="new 雪")
+                    store.record_outcome(completed)
+                    selected.append(completed)
+                elif index == 2:
+                    store.record_outcome(retry | {"_ng_failure_class": "judge_failed"})
+                # Index 1's newer dispatch has no outcome: its old success is stale.
+        paths.append(output)
+    legacy = tmp_path / "legacy.jsonl"
+    legacy_row = _record(100, 0, answer="legacy 雪")
+    legacy.write_bytes(b"\n" + orjson.dumps(legacy_row) + b"\n[]\n")
+    paths.append(legacy)
+    original_bytes = [path.read_bytes() for path in paths]
+
+    selected_method = RolloutStore.selected
+
+    def unexpected_materialization(self, disposition):
+        if disposition == "success":
+            pytest.fail("Health selection must not materialize a list of completed trajectories")
+        return selected_method(self, disposition)
+
+    monkeypatch.setattr(RolloutStore, "selected", unexpected_materialization)
+    slices = health._index_jsonl(paths)
+    assert [(line.path, line.source_index) for line in slices] == [
+        (str(paths[0]), 0),
+        (str(paths[1]), 1),
+        (str(legacy), 2),
+        (str(legacy), 2),
+    ]
+    for line, expected in zip(slices, [*selected, legacy_row]):
+        with open(line.path, "rb") as file:
+            file.seek(line.offset)
+            assert orjson.loads(file.read(line.length)) == expected
+    assert slices[-1].line_number == 3
+
+    report_dir = tmp_path / "reports"
+    original_open = Path.open
+
+    def no_trajectory_copies(path, mode="r", *args, **kwargs):
+        if any(flag in mode for flag in "wax+"):
+            assert path in (report_dir / "quality_summary.json", report_dir / "rollout_verdicts.jsonl")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", no_trajectory_copies)
+    result = run_health_checks(paths, workers=workers, output_dir=report_dir)
+    assert result.summary["run"]["artifacts"]["records"] == 4
+    assert result.summary["run"]["issues"]["rollout_duplicate_identity"] == 0
+    assert result.summary["run"]["issues"]["record_unreadable"] == 1
+    assert {digest.task_index for digest in result.rollouts} == {0, 10, 100, "__unreadable_record__:input-2:line-3"}
+    assert [path.read_bytes() for path in paths] == original_bytes
 
 
 @pytest.mark.parametrize(
@@ -2438,9 +2623,11 @@ def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
     }
 
 
-def test_health_cli_reports_history_error_without_traceback(monkeypatch, capsys):
+def test_health_cli_reports_config_error_without_traceback(monkeypatch, capsys):
+    from nemo_gym.config.config_types import ConfigError
+
     def unavailable(*args, **kwargs):
-        raise health.JournalHealthUnavailable("Export selected results with gym eval aggregate.")
+        raise ConfigError("Export selected results with gym eval aggregate.")
 
     monkeypatch.setattr(cli_eval, "health_check_rollouts", unavailable)
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "health-check", "/tmp/example-run"])
@@ -3763,8 +3950,8 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
     report = health.format_health_report(
         SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
     )
-    assert "Rollout checks: 1600 checked, 1599 passed, 1 flagged, 0 unobserved" in report
-    assert "Rollout health:" not in report
+    assert "rollout quality: 1599 healthy / 1 unhealthy / 0 unobserved" in report
+    assert "run health (failures vs limit): not evaluated; limit final none, not final none" in report
     if responses is None:
         assert "Model responses:" not in report
     else:
@@ -3772,6 +3959,30 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
         assert f"{responses['unknown']} rollout scopes unobserved" in report
         assert f"{responses['duplicated']} duplicate call IDs" in report
     assert summary == original
+
+
+@pytest.mark.parametrize(
+    ("healthy", "reasons", "status"),
+    [(True, [], "healthy"), (False, ["final failures 3 of 100 (3.0%), limit 2%"], "UNHEALTHY")],
+)
+def test_console_reports_failure_counts_and_the_two_limits(healthy, reasons, status, tmp_path):
+    from types import SimpleNamespace
+
+    artifacts = {
+        "healthy": healthy,
+        "expected": 100,
+        "failed": {"final": 3, "not_final": 5},
+        "limits": {"max_final_failure_fraction": 0.02, "max_not_final_failure_fraction": 0.1},
+        "unhealthy_reasons": reasons,
+    }
+    summary = {
+        "run": {"verdicts": {"healthy": 100, "unhealthy": 0, "unobserved": 0}, "stats": {}, "artifacts": artifacts}
+    }
+    report = health.format_health_report(
+        SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
+    )
+    expected = f"run health (failures vs limit): {status}; failed 3 final, 5 not final of 100 expected; limit final 2%, not final 10%"
+    assert expected + ("; " + reasons[0] if reasons else "") in report
 
 
 @pytest.mark.parametrize("mode", ["enabled", "disabled", "missing", "relative"])
@@ -3787,7 +3998,7 @@ def test_health_capture_configuration_is_optional_and_does_not_create_files(tmp_
     assert list(tmp_path.iterdir()) == before
 
 
-@pytest.mark.parametrize("error_type", [health.JournalHealthUnavailable, OSError])
+@pytest.mark.parametrize("error_type", [ValueError, OSError])
 def test_provisional_health_failure_preserves_saved_evidence(tmp_path, monkeypatch, capsys, caplog, error_type):
     from types import SimpleNamespace
 
@@ -3806,10 +4017,7 @@ def test_provisional_health_failure_preserves_saved_evidence(tmp_path, monkeypat
     health._health_check_collected_rollouts(output, config, {(0, 0)}, terminated=True)
     assert len(calls) == 1
     assert (output.read_bytes(), report.read_bytes()) == before
-    if error_type is health.JournalHealthUnavailable:
-        assert "Rollout health checks skipped" in capsys.readouterr().out
-    else:
-        assert "Writing the provisional quality summary failed" in caplog.text
+    assert "Writing the provisional quality summary failed" in caplog.text
 
 
 def test_collected_health_before_output_exists_does_not_create_reports(tmp_path):
@@ -3817,7 +4025,7 @@ def test_collected_health_before_output_exists_does_not_create_reports(tmp_path)
     assert list(tmp_path.iterdir()) == []
 
 
-def test_unavailable_journal_health_preserves_saved_evidence(tmp_path, monkeypatch, capsys):
+def test_collected_health_read_failure_preserves_saved_evidence(tmp_path, monkeypatch, caplog):
     from types import SimpleNamespace
 
     output = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
@@ -3827,11 +4035,11 @@ def test_unavailable_journal_health_preserves_saved_evidence(tmp_path, monkeypat
     )
 
     def unavailable(*args, **kwargs):
-        raise health.JournalHealthUnavailable("selected projection required")
+        raise OSError("saved history unavailable")
 
     monkeypatch.setattr(health, "run_health_checks", unavailable)
     health._health_check_collected_rollouts(output, config)
-    assert "Rollout health checks skipped: selected projection required" in capsys.readouterr().out
+    assert "Rollout health checks failed after collection" in caplog.text
     assert output.read_bytes() == before
     assert not (tmp_path / "quality_summary.json").exists()
 
@@ -3843,3 +4051,102 @@ def test_run_provenance_records_whether_mlflow_tracking_is_required(tmp_path: Pa
     (tmp_path / "rollouts_resolved_config.yaml").write_text(line + "route_failures_to_sidecar: true\n")
     summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
     assert summary["run"]["provenance"]["mlflow"]["tracking_required"] is required
+
+
+def _tool_call(index: int, output) -> dict:
+    return {"invocation_id": "root", "tool_call_id": f"t{index}", "tool_name": "grep", "output": output}
+
+
+def _tool_call_failed_findings(tmp_path: Path, tool_calls: list[dict], **record_updates) -> tuple[dict, list]:
+    record = _record(0, 0)
+    record["ng_trajectory"]["tool_calls"] = tool_calls
+    record.update(record_updates)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1).rollouts
+    return record, [finding for finding in digest.findings if finding.check == "rollout_tool_call_failed"]
+
+
+def test_tool_outputs_that_report_the_harness_tool_could_not_run_are_one_counted_finding(tmp_path: Path) -> None:
+    failed = [_tool_call(i, "ripgrep execution failed: spawn rg ENOENT") for i in range(129)]
+    ok = [_tool_call(1000, "3 matches"), _tool_call(1001, None), _tool_call(1002, "the ripgrep execution failed")]
+
+    record, findings = _tool_call_failed_findings(tmp_path, [*failed, *ok], reward=0.0)
+
+    [finding] = findings
+    assert finding.detail["count"] == 129
+    assert list(finding.subject.values()) == [0, 0]
+    # The finding labels the rollout; the reward the record carries is not read or changed.
+    assert record["reward"] == 0.0
+
+
+def test_a_completed_tool_call_that_prints_the_marker_is_not_a_tool_failure(tmp_path: Path) -> None:
+    # A command that ran and succeeded can print the marker, for example when it reads a log.
+    completed = _tool_call(1, "ripgrep execution failed: example from a log file") | {
+        "tool_name": "bash",
+        "status": "completed",
+    }
+    failed = _tool_call(2, "ripgrep execution failed: spawn rg ENOENT") | {"status": "failed"}
+    other_tool = _tool_call(3, "ripgrep execution failed: quoted") | {"tool_name": "bash", "status": "failed"}
+
+    _, findings = _tool_call_failed_findings(tmp_path, [completed])
+    assert findings == []
+
+    _, findings = _tool_call_failed_findings(tmp_path, [completed, failed, other_tool])
+    [finding] = findings
+    assert finding.detail["count"] == 1
+
+
+def test_a_trajectory_without_failed_tool_outputs_has_no_tool_call_failed_finding(tmp_path: Path) -> None:
+    _, findings = _tool_call_failed_findings(tmp_path, [_tool_call(1, "3 matches"), _tool_call(2, "")])
+    assert findings == []
+    _, findings = _tool_call_failed_findings(tmp_path, [])
+    assert findings == []
+
+
+def test_a_tool_failure_marker_is_read_from_text_output_shapes(tmp_path: Path) -> None:
+    _, findings = _tool_call_failed_findings(
+        tmp_path,
+        [
+            _tool_call(1, "  Ripgrep execution failed: exit 2"),
+            _tool_call(2, {"output": "ripgrep execution failed: killed"}),
+            _tool_call(3, {"unrelated": "ripgrep execution failed"}),
+        ],
+    )
+    assert [finding.detail["count"] for finding in findings] == [2]
+
+
+def test_tool_call_failed_leaves_the_verdict_to_the_finding_only(tmp_path: Path) -> None:
+    record = _record(0, 0)
+    record["ng_trajectory"]["tool_calls"] = [_tool_call(1, "ripgrep execution failed: x")]
+    result = run_health_checks(_write_fixture(tmp_path, [(record, [_call()])]), workers=1)
+    [digest] = result.rollouts
+    assert [finding.check for finding in digest.findings] == ["rollout_tool_call_failed"]
+    assert digest.verdict == "unhealthy"
+
+
+def _missing_turns_finding(tmp_path: Path, **record_updates):
+    record = _record(0, 0, include_turn=False)
+    record.update(record_updates)
+    [digest] = run_health_checks(_write_fixture(tmp_path, [(record, [])]), workers=1).rollouts
+    [finding] = [item for item in digest.findings if item.check == "rollout_missing_agent_turns"]
+    return finding
+
+
+def test_missing_agent_turns_names_the_resource_limit_that_ended_the_sandbox(tmp_path: Path) -> None:
+    limit = {"resource": "storage", "detail": "Pod entered Failed phase (Evicted)"}
+
+    finding = _missing_turns_finding(tmp_path, sandbox_resource_limit=limit)
+
+    # Still reported: the detail only says why the absence was expected.
+    assert finding.detail == {
+        "reason": "no agent turn with model activity",
+        "expected_absence": "sandbox_resource_limit:storage",
+    }
+
+
+@pytest.mark.parametrize("limit", [None, {}, {"detail": "no resource"}, {"resource": ""}, "storage"])
+def test_missing_agent_turns_detail_is_unchanged_without_a_named_resource_limit(tmp_path: Path, limit) -> None:
+    updates = {} if limit is None else {"sandbox_resource_limit": limit}
+
+    finding = _missing_turns_finding(tmp_path, **updates)
+
+    assert finding.detail == {"reason": "no agent turn with model activity"}

@@ -16,6 +16,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.models.base_responses_api_model import _orjson_dispatch_response
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
@@ -143,6 +144,7 @@ class VLLMModelWithCompaction(VLLMModel):
         standard_body, chat_params = self._context_compaction_chat_params(body)
         standard_body.model = self.config.model
         chat_completion_response = await self.chat_completions(request, chat_params)
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return self._converter.chat_completion_to_response(
             responses_create_params=standard_body,
             chat_completion=chat_completion_response,

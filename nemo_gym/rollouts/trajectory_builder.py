@@ -29,6 +29,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import TaskId, is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -72,9 +73,12 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         rollout_id = identity.get("rollout_id")
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
-    task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
-    if task_id is None:
-        task_id = str(row[TASK_INDEX_KEY_NAME])
+    if is_materialized_task_row(row):
+        task_id = TaskId.model_validate(row["task_id"]).task_id
+    else:
+        task_id = next((str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None), None)
+        if task_id is None:
+            task_id = str(row[TASK_INDEX_KEY_NAME])
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
@@ -82,8 +86,8 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
 def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
     """Split one captured model call into the turn's question, answer, reasoning, and tool-call count.
 
-    Handles Responses API output items and chat-completions messages, the two dialects the Model
-    Server captures.
+    Handles the three dialects the Model Server captures: Responses API output items, chat-completions
+    messages, and Anthropic Messages content blocks.
     """
     question = request.get("input", request.get("messages")) if isinstance(request, dict) else request
     if isinstance(request, dict) and isinstance(request.get("input"), list):
@@ -97,6 +101,13 @@ def _turn_content(request: Any, response: Any) -> tuple[Any, Any, Any, int]:
         reasoning = [item for item in output if item.get("type") == "reasoning"] or None
         answer = [item for item in output if item.get("type") != "reasoning"]
         tool_calls = sum(1 for item in answer if item.get("type") == "function_call")
+        return question, answer, reasoning, tool_calls
+    if isinstance(response, dict) and response.get("type") == "message" and isinstance(response.get("content"), list):
+        blocks = [block for block in response["content"] if isinstance(block, dict)]
+        thinking = ("thinking", "redacted_thinking")
+        reasoning = [block for block in blocks if block.get("type") in thinking] or None
+        answer = [block for block in blocks if block.get("type") not in thinking]
+        tool_calls = sum(1 for block in answer if block.get("type") == "tool_use")
         return question, answer, reasoning, tool_calls
     choices = response.get("choices") if isinstance(response, dict) else None
     if isinstance(choices, list) and choices and isinstance(choices[0], dict):

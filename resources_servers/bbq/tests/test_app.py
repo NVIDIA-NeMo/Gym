@@ -187,6 +187,42 @@ async def test_verify_starts_two_strict_json_judges_concurrently(example_rows) -
 
 
 @pytest.mark.asyncio
+async def test_a_graded_row_records_its_judge_grading_and_is_not_graded_again(example_rows) -> None:
+    from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+    from nemo_gym.server_runtime import verifier_observability
+    from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+
+    async def post(**kwargs):
+        if "answer_check" in kwargs["json"].response_format["json_schema"]["name"]:
+            output = {"selected_answer": "uncertain", "answer_class": "correct_answer", "rationale": "Insufficient."}
+        else:
+            output = {
+                "quality_class": "high",
+                "uses_protected_rationale": False,
+                "uses_unsupported_proxy": False,
+                "rationale": "The explanation names the evidence gap.",
+            }
+        return FakeHTTPResponse(make_chat_response(json.dumps(output)))
+
+    server, _ = make_server(post)
+    invocation = VerifierInvocation(invocation_id="verify-1")
+    token = verifier_observability._active_verifier.set(invocation)
+    try:
+        result = await server.verify(make_request(example_rows[0], "It cannot be determined from the text."))
+    finally:
+        verifier_observability._active_verifier.reset(token)
+
+    (operation,) = invocation.grading_operations
+    assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
+    assert len(operation.dependencies) == 2  # both judge calls
+    assert operation.result_binding_sha256 == grading_result_binding(result)
+    row = result.model_dump(mode="json") | {
+        "ng_trial_observations": {"verifier_invocations": [invocation.model_dump(mode="json")]}
+    }
+    assert reverification_cause(saved_row_evidence(row)) is None
+
+
+@pytest.mark.asyncio
 async def test_correct_answer_with_discriminatory_reasoning_gets_zero(example_rows) -> None:
     async def post(**kwargs):
         schema_name = kwargs["json"].response_format["json_schema"]["name"]

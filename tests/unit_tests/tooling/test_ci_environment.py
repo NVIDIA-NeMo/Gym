@@ -951,10 +951,14 @@ esac
         bin_dir / "ng_test_all",
         """#!/usr/bin/env bash
 set -eu
-printf 'UV_CACHE_DIR=%s\\n' "${UV_CACHE_DIR}" > "${GYM_CI_CAPTURE}"
-printf 'UV_LINK_MODE=%s\\n' "${UV_LINK_MODE:-}" >> "${GYM_CI_CAPTURE}"
-printf 'GYM_CI_DEV_VENV_DIR=%s\\n' "${GYM_CI_DEV_VENV_DIR:-}" >> "${GYM_CI_CAPTURE}"
-printf 'ARG=%s\\n' "$@" >> "${GYM_CI_CAPTURE}"
+for arg; do
+    case "$arg" in +shard_index=*) index=${arg#*=} ;; esac
+done
+capture="${GYM_CI_CAPTURE}.${index}"
+printf 'UV_CACHE_DIR=%s\\n' "${UV_CACHE_DIR}" > "${capture}"
+printf 'UV_LINK_MODE=%s\\n' "${UV_LINK_MODE:-}" >> "${capture}"
+printf 'GYM_CI_DEV_VENV_DIR=%s\\n' "${GYM_CI_DEV_VENV_DIR:-}" >> "${capture}"
+printf 'ARG=%s\\n' "$@" >> "${capture}"
 """,
     )
 
@@ -971,14 +975,17 @@ printf 'ARG=%s\\n' "$@" >> "${GYM_CI_CAPTURE}"
     )
     subprocess.run([str(ci_dir / "server_tests.sh"), "2", "8"], check=True, env=env)
 
-    captured = capture_path.read_text().splitlines()
+    captures = [Path(f"{capture_path}.{index}").read_text().splitlines() for index in (2, 10, 18, 26)]
+    for captured in captures:
+        assert "ARG=+num_shards=32" in captured
+    captured = captures[0]
     assert f"UV_CACHE_DIR={repo_root}/relative-cache" in captured
     assert "UV_LINK_MODE=copy" in captured
     assert f"GYM_CI_DEV_VENV_DIR={node_local_root}/.driver-venv" in captured
     assert "ARG=+uv_cache_dir=" + str(repo_root / "relative-cache") in captured
     assert "ARG=+uv_venv_dir=" + str(node_local_root) in captured
     assert "ARG=+shard_index=2" in captured
-    assert "ARG=+num_shards=8" in captured
+    assert "ARG=+num_shards=32" in captured
     assert not (node_local_root / ".driver-venv").exists()
 
 
