@@ -5970,6 +5970,7 @@ def _verify_transport_failure(row: Mapping[str, Any]) -> bool:
 
 
 _FAILED_RESPONSE_STATUSES = frozenset({"failed", "incomplete", "cancelled"})
+_CUT_FINISH = frozenset({"length", "content_filter", "max_tokens", "max_output_tokens"})
 
 
 def _verifier_model_answered(row: Mapping[str, Any], verifiers: list[Any]) -> bool:
@@ -5994,19 +5995,23 @@ def _verifier_model_answered(row: Mapping[str, Any], verifiers: list[Any]) -> bo
             continue
         code, status = metadata.get("status_code"), metadata.get("response_status")
         answered = 200 <= code < 300 if type(code) is int else status == "completed"
-        if answered and status not in _FAILED_RESPONSE_STATUSES:
+        # A chat reply carries no response status; a cut one says so in its finish reason.
+        if answered and status not in _FAILED_RESPONSE_STATUSES and metadata.get("finish_reason") not in _CUT_FINISH:
             return True
     return False
 
 
 def _judge_error_marker(row: Mapping[str, Any]) -> bool:
-    """Whether the row names a judge error the server wrote: a judge failure kind, or a saved judge error or invalid
-    judge response."""
+    """Whether the row names a judge error the server wrote: a judge failure kind, a saved judge error (a label or a
+    top-level message) or an invalid judge response (top level or inside the rubric facts)."""
     facts = _grading_facts(row)
+    rubric = facts.get("rubric")
     return (
         row.get("failure_kind") in JUDGE_FAILURE_KINDS
         or facts.get("judge_error") is True
+        or facts.get("judge_error_message") is True
         or facts.get("invalid_judge_response") is True
+        or (isinstance(rubric, Mapping) and rubric.get("invalid_judge_response") is True)
     )
 
 

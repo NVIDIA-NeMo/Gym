@@ -348,6 +348,9 @@ def _asked_a_model(row: dict, metadata: dict | None, **extra) -> dict:
 
 
 ANSWERED = {"status_code": 200, "response_status": "completed"}
+TEXT_ANSWER = ANSWER | {
+    "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "42"}]}]
+}
 
 
 async def test_a_result_the_judge_answered_without_a_grading_record_is_not_graded_again(tmp_path, verifier) -> None:
@@ -390,6 +393,42 @@ async def test_one_answered_judge_call_among_failed_ones_keeps_the_grade(tmp_pat
 
 async def test_a_result_naming_a_judge_error_is_graded_again_even_after_a_200(tmp_path) -> None:
     row = _asked_a_model(ungraded(0), ANSWERED, failure_kind="judge_invalid")
+    assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
+
+
+@pytest.mark.parametrize(
+    "finish",
+    ["length", "content_filter"],
+)
+async def test_a_chat_judge_reply_cut_at_its_cap_is_graded_again(tmp_path, finish) -> None:
+    """FrontierScience's non-research verifier saves no verdict, reward 0.0 and a clean invalid flag on a cut reply."""
+    metadata = {"status_code": 200, "response_status": None, "dialect": "chat", "finish_reason": finish}
+    row = _asked_a_model(
+        ungraded(0), metadata, verdict=None, reward=0.0, invalid_judge_response=False, response=TEXT_ANSWER
+    )
+    assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
+
+
+async def test_a_chat_judge_reply_that_stopped_normally_keeps_the_grade(tmp_path) -> None:
+    metadata = {"status_code": 200, "response_status": None, "dialect": "chat", "finish_reason": "stop"}
+    row = _asked_a_model(
+        ungraded(0), metadata, verdict=None, reward=0.0, invalid_judge_response=False, response=TEXT_ANSWER
+    )
+    assert due_judge_failures(_run(tmp_path, [row])) == []
+
+
+async def test_a_partial_reward_with_a_saved_judge_error_message_is_graded_again(tmp_path) -> None:
+    """Finance Agent V2: an answered judge call, reward 0.5 and a nonempty judge_error for unresolved criteria."""
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    row = _asked_a_model(ungraded(0), ANSWERED, reward=0.5, judge_error="criteria 2, 3 unresolved")
+    assert len(due_judge_failures(_run(tmp_path / "a", [row]))) == 1
+    empty = _asked_a_model(ungraded(0), ANSWERED, reward=0.5, judge_error="")
+    assert due_judge_failures(_run(tmp_path / "b", [empty])) == []
+
+
+async def test_an_invalid_judge_response_inside_the_rubric_facts_is_graded_again(tmp_path) -> None:
+    row = _asked_a_model(ungraded(0), ANSWERED, rubric_score=0.0, scoring_threshold=1.0, invalid_judge_response=True)
     assert len(due_judge_failures(_run(tmp_path, [row]))) == 1
 
 

@@ -323,6 +323,8 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "judge_error_message": isinstance(r.get("judge_error"), str) and bool(r["judge_error"].strip()),
+        "invalid_judge_response": r.get("invalid_judge_response") is True,
         "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
