@@ -223,7 +223,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
         # so a tool cannot create an untracked replacement in the gap, even if its request is cancelled.
         async with self.session_lock(sid):
             if self.session_is_closed(sid) or self.session_is_verified(sid):
-                raise ResourcesSessionLostError(f"math_with_code session {sid} is closed")
+                raise ResourcesSessionLostError(f"math_with_code session {sid} is closed or already verified")
             try:
                 if sid not in self._sessions:
                     if sid not in self._starting_sessions:
@@ -241,6 +241,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                     self._starting_sessions.pop(sid, None)
                 handle = self._sessions[sid]
             except Exception as e:
+                logger.exception("Python worker failed to start for resources session %s", sid)
                 return ExecutePythonResponse(success=False, stdout="", stderr="", error_message=str(e))
         try:
             stdout, stderr, result = await loop.run_in_executor(
@@ -262,8 +263,7 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                 error_message=str(e),
             )
         if self.session_is_closed(sid):
-            # The session closed while this call ran, so stop the worker the call may have started.
-            await self._cleanup_session(sid)
+            # The session closed while this call ran, so its result is discarded; close already stopped the worker.
             raise ResourcesSessionLostError(f"math_with_code session {sid} closed during the call")
         return response
 

@@ -550,7 +550,7 @@ class TestResourcesSessions:
         assert (await server.execute_python(request, ExecutePythonRequest(code="1"))).result == "1"
         worker = server._sessions["rs-1"]._proc
         # Model code can catch the worker's alarm, so its exec holds a default-executor thread until the worker stops.
-        code = "import time\nwhile True:\n    try:\n        time.sleep(60)\n    except Exception:\n        pass"
+        code = "import time\nwhile True:\n    try:\n        time.sleep(60)\n    except:\n        pass"
         stuck = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code=code)))
         await asyncio.sleep(0.5)
         # Stand-ins for other sessions' blocked execs take the rest of the default executor's threads.
@@ -620,6 +620,31 @@ class TestResourcesSessions:
         handle.stoppable = True
         assert client.post("/close_session", json=_close("rs-1")).status_code == 200
         assert server._sessions == {}
+
+    def test_end_session_stops_the_worker_without_fencing_the_session(self) -> None:
+        server, app = _session_server()
+        client = TestClient(app, raise_server_exceptions=False)
+        assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+        assert client.post("/execute_python", json={"code": "1 + 1"}).status_code == 200
+        worker = server._sessions["rs-1"]._proc
+        assert worker.is_alive()
+
+        assert client.post("/end_session").status_code == 200
+        assert not worker.is_alive()
+        assert server._sessions == {}
+        assert client.post("/end_session").status_code == 200
+
+        # end_session does not fence: the next tool call starts a fresh worker.
+        assert client.post("/execute_python", json={"code": "2 + 2\n2 + 2"}).json()["result"] == "4"
+        assert server._sessions["rs-1"]._proc is not worker
+        handle = _UnstoppableHandle()
+        server._sessions["rs-1"], previous = handle, server._sessions["rs-1"]
+        assert client.post("/end_session").status_code == 500
+        assert server._sessions["rs-1"] is handle
+        handle.stoppable = True
+        assert client.post("/end_session").status_code == 200
+        assert server._sessions == {}
+        previous._proc.kill()
 
     def test_execute_after_close_is_a_lost_session(self) -> None:
         server, app = _session_server()
@@ -692,7 +717,7 @@ class TestResourcesSessions:
             assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         assert server._sessions == {} and not worker._proc.is_alive()
 
-    def test_legacy_seed_keeps_working(self) -> None:
+    def test_cookie_seed_keeps_working(self) -> None:
         server, app = _session_server()
         client = TestClient(app)
 
