@@ -22,7 +22,7 @@ class LentSandboxes:
     """Start, lend and stop one sandbox per resources session, from the server's sandbox configuration.
 
     A server's typed seed calls :meth:`lend` and its typed close calls :meth:`release`, both under the server's
-    :class:`ResourcesSessionFence` lock. The server keeps any other session state, such as task files it serves or a
+    :class:`ResourcesSessionLocks` lock. The server keeps any other session state, such as task files it serves or a
     tool workspace, and calls :meth:`release_all` at shutdown. A server that grades in the lent sandbox after the
     episode reads it with :meth:`get` before the close.
     """
