@@ -33,8 +33,9 @@ import math
 import operator
 import struct
 from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from itertools import compress, repeat
-from typing import Any
+from typing import Any, overload
 
 from nemo_gym.token_id_capture import capture_metrics
 
@@ -93,8 +94,55 @@ def _all_exact_type(values: Sequence[object], expected: type) -> bool:
     return all(map(operator.is_, map(type, values), repeat(expected)))
 
 
+@dataclass(frozen=True, init=False)
+class PackedTokenIds(Sequence[int]):
+    """An owned immutable token sequence with its validated v2 encoding.
+
+    Reuse is local to one record build. No mutable record or engine buffer is
+    cached, and ordinary wire validation continues to pack its own columns.
+    """
+
+    _values: tuple[int, ...]
+    encoded: bytes
+
+    def __init__(self, values: Sequence[int]) -> None:
+        owned = tuple(values)
+        object.__setattr__(self, "_values", owned)
+        object.__setattr__(self, "encoded", encode_token_ids(owned))
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    @overload
+    def __getitem__(self, index: int) -> int: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[int, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> int | tuple[int, ...]:
+        if isinstance(index, slice):
+            return self._values[index]
+        return self._values[index]
+
+    def prepend(self, prefix: Sequence[int]) -> PackedTokenIds:
+        """Pack only the prefix, retaining already validated delta bytes."""
+        head = PackedTokenIds(prefix)
+        if not head:
+            return self
+        result = object.__new__(PackedTokenIds)
+        object.__setattr__(result, "_values", head._values + self._values)
+        object.__setattr__(
+            result,
+            "encoded",
+            struct.pack(">Q", len(head) + len(self)) + head.encoded[8:] + self.encoded[8:],
+        )
+        return result
+
+
 def encode_token_ids(token_ids: Sequence[int]) -> bytes:
     """Encode token IDs as a length followed by unsigned big-endian values."""
+    if type(token_ids) is PackedTokenIds:
+        return token_ids.encoded
     length = _encode_uint(len(token_ids), field="token_ids length")
     if not _all_exact_type(token_ids, int):
         for token_id in token_ids:
@@ -143,7 +191,47 @@ def compute_chain_hash(parent_chain_hash: str | None, token_ids_delta: Sequence[
     return hashlib.sha256(_CHAIN_DIGEST_DOMAIN + bytes(payload)).hexdigest()
 
 
+@dataclass(frozen=True, init=False)
+class PackedFloat32Values(Sequence[float]):
+    """Owned exact floats and their checked, canonical float32 encoding."""
+
+    _values: tuple[float, ...]
+    encoded: bytes
+
+    def __init__(self, values: Sequence[float], *, field: str) -> None:
+        owned = tuple(values)
+        object.__setattr__(self, "_values", owned)
+        object.__setattr__(self, "encoded", _encode_float32_values(owned, field=field))
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    @overload
+    def __getitem__(self, index: int) -> float: ...
+
+    @overload
+    def __getitem__(self, index: slice) -> tuple[float, ...]: ...
+
+    def __getitem__(self, index: int | slice) -> float | tuple[float, ...]:
+        if isinstance(index, slice):
+            return self._values[index]
+        return self._values[index]
+
+    def count(self, value: float) -> int:
+        return self._values.count(value)
+
+    def matches(self, values: Sequence[float]) -> bool:
+        """Require identical float objects, preserving signed zero and precision.
+
+        Normal Pydantic list validation retains exact float objects. A custom
+        field validator that replaces one falls back to ordinary encoding.
+        """
+        return len(values) == len(self) and all(map(operator.is_, values, self._values))
+
+
 def _encode_float32_values(values: Sequence[float], *, field: str) -> bytes:
+    if type(values) is PackedFloat32Values:
+        return values.encoded
     length = _encode_uint(len(values), field=f"{field} length")
     if not _all_exact_type(values, float) or not all(map(math.isfinite, values)):
         for value in values:
