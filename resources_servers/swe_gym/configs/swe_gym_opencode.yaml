@@ -9,6 +9,11 @@
 # in every pass of the 3x sweep -- see the README), not a fixed eval benchmark.
 #
 #   gym env start --config resources_servers/swe_gym/configs/swe_gym_opencode.yaml
+#
+# Deprecated: opencode_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
+# migration. Use swe_gym_opencode_single_agent_turn.yaml instead, which runs opencode_agent through
+# single_agent_turn. Training on opencode_agent session rollouts is not validated yet (see
+# responses_api_agents/opencode_agent/README.md), so check its token capture before moving a training run over.
 
 config_paths:
   - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml

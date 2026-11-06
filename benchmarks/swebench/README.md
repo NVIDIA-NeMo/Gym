@@ -15,32 +15,27 @@ Adds multiple SWE benchmarks to Gym. These are useable across agents/harnesses.
 
 ## Harnesses
 
-Each `opencode.yaml` recipe runs `opencode_sandboxed_agent` through the `legacy_agent` relay. The
-`opencode_single_agent_turn.yaml` recipes of Verified, Multilingual and Pro run `opencode_agent` through
-`single_agent_turn` instead, as `verified/hermes.yaml` runs Hermes: the Resources Server starts the task sandbox,
-lends it to the agent session, and grades the captured patch after the agent closes. Rows reach it through the
-recipe's taskset (`swebench:verified`, `swebench:multilingual` or `swebench:pro`). The two OpenCode adapters use
-different defaults, so treat their scores as separate measurements.
+Use the `opencode_single_agent_turn.yaml` recipe of Verified, Multilingual or Pro. It runs `opencode_agent` through
+`single_agent_turn`, as `verified/hermes.yaml` runs Hermes: the Resources Server starts the task sandbox, lends it to
+the agent session, and grades the captured patch after the agent closes. Rows reach it through the recipe's taskset
+(`swebench:verified`, `swebench:multilingual` or `swebench:pro`).
 
-```bash
-gym eval prepare --config benchmarks/swebench/verified/opencode_single_agent_turn.yaml
-gym env start --model-type vllm_model --config benchmarks/swebench/verified/opencode_single_agent_turn.yaml
-```
+The `opencode.yaml` recipes of Verified, Multilingual and Pro are deprecated. They run `opencode_sandboxed_agent`
+through the `legacy_agent` relay, and that agent
+[will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx) after the Environment
+Server migration. They stay to reproduce existing results, such as the
+[Nemotron 3.5 Super](../nemotron_3.5_super/README.md) recipes. The two OpenCode adapters use different defaults, so
+treat their scores as separate measurements.
 
 ## Example usage
 
 ```bash
 # Prepare benchmark data
-gym eval prepare --config benchmarks/swebench/verified/opencode.yaml
+gym eval prepare --config benchmarks/swebench/verified/opencode_single_agent_turn.yaml
 
-# Running servers
-gym env start \
-    --model-type vllm_model \
-    --config benchmarks/swebench/verified/opencode.yaml
-
-# Collecting rollouts
-gym eval run --no-serve \
-    --agent mini_swe_agent_2_swebench_verified \
-    --input benchmarks/swebench/data/swebench_verified_benchmark.jsonl \
+# Start the servers, collect rollouts from the prepared benchmark split, and stop the servers
+gym eval run --model-type vllm_model \
+    --config benchmarks/swebench/verified/opencode_single_agent_turn.yaml \
+    --split benchmark \
     --output results/swebench_verified/rollouts.jsonl
 ```

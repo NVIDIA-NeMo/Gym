@@ -43,7 +43,8 @@ r2e_gym_opencode_agent:
   responses_api_agents:
     opencode_agent:
       resources_server: null
-      # Training rollouts need the policy's token IDs, as opencode_sandboxed_agent records them by default.
+      # Training rollouts need the policy's token IDs, as opencode_sandboxed_agent records them by default. The
+      # opencode_agent README still lists its session path as evaluation only; check the capture before training on it.
       token_id_capture: true
 
 r2e_gym_opencode_single_agent_turn:

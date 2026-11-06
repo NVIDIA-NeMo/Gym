@@ -100,17 +100,17 @@ example metrics.
 ## Running an agent
 
 ```bash
-gym env start --config resources_servers/r2e_gym/configs/r2e_gym_opencode.yaml
-```
-
-`r2e_gym_opencode.yaml` runs `opencode_sandboxed_agent` through the `legacy_agent` relay.
-`r2e_gym_opencode_single_agent_turn.yaml` runs `opencode_agent` through `single_agent_turn` instead: the server
-lends the task sandbox to the agent session through `sandbox_access`, and rows reach it through the `r2e_gym`
-taskset.
-
-```bash
 gym env start --config resources_servers/r2e_gym/configs/r2e_gym_opencode_single_agent_turn.yaml
 ```
+
+`r2e_gym_opencode_single_agent_turn.yaml` runs `opencode_agent` through `single_agent_turn`: the server lends the task
+sandbox to the agent session through `sandbox_access`, and rows reach it through the `r2e_gym` taskset. The
+`opencode_agent` README still lists its session path as evaluation only, so check its token capture before you
+train on these rollouts.
+
+`r2e_gym_opencode.yaml` is deprecated. It runs `opencode_sandboxed_agent` through the `legacy_agent` relay, and that
+agent [will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx) after the
+Environment Server migration.
 
 ## Tests
 

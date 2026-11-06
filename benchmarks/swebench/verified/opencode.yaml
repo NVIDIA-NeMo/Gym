@@ -1,3 +1,7 @@
+# Deprecated: this recipe runs opencode_sandboxed_agent through the legacy_agent relay, and that agent will be removed
+# after the Environment Server migration. Use opencode_single_agent_turn.yaml instead, which runs opencode_agent
+# through single_agent_turn. This recipe stays to reproduce existing results, such as the Nemotron 3.5 Super recipes.
+
 config_paths:
 - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
 - resources_servers/swebench/configs/swebench.yaml
