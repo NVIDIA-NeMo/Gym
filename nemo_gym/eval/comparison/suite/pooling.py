@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Source collections and pooled suite-report provenance."""
+"""Combine suite repeat samples while preserving each source's own evidence."""
 
 from dataclasses import asdict
 
@@ -21,31 +21,22 @@ from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import summa
 from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
 from nemo_gym.eval.comparison.suite.schema import (
     SuiteCoverage,
-    SuiteRunSource,
     SuiteRunSummary,
     SuiteSampleSummary,
 )
 
 
-def suite_sources(source: SuiteRunSource | list[SuiteRunSource]) -> tuple[SuiteRunSource, ...]:
-    """Normalize the manifest's mapping-or-list syntax without changing source order."""
-    return tuple(source) if isinstance(source, list) else (source,)
-
-
-def summary_sources(summary: SuiteRunSummary) -> tuple[SuiteRunSummary, ...]:
-    """Return each independently loaded source, preserving single-source reports."""
-    return tuple(summary.sources) if summary.sources else (summary,)
-
-
-def pool_suite_summaries(summaries: list[SuiteRunSummary], *, runs: tuple[LoadedSuiteRun, ...]) -> SuiteRunSummary:
+def pool_suite_summaries(
+    summaries: list[SuiteRunSummary], *, runs: tuple[LoadedSuiteRun, ...], collection_notes: list[str]
+) -> SuiteRunSummary:
     """Concatenate repeat samples, retaining each source's coverage and local identities."""
-    if len(summaries) == 1:
+    if len(summaries) == 1 and not collection_notes:
         return summaries[0]
     scores = [score for source in summaries for score in source.repeat_scores]
     coverages = [source.coverage for source in summaries]
     status = (
         "incomplete"
-        if any(coverage.status == "incomplete" for coverage in coverages)
+        if collection_notes or any(coverage.status == "incomplete" for coverage in coverages)
         else "unverified"
         if any(coverage.status == "unverified" for coverage in coverages)
         else "verified"
@@ -57,17 +48,15 @@ def pool_suite_summaries(summaries: list[SuiteRunSummary], *, runs: tuple[Loaded
         if all(plan is not None for plan in planned)
         else None
     )
+    notes = [
+        *collection_notes,
+        *(f"Source {index}: {note}" for index, source in enumerate(summaries, 1) for note in source.coverage.notes),
+    ]
     coverage = SuiteCoverage(
         status=status,
         recorded_task_count=len(recorded_tasks),
         planned_task_count=len(planned_tasks) if planned_tasks is not None else None,
-        notes=list(
-            dict.fromkeys(
-                f"Source {index}: {note}"
-                for index, source in enumerate(summaries, 1)
-                for note in source.coverage.notes
-            )
-        ),
+        notes=list(dict.fromkeys(notes)),
     )
     # Recompute variance over all repeat samples, including between-run variation.
     sample = SuiteSampleSummary(**asdict(summarize_sample(scores))) if len(scores) >= 2 else None

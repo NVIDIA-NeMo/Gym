@@ -43,6 +43,8 @@ def invoked_command() -> str:
 
 def build_comparison_result(config: ComparisonConfig, command: str) -> ComparisonResult:
     """Load both sides, pick the agent(s), and assemble the full comparison."""
+    baseline_pooled = config.baseline_rollouts_jsonl_fpaths is not None
+    candidate_pooled = config.pooled_candidate_rollouts_jsonl_fpaths is not None
     baseline_paths = config.baseline_rollouts_jsonl_fpaths or [config.baseline_rollouts_jsonl_fpath]
     baseline_overrides = config.baseline_aggregate_metrics_fpaths or [config.baseline_aggregate_metrics_fpath]
     baseline_files = [
@@ -77,10 +79,7 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
 
     comparisons = []
     for selection in selections:
-        if (
-            config.baseline_rollouts_jsonl_fpaths is not None
-            or config.pooled_candidate_rollouts_jsonl_fpaths is not None
-        ):
+        if baseline_pooled or candidate_pooled:
             validate_independent_sources(baseline_files, candidate_files, selection=selection)
         baseline_runs = [
             build_loaded_run(source, agent) for source, agent in zip(baseline_files, selection.baseline_agents)
@@ -89,13 +88,13 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
             pool_loaded_runs(
                 baseline_runs, source_labels=[str(source.aggregate_metrics_fpath) for source in baseline_files]
             )
-            if config.baseline_rollouts_jsonl_fpaths is not None
+            if baseline_pooled
             else baseline_runs[0]
         )
         candidate_runs = [
             build_loaded_run(run_file, agent) for run_file, agent in zip(candidate_files, selection.candidate_agents)
         ]
-        if config.pooled_candidate_rollouts_jsonl_fpaths is not None:
+        if candidate_pooled:
             candidate_runs = [
                 pool_loaded_runs(
                     candidate_runs, source_labels=[str(source.aggregate_metrics_fpath) for source in candidate_files]
@@ -103,20 +102,18 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
             ]
         comparisons.append(compare_runs(baseline_run, candidate_runs, confidence_level=config.confidence_level))
 
-    return ComparisonResult(
-        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        nemo_gym_version=__version__,
-        command=command,
-        confidence_level=config.confidence_level,
-        baseline=combine_run_files(
+    baseline_summary = (
+        combine_run_files(
             baseline_files,
             agent_names_by_source=[
                 [selection.baseline_agents[index] for selection in selections] for index in range(len(baseline_files))
             ],
         )
-        if config.baseline_rollouts_jsonl_fpaths is not None
-        else baseline_files[0],
-        candidates=[
+        if baseline_pooled
+        else baseline_files[0]
+    )
+    candidate_summaries = (
+        [
             combine_run_files(
                 candidate_files,
                 agent_names_by_source=[
@@ -125,8 +122,16 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
                 ],
             )
         ]
-        if config.pooled_candidate_rollouts_jsonl_fpaths is not None
-        else candidate_files,
+        if candidate_pooled
+        else candidate_files
+    )
+    return ComparisonResult(
+        generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        nemo_gym_version=__version__,
+        command=command,
+        confidence_level=config.confidence_level,
+        baseline=baseline_summary,
+        candidates=candidate_summaries,
         comparisons=comparisons,
         skipped_agents=skipped,
         # Run-level warnings only. Per-comparison observations stay on their `AgentComparison.notes`
@@ -136,7 +141,7 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
 
 
 def resolve_output_dir(config: ComparisonConfig) -> Path:
-    """`--output-dir`, defaulting to the candidate run's own directory.
+    """`--output-dir`, defaulting to the last candidate source's directory.
 
     The default resolves the candidate path the same way loading does, so the report lands next to
     the metrics file that was actually read rather than at a same-named path under the cwd.

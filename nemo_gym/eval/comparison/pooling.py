@@ -28,7 +28,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INFOS_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.eval.comparison.loading import LoadedRun
+from nemo_gym.eval.comparison.loading import LoadedRun, is_token_accounting_only
 from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, Stat, is_primary_metric
 
 
@@ -42,7 +42,9 @@ def _validated_rows(run: LoadedRun, label: str) -> List[Dict[str, Any]]:
     if not isinstance(rows, list) or not rows:
         raise ConfigError(
             f"Cannot pool '{label}' for agent '{run.agent_name}': no repeat-level observations were recorded. "
-            "Pooling requires stored repeat_level_metrics in every source."
+            "Single-repeat aggregates do not store quality repeat-level estimates. "
+            "Collect at least two scored repeats per source and regenerate aggregate metrics; "
+            "pooling requires stored repeat_level_metrics in every source."
         )
     indices = set()
     for position, row in enumerate(rows):
@@ -63,11 +65,6 @@ def _validated_rows(run: LoadedRun, label: str) -> List[Dict[str, Any]]:
     return rows
 
 
-def _token_only(row: Dict[str, Any]) -> bool:
-    measurements = row.keys() - {AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
-    return bool(measurements) and measurements <= set(COMPLETION_TOKEN_METRIC_NAMES)
-
-
 def _quality_rows(run: LoadedRun, rows: List[Dict[str, Any]], label: str) -> List[Dict[str, Any]]:
     """Keep scored metric estimates while recognizing accounting-only producer rows."""
     scored_indices = set()
@@ -79,14 +76,45 @@ def _quality_rows(run: LoadedRun, rows: List[Dict[str, Any]], label: str) -> Lis
             index = info.get(ROLLOUT_INDEX_KEY_NAME) if isinstance(info, dict) else None
             if isinstance(index, int) and not isinstance(index, bool) and index >= 0:
                 scored_indices.add(index)
-    token_rows = [row for row in rows if _token_only(row)]
+    token_rows = [row for row in rows if is_token_accounting_only(row)]
     if any(row[ROLLOUT_INDEX_KEY_NAME] in scored_indices for row in token_rows):
         raise ConfigError(
             f"Cannot pool '{label}': scored repeats have no stored quality repeat-level estimates. "
+            "Single-repeat aggregates do not store those estimates. "
             "Collect at least two scored repeats per source and regenerate aggregate metrics; "
             "whole-run point estimates cannot replace missing repeat observations."
         )
-    return [row for row in rows if not _token_only(row)]
+    return [row for row in rows if not is_token_accounting_only(row)]
+
+
+def _pooled_metric_samples(
+    name: str, rows_by_source: Sequence[List[Dict[str, Any]]], source_labels: Sequence[str]
+) -> Tuple[List[float], List[str]]:
+    """Require complete quality samples and retain explicitly available token accounting."""
+    values = []
+    notes = []
+    token_metric = name in COMPLETION_TOKEN_METRIC_NAMES
+    for label, rows in zip(source_labels, rows_by_source, strict=True):
+        missing = []
+        for row in rows:
+            if token_metric and name not in row:
+                missing.append(row[ROLLOUT_INDEX_KEY_NAME])
+                continue
+            value = row.get(name)
+            if not _finite_number(value):
+                raise ConfigError(
+                    f"Cannot pool metric '{name}': source '{label}', repeat "
+                    f"{row[ROLLOUT_INDEX_KEY_NAME]} has a missing or nonfinite numeric value. "
+                    "Every constituent must provide every pooled metric for all its scored repeats; "
+                    "only absent token accounting may be skipped."
+                )
+            values.append(float(value))
+        if missing:
+            notes.append(
+                f"Source '{label}': metric '{name}' has no token accounting for local repeats {sorted(missing)}. "
+                "Its pooled estimate uses available observations only."
+            )
+    return values, notes
 
 
 def _pooled_groups(runs: Sequence[LoadedRun]) -> Tuple[List[Dict[str, Any]], Optional[str]]:
@@ -151,9 +179,9 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
 
     Each repeat has equal weight, even when sources have different repeat counts. Metrics
     available only as whole-run aggregates (including pass@k summaries) are omitted. A metric
-    appearing in any source's scored repeat rows must be finite in every scored row of
-    every source. Accounting-only rows from unscored repeats remain available for token
-    metrics, without inventing a zero quality estimate.
+    other than token accounting must be finite in every scored row of every source.
+    Token metrics use the observations that record them, including accounting-only rows
+    from unscored repeats, without inventing a zero quality or token estimate.
     """
     if not runs or len(runs) != len(source_labels):
         raise ValueError("Pooling requires one source label per nonempty run collection.")
@@ -193,19 +221,11 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
                 )
 
     metrics: Dict[str, float] = {}
+    accounting_notes = []
     for name in metric_names:
-        values = []
         observations = rows_by_source if name in token_names else quality_rows
-        for label, rows in zip(source_labels, observations, strict=True):
-            for row in rows:
-                value = row.get(name)
-                if not _finite_number(value):
-                    raise ConfigError(
-                        f"Cannot pool metric '{name}': source '{label}', repeat "
-                        f"{row[ROLLOUT_INDEX_KEY_NAME]} has a missing or nonfinite numeric value. "
-                        "Every constituent must provide every pooled metric for all its repeats."
-                    )
-                values.append(float(value))
+        values, missing_notes = _pooled_metric_samples(name, observations, source_labels)
+        accounting_notes.extend(missing_notes)
         mean = fmean(values)
         metrics[name] = metrics[f"{Stat.MEAN.across_repeats_prefix}{name}"] = mean
         if len(values) > 1:
@@ -218,15 +238,19 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
     rows = [row for source_rows in rows_by_source for row in source_rows]
     rows = [{**row, ROLLOUT_INDEX_KEY_NAME: index} for index, row in enumerate(rows)]
     groups, flip_reason = _pooled_groups(runs)
-    task_indices = {
-        group[TASK_INDEX_KEY_NAME]
+    task_sets = [
+        {
+            group[TASK_INDEX_KEY_NAME]
+            for group in run.group_level_metrics
+            if isinstance(group, dict)
+            and isinstance(group.get(TASK_INDEX_KEY_NAME), int)
+            and not isinstance(group[TASK_INDEX_KEY_NAME], bool)
+            and group[TASK_INDEX_KEY_NAME] >= 0
+        }
         for run in runs
-        for group in run.group_level_metrics
-        if isinstance(group, dict)
-        and isinstance(group.get(TASK_INDEX_KEY_NAME), int)
-        and not isinstance(group[TASK_INDEX_KEY_NAME], bool)
-        and group[TASK_INDEX_KEY_NAME] >= 0
-    }
+    ]
+    task_indices = set().union(*task_sets)
+    known_task_sets = [tasks for tasks in task_sets if tasks]
     omitted = sorted(
         {
             name
@@ -242,6 +266,7 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
         f"repeats; {sample_count} total). Each repeat is an independent, equally weighted observation; "
         "local repeat indices in different sources are independent."
     ]
+    notes.extend(accounting_notes)
     if any(run.agent_metrics.get("coverage/masked_rollouts", 0) for run in runs) or any(
         len(scored) != len(recorded) for scored, recorded in zip(quality_rows, rows_by_source, strict=True)
     ):
@@ -252,7 +277,7 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
         )
     if quality_names:
         for run, label, source_rows in zip(runs, source_labels, rows_by_source, strict=True):
-            skipped = sorted(row[ROLLOUT_INDEX_KEY_NAME] for row in source_rows if _token_only(row))
+            skipped = sorted(row[ROLLOUT_INDEX_KEY_NAME] for row in source_rows if is_token_accounting_only(row))
             if skipped:
                 notes.append(
                     f"Source '{label}' for agent '{run.agent_name}': local repeats {skipped} contain only "
@@ -264,7 +289,7 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
             + ", ".join(f"`{name}`" for name in omitted)
             + "."
         )
-    if flip_reason and "different task indices" in flip_reason:
+    if any(tasks != known_task_sets[0] for tasks in known_task_sets[1:]):
         notes.append(
             "Pooled sources cover different task indices; repeat confidence intervals may mix "
             "task-difficulty differences with repeat variance."

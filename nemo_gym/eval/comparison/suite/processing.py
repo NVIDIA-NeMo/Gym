@@ -27,7 +27,7 @@ from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import (
     normalize_score,
     summarize_sample,
 )
-from nemo_gym.eval.comparison.suite.coverage import _coverage, _task_sets, check_collection_coverage
+from nemo_gym.eval.comparison.suite.coverage import check_collection_coverage, recorded_task_sets, run_coverage
 from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun, _repeat_count
 from nemo_gym.eval.comparison.suite.pooling import pool_suite_summaries
 from nemo_gym.eval.comparison.suite.schema import (
@@ -54,7 +54,7 @@ def _select_metric_repeats(run: LoadedSuiteRun, metrics: list[SuiteMetricResult]
     if not omitted:
         return run
     rows = tuple(row for row in run.repeat_rows if row[ROLLOUT_INDEX_KEY_NAME] not in omitted)
-    recorded, _, complete_identities = _task_sets(run)
+    recorded, _, complete_identities = recorded_task_sets(run)
     # A valid single-repeat run also has only token summaries. Its scored task records
     # distinguish that case from repeats with no usable measurements.
     unscored = omitted - recorded.keys() if complete_identities else omitted
@@ -124,7 +124,10 @@ def _statistics(cells: list[SuiteCellResult], *, confidence_level: float) -> Sui
 
 
 def _collection_summary(
-    runs: tuple[LoadedSuiteRun, ...], coverages: list[SuiteCoverage], scores: tuple[float, ...]
+    runs: tuple[LoadedSuiteRun, ...],
+    coverages: list[SuiteCoverage],
+    scores: tuple[float, ...],
+    collection_notes: list[str],
 ) -> SuiteRunSummary:
     summaries = []
     offset = 0
@@ -132,7 +135,7 @@ def _collection_summary(
         count = len(run.repeat_rows)
         summaries.append(_run_summary(run, coverage, scores[offset : offset + count]))
         offset += count
-    return pool_suite_summaries(summaries, runs=runs)
+    return pool_suite_summaries(summaries, runs=runs, collection_notes=collection_notes)
 
 
 def compare_suite_cell(
@@ -151,9 +154,9 @@ def compare_suite_cell(
         raise ConfigError("Baseline and candidate source collections must not be empty.")
     baseline_runs = tuple(_select_metric_repeats(run, metrics) for run in baseline_runs)
     candidate_runs = tuple(_select_metric_repeats(run, metrics) for run in candidate_runs)
-    baseline_coverage = [_coverage(run) for run in baseline_runs]
-    candidate_coverage = [_coverage(run) for run in candidate_runs]
-    check_collection_coverage(baseline_runs, candidate_runs, baseline_coverage, candidate_coverage)
+    baseline_coverage = [run_coverage(run) for run in baseline_runs]
+    candidate_coverage = [run_coverage(run) for run in candidate_runs]
+    collection_notes = check_collection_coverage(baseline_runs, candidate_runs, baseline_coverage, candidate_coverage)
     baseline_count = sum(run.repeat_count for run in baseline_runs)
     candidate_count = sum(run.repeat_count for run in candidate_runs)
     if baseline_count < 2 or candidate_count < 2:
@@ -165,8 +168,8 @@ def compare_suite_cell(
                 "Excluded: at least two repeats are required on each side "
                 f"(baseline={baseline_count}, candidate={candidate_count})."
             ),
-            baseline=_collection_summary(baseline_runs, baseline_coverage, ()),
-            candidate=_collection_summary(candidate_runs, candidate_coverage, ()),
+            baseline=_collection_summary(baseline_runs, baseline_coverage, (), collection_notes),
+            candidate=_collection_summary(candidate_runs, candidate_coverage, (), collection_notes),
             metrics=metrics,
         )
     for run in (*baseline_runs, *candidate_runs):
@@ -194,8 +197,8 @@ def compare_suite_cell(
         benchmark=benchmark,
         eligible=True,
         metrics=metrics,
-        baseline=_collection_summary(baseline_runs, baseline_coverage, baseline_scores),
-        candidate=_collection_summary(candidate_runs, candidate_coverage, candidate_scores),
+        baseline=_collection_summary(baseline_runs, baseline_coverage, baseline_scores, collection_notes),
+        candidate=_collection_summary(candidate_runs, candidate_coverage, candidate_scores, collection_notes),
     )
     cell.statistics = _statistics([cell], confidence_level=confidence_level)
     return cell

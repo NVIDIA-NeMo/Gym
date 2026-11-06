@@ -23,7 +23,7 @@ their already-recorded per-rollout summaries in memory.
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 import orjson
 
@@ -32,16 +32,23 @@ from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
 )
 from nemo_gym.eval.comparison.schema import RunFile, RunSource
-from nemo_gym.metrics.metrics_config import Stat
+from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, Stat
 from nemo_gym.rollouts.rollout_records import resolve_rollout_path
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 from nemo_gym.utils.text import did_you_mean
 
 
 RunRole = Literal["baseline", "candidate"]
+
+
+def is_token_accounting_only(row: Mapping[str, object]) -> bool:
+    """Identify recorded repeat rows that contain accounting without quality estimates."""
+    measurements = row.keys() - {AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME}
+    return bool(measurements) and measurements <= set(COMPLETION_TOKEN_METRIC_NAMES)
 
 
 @dataclass(frozen=True)
@@ -147,8 +154,8 @@ def load_agg_metrics_file(
             f"Aggregate metrics not found: '{metrics_path}', derived from '{rollouts_jsonl_fpath}'. "
             "The run may have been collected with --disable-aggregation: run `gym eval aggregate` first, "
             "or point at the metrics file directly with "
-            "'baseline_aggregate_metrics_fpath' for --baseline, 'baseline_aggregate_metrics_fpaths' "
-            "for --baseline-runs, or 'candidate_aggregate_metrics_fpaths' for either candidate option."
+            "--baseline-agg-metrics for --baseline, --baseline-runs-agg-metrics for --baseline-runs, "
+            "or --candidates-agg-metrics for either candidate option."
         )
     entries_by_agent = _read_agent_entries(metrics_path)
     if any("repeat_level_metrics" not in entry for entry in entries_by_agent.values()):
@@ -176,8 +183,8 @@ def _sole_agent(run_file: RunFile) -> str:
     raise ConfigError(
         f"The {run_file.role} run's metrics at '{run_file.aggregate_metrics_fpath}' contain "
         f"{len(run_file.entries_by_agent)} agents: {', '.join(run_file.agent_names)}. "
-        "Set 'agent_name' to compare one of them on both sides, or 'baseline_agent_name' / "
-        "'candidate_agent_names' to choose a different agent per side."
+        "Use --agent to select one on both sides, --baseline-agent to select one for all baseline sources, "
+        "or --baseline-agents / --candidate-agents to select an agent per pooled source."
     )
 
 
@@ -187,6 +194,37 @@ def _require_agent(run_file: RunFile, agent_name: str) -> None:
             f"Agent '{agent_name}' is not in '{run_file.aggregate_metrics_fpath}'. "
             f"Available: {', '.join(run_file.agent_names)}." + did_you_mean(agent_name, run_file.agent_names)
         )
+
+
+def _common_agents(run_files: Sequence[RunFile]) -> Tuple[List[str], List[str], Dict[str, List[str]]]:
+    """Find the default agent join and account for entries outside it."""
+    matched = set(run_files[0].entries_by_agent)
+    for run_file in run_files[1:]:
+        matched &= set(run_file.entries_by_agent)
+    if not matched:
+        listing = "\n".join(
+            f"  {run_file.role} ({run_file.aggregate_metrics_fpath}): {', '.join(run_file.agent_names)}"
+            for run_file in run_files
+        )
+        raise ConfigError(
+            "No agent name is present in every run, so there is nothing to compare.\n"
+            f"{listing}\n"
+            "Use --agent to select one on both sides, --baseline-agent to select one for all baseline sources, "
+            "or --baseline-agents / --candidate-agents to select an agent per pooled source."
+        )
+    warnings: List[str] = []
+    skipped: Dict[str, List[str]] = {}
+    for run_file in run_files:
+        extras = sorted(set(run_file.entries_by_agent) - matched)
+        if extras:
+            label = (
+                f"{run_file.role}[{run_file.index}]"
+                if run_file.role == "candidate" or run_file.index
+                else run_file.role
+            )
+            skipped[label] = extras
+            warnings.append(f"Agent(s) {', '.join(extras)} are present only in {label} and were not compared.")
+    return sorted(matched), warnings, skipped
 
 
 def resolve_agent_selections(
@@ -223,35 +261,9 @@ def resolve_agent_selections(
             _require_agent(run_file, agent_name)
         return [AgentSelection(agent_name, tuple(agent_name for _ in candidate_files))], warnings, skipped
 
-    matched = set(baseline_file.entries_by_agent)
-    for run_file in candidate_files:
-        matched &= set(run_file.entries_by_agent)
-
-    if not matched:
-        listing = "\n".join(
-            f"  {run_file.role} ({run_file.aggregate_metrics_fpath}): {', '.join(run_file.agent_names)}"
-            for run_file in (baseline_file, *candidate_files)
-        )
-        raise ConfigError(
-            "No agent name is present in every run, so there is nothing to compare.\n"
-            f"{listing}\n"
-            "Set 'agent_name' to force one agent on both sides, or 'baseline_agent_name' / "
-            "'candidate_agent_names' to pick a different agent per side."
-        )
-
-    for run_file in (baseline_file, *candidate_files):
-        extras = sorted(set(run_file.entries_by_agent) - matched)
-        if extras:
-            label = (
-                f"{run_file.role}[{run_file.index}]"
-                if run_file.role == "candidate" or run_file.index
-                else run_file.role
-            )
-            skipped[label] = extras
-            warnings.append(f"Agent(s) {', '.join(extras)} are present only in {label} and were not compared.")
-
+    matched, warnings, skipped = _common_agents((baseline_file, *candidate_files))
     return (
-        [AgentSelection(name, tuple(name for _ in candidate_files)) for name in sorted(matched)],
+        [AgentSelection(name, tuple(name for _ in candidate_files)) for name in matched],
         warnings,
         skipped,
     )
@@ -268,16 +280,20 @@ def resolve_source_agent_selections(
 ) -> Tuple[List[SourceAgentSelection], List[str], Dict[str, List[str]]]:
     """Select common agents across all sources, or honor explicit per-source names."""
     if baseline_agent_name is None and baseline_agent_names is None and candidate_agent_names is None:
-        selections, notes, skipped = resolve_agent_selections(
-            baseline_files[0], [*baseline_files[1:], *candidate_files], agent_name=agent_name
-        )
+        files = (*baseline_files, *candidate_files)
+        if agent_name:
+            for run_file in files:
+                _require_agent(run_file, agent_name)
+            matched, notes, skipped = [agent_name], [], {}
+        else:
+            matched, notes, skipped = _common_agents(files)
         return (
             [
                 SourceAgentSelection(
-                    (selection.baseline_agent, *selection.candidate_agents[: len(baseline_files) - 1]),
-                    selection.candidate_agents[len(baseline_files) - 1 :],
+                    tuple(name for _ in baseline_files),
+                    tuple(name for _ in candidate_files),
                 )
-                for selection in selections
+                for name in matched
             ],
             notes,
             skipped,
@@ -369,7 +385,7 @@ def combine_run_files(sources: Sequence[RunFile], *, agent_names_by_source: Sequ
     """Represent a pooled side while retaining every source path and its recorded counts."""
     provenance = []
     for source, selected in zip(sources, agent_names_by_source, strict=True):
-        agents = {name: build_loaded_run(source, name) for name in source.agent_names}
+        agents = {name: build_loaded_run(source, name) for name in selected}
         provenance.append(
             RunSource(
                 rollouts_jsonl_fpath=source.rollouts_jsonl_fpath,
@@ -377,6 +393,10 @@ def combine_run_files(sources: Sequence[RunFile], *, agent_names_by_source: Sequ
                 selected_agents=list(selected),
                 repeat_counts_by_agent={
                     name: len(run.repeat_level_metrics) or run.num_repeats for name, run in agents.items()
+                },
+                scored_repeat_counts_by_agent={
+                    name: sum(not is_token_accounting_only(row) for row in run.repeat_level_metrics)
+                    for name, run in agents.items()
                 },
                 task_counts_by_agent={name: run.num_tasks for name, run in agents.items()},
             )

@@ -14,10 +14,11 @@
 # limitations under the License.
 """Manifest, configuration, and report contracts for benchmark-suite comparisons."""
 
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 from nemo_gym.eval.comparison.schema import ReportFormat
@@ -82,17 +83,16 @@ class SuiteRunSource(_SuiteModel):
 
 
 class SuiteRunPair(_SuiteModel):
-    """A source mapping or a nonempty collection of independent sources on each side."""
+    """Nonempty source collections, accepting a single mapping as shorthand in YAML."""
 
-    baseline: SuiteRunSource | list[SuiteRunSource]
-    candidate: SuiteRunSource | list[SuiteRunSource]
+    baseline: list[SuiteRunSource] = Field(min_length=1)
+    candidate: list[SuiteRunSource] = Field(min_length=1)
 
-    @model_validator(mode="after")
-    def validate_nonempty_sources(self) -> "SuiteRunPair":
-        for sources in (self.baseline, self.candidate):
-            if isinstance(sources, list) and not sources:
-                raise ValueError("Baseline and candidate source collections must not be empty.")
-        return self
+    @field_validator("baseline", "candidate", mode="before")
+    @classmethod
+    def normalize_sources(cls, value: object) -> object:
+        """Choose the source shape before validation so errors describe only that shape."""
+        return [value] if isinstance(value, (Mapping, SuiteRunSource)) else value
 
 
 class SuiteManifest(_SuiteModel):
@@ -192,6 +192,11 @@ class SuiteRunSummary(_SuiteModel):
     summary: SuiteSampleSummary | None = None
     coverage: SuiteCoverage
     failures: SuiteFailureSummary | None = None
+
+
+def summary_sources(summary: SuiteRunSummary) -> tuple[SuiteRunSummary, ...]:
+    """Return constituent provenance, preserving a standalone source's report contract."""
+    return tuple(summary.sources) if summary.sources else (summary,)
 
 
 class SuiteMetricResult(_SuiteModel):

@@ -13,6 +13,7 @@ from scipy.stats import ttest_ind
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval.comparison.suite.report import render_suite_markdown, write_suite_reports
 from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for, materialized_path_for
 from tests.unit_tests.eval.test_comparison_suite import (
     _compare,
@@ -61,7 +62,7 @@ def _suite(tmp_path: Path, baseline: list[dict[str, str]], candidate: list[dict[
     )
 
 
-@pytest.mark.parametrize("counts", [((8, 8), (8, 8, 8)), ((1, 4), (2, 3, 1))])
+@pytest.mark.parametrize("counts", [((8, 8), (8, 8, 8)), ((2, 5), (2, 3, 4))])
 def test_pooled_repeats_match_scipy_welch_without_averaging_run_means(
     tmp_path: Path, counts: tuple[tuple[int, ...], tuple[int, ...]]
 ) -> None:
@@ -122,7 +123,7 @@ def test_empty_source_collection_is_rejected(tmp_path: Path, role: str) -> None:
     baseline = [_source(tmp_path / "baseline", [0.2, 0.4])]
     candidate = [_source(tmp_path / "candidate", [0.4, 0.6])]
     path = _suite(tmp_path, [] if role == "baseline" else baseline, [] if role == "candidate" else candidate)
-    with pytest.raises(ConfigError, match="source collections must not be empty"):
+    with pytest.raises(ConfigError, match="List should have at least 1 item"):
         _compare(path)
 
 
@@ -186,7 +187,11 @@ def test_incomplete_later_source_suppresses_all_dependent_intervals(tmp_path: Pa
         _edit_entry(later, incomplete)
     result = _compare(_suite(tmp_path, baseline, candidate))
     cell = result.cells[0]
-    assert cell.baseline.sources[1].coverage.status == cell.baseline.coverage.status == "incomplete"
+    assert cell.baseline.coverage.status == "incomplete"
+    expected_source_status = (
+        "verified" if evidence == "recorded_tasks" else "unverified" if evidence == "planned_tasks" else "incomplete"
+    )
+    assert cell.baseline.sources[1].coverage.status == expected_source_status
     assert any("source 2" in warning.lower() for warning in result.warnings)
     for statistics in (cell.statistics, result.per_model[0].statistics, result.overall.statistics):
         assert statistics.ci_low is statistics.ci_high is None
@@ -199,8 +204,12 @@ def test_incomplete_later_source_suppresses_all_dependent_intervals(tmp_path: Pa
 def test_single_repeat_sources_require_saved_repeat_metrics(tmp_path: Path) -> None:
     baseline = [_source(tmp_path / "baseline-1", [0.2]), _source(tmp_path / "baseline-2", [0.4])]
     candidate = [_source(tmp_path / "candidate", [0.4, 0.6])]
-    _edit_entry(baseline[1]["rollouts"], lambda entry: entry.update({"repeat_level_metrics": []}))
-    with pytest.raises(ConfigError, match="baseline-2.*no stored repeat rows.*Pooling requires stored metrics"):
+    for source, reward in zip(baseline, (0.2, 0.4), strict=True):
+        produced = compute_aggregate_metrics(
+            [{"_ng_task_index": task, "_ng_rollout_index": 0, "reward": reward} for task in (0, 1)]
+        ).model_dump(mode="json")
+        _edit_entry(source["rollouts"], lambda entry: entry.update(produced))
+    with pytest.raises(ConfigError, match="baseline-1.*no stored repeat rows.*Pooling requires stored metrics"):
         _compare(_suite(tmp_path, baseline, candidate))
 
 
@@ -394,10 +403,36 @@ def test_coverage_compares_available_recorded_and_planned_sets_across_sources(tm
     )
 
 
+@pytest.mark.parametrize("candidate_sources", [1, 3])
+def test_collection_mismatch_preserves_source_evidence_and_reports_each_problem_once(
+    tmp_path: Path, candidate_sources: int
+) -> None:
+    baseline = [
+        _source(tmp_path / "baseline-1", [0.1, 0.3]),
+        _source(tmp_path / "baseline-2", [0.2, 0.4], tasks=(5, 6)),
+    ]
+    candidate = [_source(tmp_path / f"candidate-{index}", [0.4, 0.6]) for index in range(candidate_sources)]
+
+    result = _compare(_suite(tmp_path, baseline, candidate))
+
+    cell = result.cells[0]
+    mismatch = str(aggregate_metrics_path_for(Path(baseline[1]["rollouts"])))
+    assert len(result.warnings) == 4
+    for side in (cell.baseline, cell.candidate):
+        assert side.coverage.status == "incomplete"
+        assert len(side.coverage.notes) == 2
+        assert all("baseline source 2" in note and mismatch in note for note in side.coverage.notes)
+        assert all(source.coverage.status == "verified" for source in side.sources)
+        assert all(source.coverage.notes == [] for source in side.sources)
+    for statistics in (cell.statistics, result.per_model[0].statistics, result.overall.statistics):
+        assert statistics.ci_low is statistics.ci_high is None
+        assert statistics.interval_unavailable_reason == "Known incomplete task coverage in an included benchmark."
+
+
 def test_selected_metrics_are_normalized_within_each_pooled_repeat(tmp_path: Path) -> None:
-    baseline = [_source(tmp_path / "baseline-1", [0.1, 0.3]), _source(tmp_path / "baseline-2", [0.2])]
-    candidate = [_source(tmp_path / "candidate-1", [0.4]), _source(tmp_path / "candidate-2", [0.6, 0.8])]
-    for source, latencies in zip((*baseline, *candidate), ([90, 50], [70], [80], [20, 40]), strict=True):
+    baseline = [_source(tmp_path / "baseline-1", [0.1, 0.3]), _source(tmp_path / "baseline-2", [0.2, 0.4])]
+    candidate = [_source(tmp_path / "candidate-1", [0.4, 0.5]), _source(tmp_path / "candidate-2", [0.6, 0.8])]
+    for source, latencies in zip((*baseline, *candidate), ([90, 50], [70, 30], [80, 60], [20, 40]), strict=True):
 
         def add_latency(entry):
             for row, latency in zip(entry["repeat_level_metrics"], latencies, strict=True):
@@ -412,16 +447,16 @@ def test_selected_metrics_are_normalized_within_each_pooled_repeat(tmp_path: Pat
 
     cell = _compare(path).cells[0]
 
-    baseline_scores = [10, 40, 25]
-    candidate_scores = [30, 70, 70]
+    baseline_scores = [10, 40, 25, 55]
+    candidate_scores = [30, 45, 70, 70]
     oracle = ttest_ind(candidate_scores, baseline_scores, equal_var=False)
     interval = oracle.confidence_interval(confidence_level=0.9)
     assert cell.baseline.repeat_scores == pytest.approx(baseline_scores)
     assert cell.candidate.repeat_scores == pytest.approx(candidate_scores)
     assert cell.baseline.sources[0].repeat_scores == pytest.approx([10, 40])
-    assert cell.baseline.sources[1].repeat_scores == pytest.approx([25])
-    assert cell.metrics[1].baseline_raw == [90, 50, 70]
-    assert cell.metrics[1].baseline_scaled == pytest.approx([10, 50, 30])
-    assert cell.metrics[1].candidate_scaled == pytest.approx([20, 80, 60])
+    assert cell.baseline.sources[1].repeat_scores == pytest.approx([25, 55])
+    assert cell.metrics[1].baseline_raw == [90, 50, 70, 30]
+    assert cell.metrics[1].baseline_scaled == pytest.approx([10, 50, 30, 70])
+    assert cell.metrics[1].candidate_scaled == pytest.approx([20, 40, 80, 60])
     assert cell.statistics.delta == pytest.approx(mean(candidate_scores) - mean(baseline_scores))
     assert (cell.statistics.ci_low, cell.statistics.ci_high) == pytest.approx((interval.low, interval.high))

@@ -20,7 +20,7 @@ from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
 from nemo_gym.eval.comparison.suite.schema import SuiteCoverage
 
 
-def _task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str], bool]:
+def recorded_task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str], bool]:
     """Read identities already recorded by aggregation; never derive repeat scores."""
     tasks: dict[int, set[int]] = {}
     seen_groups = set()
@@ -64,8 +64,9 @@ def _task_indices(tasks: set[int]) -> str:
     return f"{preview}, ... (+{len(tasks) - 10} more)" if len(tasks) > 10 else preview
 
 
-def _coverage(run: LoadedSuiteRun) -> SuiteCoverage:
-    recorded, notes, complete_identities = _task_sets(run)
+def run_coverage(run: LoadedSuiteRun) -> SuiteCoverage:
+    """Describe a source's own recorded and planned evidence independently of other runs."""
+    recorded, notes, complete_identities = recorded_task_sets(run)
     incomplete = bool(notes)
     if run.unscored_repeat_indices:
         incomplete = True
@@ -194,26 +195,39 @@ def check_collection_coverage(
     candidate: tuple[LoadedSuiteRun, ...],
     baseline_coverage: list[SuiteCoverage],
     candidate_coverage: list[SuiteCoverage],
-) -> None:
-    """Keep the fixed task set identical across every constituent source."""
+) -> list[str]:
+    """Return collection inconsistencies separately from each source's own evidence."""
     if len(baseline) == len(candidate) == 1:
         _check_paired_coverage(baseline[0], candidate[0], baseline_coverage[0], candidate_coverage[0])
-        return
-    runs = (*baseline, *candidate)
-    recorded = {frozenset(group[TASK_INDEX_KEY_NAME] for group in run.groups) for run in runs if run.groups}
-    planned = {
-        frozenset().union(*run.planned_tasks_by_repeat.values())
-        for run in runs
+        return []
+    labeled_runs = [
+        (f"{role} source {index} ('{run.aggregate_metrics}')", run)
+        for role, runs in (("baseline", baseline), ("candidate", candidate))
+        for index, run in enumerate(runs, 1)
+    ]
+    recorded = [
+        (label, frozenset(group[TASK_INDEX_KEY_NAME] for group in run.groups))
+        for label, run in labeled_runs
+        if run.groups
+    ]
+    planned = [
+        (label, frozenset().union(*run.planned_tasks_by_repeat.values()))
+        for label, run in labeled_runs
         if run.planned_tasks_by_repeat is not None
-    }
+    ]
     reasons = []
-    if len(recorded) > 1:
-        reasons.append("Pooled source runs have results for different tasks.")
-    if len(planned) > 1:
-        reasons.append("Pooled source runs have different planned task sets.")
-    if not reasons and len(recorded | planned) > 1:
-        reasons.append("Recorded and planned task sets differ across pooled source runs.")
-    for coverage in (*baseline_coverage, *candidate_coverage):
-        if reasons:
-            coverage.status = "incomplete"
-            coverage.notes.extend(reasons)
+    for evidence, message in (
+        (recorded, "Pooled source runs have results for different tasks"),
+        (planned, "Pooled source runs have different planned task sets"),
+    ):
+        if evidence:
+            reference, tasks = evidence[0]
+            differing = [label for label, observed in evidence[1:] if observed != tasks]
+            if differing:
+                reasons.append(f"{message}: {', '.join(differing)} differ from {reference}.")
+    if not reasons and recorded and planned and recorded[0][1] != planned[0][1]:
+        reasons.append(
+            "Recorded and planned task sets differ across pooled source runs: "
+            f"recorded evidence in {recorded[0][0]} disagrees with planned evidence in {planned[0][0]}."
+        )
+    return reasons

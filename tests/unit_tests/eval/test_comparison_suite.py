@@ -740,9 +740,12 @@ def test_duplicate_repeat_indices_are_rejected(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("field", ["aggregate_metrics", "materialized_inputs"])
 @pytest.mark.parametrize("role", ["baseline", "candidate"])
-def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role: str) -> None:
+@pytest.mark.parametrize("source_list", [False, True])
+def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role: str, source_list: bool) -> None:
     pair = _pair(tmp_path, "run", _values(0.2, 0.4), _values(0.4, 0.6))
     pair[role][field] = "unsupported.json"
+    if source_list:
+        pair[role] = [pair[role]]
     path = _manifest(tmp_path, benchmarks={"test": {"metrics": [_scale()]}}, models={"model": {"test": pair}})
     sources = {file: file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
 
@@ -751,12 +754,10 @@ def test_source_artifact_overrides_are_rejected(tmp_path: Path, field: str, role
 
     cause = error.value.__cause__
     assert isinstance(cause, ValidationError)
-    assert any(
-        detail["type"] == "extra_forbidden"
-        and detail["loc"][:4] == ("models", "model", "test", role)
-        and detail["loc"][-1] == field
-        for detail in cause.errors()
-    )
+    errors = cause.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "extra_forbidden"
+    assert errors[0]["loc"] == ("models", "model", "test", role, 0, field)
     assert {file: file.read_bytes() for file in sources} == sources
 
 

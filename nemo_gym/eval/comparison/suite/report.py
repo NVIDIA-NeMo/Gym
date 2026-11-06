@@ -20,8 +20,12 @@ import orjson
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.eval.comparison.schema import ReportFormat
-from nemo_gym.eval.comparison.suite.pooling import summary_sources
-from nemo_gym.eval.comparison.suite.schema import SuiteComparisonResult, SuiteRunSummary, SuiteStatistics
+from nemo_gym.eval.comparison.suite.schema import (
+    SuiteComparisonResult,
+    SuiteRunSummary,
+    SuiteStatistics,
+    summary_sources,
+)
 
 
 def _number(value: float | None) -> str:

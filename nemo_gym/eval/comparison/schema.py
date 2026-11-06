@@ -39,7 +39,7 @@ MAX_FLIPS_SHOWN = 10
 
 
 class ComparisonConfig(BaseNeMoGymCLIConfig):
-    """Compare a baseline eval run against a candidate run.
+    """Compare baseline and candidate eval runs, optionally pooling independent collections.
 
     Reads only each run's `<stem>_aggregate_metrics.json`, derived from the rollouts JSONL path you
     pass, and writes `compare_report.md` and/or `compare_report.json`. The rollouts JSONL itself is
@@ -53,10 +53,15 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
     gym eval compare \
         --baseline outputs/run_a/rollouts.jsonl \
         --candidates outputs/run_b/rollouts.jsonl
+
+    gym eval compare \
+        --baseline-runs outputs/b1/rollouts.jsonl,outputs/b2/rollouts.jsonl \
+        --candidate-runs outputs/c1/rollouts.jsonl,outputs/c2/rollouts.jsonl
     ```
 
     To point at metrics files that do not follow the `<stem>_aggregate_metrics.json` convention,
-    set `baseline_aggregate_metrics_fpath` and `candidate_aggregate_metrics_fpaths`.
+    use --baseline-agg-metrics, --baseline-runs-agg-metrics and --candidates-agg-metrics
+    in the corresponding source order. Each pooled repeat is an equally weighted observation.
     """
 
     baseline_rollouts_jsonl_fpath: Optional[str] = Field(
@@ -97,11 +102,11 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
     agent_name: Optional[str] = Field(
         default=None,
         description="Agent to compare on every side. When unset, compares every agent name present in all "
-        "runs. Overridden per side by baseline_agent_name / candidate_agent_names.",
+        "runs. Overridden by baseline_agent_name, baseline_agent_names or candidate_agent_names.",
     )
     baseline_agent_name: Optional[str] = Field(
         default=None,
-        description="Agent to read from the baseline's metrics. Takes precedence over agent_name.",
+        description="Agent to read from every baseline source. Takes precedence over agent_name.",
     )
     baseline_agent_names: Optional[List[str]] = Field(
         default=None,
@@ -243,7 +248,7 @@ class AgentComparison(BaseModel):
 
 
 class RunFile(BaseModel):
-    """One run's parsed `*_aggregate_metrics.json`, indexed by agent name."""
+    """Parsed aggregates indexed by agent; pooled paths represent the first of authoritative `sources`."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -278,7 +283,10 @@ class RunSource(BaseModel):
     rollouts_jsonl_fpath: Path
     aggregate_metrics_fpath: Path
     selected_agents: List[str] = Field(default_factory=list)
-    repeat_counts_by_agent: Dict[str, Optional[int]] = Field(default_factory=dict)
+    repeat_counts_by_agent: Dict[str, Optional[int]] = Field(
+        default_factory=dict, description="Recorded repeat rows, including accounting-only repeats."
+    )
+    scored_repeat_counts_by_agent: Dict[str, int] = Field(default_factory=dict)
     task_counts_by_agent: Dict[str, int] = Field(default_factory=dict)
 
 
@@ -294,7 +302,7 @@ class ComparisonResult(BaseModel):
         gt=0,
         lt=1,
         allow_inf_nan=False,
-        description="Confidence level of delta intervals. Baseline/candidate intervals are recorded at 95%.",
+        description="Confidence level of delta intervals. Side intervals stay at 95%, recomputed for pooled sides.",
     )
     baseline: RunFile
     candidates: List[RunFile]

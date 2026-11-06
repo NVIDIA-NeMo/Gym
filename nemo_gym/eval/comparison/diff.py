@@ -399,7 +399,10 @@ def compare_runs(
             "Runs collected with different --num-repeats produce different pass@k metric names."
         )
 
-    notes: List[str] = [*baseline.notes, *(note for run in candidates for note in run.notes)]
+    notes: List[str] = [f"Baseline: {note}" if baseline.pooled else note for note in baseline.notes]
+    for index, run in enumerate(candidates):
+        label = "Candidate" if len(candidates) == 1 else f"Candidate {index + 1}"
+        notes.extend(f"{label}: {note}" if run.pooled else note for note in run.notes)
     repeat_counts = [run.num_repeats for run in candidates]
     if (
         not baseline.pooled

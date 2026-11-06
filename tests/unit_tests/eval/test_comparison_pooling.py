@@ -22,6 +22,8 @@ import pytest
 from scipy.stats import t, ttest_ind
 
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.eval.comparison.loading import LoadedRun
+from nemo_gym.eval.comparison.pooling import pool_loaded_runs
 from nemo_gym.eval.comparison.report import render_markdown, summary_lines, write_reports
 from nemo_gym.eval.comparison.runner import build_comparison_result, resolve_output_dir
 from nemo_gym.eval.comparison.schema import ComparisonConfig
@@ -204,13 +206,28 @@ def test_per_source_agent_choices_and_aggregate_overrides_are_honored(tmp_path):
     assert [str(source.aggregate_metrics_fpath) for source in result.baseline.sources] == baseline_overrides
 
 
-@pytest.mark.parametrize("bad_value", [None, "unknown", True, float("inf")])
+@pytest.mark.parametrize("bad_value", [None, "unknown", True])
 def test_incomplete_metric_never_silently_drops_a_source(tmp_path, bad_value):
     broken = _entry([0.2, 0.3])
     broken["repeat_level_metrics"][0][METRIC] = bad_value
     config = _config(tmp_path, baseline_entries=[[_entry([0, 1])], [broken]])
     with pytest.raises(ConfigError, match="Cannot pool metric 'mean/reward'.*base1.*repeat 0"):
         build_comparison_result(config, "gym eval compare")
+
+
+@pytest.mark.parametrize("bad_value", [float("inf"), float("-inf"), float("nan")])
+def test_programmatic_pooling_rejects_nonfinite_observations(bad_value: float) -> None:
+    entry = _entry([0.2, 0.3])
+    entry["repeat_level_metrics"][0][METRIC] = bad_value
+    run = LoadedRun(
+        agent_name="agent",
+        agent_metrics=entry["agent_metrics"],
+        key_metrics=entry["key_metrics"],
+        group_level_metrics=entry["group_level_metrics"],
+        repeat_level_metrics=entry["repeat_level_metrics"],
+    )
+    with pytest.raises(ConfigError, match="Cannot pool metric 'mean/reward'.*nonfinite-source.*repeat 0"):
+        pool_loaded_runs([run], source_labels=["nonfinite-source"])
 
 
 def test_metric_absent_from_entire_constituent_is_an_error(tmp_path):
@@ -247,17 +264,17 @@ def test_flips_recompute_task_rewards_using_all_observations(tmp_path):
     result = build_comparison_result(
         _config(
             tmp_path,
-            baseline_entries=[[_entry([1, 1])], [_entry([0])]],
-            candidate_entries=[[_entry([0, 0])], [_entry([0])]],
+            baseline_entries=[[_entry([1, 1, 1])], [_entry([0, 0])]],
+            candidate_entries=[[_entry([0, 0, 0])], [_entry([0, 0])]],
         ),
         "gym eval compare",
     )
     flip = result.comparisons[0].flips[0]
     assert flip.mode == "binary"
     assert flip.pass_to_fail_count == 1
-    assert flip.flips[0].baseline_score == pytest.approx(2 / 3)
-    assert flip.flips[0].baseline_rewards == [1, 1, 0]
-    assert flip.flips[0].candidate_rewards == [0, 0, 0]
+    assert flip.flips[0].baseline_score == pytest.approx(3 / 5)
+    assert flip.flips[0].baseline_rewards == [1, 1, 1, 0, 0]
+    assert flip.flips[0].candidate_rewards == [0, 0, 0, 0, 0]
 
 
 def test_flips_are_unavailable_when_source_only_carries_task_means(tmp_path):
@@ -270,11 +287,14 @@ def test_flips_are_unavailable_when_source_only_carries_task_means(tmp_path):
     assert _reward_row(result).baseline.value == 0.5
 
 
-def test_different_task_sets_warn_even_with_equal_sample_counts(tmp_path):
+@pytest.mark.parametrize("with_rollout_infos", [False, True])
+def test_different_task_sets_warn_even_with_equal_sample_counts(tmp_path, with_rollout_infos):
     different_task = _entry([0, 1])
     different_task["group_level_metrics"][0]["_ng_task_index"] = 10
     for info in different_task["group_level_metrics"][0]["rollout_infos"]:
         info["_ng_task_index"] = 10
+    if not with_rollout_infos:
+        del different_task["group_level_metrics"][0]["rollout_infos"]
     result = build_comparison_result(
         _config(tmp_path, baseline_entries=[[_entry([0, 1])], [different_task]]), "gym eval compare"
     )
@@ -282,7 +302,7 @@ def test_different_task_sets_warn_even_with_equal_sample_counts(tmp_path):
     assert any("task-difficulty differences" in note for note in comparison.notes)
     assert comparison.baseline_task_count == 2
     assert comparison.flips[0].mode == "unavailable"
-    assert "different task indices" in comparison.flips[0].reason
+    assert ("different task indices" if with_rollout_infos else "stored rollout_infos") in comparison.flips[0].reason
 
 
 @pytest.mark.parametrize("reuse_kind", ["within_side", "aggregate_symlink", "rollout_symlink"])
@@ -402,7 +422,9 @@ def test_pooled_sides_can_select_different_agents_from_shared_files(tmp_path):
     assert [source.selected_agents for source in result.candidates[0].sources] == [["candidate"], ["candidate"]]
 
 
-def _producer_entry(*, offset: float, with_perf: bool, scored_repeats: tuple[int, ...]) -> dict:
+def _producer_entry(
+    *, offset: float, with_perf: bool, scored_repeats: tuple[int, ...], perf_repeats: tuple[int, ...] = (0, 1, 2)
+) -> dict:
     rows = []
     for repeat in range(3):
         for task in range(2):
@@ -413,10 +435,69 @@ def _producer_entry(*, offset: float, with_perf: bool, scored_repeats: tuple[int
             }
             if repeat not in scored_repeats:
                 row["mask_sample"] = True
-            if with_perf:
+            if with_perf and repeat in perf_repeats:
                 row["ng_perf"] = {"completion_tokens": 10 * (repeat + 1), "num_turns": 1}
             rows.append(row)
     return {"agent_ref": {"name": "agent"}, **compute_aggregate_metrics(rows).model_dump(mode="json")}
+
+
+@pytest.mark.parametrize("missing_repeats", [(0, 1, 2), (1,)])
+def test_missing_token_accounting_preserves_quality_samples(tmp_path: Path, missing_repeats: tuple[int, ...]) -> None:
+    kept_repeats = tuple(index for index in range(3) if index not in missing_repeats)
+    baseline = [
+        [_producer_entry(offset=0, with_perf=True, scored_repeats=(0, 1, 2))],
+        [_producer_entry(offset=0.04, with_perf=True, scored_repeats=(0, 1, 2), perf_repeats=kept_repeats)],
+    ]
+    config = _config(
+        tmp_path,
+        baseline_entries=baseline,
+        candidate_entries=[[_producer_entry(offset=0.1, with_perf=True, scored_repeats=(0, 1, 2))]],
+    )
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
+    result = build_comparison_result(config, "gym eval compare")
+    comparison = result.comparisons[0]
+    baseline_sample = [0.205 + 0.1 * repeat + offset for offset in (0, 0.04) for repeat in range(3)]
+    candidate_sample = [0.305 + 0.1 * repeat for repeat in range(3)]
+    interval = ttest_ind(candidate_sample, baseline_sample, equal_var=False).confidence_interval(0.95)
+    reward = _reward_row(result)
+    assert comparison.baseline_repeat_count == 6
+    assert comparison.candidate_repeat_counts == [3]
+    assert reward.baseline.value == pytest.approx(fmean(baseline_sample))
+    assert reward.candidates[0].delta_ci_low == pytest.approx(interval.low)
+    assert reward.candidates[0].delta_ci_high == pytest.approx(interval.high)
+    tokens = next(row for row in comparison.metrics if row.metric == "mean_completion_tokens")
+    token_sample = [10, 20, 30] + [10 * (repeat + 1) for repeat in kept_repeats]
+    assert tokens.baseline.value == pytest.approx(fmean(token_sample))
+    assert tokens.baseline.se_across_repeats == pytest.approx(sqrt(variance(token_sample) / len(token_sample)))
+    assert any(
+        str(aggregate_metrics_path_for(Path(config.baseline_rollouts_jsonl_fpaths[1]))) in note
+        and "mean_completion_tokens" in note
+        and str(list(missing_repeats)) in note
+        for note in comparison.notes
+    )
+    assert all(path.read_bytes() == contents for path, contents in before.items())
+
+
+@pytest.mark.parametrize("bad_value", [None, "unknown", True])
+def test_present_malformed_token_accounting_is_rejected(tmp_path: Path, bad_value: object) -> None:
+    entry = _producer_entry(offset=0, with_perf=True, scored_repeats=(0, 1, 2))
+    entry["repeat_level_metrics"][0]["mean_completion_tokens"] = bad_value
+    config = _config(tmp_path, baseline_entries=[[entry]])
+    with pytest.raises(ConfigError, match="Cannot pool metric 'mean_completion_tokens'.*base0.*repeat 0"):
+        build_comparison_result(config, "gym eval compare")
+
+
+@pytest.mark.parametrize("with_perf", [False, True])
+def test_single_repeat_producer_error_explains_collection_requirement(tmp_path: Path, with_perf: bool) -> None:
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 0.5}]
+    if with_perf:
+        rows[0]["ng_perf"] = {"completion_tokens": 10, "num_turns": 1}
+    entry = {"agent_ref": {"name": "agent"}, **compute_aggregate_metrics(rows).model_dump(mode="json")}
+    config = _config(tmp_path, baseline_entries=[[entry]])
+    with pytest.raises(ConfigError, match="(?i)single-repeat") as error:
+        build_comparison_result(config, "gym eval compare")
+    assert "base0" in str(error.value)
+    assert "two scored repeats" in str(error.value)
 
 
 @pytest.mark.parametrize("with_perf", [False, True])

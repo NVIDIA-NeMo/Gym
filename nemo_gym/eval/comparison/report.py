@@ -166,7 +166,7 @@ def _pooled_source_tables(result: ComparisonResult) -> List[str]:
             continue
         lines += ["", f"### {label} pooled sources", ""]
         lines += _table(
-            ["Source", "Rollouts", "Aggregate metrics", "Agent: repeats (tasks)"],
+            ["Source", "Rollouts", "Aggregate metrics", "Agent: recorded repeat rows / scored repeats (tasks)"],
             ["---:", "---", "---", "---"],
             [
                 [
@@ -175,6 +175,7 @@ def _pooled_source_tables(result: ComparisonResult) -> List[str]:
                     f"`{source.aggregate_metrics_fpath}`",
                     ", ".join(
                         f"`{name}`: {source.repeat_counts_by_agent.get(name, 'unknown')} "
+                        f"/ {source.scored_repeat_counts_by_agent.get(name, 'unknown')} "
                         f"({source.task_counts_by_agent.get(name, 0)})"
                         for name in source.selected_agents
                     ),
@@ -288,12 +289,14 @@ def _select_shown_flips(summary: FlipSummary) -> List:
 def render_markdown(result: ComparisonResult) -> str:
     candidate_labels = _candidate_labels(result)
     lines: List[str] = ["# gym eval compare", ""]
+    lines += _pooled_source_tables(result)
+    if result.baseline.sources or any(run.sources for run in result.candidates):
+        lines.append("")
 
     for comparison in result.comparisons:
         if len(result.comparisons) > 1:
             lines += [f"## Agent: `{comparison.baseline_agent}`", ""]
         lines += _run_summary_table(result, comparison)
-        lines += _pooled_source_tables(result)
         lines += [
             "",
             f"Generated {result.generated_at} by nemo-gym {result.nemo_gym_version}.",
@@ -309,7 +312,11 @@ def render_markdown(result: ComparisonResult) -> str:
         if key_rows:
             lines += _metric_table(key_rows, candidate_labels, confidence_level=result.confidence_level)
         else:
-            lines += ["No key metrics were recorded for this agent."]
+            lines += [
+                "No key metrics could be pooled for this agent; see Notes."
+                if result.baseline.sources or any(run.sources for run in result.candidates)
+                else "No key metrics were recorded for this agent."
+            ]
         lines += ["", _ci_footnote(result.confidence_level), ""]
 
         if other_rows:

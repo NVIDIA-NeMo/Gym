@@ -24,13 +24,13 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides
 from nemo_gym.eval.comparison.suite.failures import read_saved_failures, saved_failure_warning
 from nemo_gym.eval.comparison.suite.loading import load_suite_manifest, load_suite_run, resolve_metric_definitions
-from nemo_gym.eval.comparison.suite.pooling import suite_sources, summary_sources
 from nemo_gym.eval.comparison.suite.processing import aggregate_suite_cells, compare_suite_cell
 from nemo_gym.eval.comparison.suite.schema import (
     SuiteComparisonConfig,
     SuiteComparisonResult,
     SuiteFailureSummary,
     SuiteMetricResult,
+    summary_sources,
 )
 from nemo_gym.package_info import __version__
 
@@ -60,12 +60,8 @@ def build_suite_comparison(
     for model, benchmarks in manifest.models.items():
         model_cells = []
         for benchmark, sources in benchmarks.items():
-            baseline = tuple(
-                load_suite_run(source, directory=path.parent) for source in suite_sources(sources.baseline)
-            )
-            candidate = tuple(
-                load_suite_run(source, directory=path.parent) for source in suite_sources(sources.candidate)
-            )
+            baseline = tuple(load_suite_run(source, directory=path.parent) for source in sources.baseline)
+            candidate = tuple(load_suite_run(source, directory=path.parent) for source in sources.candidate)
             for role, runs in (("baseline", baseline), ("candidate", candidate)):
                 for index, run in enumerate(runs, 1):
                     label = f"{model}/{benchmark} {role}"
