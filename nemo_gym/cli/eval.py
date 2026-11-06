@@ -861,8 +861,7 @@ def _collect_and_rejudge(
     except IncompleteEvaluationError as rejected:
         if not config.require_complete or _terminated:
             raise
-        _rejudge_saved_judge_failures(global_config_dict, output, config, complete_only=True)
-        if not _saved_run_complete(output):
+        if not _rejudge_saved_judge_failures(global_config_dict, output, config, complete_only=True):
             raise _settled_rejection(output, rejected) from None
         return
     _rejudge_saved_judge_failures(global_config_dict, output, config)
@@ -926,7 +925,7 @@ def _rejudge_saved_judge_failures(
     *,
     aggregate: bool = True,
     complete_only: bool = False,
-) -> None:
+) -> bool:
     """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
 
     Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``), and at the
@@ -934,7 +933,8 @@ def _rejudge_saved_judge_failures(
     grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
     pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
     ``complete_only`` recomputes the metrics only when the settled run is complete: a strict run that was rejected as
-    incomplete publishes no score.
+    incomplete publishes no score; the saved run's completeness is then read once, after the pass, and returned
+    (always False without ``complete_only``).
     """
     from nemo_gym.eval.rollout_reverification import rejudge_saved_judge_failures
     from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
@@ -951,14 +951,15 @@ def _rejudge_saved_judge_failures(
         print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
     # A pass that raised after saving its grades can still have completed a strict run: settled completeness,
     # not a normal return, decides whether its metrics are rebuilt.
-    if not scored and not (complete_only and _saved_run_complete(output)):
-        return
+    complete = complete_only and _saved_run_complete(output)
+    if not scored and not complete:
+        return complete
     if scored:
         print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
     if collection_config.disable_aggregation or not aggregate:
-        return
-    if complete_only and not _saved_run_complete(output):
-        return
+        return complete
+    if complete_only and not complete:
+        return complete
     try:
         aggregation = RolloutAggregationConfig.model_validate(
             run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
@@ -970,6 +971,7 @@ def _rejudge_saved_judge_failures(
             f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
             flush=True,
         )
+    return complete
 
 
 class _SettledHealthSettings(RunHealthConfig):

@@ -40,9 +40,10 @@ def pass_settles_one_row(monkeypatch):
 def test_metrics_are_recomputed_only_for_a_run_that_may_publish_them(
     tmp_path, monkeypatch, pass_settles_one_row, complete_only, run_is_complete, recomputed
 ) -> None:
-    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: run_is_complete)
+    reads = []
+    monkeypatch.setattr(eval_cli, "_saved_run_complete", lambda output: reads.append(output) or run_is_complete)
 
-    eval_cli._rejudge_saved_judge_failures(
+    returned = eval_cli._rejudge_saved_judge_failures(
         {},
         tmp_path / "rollouts.jsonl",
         SimpleNamespace(disable_aggregation=False),
@@ -50,6 +51,9 @@ def test_metrics_are_recomputed_only_for_a_run_that_may_publish_them(
     )
 
     assert len(pass_settles_one_row) == recomputed
+    # Completeness is read once, after the pass, and returned; a non-rejection never reads it.
+    assert len(reads) == (1 if complete_only else 0)
+    assert returned is (complete_only and run_is_complete)
 
 
 @pytest.mark.parametrize(

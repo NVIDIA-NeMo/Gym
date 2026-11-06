@@ -1496,9 +1496,28 @@ class SharedRolloutCollectionConfig(
             raise ValueError("environment_server_routes are required when environment_routing_mode=taskset")
         return self
 
-    def check_completion(self, **kwargs: Any) -> None:
-        """Raise the strict run's rejection, if any; see :meth:`completion_rejection`."""
-        if (rejection := self.completion_rejection(**kwargs)) is not None:
+    def check_completion(
+        self,
+        *,
+        expected: int,
+        results: List[Dict[str, Any]],
+        completed: int | None = None,
+        intentionally_omitted: int = 0,
+        retryable: bool,
+        made_progress: bool,
+        final_zero_rows: Sequence[Mapping[str, Any]] = (),
+    ) -> None:
+        """Raise the strict run's rejection, if any; see :meth:`completion_rejection` for the arguments."""
+        rejection = self.completion_rejection(
+            expected=expected,
+            results=results,
+            completed=completed,
+            intentionally_omitted=intentionally_omitted,
+            retryable=retryable,
+            made_progress=made_progress,
+            final_zero_rows=final_zero_rows,
+        )
+        if rejection is not None:
             raise rejection
 
     def completion_rejection(
@@ -1511,7 +1530,7 @@ class SharedRolloutCollectionConfig(
         retryable: bool,
         made_progress: bool,
         final_zero_rows: Sequence[Mapping[str, Any]] = (),
-    ) -> None:
+    ) -> IncompleteEvaluationError | None:
         """The error that rejects unfinished work, or None; omissions alongside completed tasks are allowed.
 
         Collection decides this before it computes the aggregate, so a rejected run publishes no score.
