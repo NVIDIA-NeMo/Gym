@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import orjson
 import pytest
+from omegaconf import OmegaConf
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.rollouts.rollout_collection as collection
@@ -21,6 +22,7 @@ from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.core.failure_records import EpisodeFailure
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollouts.rollout_records import (
     coverage_path_for,
@@ -1715,3 +1717,50 @@ def test_h_collect_rollouts_cli_reads_real_coverage_writer(prepared_run, monkeyp
         with pytest.raises(SystemExit) as error:
             cli_eval.collect_rollouts()
         assert error.value.code == 75
+
+
+def _flat_reply_row() -> dict:
+    return {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "task_id": {"taskset": "native", "task_id": "0"},
+        "task_input": {},
+    }
+
+
+@pytest.mark.parametrize("reply", [{"reward": 1.0, "agent_ref": {"name": "a"}}, [], None])
+def test_reply_without_episode_result_or_failure_carries_a_typed_cause(reply):
+    with pytest.raises(collection.InvalidRolloutResult) as error:
+        collection._native_episode_record(_flat_reply_row(), reply)
+    cause = error.value.__cause__
+    assert isinstance(cause, NgFailureEvent)
+    assert cause.failure_kind == "environment_protocol_violation"
+    assert cause.boundary == "collection"
+    if isinstance(reply, dict):
+        assert "['agent_ref', 'reward']" in cause.failure_reason
+        assert "1.0" not in cause.failure_reason
+    else:
+        assert type(reply).__name__ in cause.failure_reason
+
+
+async def test_flat_reply_to_an_episode_request_becomes_a_typed_failure_row(runner_config, monkeypatch):
+    runner_config.route_failures_to_sidecar = True
+    Path(runner_config.input_jsonl_fpath).write_text(
+        orjson.dumps({"task_id": {"taskset": "native", "task_id": "0"}, "task_input": {}}).decode() + "\n"
+    )
+    runner_config.environment_server_routes = {"native": "environment"}
+    client = install_fake_server_client(
+        monkeypatch, AsyncMock(return_value=FakeResponse(200, {"reward": 1.0, "agent_ref": {"name": "a"}}))
+    )
+    client.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+    with pytest.raises((IncompleteEvaluationError, RuntimeError)):
+        await collection.RolloutCollectionHelper().run_from_config(runner_config)
+    rows = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
+    assert rows
+    for row in rows:
+        assert row["_ng_failure_record"]["failure"]["failure_kind"] == "environment_protocol_violation"
+        events = row["_ng_failure_events"].values()
+        assert any(
+            event["boundary"] == "collection" and "['agent_ref', 'reward']" in event["failure_reason"]
+            for event in events
+        )
