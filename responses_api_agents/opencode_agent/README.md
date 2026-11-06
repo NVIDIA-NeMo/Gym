@@ -72,6 +72,24 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+server's host; `model_and_tools` also allows the host of each MCP grant. Each
+allowed host is open on every port. The OpenSandbox policy is set when the sandbox
+is created, so a session that borrows a task sandbox rejects any value other than
+`inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download
+the runtime: set `sandbox_executable_path` and `sandbox_executable_sha256`, or use an
+image that already holds the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
+(see [Offline sandbox runtimes](#offline-sandbox-runtimes-and-native-model-identity)).
+Without either, the seed is accepted and each attempt then fails downloading OpenCode.
+Preinstall `rg` too, since OpenCode otherwise tries to download ripgrep on demand.
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the
+policy would block its host; under `model_and_tools`, a grant at an address the
+sandbox cannot reach, such as loopback, refuses the seed. A borrowed sandbox relies on
+its owner's network policy. The policy is only as strong as the OpenSandbox server's
+egress mode: in `dns` mode only name resolution is filtered, so a hard-coded IP
+bypasses it; `dns+nft` also enforces it at the IP layer and is needed for full isolation.
+
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
 apt-get or apk when running as root; otherwise preinstall it.
@@ -103,7 +121,7 @@ The CLI must exit before
 its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
-but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
+but permits connection release. A successful close fences the session and keeps its saved reply for `session_close_retry_window_seconds` (default 300).
 Session state lives in the worker that seeded the session.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 Provider TTL and the episode owner handle abandoned sessions. Process cleanup is not a hostile-code security boundary.
@@ -157,7 +175,10 @@ model server by address, so the profile sets `use_absolute_ip: true` and keeps t
 on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
 harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
 10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
-instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`.
+instance name, `opencode_agent.responses_api_agents.opencode_agent.sandbox_config`. It sets `network_access: model_only`,
+so the sandbox reaches only the model server; a search preset overrides it with `model_and_tools`. A restricted
+sandbox cannot download OpenCode, so supply `sandbox_executable_path` and `sandbox_executable_sha256` for a binary
+in the image.
 
 The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
 APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
@@ -268,7 +289,7 @@ These sandbox-session settings are off by default; unset, sessions behave as des
 above. Local calls do not use them. Each is general-purpose: the sandbox owner (usually
 the Resources Server that lends the sandbox) supplies the files, and the adapter stages,
 checks or reads them without any benchmark-specific logic. Seed refuses an unusable
-setting or owner-supplied input with `AgentSeedRejectedError`, a final 422, so the
+setting or owner-supplied input with `AgentSeedRejectedError`, a terminal 422, so the
 episode fails once with the reason; a failure a retry can fix stays a 5xx. In the
 sandbox, their checks, staging, import and export need only a POSIX shell and coreutils
 (`sha256sum`, and `tar` for an archive); the agent server reads OpenCode's session store
