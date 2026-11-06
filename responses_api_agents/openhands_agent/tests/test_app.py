@@ -19,7 +19,9 @@ from nemo_gym.agents import (
     ROLLOUT_STOP_METADATA_KEY,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
+    OutcomeAction,
     SandboxSession,
+    agent_outcome_policy,
     check_agent_seed_rejected,
     harness_termination_failure,
 )
@@ -338,8 +340,10 @@ async def test_model_failure_is_classified_and_context_limit_stays_gradable(monk
         adapter.OpenHandsSandboxSession, "execute", AsyncMock(return_value=artifacts(FINISHED_EVENTS[:2], overflow))
     )
     response = await instance._activate(session_state(), body, prompt="Build it", system="")
-    assert (response.status, response.error) == ("incomplete", None)
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == "model_context_limit"
+    assert (response.status, response.error, response.metadata["stop_reason"]) == ("incomplete", None, "context_limit")
+    # The Environment Server grades an incomplete response whatever it carries, so it carries no outcome.
+    assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
 
 @pytest.mark.asyncio
@@ -361,6 +365,29 @@ async def test_deadline_keeps_partial_work_as_incomplete(monkeypatch):
     assert {record.sandbox_id for record in state.observations.records if record.kind == "tool_call"} == {
         "nemo-gym-task"
     }
+
+
+@pytest.mark.asyncio
+async def test_a_deadline_before_any_model_reply_is_a_retried_transport_failure(monkeypatch):
+    instance = agent()
+    cleanup = {"timed_out": True, "return_code": 143, "cleanup_confirmed": True, "error": None}
+    opening = [
+        {"kind": "SystemPromptEvent", "source": "agent"},
+        {"kind": "MessageEvent", "source": "user", "llm_response_id": None},
+    ]
+    no_usage = {"usage_to_metrics": {"agent": {"token_usages": []}}}
+    captured = artifacts(opening, run_result(status="terminated", execution_status="running", stats=no_usage))
+    state = session_state(cleanup=cleanup, artifacts=captured)
+    monkeypatch.setattr(adapter.OpenHandsSandboxSession, "execute", AsyncMock(return_value=captured))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
+    response = await instance._activate(state, body, prompt="Build it", system="")
+    assert (response.status, response.metadata["stop_reason"], response.output) == ("failed", "timeout", [])
+    assert response.error.message == "LLMTimeoutError: no model call returned before the run's deadline"
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+    # The Environment Server's default policy retries the episode instead of grading it.
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    sandbox = state.observations.records[-1]
+    assert (sandbox.kind, sandbox.outcome, sandbox.exit_code) == ("sandbox", "timeout", 143)
 
 
 @pytest.mark.asyncio

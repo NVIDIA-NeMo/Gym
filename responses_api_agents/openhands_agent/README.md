@@ -126,14 +126,20 @@ OpenHands delivers its final answer through the `finish` tool; that answer is al
 message.
 Status follows OpenHands' own rule at 1.59.0: `conversation.run()` raises only for errors that end the run.
 
-| OpenHands outcome | Response |
-| --- | --- |
-| `finished` | `completed` |
-| `MaxIterationsReached`, `MaxBudgetReached`, stuck detection, the deadline, or a stop request | `incomplete`, graded |
-| Context window exceeded | `incomplete`, graded, outcome `model_context_limit` |
-| A model error after OpenHands' own retries | `failed`, outcome `model_request_error` with the HTTP status, or `model_transport_error` |
-| Any other error that ends the run | `failed`, outcome `unknown` (retryable) |
-| No result, unconfirmed termination, or a sandbox failure | HTTP error from `/v1/responses` |
+| OpenHands outcome | Response | Verified |
+| --- | --- | --- |
+| `finished` | `completed` | Yes |
+| `MaxIterationsReached`, `MaxBudgetReached`, stuck detection, a rollout stop, or Gym's deadline after a model call returned | `incomplete`; `stop_reason` names it | Yes |
+| Context window exceeded | `incomplete`, `stop_reason` `context_limit` | Yes |
+| Gym's deadline before any model call returned | `failed`, `LLMTimeoutError`, with `ng_agent_outcome` `model_transport_error` | No: the outcome policy retries it by default |
+| A model error after OpenHands' own retries | `failed`, with `ng_agent_outcome` `model_request_error` and the HTTP status, or `model_transport_error` | By the outcome policy: by default 400, 413 and 422 are verified, `model_transport_error` and 408, 425, 429 and 5xx are retried, and other statuses fail the episode |
+| Any other error that ends the run | `failed`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
+| No result, unconfirmed termination, or a sandbox failure | HTTP error from `/v1/responses` | No |
+
+Each model call may take the whole budget, so Gym's deadline before any model reply means the Model Server
+never answered; that episode is retried rather than graded. Once a model call has returned, the deadline is
+graded with the work done so far, even if the next call was still waiting on the Model Server: the adapter
+cannot tell a slow reply from a Model Server that stopped answering. A rollout stop is graded either way.
 
 Tool errors are returned to the model and do not end the run. A terminal command that exits nonzero is
 recorded as a `failed` tool call. Usage is reported only when every model response the conversation used,
@@ -151,6 +157,9 @@ invocation. Gaps name what the events do not show, such as token counts around a
 ## Limits
 
 - Resources Server tool grants (MCP or direct HTTP) are not supported; required grants are refused.
+- The adapter has no `network_access` setting. An agent-owned sandbox keeps its provider's network policy, so
+  its egress is open unless `sandbox_config.provider_options` restricts it (for example OpenSandbox's
+  `network_policy`). A borrowed sandbox keeps the network its Resources Server gave it.
 - The first seed for each glibc level builds the runtime on the Agent Server host, which needs `uv` and
   access to PyPI and GitHub (python-build-standalone) or mirrors of them.
 - Tool commands run as the task's user and can see the runtime. In the TB2.1 smoke, the agent found the

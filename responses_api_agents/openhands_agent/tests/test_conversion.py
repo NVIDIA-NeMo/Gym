@@ -210,8 +210,24 @@ def test_run_outcome_follows_openhands_terminal_status(outcome_result, events, e
     assert (outcome.status, outcome.stop_reason) == expected
 
 
-def test_deadline_wins_over_the_runner_result():
-    assert run_outcome([], result(status="terminated"), timed_out=True).stop_reason == "timeout"
+# What OpenHands records before its first model call returns.
+OPENING = (
+    {"kind": "SystemPromptEvent", "source": "agent"},
+    {"kind": "MessageEvent", "source": "user", "llm_response_id": None},
+)
+
+
+def test_the_deadline_is_graded_after_a_model_reply_and_a_transport_failure_before_one():
+    replied = run_outcome(recorded(action("c1", "r1")), result("r1", status="terminated"), timed_out=True)
+    assert (replied.status, replied.stop_reason, replied.failure_kind) == ("incomplete", "timeout", None)
+    # A usage record also shows a reply, such as one OpenHands answered with an error event.
+    assert run_outcome(recorded(*OPENING), result("r1", status="terminated"), timed_out=True).status == "incomplete"
+    silent = run_outcome(recorded(*OPENING), result(status="terminated"), timed_out=True)
+    assert (silent.status, silent.stop_reason, silent.failure_kind) == ("failed", "timeout", MODEL_TRANSPORT_ERROR)
+    assert silent.message == "LLMTimeoutError: no model call returned before the run's deadline"
+    assert run_outcome([], None, timed_out=True).failure_kind == MODEL_TRANSPORT_ERROR
+    # A rollout stop is not a Model Server failure, so the stopped run is graded.
+    assert run_outcome([], None, timed_out=True, rollout_stop=True).status == "incomplete"
 
 
 @pytest.mark.parametrize(

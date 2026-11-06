@@ -35,7 +35,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
-    MODEL_CONTEXT_LIMIT,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -51,6 +50,7 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from responses_api_agents.openhands_agent.conversion import (
+    NO_REPLY_BY_DEADLINE,
     RunOutcome,
     classify_error,
     error_chain,
@@ -370,7 +370,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 result = parsed if isinstance(parsed, dict) else None
             except ValueError:
                 result = None
-        outcome = run_outcome(events, result, timed_out=timed_out)
+        outcome = run_outcome(events, result, timed_out=timed_out, rollout_stop=state.session.expired)
         if failure is not None and not (timed_out and artifacts is not None):
             outcome = RunOutcome(
                 "incomplete" if isinstance(failure, asyncio.CancelledError) else "failed",
@@ -412,11 +412,9 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             },
         )
         response = self.report_rollout_stop(response, state.session)
-        if outcome.failure_kind == MODEL_CONTEXT_LIMIT:
-            # A context-limit stop keeps its partial work for verification, without an episode retry.
-            failed = self.report_outcome(response.model_copy(update={"status": "failed"}), result or {})
-            return failed.model_copy(update={"status": "incomplete", "error": None})
-        return self.report_outcome(response, result or {})
+        # Only a failed response gets an outcome; after a deadline that is one without a model reply, which
+        # recorded no error chain of its own.
+        return self.report_outcome(response, {"error": [NO_REPLY_BY_DEADLINE]} if timed_out else result or {})
 
     def _observations(
         self,

@@ -23,6 +23,7 @@ import pytest
 from packaging.requirements import Requirement
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     ROLLOUT_STOP_METADATA_KEY,
@@ -157,6 +158,7 @@ def local_state(session_dir: Path, *, interpreter: str = "/rt/openhands-gym", wo
         workdir=workdir,
         sandbox=LocalSandbox(),
         read_output_log=output_log,
+        cleanup=None,
         expired=False,
         expired_before_launch=False,
     )
@@ -269,19 +271,21 @@ async def test_a_rollout_stop_before_the_first_event_is_graded_as_an_empty_stopp
 
 
 @pytest.mark.asyncio
-async def test_a_deadline_without_events_is_still_a_runner_failure():
-    # Without a rollout stop, a harness that recorded nothing by its deadline failed; the episode is retried.
+async def test_a_deadline_without_events_is_a_model_transport_failure():
+    # Without a rollout stop, a harness that recorded nothing by its deadline got no model reply; the
+    # Environment Server's outcome policy retries the episode instead of grading it.
     sandbox = SupervisedSandbox({"cleanup_confirmed": True, "return_code": 143, "timed_out": True, "error": None})
     sandbox.finish.set()
-    with pytest.raises(RuntimeError, match="exit 143") as error:
-        await agent()._activate(supervised_state(sandbox), BODY, prompt="Build it", system="")
-    assert "recorded no events" in str(error.value.__cause__)
+    response = await agent()._activate(supervised_state(sandbox), BODY, prompt="Build it", system="")
+    assert (response.status, response.metadata["stop_reason"], response.output) == ("failed", "timeout", [])
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+    assert ROLLOUT_STOP_METADATA_KEY not in response.metadata
 
 
 @pytest.mark.asyncio
-async def test_a_stopped_run_whose_events_cannot_be_read_is_still_a_failure(tmp_path):
+async def test_a_timed_out_run_whose_events_cannot_be_read_is_still_a_failure(tmp_path):
     state = local_state(tmp_path)
-    state.session.expired = True
+    state.session.cleanup = {"timed_out": True}
     # events.jsonl exists but cannot be read, so the run may have recorded work that would be lost.
     (tmp_path / "events.jsonl").mkdir()
     with pytest.raises(RuntimeError, match="recorded no events"):

@@ -189,9 +189,11 @@ class OpenHandsSandboxSession(AgentSessionState):
         try:
             events = await read_text(sandbox, path=self.path("events.jsonl"))
         except Exception as error:
-            if self.session.expired and await self._events_absent():
-                # A rollout stop can end the runner after launch but before it records its first event.
-                LOG.warning("OpenHands recorded no events before a rollout stop ended it; keeping an empty run")
+            cleanup = self.session.cleanup
+            if cleanup and cleanup["timed_out"] and await self._events_absent():
+                # The deadline or a rollout stop can end the runner after launch but before it records its first
+                # event; the activation judges that run like any other without a model reply.
+                LOG.warning("OpenHands recorded no events before its deadline or a rollout stop; keeping an empty run")
                 return OpenHandsArtifacts(events="", result=None, stderr=stderr)
             logs = await self.session.read_output_log()
             raise RuntimeError(f"OpenHands runner recorded no events: {(stderr or logs)[-16000:]}") from error
@@ -219,6 +221,6 @@ class OpenHandsSandboxSession(AgentSessionState):
                 timeout_s=10,
             )
         except Exception:
-            LOG.warning("Could not check for OpenHands events after a rollout stop", exc_info=True)
+            LOG.warning("Could not check for OpenHands events after the deadline", exc_info=True)
             return False
         return probe.return_code == 0 and not probe.error_type and (probe.stdout or "").strip() == "absent"

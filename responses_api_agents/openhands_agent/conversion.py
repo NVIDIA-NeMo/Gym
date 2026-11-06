@@ -52,6 +52,8 @@ _STATUS_BY_ERROR = {
     "BadRequestError": 400,
     "LLMContentPolicyViolationError": 400,
 }
+# The error a deadline before any model reply stands for: OpenHands was still waiting on its first model call.
+NO_REPLY_BY_DEADLINE = {"type": "LLMTimeoutError", "message": "no model call returned before the run's deadline"}
 
 
 def parse_events(text: str) -> tuple[list[tuple[float, dict[str, Any]]], int]:
@@ -241,16 +243,25 @@ class RunOutcome:
 
 
 def run_outcome(
-    events: list[tuple[float, dict[str, Any]]], result: Optional[dict[str, Any]], *, timed_out: bool
+    events: list[tuple[float, dict[str, Any]]],
+    result: Optional[dict[str, Any]],
+    *,
+    timed_out: bool,
+    rollout_stop: bool = False,
 ) -> RunOutcome:
     """Map the runner result to a response status.
 
     ``conversation.run()`` raises only for errors that end the run, such as a model call that still fails after
     OpenHands' own retries. Tool errors go back to the model and do not end the run. A run limit (iterations or
-    budget) and stuck detection end the run with partial work, as does the deadline.
+    budget) and stuck detection end the run with partial work, as do a rollout stop and the deadline after a model
+    call returned. Each model call may take the whole budget, so a deadline before any model reply means the Model
+    Server never answered: a transport failure, not the agent's result.
     """
     if timed_out:
-        return RunOutcome("incomplete", "timeout")
+        if rollout_stop or _response_ids(events) or token_usages(result):
+            return RunOutcome("incomplete", "timeout")
+        message = f"{NO_REPLY_BY_DEADLINE['type']}: {NO_REPLY_BY_DEADLINE['message']}"
+        return RunOutcome("failed", "timeout", message, MODEL_TRANSPORT_ERROR)
     if result is None:
         return RunOutcome("failed", "runner_error", "The OpenHands runner wrote no result")
     if result.get("status") == "terminated":
