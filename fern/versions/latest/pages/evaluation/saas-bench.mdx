@@ -1,0 +1,65 @@
+---
+title: SaaS Bench with OpenCode
+description: Evaluate source-owned SaaS application tasks with native final-state verifiers.
+position: 20
+---
+
+# SaaS Bench with OpenCode
+
+This external-agent adapter runs a complete SaaS Bench episode through the source-owned **OpenCode harness 2.1.1 / CLI 1.17.11**. Gym provides the model proxy, rollout identity, collection and metric aggregation. The source worker starts fresh app instances, runs the native browser harness, grades final application state with the task's native verifier, and tears the apps down. The integration does not replace task prompts, browser tools, screenshots, compaction or grading with a different harness.
+
+The adapter wraps the source's complete episode loop through `legacy_agent`, like other external-agent benchmarks. It is not a new implementation of the generic OpenCode agent or a training integration. A future session-based migration requires its own parity evidence.
+
+## Provision the external source and runtime
+
+Obtain an authorized SaaS Bench checkout exposing `saas_bench.opencode.core.HARNESS_VERSION == "2.1.1"`, its task data and declared inputs, app images, and a working Docker/Podman/Enroot runtime. The reference source revision is `ad48579c1af66bb7100501f45460bb3e9ec5eaae` (Apache-2.0 code; CC-BY-4.0 task data). Prepare again whenever source tasks or input bytes change.
+
+Use separate Python environments when required: the Gym driver/agent uses Gym's Python, while `SAAS_BENCH_WORKER_PYTHON` points to the source browser/app runtime with Playwright Chromium, MCP, PyMuPDF, YAML and requests. A copied virtualenv or an available container executable alone does not establish runtime readiness. Explicit runtime paths must be valid on the execution node. The default `opencode` command uses Gym's pinned OpenCode installer; an explicit command path is checked by the source worker.
+
+The converter lives in the SaaS source checkout. Gym's prepare wrapper delegates to it instead of copying benchmark tasks or conversion logic. No benchmark data or credentials are bundled here.
+
+## One-task evaluation
+
+Run on a compute node with the provisioned app runtime. Values below are environment-specific paths, not a deployment certificate.
+
+```bash
+export SAAS_BENCH_ROOT=/path/to/saas-bench
+export SAAS_BENCH_WORKER_PYTHON=/path/to/saas-runtime/bin/python
+export SAAS_BENCH_OPENCODE=/path/to/opencode-1.17.11
+export SAAS_BENCH_TASKS=business_023
+export SAAS_BENCH_OUTPUT_ROOT=/private/run/episodes
+export SAAS_BENCH_DATASET_PATH=/private/run/input/saas_bench.jsonl
+export SAAS_BENCH_MODEL_BASE_URL=http://model-host:8000/v1
+export SAAS_BENCH_MODEL_NAME=served-model
+export SAAS_BENCH_MODEL_API_KEY=EMPTY
+# Supply LLM_BASE_URL, LLM_JUDGE_MODEL and LLM_API_KEY privately for native
+# task verifiers that use a model judge. Do not put real keys in arguments.
+
+gym eval prepare --config benchmarks/saas_bench/config.yaml \
+  +prepare_script_args.output_fpath=/private/run/input/saas_bench.jsonl
+
+gym eval run --config benchmarks/saas_bench/config.yaml \
+  --agent saas_bench_agent --split benchmark --limit 1 --concurrency 1 \
+  --output /private/run/rollouts.jsonl \
+  +model_call_capture_dir=/private/run/model_calls
+```
+
+The config includes the model transport and `saas_opencode.py`. Do not reload the generic model config after the benchmark config. `saas_bench_sampling` pins the effective Chat Completions sampling at the model proxy; setting only the outer Responses request does not change an external harness's sampling. Configure reasoning and token limits explicitly for each model comparison. Default sampling is temperature 0.6, top-p 0.95 and frequency penalty 0.0; the latter avoids the generic vLLM transport's nonzero default.
+
+Use one output/prepared-data path per independent run. Set `SAAS_BENCH_TASKS=all` and prepare again for the full inventory. Concurrency must not exceed provisioned app slots; the agent requires one server worker and bounds subprocess concurrency. Each task fingerprint covers its description, metadata, verifier and declared input bytes. Missing inputs or verifiers fail preparation rather than reducing coverage silently.
+
+## Rewards, retries and evidence
+
+`saas_bench/mean_score` averages native fractional verifier scores in `[0,1]` over unmasked results. `saas_bench/pass_rate` reports the native all-checks-pass outcome. A legitimate zero is included; startup, CLI and verifier infrastructure failures are masked and counted separately. Do not change native task weights or substitute an online reward designer.
+
+Each rollout ID owns one output directory and fresh app state. Concurrent HTTP retries share a running episode. A saved matching result is reused after restart; changed bindings or incomplete saved episodes are refused. A task ID alone is not a repeat identity. Cancellation terminates and reaps the worker process group.
+
+Rows retain original OpenCode events, typed response items, execution health and native verifier diagnostics. `native_metrics` and `native_diagnostics` expose the native scorer's saved fractional score and response-bound grading evidence for Gym's grading-artifact projection. Unknown token usage remains unknown. Private per-episode artifacts include prompts, events, screenshots, native verifier JSON, worker logs and model-call sidecars. They may contain application credentials and must not be uploaded with the PR.
+
+## Eval Factory
+
+Compose the companion Factory `configs/benchmarks/saas-bench/gym_native.yaml` binding with an existing model profile and cluster. It mounts provisioned source/assets, delegates directly to Gym prepare/run, pins the companion Gym commit, preserves collection observability and uses per-job prepared-data/output paths. No runtime overlay copying or bespoke evaluation command is needed after this integration is installed. Native verifier judge keys remain runtime environment references.
+
+## Validation limits
+
+This adapter is experimental. Unit/contract checks cover native partial/zero rewards, masking, retries, repeat isolation, source preparation and process cancellation. Source-protocol tests are opt-in with `SAAS_BENCH_TEST_SOURCE_ROOT`; they use the real native parser without app images or model requests. Prior source-runtime smokes do not certify this new upstream-main port. A representative live app/model smoke, failure/resume fixtures, complete health evidence and a full benchmark parity comparison remain required before calling the integration verified.
