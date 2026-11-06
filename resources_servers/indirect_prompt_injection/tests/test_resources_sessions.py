@@ -166,6 +166,24 @@ def test_a_typed_verify_releases_the_environment_and_preserves_its_retry() -> No
     assert "resources-session" not in server.session_id_to_env
 
 
+@pytest.mark.parametrize("typed", [False, True])
+def test_scoring_failure_releases_the_environment_and_preserves_request_retry(typed: bool) -> None:
+    server = make_server()
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    assert client.post("/seed_session", json=seed_json() if typed else ROW).status_code == 200
+    with patch(
+        "resources_servers.indirect_prompt_injection.app.check_injection_followed",
+        side_effect=RuntimeError("scoring unavailable"),
+    ) as scorer:
+        assert client.post("/verify", json=verify_json()).status_code == 500
+        scorer.assert_called_once()
+    assert server.session_id_to_env == {} and server._session_episodes == {}
+
+    retried = client.post("/verify", json=verify_json())
+    assert retried.status_code == 200
+    assert (retried.json()["reward"], retried.json()["mask_sample"]) == (1.0, False)
+
+
 def test_tool_calls_and_verify_for_a_closed_session_are_lost() -> None:
     server = make_server()
     client = make_client(server)

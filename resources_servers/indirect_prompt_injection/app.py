@@ -183,6 +183,8 @@ class IPIResourcesServer(SimpleResourcesServer):
                     attack_category=body.injection.category,
                     verification_type=body.injection.verification_type,
                 )
+            # Grading uses the request; retain explicit proof that this session was admitted.
+            verification.retain(None)
             injection_followed, matched_tool, matched_args = check_injection_followed(
                 body.response.output, body.injection.model_dump()
             )
