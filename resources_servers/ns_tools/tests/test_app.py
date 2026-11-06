@@ -680,7 +680,7 @@ class TestResourcesSessions:
         assert client.post(prefix + "/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         manager.cleanup_error = RuntimeError("cleanup failed")
         first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
-        assert first.status_code == 500
+        assert first.status_code == 200 and first.json()["reward"] == 1.0
         assert server.checkpoint_participant.is_open("rs-1")
         assert "rs-1" in server._session_episodes
         assert "rs-1" in manager.python_sessions
@@ -948,11 +948,11 @@ class TestResourcesSessions:
         async with _real_python_tool_server(unused_tcp_port, sandbox, monkeypatch) as (server, tool, request):
             [python_session] = sandbox.sessions
 
-            with pytest.raises(ClientResponseError, match="503"):
-                await server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY))
+            verified = await server.verify(request, NSToolsVerifyRequest.model_validate(VERIFY_BODY))
+            assert verified.reward == 1.0 and verified.num_tool_calls == 1
 
             assert sandbox.deletes == [python_session] * 3
-            # Verify failed, so the Python session and the active identity stay owned for the close.
+            # Cleanup failed, so the Python session and the active identity stay owned for the close.
             assert str(tool.requests_to_sessions["rs-1"]) == python_session
             assert sandbox.sessions == {python_session}
             assert server._session_episodes["rs-1"] == (EPISODE_ID, TaskId(taskset="ns_tools", task_id="0"))
@@ -963,7 +963,7 @@ class TestResourcesSessions:
             assert sandbox.sessions == set() and "rs-1" not in tool.requests_to_sessions
             assert server.session_is_closed("rs-1")
 
-    def test_failed_cleanup_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
+    def test_failed_cleanup_at_verify_preserves_score_and_keeps_cleanup_owned(self) -> None:
         tool_manager = FakePythonToolManager()
         server, app = _session_server(tool_manager)
         client = TestClient(app, raise_server_exceptions=False)
@@ -976,7 +976,7 @@ class TestResourcesSessions:
 
         verified = client.post("/verify", json=VERIFY_BODY)
 
-        assert verified.status_code == 500
+        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
         # The python session stays owned, so the close retries the release and reports its failure.
         assert "rs-1" in tool_manager.python_sessions
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
@@ -1195,7 +1195,7 @@ class TestResourcesSessions:
         [session_id] = manager.python_sessions
         python_session = manager.python_sessions[session_id]
         manager.cleanup_error = RuntimeError("sandbox release unavailable")
-        assert client.post("/verify", json=VERIFY_BODY).status_code == 500
+        assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
 
         assert client.post("/seed_session", json=VERIFY_BODY).status_code == 500
         assert server.session_is_verified(session_id)
@@ -1221,7 +1221,7 @@ class TestResourcesSessions:
         assert client.post("/stateful_python_code_exec", json={"code": "print(4)"}).status_code == 200
         [session_id] = manager.python_sessions
         manager.cleanup_error = RuntimeError("sandbox release unavailable")
-        assert client.post("/verify", json=VERIFY_BODY).status_code == 500
+        assert client.post("/verify", json=VERIFY_BODY).json()["reward"] == 1.0
         now = base_resources.monotonic()
         monkeypatch.setattr(
             base_resources, "monotonic", lambda: now + server.config.session_close_retry_window_seconds + 1
