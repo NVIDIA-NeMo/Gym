@@ -855,10 +855,55 @@ class TestParseExecJsonl:
         assert len(items) == 2
         assert isinstance(items[0], NeMoGymResponseFunctionToolCall)
         assert items[0].name == "exec_command"
-        assert json.loads(items[0].arguments) == {"cmd": "/bin/bash -lc ls"}
+        # The call records the model's ``cmd``, not the shell wrapper Codex ran it in.
+        assert json.loads(items[0].arguments) == {"cmd": "ls"}
         assert isinstance(items[1], NeMoGymFunctionCallOutput)
         assert "file.txt" in items[1].output
         assert items[0].call_id == items[1].call_id == "item_1"
+
+    @pytest.mark.parametrize(
+        ("executed", "cmd"),
+        [
+            ("/bin/bash -lc 'cat /workspace/skills/demo/SKILL.md'", "cat /workspace/skills/demo/SKILL.md"),
+            ("/usr/bin/zsh -c 'cd /tmp && ls -la'", "cd /tmp && ls -la"),
+            ("""/bin/bash -lc 'grep -n '"'"'pineapple'"'"' SKILL.md'""", "grep -n 'pineapple' SKILL.md"),
+            ("""/bin/bash -lc 'bash -lc '"'"'ls'"'"''""", "bash -lc 'ls'"),
+            ("ls -la", "ls -la"),
+            ("/bin/bash run.sh", "/bin/bash run.sh"),
+            ("python3 -c 'print(1)'", "python3 -c 'print(1)'"),
+            ("/bin/bash -lc 'unbalanced", "/bin/bash -lc 'unbalanced"),
+        ],
+        ids=["login-shell", "zsh-c", "quotes", "nested-shell", "plain", "script", "not-a-shell", "unparsable"],
+    )
+    def test_command_execution_records_the_models_cmd(self, executed: str, cmd: str) -> None:
+        line = _item_completed(
+            {
+                "id": "item_2",
+                "type": "command_execution",
+                "command": executed,
+                "aggregated_output": "The magic word is pineapple.\n",
+                "exit_code": 0,
+                "status": "completed",
+            }
+        )
+        items, _ = parse_exec_jsonl(line)
+        assert items[0].name == "exec_command"
+        assert json.loads(items[0].arguments) == {"cmd": cmd}
+
+    def test_unfinished_command_execution_records_the_models_cmd(self) -> None:
+        line = _event(
+            "item.updated",
+            item={
+                "id": "item_1",
+                "type": "command_execution",
+                "command": "/bin/bash -lc 'pytest -x'",
+                "aggregated_output": "collected 3 items\n",
+                "status": "in_progress",
+            },
+        )
+        items, _ = parse_exec_jsonl(line, include_partial=True)
+        assert items[0].status == "incomplete"
+        assert json.loads(items[0].arguments) == {"cmd": "pytest -x"}
 
     def test_command_execution_nonzero_exit_annotated(self) -> None:
         line = _item_completed(
