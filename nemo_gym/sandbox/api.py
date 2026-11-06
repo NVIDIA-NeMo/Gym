@@ -49,6 +49,13 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxSidecars,
     create_provider,
 )
+from nemo_gym.sandbox.resource_telemetry import (
+    ResourceProvider,
+    ResourceSampler,
+    record_request,
+    requested_attributes,
+    sampling_interval,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
 from nemo_gym.telemetry.gym_metrics import (
     record_sandbox_active,
@@ -428,6 +435,8 @@ class AsyncSandbox:
         self._stopped = True
         self._closed = False
         self._connected = False
+        self._resource_sampler: ResourceSampler | None = None
+        self._resource_attributes: dict[str, Any] = {}
         # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
         # was counted by the process that started it and must not be subtracted here.
         self._counted_active = False
@@ -506,10 +515,16 @@ class AsyncSandbox:
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
             started = time.perf_counter()
+            self._resource_attributes = {
+                "nemo.gym.sandbox.provider": provider_name,
+                **default_span_attributes(span_attributes),
+            }
+            if "nemo.gym.sandbox.request.id" not in self._resource_attributes:
+                self._resource_attributes = record_request(requested_spec, self._resource_attributes)
             with managed_span(
                 GymSpanGroup.SANDBOX,
                 "gym.sandbox.start",
-                **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
+                **{**self._resource_attributes, **requested_attributes(requested_spec)},
             ) as span:
                 handle = await self._provider.create(requested_spec)
                 if span is not None:
@@ -523,6 +538,15 @@ class AsyncSandbox:
         self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
         self._stopped = False
+        interval = sampling_interval()
+        if interval and isinstance(self._provider, ResourceProvider):
+            self._resource_sampler = ResourceSampler(
+                self._provider,
+                handle,
+                {**self._resource_attributes, "nemo.gym.sandbox.id": _sandbox_id(handle)},
+                interval,
+            )
+            self._resource_sampler.start()
         try:
             if requested_spec.files:
                 with tempfile.TemporaryDirectory(prefix="nemo-gym-sandbox-upload-") as tmp_dir:
@@ -667,6 +691,14 @@ class AsyncSandbox:
         """
         self._spec = replace(self._spec, user=user) if self._spec is not None else SandboxSpec(user=user)
 
+    def set_default_workdir(self, workdir: str | None) -> None:
+        """Change the default exec directory after sandbox setup has created it.
+
+        This does not create or change ownership of the directory. ``serialize()`` carries the new
+        default, so a harness that reattaches executes in the same directory.
+        """
+        self._spec = replace(self._spec, workdir=workdir) if self._spec is not None else SandboxSpec(workdir=workdir)
+
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
 
@@ -740,6 +772,9 @@ class AsyncSandbox:
         # A failed remote stop is retryable. Do not close its client or mark the
         # wrapper closed until the provider confirms container teardown.
         if self._handle is not None and not self._stopped:
+            if self._resource_sampler is not None:
+                await self._resource_sampler.stop()
+                self._resource_sampler = None
             try:
                 if is_span_group_enabled(GymSpanGroup.SANDBOX):
                     with managed_span(
@@ -749,6 +784,7 @@ class AsyncSandbox:
                             "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
                             "nemo.gym.sandbox.id": _sandbox_id(self._handle),
                             **default_span_attributes(),
+                            **self._resource_attributes,
                         },
                     ):
                         await self._provider.close(self._handle)
@@ -802,7 +838,11 @@ class AsyncSandbox:
         # Carry the working directory so a reattached sandbox lands in the same
         # place, even for providers whose descriptor does not include it (the
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
-        if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
+        if (
+            isinstance(descriptor, dict)
+            and self._spec is not None
+            and (self._spec.workdir is not None or descriptor.get("workdir") is None)
+        ):
             descriptor = {**descriptor, "workdir": self._spec.workdir}
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}

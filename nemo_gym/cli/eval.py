@@ -24,6 +24,7 @@ import signal
 import subprocess
 import sys
 import time
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import replace
@@ -507,8 +508,10 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         COLLECT_SCRIPT,
         CollectedEvidence,
         IdentityState,
+        RecoveryOutcomePolicyConfig,
         _observed_trial_operations,
         decide_from_collected,
+        decision_classification,
         failure_facts,
         fault_report,
         response_health,
@@ -517,7 +520,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial_population,
         trial_verdict,
     )
-    from nemo_gym.rollouts.rollout_recovery import atomic_output_file
+    from nemo_gym.rollouts.rollout_recovery import atomic_output_file, saved_failure_classification
 
     artifacts = RunArtifacts(output)
     version = _artifact_version(artifacts)
@@ -555,7 +558,13 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
         )
         collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
-        decision = decide_from_collected(collected, max_infra_retries=None, max_walltime_s=None, live_job=None)
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=None,
+            max_walltime_s=None,
+            live_job=None,
+            outcome_policy=RecoveryOutcomePolicyConfig(classification=saved_failure_classification(output)),
+        )
         quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
         response, _ = response_health(decision, quality)
         if response is not None:
@@ -574,13 +583,18 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         trial, _, evaluation = trial_verdict(decision, collected)
         if evaluation is None and trials > 0:
             # Not evaluated (the run is not complete): its known faults are a lower bound.
-            evaluation = fault_report(trial_faults(decision, collected), trials) | {"exact": False}
+            attributions = Counter()
+            kinds = trial_faults(decision, collected, attributions=attributions)
+            evaluation = fault_report(
+                kinds, trials, attributions=attributions, classification=decision_classification(decision)
+            ) | {"exact": False}
         if evaluation is not None:
             exact = evaluation["exact"]
             failed = evaluation["evaluation"]["count"]
             metrics.update(
                 {
                     "health/trial/counts_known": int(exact),
+                    "health/trial/unclassified": evaluation["unknown"]["count"],
                     "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
                     "health/trial/expected": trials,
                     "health/trial/omitted": decision.counts.get(IdentityState.OMITTED, 0),
@@ -2042,6 +2056,26 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
                 f"by kind: {json.dumps(member.get('failures_by_kind', {}), sort_keys=True)}; "
                 f"model-final by kind: {json.dumps(member.get('model_final_by_kind', {}), sort_keys=True)}"
             )
+
+
+@exit_cleanly_on_config_error
+def compare_suite() -> None:
+    """Compare baseline and candidate runs across a configured benchmark and model suite."""
+    from nemo_gym.environment.comparison import resolve_benchmark_reward_metric
+    from nemo_gym.eval.comparison.suite.report import render_suite_summary, write_suite_reports
+    from nemo_gym.eval.comparison.suite.runner import build_suite_comparison, invoked_command
+    from nemo_gym.eval.comparison.suite.schema import SuiteComparisonConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("suite_fpath") and not (config_dict.get("help") or config_dict.get("h")):
+        raise ConfigError("gym eval compare-suite requires --suite PATH.")
+    config = SuiteComparisonConfig.model_validate(config_dict)
+    result = build_suite_comparison(config, invoked_command(), reward_metric_resolver=resolve_benchmark_reward_metric)
+    output = Path(config.output_dirpath) if config.output_dirpath else result.suite_fpath.parent
+    written = write_suite_reports(result, output, config.report_format)
+    print(render_suite_summary(result))
+    for path in written:
+        print(f"Wrote: {path}")
 
 
 __getattr__ = moved_names_getattr(__name__)
