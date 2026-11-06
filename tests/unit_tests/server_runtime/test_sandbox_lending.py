@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """LentSandboxes on the local sandbox provider, in a temporary working directory."""
 
+import asyncio
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
+import anyio
 import pytest
 
 from nemo_gym.core.episode_types import TaskId
@@ -67,6 +69,8 @@ async def test_lend_starts_one_sandbox_per_session_and_release_stops_it(workdir,
     assert access.workdir == str(workdir)
     assert access.connection.provider_config_ref == "sandbox"
     assert access.connection.descriptor == {"sandbox_id": "local"}
+    # The harness gets an operate descriptor: it may use the sandbox, but only this server stops it.
+    AsyncSandbox.serialize.assert_awaited_with(scope="operate")
     assert (workdir / "images" / "0.png").read_bytes() == b"png"
     assert not (workdir / "other.png").exists(), "a repeated lend must not start a second sandbox"
     assert len(started) == 1
@@ -138,3 +142,62 @@ async def test_a_sandbox_that_cannot_be_described_is_stopped_and_not_kept(
 
     assert len(stopped) == 1
     assert lender.get("session") is None
+
+
+async def test_release_finishes_the_stop_when_the_close_is_cancelled(workdir, started, monkeypatch) -> None:
+    lender = _lender(workdir)
+    await lender.lend("session", TASK)
+    sandbox = lender.get("session")
+    finished: list[AsyncSandbox] = []
+
+    async def stop(self: AsyncSandbox) -> None:
+        # A checkpoint where an unshielded stop would be cancelled with its request.
+        await anyio.sleep(0)
+        finished.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    with anyio.CancelScope() as scope:
+        scope.cancel()
+        await lender.release("session")
+
+    assert finished == [sandbox]
+    assert lender.get("session") is None
+
+
+async def test_a_stop_that_hangs_times_out_and_keeps_the_sandbox(workdir, started, monkeypatch) -> None:
+    lender = _lender(workdir)
+    await lender.lend("session", TASK)
+    monkeypatch.setattr(sandbox_lending, "STOP_TIMEOUT_S", 0.05)
+
+    async def stop(self: AsyncSandbox) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    release = asyncio.create_task(lender.release("session"))
+    done, _ = await asyncio.wait({release}, timeout=5)
+
+    assert done == {release}, "release() must give up on a stop that hangs"
+    with pytest.raises(TimeoutError):
+        release.result()
+    assert lender.get("session") is not None
+
+
+async def test_release_all_stops_the_sandboxes_concurrently(workdir, started, monkeypatch) -> None:
+    lender = _lender(workdir)
+    for session in ("a", "b", "c"):
+        await lender.lend(session, TASK)
+    entered: list[AsyncSandbox] = []
+    all_entered = asyncio.Event()
+
+    async def stop(self: AsyncSandbox) -> None:
+        # Each stop waits until all three have started, so stops run one at a time would never finish.
+        entered.append(self)
+        if len(entered) == 3:
+            all_entered.set()
+        await all_entered.wait()
+
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    await asyncio.wait_for(lender.release_all(), timeout=5)
+
+    assert len(entered) == 3
+    assert all(lender.get(session) is None for session in ("a", "b", "c"))
