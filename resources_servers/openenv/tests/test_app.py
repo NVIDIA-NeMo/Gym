@@ -962,6 +962,30 @@ class TestResourcesSessions:
         envs[0].step.assert_not_called()
         assert retried.json()["reward"] == pytest.approx(0.5)
 
+    def test_failed_verify_release_preserves_reward_until_owning_close_retries(self) -> None:
+        step_obs = MagicMock(reward=1.0, done=False)
+        step_obs.model_dump.return_value = {"reward": 1.0, "done": False}
+        server, envs = _session_server(reset_obs=MagicMock(reward=0.5, done=False), step_obs=step_obs)
+        with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+            envs[0].close.side_effect = [RuntimeError("env would not stop"), RuntimeError("still unavailable"), None]
+            verified = client.post("/verify", json=VERIFY_BODY)
+            assert verified.status_code == 200
+            assert verified.json()["reward"] == pytest.approx(0.5)
+            assert verified.json()["mask_sample"] is False
+            assert "resources-session" in server._sessions
+            assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 409
+            assert client.post("/step", json={}).status_code == 404
+
+            wrong_close = _typed_close() | {"episode_id": {"rollout_id": "another", "attempt": 0}}
+            assert client.post("/close_session", json=wrong_close).status_code == 409
+            assert client.post("/close_session", json=_typed_close()).status_code == 500
+            assert "resources-session" in server._sessions
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert server._sessions == {}
+        assert envs[0].close.call_count == 3
+        envs[0].step.assert_not_called()
+
     def test_failed_env_close_raises_and_a_retried_close_releases(self) -> None:
         server, envs = _session_server()
 

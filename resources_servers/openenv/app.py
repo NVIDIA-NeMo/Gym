@@ -200,8 +200,9 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
 
     def _open_session(self, request: Request) -> SessionState:
         """The session a tool call names, or a 404 if it was never seeded or has already ended."""
-        session = self._sessions.get(request.session[SESSION_ID_KEY])
-        if session is None or not session.initialized:
+        session_id = request.session[SESSION_ID_KEY]
+        session = self._sessions.get(session_id)
+        if session is None or not session.initialized or self.session_is_verified(session_id):
             raise ResourcesSessionLostError("No active OpenEnv session for this request. Call /seed_session first.")
         return session
 
