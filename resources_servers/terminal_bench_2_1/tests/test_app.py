@@ -14,8 +14,7 @@ from fastapi import Request
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import FailureHeader, NeMoGymResponse, NgFailureEvent, RequestFailureLog
-from nemo_gym.core.failure_records import SandboxFailureDetails
+from nemo_gym.core import FailureHeader, NeMoGymResponse, NgFailureEvent, RequestFailureLog, SandboxFailureDetails
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
     GOLDEN_PATCH_SOLVE_SH_PATCHES,

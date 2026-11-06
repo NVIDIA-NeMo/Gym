@@ -28,10 +28,10 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
     NgFailureEvent,
+    SandboxFailureDetails,
     agent_route_failure,
     failure_report_for,
 )
-from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.trajectory import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module

@@ -56,11 +56,11 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
     NgFailureEvent,
+    SandboxFailureDetails,
     agent_route_failure,
     failure_report_for,
 )
 from nemo_gym.core.failure_kinds import CANCELLED
-from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.sandbox import AsyncSandbox, DirectSandboxConnection, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
