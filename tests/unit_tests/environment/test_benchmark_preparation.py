@@ -311,10 +311,11 @@ class TestPrepareDependencies:
         (tmp_path / "wrong_preparer.py").write_text(
             "from pathlib import Path\ndef prepare(): return Path('wrong.jsonl')\n"
         )
-        with pytest.raises(subprocess.CalledProcessError):
+        with pytest.raises(benchmark_preparation.PreparationFailedError) as stopped:
             benchmark_preparation._run_isolated_prepare(
                 Path(sys.executable), "wrong_preparer", "prepare", tmp_path / "expected", {}
             )
+        assert isinstance(stopped.value.__cause__, subprocess.CalledProcessError)
 
 
 class TestLockedPrepareSearchRoots:
@@ -375,3 +376,44 @@ def test_isolated_prepare_receives_hf_config_and_structured_arguments(tmp_path, 
     )
     assert result == {"output": str(output)}
     assert output.read_text() == "prepared"
+
+
+def test_a_failed_isolated_preparer_is_a_typed_terminal_stop(tmp_path, monkeypatch) -> None:
+    import subprocess
+
+    from nemo_gym.environment import benchmark_preparation as preparation
+
+    script = tmp_path / "prepare.py"
+    script.write_text("")
+
+    def failing_worker(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0])
+
+    monkeypatch.setattr(preparation.subprocess, "run", failing_worker)
+
+    with pytest.raises(preparation.PreparationFailedError) as stopped:
+        preparation._run_isolated_prepare(
+            tmp_path / "python", str(script), "prepare", tmp_path / "out.jsonl", {}, config={}
+        )
+
+    assert str(stopped.value).startswith("EVAL STOPPED: data preparation failed for ")
+    assert (stopped.value.failure_kind, stopped.value.stop_exit_code) == ("environment_prepare_failed", 76)
+
+
+def test_the_cli_exits_76_and_leaves_the_kind_for_the_chain_guard(tmp_path, monkeypatch) -> None:
+    from nemo_gym.cli.utils import exit_cleanly_on_config_error
+    from nemo_gym.environment.benchmark_preparation import PreparationFailedError
+    from nemo_gym.orchestration.executors.resume_script import DRIVER_FAILURE_ENV
+
+    failure_file = tmp_path / ".gym_driver_failure.100"
+    monkeypatch.setenv(DRIVER_FAILURE_ENV, str(failure_file))
+
+    @exit_cleanly_on_config_error
+    def prepare() -> None:
+        raise PreparationFailedError("benchmarks.example.prepare", "prepare", "exit status 1")
+
+    with pytest.raises(SystemExit) as exited:
+        prepare()
+
+    assert exited.value.code == 76
+    assert failure_file.read_text() == "environment_prepare_failed\n"

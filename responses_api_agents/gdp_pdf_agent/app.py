@@ -54,7 +54,7 @@ from PIL import Image, ImageDraw
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agents.utils.verify_call import verify_with_transport_retry
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -634,12 +634,7 @@ class GdpPdfAgent(SimpleAgent):
                 # Return the real generated answer on the established masked-failure path. Raising
                 # here would discard it at the HTTP boundary and make a resume generate again. Every
                 # attempt was observed as its own agent route failure of operation verify.
-                result.update(
-                    reward=0.0,
-                    mask_sample=True,
-                    failure_kind=failure.failure_kind,
-                    failure_reason=failure.failure_reason,
-                )
+                result = masked_verify_failure(result, failure)
 
         adaptations = delivery.adaptation_counts()
         result["document_delivery"] = (

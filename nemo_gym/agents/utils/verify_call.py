@@ -97,3 +97,17 @@ async def verify_with_transport_retry(
                     continue
             raise failure from error
     raise AssertionError("unreachable")  # pragma: no cover
+
+
+def masked_verify_failure(answer: dict[str, Any], failure: NgFailureEvent) -> dict[str, Any]:
+    """``answer`` (the verify request, with the generated response) as a masked zero for a verify call that failed.
+
+    Return this from ``/run`` instead of raising: the HTTP boundary would drop the generated answer, and a resume
+    would generate again. The typed failure is the one ``verify_with_transport_retry`` raised.
+    """
+    return answer | {
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": failure.failure_kind,
+        "failure_reason": failure.failure_reason,
+    }
