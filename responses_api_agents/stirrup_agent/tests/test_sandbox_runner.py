@@ -49,6 +49,7 @@ def _payload(model_url: str, resources_url: str, workdir: Path) -> dict:
         "instructions": None,
         "tools": _TOOLS,
         "finish_tool_names": ["finish", "abandon_task_finish"],
+        "code_exec": True,
         "tool_access": {"base_url": resources_url, "cookies": {"session": "seeded"}, "headers": {}},
         "workdir": str(workdir),
         "max_turns": 10,
@@ -231,6 +232,7 @@ def test_a_request_the_model_server_rejects_ends_the_run_as_failed_with_the_turn
 
     assert output["stop_reason"] == "model_error"
     assert str(status) in output["model_error"]
+    assert output["model_error_status"] == status
     observations = output["observations"]
     assert observations["status"] == "failed"
     assert observations["model_response_ids"] == ["chatcmpl-1"]
@@ -321,6 +323,23 @@ def test_the_model_sees_the_certified_tool_definitions(tmp_path, resources):
     }
     assert [t for t in tools if t["function"]["name"] != "code_exec"] == [
         certified[name] for name in ("finish", "abandon_task_finish", "web_search", "fetch_web_page")
+    ]
+
+
+def test_without_code_exec_the_model_sees_only_the_request_tools(tmp_path, resources):
+    model = _ModelServer([_call("finish", json.dumps({"reason": "done"}))])
+    payload = {**_payload(model.base_url, resources.base_url, tmp_path), "code_exec": False}
+    try:
+        output = asyncio.run(run(payload, tmp_path, Observer()))
+    finally:
+        model.close()
+
+    assert output["observations"]["status"] == "completed"
+    assert [t["function"]["name"] for t in model.requests[0]["tools"]] == [
+        "finish",
+        "abandon_task_finish",
+        "web_search",
+        "fetch_web_page",
     ]
 
 
@@ -431,3 +450,34 @@ def test_the_staged_files_have_no_broken_imports():
                 assert not module.startswith(("nemo_gym", "resources_servers")), f"{name} imports {module}"
                 if module.startswith("responses_api_agents"):
                     assert f"{module.rsplit('.', 1)[-1]}.py" in HARNESS_FILES, f"{name} imports {module}"
+
+
+@pytest.mark.parametrize("failed", [False, True])
+async def test_compaction_observer_retains_all_summary_attempts_without_policy_calls(failed):
+    from types import SimpleNamespace
+
+    observer = Observer()
+    observer.response_ids.append("policy-before")
+    logged = []
+    agent = SimpleNamespace(_logger=SimpleNamespace(context_summarization_complete=lambda *args: logged.append(args)))
+
+    async def summarize(*args):
+        observer.response_ids.extend(["summary-rejected", "summary-accepted"])
+        if failed:
+            raise RuntimeError("unusable summary")
+        agent._logger.context_summarization_complete("Retain the changes.", "bridge")
+        return [], ["bridge"]
+
+    agent.summarize_messages = summarize
+    observer.watch_compaction(agent)
+    if failed:
+        with pytest.raises(RuntimeError, match="unusable summary"):
+            await agent.summarize_messages([], {})
+    else:
+        assert await agent.summarize_messages([], {}) == ([], ["bridge"])
+    observer.response_ids.append("policy-after")
+    event = observer.compactions[0]
+    assert [ref["response_id"] for ref in event["model_calls"]] == ["summary-rejected", "summary-accepted"]
+    assert event["outcome"] == ("failed" if failed else "completed")
+    assert event["summary"] == (None if failed else "Retain the changes.")
+    assert event["trigger"] == "automatic"

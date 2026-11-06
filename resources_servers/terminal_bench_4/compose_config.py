@@ -61,6 +61,19 @@ def prebuilt_compose(
     return document
 
 
+def merge_patch(target: Any, patch: Any) -> Any:
+    """Apply a JSON merge patch (RFC 7396): mappings merge, ``None`` removes a key, other values replace."""
+    if not isinstance(patch, dict):
+        return deepcopy(patch)
+    merged = dict(target) if isinstance(target, dict) else {}
+    for key, value in patch.items():
+        if value is None:
+            merged.pop(key, None)
+        else:
+            merged[key] = merge_patch(merged.get(key), value)
+    return merged
+
+
 def _compose_literals(value: Any) -> Any:
     if isinstance(value, str):
         escaped = value.replace("$$", "\x00")

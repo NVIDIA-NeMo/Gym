@@ -23,8 +23,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 import resources_servers.scicode.app as app
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.scicode.app import (
     ScicodeResourcesServer,
     ScicodeResourcesServerConfig,
@@ -35,6 +35,7 @@ from resources_servers.scicode.scicode_integration.runner import (
     build_test_program,
     exception_class_from_stderr,
     preflight_grading_interpreter,
+    process_exit,
     run_substep,
     sanitize_test,
 )
@@ -294,6 +295,30 @@ def test_run_substep_reports_execution_details_on_failure():
     assert "ValueError" in result["stderr_tail"]
     assert "ValueError" in result["error"]  # the legacy key keeps main's bounded stderr
     assert result["exception_class"] == "ValueError"
+
+
+@pytest.mark.parametrize(
+    "result, expected",
+    [
+        ({"timed_out": True, "returncode": None}, "timeout"),
+        ({"timed_out": False, "returncode": -9}, "killed:SIGKILL"),
+        ({"timed_out": False, "returncode": -11}, "killed:SIGSEGV"),
+        ({"timed_out": False, "returncode": -200}, "killed:200"),
+        ({"timed_out": False, "returncode": 0}, "exit:0"),
+        ({"timed_out": False, "returncode": 1}, "exit:1"),
+        ({"timed_out": False, "returncode": None}, "not_run"),
+        ({}, "not_run"),
+    ],
+)
+def test_process_exit_types_how_the_grading_process_ended(result, expected):
+    assert process_exit(result) == expected
+
+
+def test_run_substep_reports_a_killed_process_as_its_signal():
+    # A grading process killed by a signal (an out-of-memory kill sends SIGKILL) has a negative return code.
+    result = run_substep("import os, signal\nos.kill(os.getpid(), signal.SIGKILL)", timeout_secs=10.0)
+    assert result["passed"] is False and result["returncode"] == -9 and result["timed_out"] is False
+    assert process_exit(result) == "killed:SIGKILL"
 
 
 def test_run_substep_output_tails_are_bounded():
@@ -671,6 +696,36 @@ class TestApp:
         assert result["step_outputs"] is None
 
     @pytest.mark.asyncio
+    async def test_verify_always_records_how_each_scored_step_ended(self):
+        # Without record_step_outputs, each scored step still says how its grading process ended: a killed process
+        # is told apart from a failing test, and a step that never ran says so.
+        results = {"a": _details(True), "b": _details(False, returncode=-9, error="", stderr_tail="")}
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details(results):
+            result = await _server(h5.name).verify(
+                _request(solutions={"1.1": "a", "1.2": "b", "1.3": "_ran_out_of_context_"}, n_steps=3)
+            )
+        assert result.step_outputs is None
+        assert result.step_results == [True, False, False]
+        assert result.step_exits == [
+            {"returncode": 0, "timed_out": False, "exit": "exit:0"},
+            {"returncode": -9, "timed_out": False, "exit": "killed:SIGKILL"},
+            {"returncode": None, "timed_out": False, "exit": "not_run"},
+        ]
+
+    @pytest.mark.asyncio
+    async def test_verify_records_the_exit_of_the_run_that_decided_the_step(self):
+        # Under the OR rule the environment that passed decides the step, so a kill in another one is not its exit.
+        killed, passed = _details(False, returncode=-9), _details(True)
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5:
+            server = _server(h5.name, record_step_outputs=True)
+            server._resolved_grading_interpreters = [("first", "python-a"), ("second", "python-b")]
+            with patch.object(app, "run_substep", side_effect=[killed, passed]):
+                result = await server.verify(_request(solutions={"1.1": "a"}, n_steps=1))
+        assert result.step_results == [True]
+        assert result.step_exits == [{"returncode": 0, "timed_out": False, "exit": "exit:0"}]
+        assert result.step_outputs[0]["environment"] == "second" and result.step_outputs[0]["exit"] == "exit:0"
+
+    @pytest.mark.asyncio
     async def test_verify_with_the_flag_returns_step_outputs_aligned_with_step_results(self):
         results = {"a": _details(True), "b": _details(False)}
         with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep_details(results):
@@ -705,6 +760,7 @@ class TestApp:
             "passed": False,
             "returncode": None,
             "timed_out": False,
+            "exit": "not_run",
             "duration_s": None,
             "exception_class": None,
             "stdout_tail": "",
@@ -734,6 +790,7 @@ class TestApp:
                 "passed": False,
                 "returncode": None,
                 "timed_out": False,
+                "exit": "not_run",
                 "duration_s": None,
                 "exception_class": None,
                 "stdout_tail": "",

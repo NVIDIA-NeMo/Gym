@@ -9,8 +9,8 @@ import pytest
 import yaml
 from nooa_bench.bench_agent import TaskResult
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
@@ -86,7 +86,7 @@ async def test_default_benchagent_runs_and_serializes_module_locals(
     assert result.return_value.solution_description == "completed by default BenchAgent"
     assert result.termination_reason is None
     assert len(calls) == len(result.trajectory.turns) == 1
-    executions = [call for call in result.trajectory.tool_calls if call.tool_name == "execute_python"]
+    executions = [call for call in result.trajectory.tool_calls if call.tool_name == "python_cell"]
     assert any(evidence in call.output for call in executions), [call.output for call in executions]
     assert all(isinstance(call.output, str) for call in executions)
     assert TrajectoryRecord.model_validate_json(result.trajectory.model_dump_json()) == result.trajectory
@@ -96,11 +96,8 @@ async def test_default_benchagent_runs_and_serializes_module_locals(
     assert json.loads(observations.model_dump_json())["records"]
 
 
-def test_server_rejects_sandboxed_execution_until_sessions_are_wired() -> None:
-    from pydantic import ValidationError
-
+def test_server_accepts_sandboxed_sessions() -> None:
     config = default_config()
     values = config.model_dump()
     values["nooa"]["execution_mode"] = "sandboxed"
-    with pytest.raises(ValidationError, match="execution_mode='sandboxed'.*unavailable"):
-        NOOAAgentConfig.model_validate(values)
+    assert NOOAAgentConfig.model_validate(values).nooa.execution_mode == "sandboxed"

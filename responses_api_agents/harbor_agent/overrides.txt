@@ -1,3 +1,0 @@
-# Harbor imports pathspec via its job and directory-scanning dependencies.
-# The root nemo-gym override excludes it, so restore it in this server venv.
-pathspec

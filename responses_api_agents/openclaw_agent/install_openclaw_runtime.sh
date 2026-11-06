@@ -11,11 +11,6 @@ if [ "$(uname -s)" != Linux ]; then
   echo 'OpenClaw sandbox execution requires a Linux sandbox.' >&2
   exit 1
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-  echo 'OpenClaw sandbox execution requires Python >=3.8 in the task image for descendant supervision.' >&2
-  exit 1
-fi
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "OpenClaw sandbox execution requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
@@ -53,13 +48,6 @@ install_packages() {
   fi
 }
 
-# Never change the task repository or its dependency environment.
-python3 - "$runtime" "$PWD" <<'PY'
-import pathlib, sys
-runtime, workdir = (pathlib.Path(p).resolve() for p in sys.argv[1:])
-if workdir == runtime or workdir in runtime.parents or runtime in workdir.parents:
-    raise SystemExit('OpenClaw runtime must be outside the task repository')
-PY
 # One sandbox can receive overlapping session setup attempts. Keep the ready
 # check and all cache writes under a version-scoped advisory lock.
 if ! command -v flock >/dev/null 2>&1; then
@@ -94,7 +82,8 @@ if [ "${#missing[@]}" -gt 0 ]; then
   echo "OpenClaw sandbox execution prerequisites missing: ${missing[*]}. Preinstall curl, ca-certificates, tar, gzip, coreutils, gawk." >&2
   install_packages curl ca-certificates tar gzip coreutils gawk
 fi
-if [ "$platform" = linux-x64-musl ] && ! python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")' 2>/dev/null; then
+# musl task images are Alpine-based; apk records whether the C++ runtime Node needs is installed.
+if [ "$platform" = linux-x64-musl ] && command -v apk >/dev/null 2>&1 && ! apk info -e libstdc++ >/dev/null; then
   install_packages libstdc++
 fi
 cd "$runtime"

@@ -31,31 +31,31 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 from toolsets import TOOLSETS  # pyright: ignore[reportMissingImports]
 
-from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
+    SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
+    resolve_agent_timeout,
+    restrict_sandbox_network,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
-)
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -69,8 +69,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import ChatCompletionsConverter
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -79,15 +87,9 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
-from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession
+from responses_api_agents.hermes_agent.sandbox import HarnessProcessInfo, HermesSandboxSession
 
 
 # Legacy /run grades these request rejections and masks other provider failures.
@@ -170,7 +172,7 @@ def _trajectory_to_output_items(messages, n_input):
         if role == "assistant":
             reasoning_text = item.get("reasoning") or ""
             if reasoning_text:
-                content = ResponsesConverter._parse_think_tags(content)[1]
+                content = ChatCompletionsConverter._parse_think_tags(content)[1]
                 output_items.append(
                     NeMoGymResponseReasoningItem(
                         id=f"rsn-{len(output_items)}",
@@ -299,10 +301,17 @@ class HermesAgentConfig(BaseResponsesAPIAgentConfig):
     terminal_timeout: int = 180
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Hermes creates: `model_only` allows only the model server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`. The Agent Server builds Hermes's runtime and "
+            "uploads it, so a restricted sandbox needs no network for setup."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
     sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
-    # Where uv builds for sandbox architectures other than the host's are cached.
-    uv_cache_dir: str = DEFAULT_UV_CACHE_DIR
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     system_prompt: Optional[str] = None
     compression_enabled: bool = True
@@ -500,27 +509,50 @@ class HermesAgent(SimpleResponsesAPIAgent):
             connection = body.sandbox_access.connection
             if not isinstance(connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("Hermes currently supports only direct sandbox connections")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "Hermes network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             provider_ref = connection.provider_config_ref
             workdir = body.sandbox_access.workdir
 
         provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
         # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
         # without use_absolute_ip) would make every model call fail and the episode score 0 unmasked.
-        assert_model_url_reachable_from_sandbox(
-            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-            provider_name=next(iter(provider_config), None),
-        )
+        model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
+        try:
+            assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
+        except ValueError as error:
+            # A model URL the sandbox cannot reach fails the same way on every attempt: refuse the seed.
+            raise AgentSeedRejectedError(str(error)) from error
         provider = create_provider(provider_config)
         try:
             if owns_sandbox:
-                sandbox = AsyncSandbox(provider)
                 sandbox_config = self.config.sandbox_config.copy()
                 # Provider TTLs outlive this server; reserve ten minutes for setup/cleanup overhead.
                 sandbox_config.setdefault(
                     "ttl_s",
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
-                await sandbox.start(SandboxSpec(**sandbox_config))
+                spec = restrict_sandbox_network(
+                    SandboxSpec(**sandbox_config),
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=model_base_url,
+                    tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in self.effective_tool_accesses(body)
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
             else:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:
@@ -539,9 +571,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
             ),
         )
         try:
-            await state.install_runtime(
-                install_timeout=self.config.sandbox_install_timeout_seconds, uv_cache_dir=self.config.uv_cache_dir
-            )
+            await state.install_runtime(install_timeout=self.config.sandbox_install_timeout_seconds)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -592,7 +622,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     ToolCallObservation.model_validate(tool) for tool in raw_observations.get("tools") or []
                 )
                 records.extend(
-                    ContextCompactionObservation.model_validate(compaction)
+                    ContextCompactionObservation.model_validate(
+                        {
+                            **compaction,
+                            "model_calls": [
+                                {**ref, "model_ref": self.config.model_server}
+                                for ref in compaction.get("model_calls", [])
+                            ],
+                        }
+                    )
                     for compaction in raw_observations.get("compactions") or []
                 )
                 return AgentObservationBundle(

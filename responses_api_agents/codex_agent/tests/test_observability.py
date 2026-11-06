@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     parse_codex_observations,
     parse_codex_usage,
@@ -54,17 +54,28 @@ def test_missing_codex_session_record_is_explicit_and_preserves_failed_invocatio
 
 
 @pytest.mark.parametrize(
-    "record",
-    [None, [], "unexpected", {"type": "response_item", "payload": {}}, {"type": "event_msg", "payload": ["invalid"]}],
+    ("record", "tool_timing_known"),
+    [
+        (None, False),
+        ([], False),
+        ("unexpected", False),
+        ({"type": "response_item", "payload": {}}, False),
+        ({"type": "event_msg", "payload": ["invalid"]}, True),
+    ],
 )
-def test_malformed_native_record_reports_gap_without_losing_invocation(tmp_path: Path, record: object) -> None:
+def test_malformed_native_record_reports_gap_without_losing_invocation(
+    tmp_path: Path, record: object, tool_timing_known: bool
+) -> None:
+    """A record that is not a native event may have been a tool call, so the tool timing is unknown too."""
     folder = tmp_path / "sessions"
     folder.mkdir()
     (folder / "episode.jsonl").write_text(json.dumps(record) + "\n")
     bundle = read_codex_observations(tmp_path, "invocation", returncode=1, timed_out=False)
     assert bundle.records[0].invocation_id == "invocation"
     assert bundle.records[0].status == "failed"
-    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable"]
+    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable"] + (
+        [] if tool_timing_known else ["tool_timing_unavailable"]
+    )
 
 
 def test_multiple_native_session_files_preserve_record_boundaries(tmp_path: Path) -> None:
@@ -143,7 +154,16 @@ def test_unrecognized_transcript_record_reports_gap() -> None:
         returncode=1,
         timed_out=False,
     )
-    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable"]
+    assert [gap.code for gap in bundle.gaps] == ["agent_artifact_record_unparseable", "tool_timing_unavailable"]
+
+
+def test_unreadable_records_report_the_tool_timing_gap_once() -> None:
+    bundle = parse_codex_observations("not json\nnot json either", "invocation", returncode=1, timed_out=False)
+    assert [gap.code for gap in bundle.gaps] == [
+        "agent_artifact_record_unparseable",
+        "agent_artifact_record_unparseable",
+        "tool_timing_unavailable",
+    ]
 
 
 @pytest.mark.parametrize("success", [True, False, None])
@@ -195,3 +215,124 @@ def test_native_web_search_retains_identity_action_and_status(status: str) -> No
     assert tool.started_at is None
     assert (tool.completed_at is None) == (status == "searching")
     assert not bundle.gaps
+
+
+def _time_split(observations) -> tuple:
+    """The run-health timeouts section's policy, tool and untracked shares for a 100-second timed-out rollout whose
+    only model call ran for its first 40 seconds, with these observations attached as collection attaches them."""
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.rollouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
+    from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
+
+    started = 1_000_000.0
+    call = {
+        "model_ref": {"type": "responses_api_models", "name": "policy_model"},
+        "started_at": started,
+        "completed_at": started + 40,
+        "latency_total_ms": 40_000,
+        "tokens_out": 100,
+    }
+    row = {
+        "agent_timed_out": True,
+        ELAPSED_S_KEY: 100.0,
+        "reward": 0.0,
+        "ng_model_call_capture": {"calls": [call]},
+        "ng_agent_observations": observations.model_dump(mode="json"),
+    }
+    _attach_trajectory_record({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0}, row)
+    split = summarize_timeouts([read_rollout_timing(row)]).model_dump()["time_split"]
+    return split["policy_model"], split["tool"], split["untracked"]
+
+
+def test_a_transcript_that_could_not_be_read_leaves_tool_time_unknown() -> None:
+    """Codex reports `agent_artifact_unavailable` without its transcript: that is not an empty tool history."""
+    assert _time_split(parse_codex_observations(None, "0-0", returncode=-9, timed_out=True)) == (0.4, None, None)
+
+
+@pytest.mark.parametrize(
+    ("transcript", "expected"),
+    [
+        ("not json", (0.4, None, None)),
+        (
+            json.dumps(
+                {"type": "event_msg", "payload": {"type": "token_count", "info": {"total_token_usage": {"x": "7"}}}}
+            ),
+            (0.4, 0.0, 0.6),
+        ),
+    ],
+    ids=["unreadable-record", "unreadable-usage"],
+)
+def test_a_record_it_could_not_read_leaves_tool_time_unknown(transcript: str, expected: tuple) -> None:
+    """An unreadable record may have been a tool call; a token usage record it could not read was not."""
+    assert _time_split(parse_codex_observations(transcript, "0-0", returncode=-9, timed_out=True)) == expected
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        None,
+        "missing_model",
+        "policy_request",
+        "different_summary",
+        "duplicate",
+        "shared_event",
+        "failed",
+        "transport",
+        "missing_id",
+    ],
+)
+def test_compaction_requires_native_event_and_unique_session_helper(damage):
+    from copy import deepcopy
+
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.trajectory import ContextCompactionObservation
+    from responses_api_agents.codex_agent.observability import (
+        _COMPACTION_PREFIX,
+        associate_codex_compaction_calls,
+    )
+
+    transcript = json.dumps(
+        {
+            "type": "compacted",
+            "timestamp": "2026-10-29T10:00:00Z",
+            "payload": {"message": _COMPACTION_PREFIX + "Keep the changes."},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "root", returncode=0, timed_out=False)
+    model_ref = ModelServerRef(type="responses_api_models", name="policy")
+    attempt = {
+        "status": 200,
+        "compaction_response": {"response_id": "response-helper", "summary": "Keep the changes."},
+    }
+    attempts = [attempt]
+    if damage == "missing_model":
+        model_ref = None
+    elif damage == "policy_request":
+        del attempt["compaction_response"]
+    elif damage == "different_summary":
+        attempt["compaction_response"]["summary"] = "Different"
+    elif damage == "duplicate":
+        attempts.append(deepcopy(attempt))
+    elif damage == "shared_event":
+        bundle.records.append(bundle.records[-1].model_copy(deep=True))
+    elif damage == "failed":
+        attempt["status"] = 500
+    elif damage == "transport":
+        attempt["transport_error"] = "stream closed"
+    elif damage == "missing_id":
+        del attempt["compaction_response"]["response_id"]
+    joined = associate_codex_compaction_calls(bundle, attempts, model_ref=model_ref)
+    event = next(r for r in joined.records if isinstance(r, ContextCompactionObservation))
+    assert event.summary == "Keep the changes."
+    assert event.outcome == "completed"
+    assert [ref.response_id for ref in event.model_calls] == ([] if damage else ["response-helper"])
+    assert joined.records[0].model_calls == event.model_calls
+    assert bool(joined.gaps) == bool(damage)
+    assert bundle.records[-1].model_calls == []
+    if damage is None:
+        repeated = associate_codex_compaction_calls(joined, attempts, model_ref=model_ref)
+        assert repeated == joined
+        repeated = associate_codex_compaction_calls(joined, attempts * 2, model_ref=model_ref)
+        event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
+        assert not event.model_calls and repeated.gaps
+        assert not repeated.records[0].model_calls
