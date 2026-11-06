@@ -44,27 +44,38 @@ def _request(result: dict) -> CollabIntelVerifyRequest:
 
 
 @pytest.mark.parametrize(
-    "result, reward, alone_pass, test_pass, unfinished",
+    "result, reward, alone_pass, test_pass, unfinished, mask_sample",
     [
-        ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": True}}, 1.0, True, True, False),
-        ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False}}, 0.0, True, False, False),
+        ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": True}}, 1.0, True, True, False, False),
+        # a completed test failure is a measured zero
+        ({"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False}}, 0.0, True, False, False, False),
         # failed alone: not scored
-        ({"alone_pass": False, "alone": {"pass": False}, "test": None}, 0.0, False, None, False),
-        # a timed-out episode is unfinished, not a failure
+        ({"alone_pass": False, "alone": {"pass": False}, "test": None}, 0.0, False, None, False, True),
+        # a timed-out episode or a missing verdict is unfinished, not a failure
         (
             {"alone_pass": True, "alone": {"pass": True}, "test": {"pass": False, "error": "timeout"}},
             0.0,
             True,
             None,
             True,
+            True,
+        ),
+        (
+            {"alone_pass": False, "alone": {"pass": False, "error": "no verdict"}, "test": None},
+            0.0,
+            False,
+            None,
+            True,
+            True,
         ),
     ],
 )
-async def test_verify(result, reward, alone_pass, test_pass, unfinished):
+async def test_verify(result, reward, alone_pass, test_pass, unfinished, mask_sample):
     response = await _server().verify(_request(result))
-    assert (response.reward, response.alone_pass, response.test_pass, response.unfinished) == (
+    assert (response.reward, response.alone_pass, response.test_pass, response.unfinished, response.mask_sample) == (
         reward,
         alone_pass,
         test_pass,
         unfinished,
+        mask_sample,
     )

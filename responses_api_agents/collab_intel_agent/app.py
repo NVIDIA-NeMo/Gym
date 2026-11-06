@@ -29,16 +29,21 @@ import os
 import re
 import subprocess
 import tempfile
+from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from anyio import CancelScope
 from fastapi import FastAPI, Request
 from pydantic import ConfigDict
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.client import get_response_json, get_server_url, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.client import get_response_json, get_server_url, raise_for_status, rollout_path_prefix
+from nemo_gym.config import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import current_rollout_id
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from resources_servers.collab_intel.task_data import TaskData
 
 
 PARTNERS = ["ci-partner-1", "ci-partner-2", "ci-partner-3"]
@@ -60,13 +65,8 @@ class CollabIntelAgentConfig(BaseResponsesAPIAgentConfig):
     episode_timeout_s: int = 7200
 
 
-class CollabIntelRunRequest(BaseRunRequest):
-    model_config = ConfigDict(extra="allow")
-    dimension: str
-    scenario_path: str
-    gate_path: str
-    gate_seed: int = 0
-    seed: int = 0
+class CollabIntelRunRequest(BaseRunRequest, TaskData):
+    pass
 
 
 class CollabIntelVerifyResponse(BaseVerifyResponse):
@@ -80,7 +80,11 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         super().model_post_init(context)
         root = Path(self.config.data_root)
         self._root = (root if root.is_absolute() else Path(__file__).resolve().parents[2] / root).resolve()
-        subprocess.run(["uv", "sync", "--frozen", "--project", str(self._root)], check=True, capture_output=True)
+        # the upstream venv lives in the release dir: drop UV_PROJECT_ENVIRONMENT, which would point uv at Gym's own venv
+        env = {k: v for k, v in os.environ.items() if k != "UV_PROJECT_ENVIRONMENT"}
+        subprocess.run(
+            ["uv", "sync", "--frozen", "--project", str(self._root)], check=True, capture_output=True, env=env
+        )
         self._python = str(self._root / ".venv" / "bin" / "python")
         self._tmp = Path(tempfile.mkdtemp(prefix="collab_intel_"))
         self._sem = asyncio.Semaphore(self.config.max_concurrent)
@@ -95,7 +99,9 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         }
         # through this agent's /ci_policy route, which strips the reasoning Gym's chat completions put in content
         policy = {
-            "base_url": get_server_url(self.config.name).rstrip("/") + "/ci_policy/v1",
+            "base_url": get_server_url(self.config.name).rstrip("/")
+            + rollout_path_prefix(current_rollout_id())
+            + "/ci_policy/v1",
             "api_key_env": "CI_GYM_KEY",
             "model": self.config.policy_model,
             "extra": self.config.policy_extra,
@@ -103,7 +109,7 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         }
         compat = {POLICY: policy, **{name: seat for name in PARTNERS + JUDGES}}
         judge, second, tiebreak = JUDGES
-        return os.environ | {
+        return {k: v for k, v in os.environ.items() if k != "UV_PROJECT_ENVIRONMENT"} | {
             "CI_GYM_KEY": "dummy",
             "HARNESS_OPENAI_COMPAT": json.dumps(compat),
             "HARNESS_JUDGE_MODEL": judge,
@@ -146,23 +152,39 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
             proc.kill()
             await proc.wait()
             return {"pass": False, "error": f"episode timeout after {self.config.episode_timeout_s} s"}
+        except asyncio.CancelledError:
+            # stop the harness before the semaphore slot is released
+            with CancelScope(shield=True):
+                if proc.returncode is None:
+                    proc.kill()
+                await proc.communicate()
+            raise
         runs = list(out.glob(f"*/{version}_seed{seed}.json"))
         if proc.returncode or not runs:
-            return {"pass": False, "error": log.decode(errors="replace")[-2000:]}
+            error = log.decode(errors="replace")[-2000:]
+            return {"pass": False, "error": error or f"harness exited with code {proc.returncode} and no transcript"}
         t = json.loads(runs[0].read_text())
-        score = t.get("score") or {}
+        score = t.get("score")
+        # a judge failure (upstream judge_failed record) or a missing verdict is unmeasured, not a policy failure
+        if t.get("judge_failed") or not isinstance(score, dict) or score.get("pass") is None:
+            return {
+                "pass": False,
+                "error": f"harness transcript has no pass verdict: {t.get('judge_failed') or score}",
+            }
         return {
-            "pass": bool(score.get("pass")),
+            "pass": bool(score["pass"]),
             "outcome": score.get("outcome"),
             "ended": t.get("ended"),
             "rounds": t.get("rounds_run"),
-            "judge_failed": "score" not in t,
-            "transcript": str(runs[0]),
+            # the team chat, kept in the rollout so a score can be audited after the temp dir is gone
+            "messages": t.get("messages") or [],
+            "final_answers": t.get("final_answers"),
         }
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.post("/ci_policy/v1/chat/completions")(self.policy_chat)
+        app.post(f"/{ROLLOUT_PATH_PREFIX}/{{rollout_id}}/ci_policy/v1/chat/completions")(self.policy_chat)
         return app
 
     async def policy_chat(self, request: Request) -> dict[str, Any]:
@@ -170,7 +192,9 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
         at the start of content (vllm_model with uses_reasoning_parser). The harness would post that into the team chat,
         so the partners and judges would read the policy's reasoning. Move it to message.reasoning instead."""
         resp = await self.server_client.post(
-            server_name=self.config.model_server.name, url_path="/v1/chat/completions", json=await request.json()
+            server_name=self.config.model_server.name,
+            url_path=self.url_path_for_request("/v1/chat/completions", request),
+            json=await request.json(),
         )
         await raise_for_status(resp)
         out = await get_response_json(resp)
@@ -181,6 +205,30 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
                 msg["reasoning"] = m.group(0).strip()[len("<think>") : -len("</think>")]
                 msg["content"] = content[m.end() :]
         return out
+
+    @staticmethod
+    def _score(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        """Upstream score: test pass rate per dimension over completed rows that passed alone, then the mean over
+        dimensions, each weighted equally. A dimension with no such row is left out of the mean."""
+        by_dimension = defaultdict(list)
+        for rollout in (r for task in tasks for r in task):
+            if not rollout.get("mask_sample") and rollout.get("test_pass") is not None:
+                by_dimension[rollout["dimension"]].append(float(rollout["test_pass"]))
+        rates = {d: sum(v) / len(v) for d, v in sorted(by_dimension.items())}
+        metrics = {f"collab_intel/{d}": 100 * rate for d, rate in rates.items()}
+        if rates:
+            metrics["collab_intel/score"] = 100 * sum(rates.values()) / len(rates)
+        metrics["collab_intel/scored_rows"] = sum(len(v) for v in by_dimension.values())
+        return metrics
+
+    def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return self._score(tasks)
+
+    def compute_repeat_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
+        return self._score(tasks)
+
+    def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:
+        return {k: v for k, v in agent_metrics.items() if k in ("collab_intel/score", "collab_intel/scored_rows")}
 
     async def responses(self, request: Request, body: Any = None):
         raise NotImplementedError("collab_intel_agent only supports /run")
@@ -224,3 +272,5 @@ class CollabIntelAgent(SimpleResponsesAPIAgent):
 
 if __name__ == "__main__":
     CollabIntelAgent.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = CollabIntelAgent.run_webserver()

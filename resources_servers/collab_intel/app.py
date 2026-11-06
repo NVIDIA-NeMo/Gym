@@ -26,6 +26,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class CollabIntelConfig(BaseResourcesServerConfig):
@@ -56,6 +57,8 @@ class CollabIntelResourcesServer(SimpleResourcesServer):
         return CollabIntelVerifyResponse(
             **body.model_dump(),
             reward=float(bool(test_pass)),
+            # only a completed test on a passed gate is a measurement; gate failures and unfinished rows are masked
+            mask_sample=unfinished or not r.get("alone_pass"),
             alone_pass=bool(r.get("alone_pass")),
             test_pass=test_pass,
             unfinished=unfinished,
@@ -64,3 +67,5 @@ class CollabIntelResourcesServer(SimpleResourcesServer):
 
 if __name__ == "__main__":
     CollabIntelResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = CollabIntelResourcesServer.run_webserver()

@@ -2,11 +2,11 @@ name: collab_intel
 version: 0.1.0
 experimental: true
 kind: benchmark
-integration_profile: custom-gym-agent-loop
+integration_profile: external-agent-loop
 domain: agent
 description: Collaborative Intelligence, AI agents as teammates (upstream harness, self-hosted partners and judges)
 modality: text
-licensing: CC BY 4.0 data (7 scenarios CC BY-NC-SA 4.0), MIT code
+licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0 AND MIT
 authors:
 - cmunley1
 reward:
@@ -14,7 +14,7 @@ reward:
   - 0.0
   - 1.0
   higher_is_better: true
-determinism: nondeterministic
+determinism: stochastic
 resources_server: collab_intel
 agent_server: collab_intel_agent
 datasets:
@@ -25,4 +25,5 @@ datasets:
   num_repeats: 1
 model_server: policy_model
 canonical_split: benchmark
+prompt_source: agent
 lifecycle: active

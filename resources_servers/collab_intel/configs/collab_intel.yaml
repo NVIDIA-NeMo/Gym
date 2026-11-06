@@ -21,7 +21,7 @@ collab_intel_agent:
           type: example
           jsonl_fpath: resources_servers/collab_intel/data/example.jsonl
           num_repeats: 1
-          license: CC BY 4.0
+          license: Creative Commons Attribution 4.0 International
 
 collab_intel_agent_environment_server:
   environment_servers:
