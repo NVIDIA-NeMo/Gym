@@ -17,6 +17,7 @@ from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources
 from resources_servers.nemo_user_sim import app as usersim_app
 from resources_servers.nemo_user_sim.app import (
     PROBE_SCORERS,
+    SIMULATION_FAILED,
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
     _decode_provenance,
@@ -367,6 +368,44 @@ async def test_verify_masks_swallowed_judge_failure_from_real_evaluator(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "failure_kind", "failure_reason"),
+    [
+        (
+            {"failure_class": "user_simulator_error", "failure_detail": "User simulator returned HTTP 503"},
+            "usersim:user_simulator_error",
+            "User simulator returned HTTP 503",
+        ),
+        ({"failure_reason": "The simulation stopped early"}, SIMULATION_FAILED, "The simulation stopped early"),
+    ],
+)
+async def test_verify_masks_a_failed_simulation_under_a_failure_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: dict[str, str],
+    failure_kind: str,
+    failure_reason: str,
+) -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    row = _resolved_row()
+    request = _request("simulation-failed")
+    await server.seed_session(request, _seed_body(row))
+
+    async def scorer(_trajectory: dict[str, Any], _models: dict[str, Any]) -> dict[str, Any]:
+        return {"status_proposal": True, "scores": {}}
+
+    _install_evaluator_scripts(monkeypatch, _ScriptedModelFacade(_judge_payload()), scorer)
+    body = _verify_body(row)
+    body.verification_input.usersim_result.conversation_status = False
+    body.verification_input.usersim_result.simulation_outcome = {"status": "failed", **outcome}
+
+    verification = await server.verify(request, body)
+
+    assert (verification.reward, verification.mask_sample) == (0.0, True)
+    assert (verification.failure_kind, verification.failure_reason) == (failure_kind, failure_reason)
+
+
+@pytest.mark.asyncio
 async def test_verify_masks_real_evaluator_scorer_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -543,7 +582,7 @@ def test_resources_session_contract() -> None:
     server = _server()
     server.session_id_to_seed = {}
     server.resources_session_id_to_session_id = {}
-    server.closed_resources_session_ids = {}
+    server.fenced_resources_session_ids = {}
 
     check_resources_session_contract(
         server.setup_webserver(),
@@ -561,7 +600,7 @@ async def test_seed_retried_under_a_new_cookie_moves_the_record_and_close_withou
     server = _server()
     server.session_id_to_seed = {}
     server.resources_session_id_to_session_id = {}
-    server.closed_resources_session_ids = {}
+    server.fenced_resources_session_ids = {}
     body = _seed_body(_resolved_row())
 
     await server.seed_session(_request("lost-reply"), body)
@@ -597,7 +636,7 @@ async def test_expired_session_is_removed_and_verifies_as_masked(monkeypatch: py
     assert (verification.mask_sample, verification.failure_kind) == (True, SESSION_EXPIRED)
     assert "expired" not in server.session_id_to_seed
     assert server.resources_session_id_to_session_id == {}
-    # The expiry record is bounded like the closed record.
+    # The expiry record is bounded like a fence.
     now = 122.0
     verification = await _verify(server, request, _resolved_row())
     assert verification.failure_kind == SESSION_LOST
@@ -609,7 +648,7 @@ async def test_close_finds_the_session_by_id_before_the_cookie() -> None:
     server = _server()
     server.session_id_to_seed = {}
     server.resources_session_id_to_session_id = {}
-    server.closed_resources_session_ids = {}
+    server.fenced_resources_session_ids = {}
     first = _seed_body(_resolved_row())
     second = first.model_copy(update={"resources_session_id": "resources-session-1"})
     await server.seed_session(_request("cookie-a"), first)
@@ -623,7 +662,7 @@ async def test_close_finds_the_session_by_id_before_the_cookie() -> None:
 
     assert set(server.session_id_to_seed) == {"cookie-b"}
     assert server.resources_session_id_to_session_id == {"resources-session-1": "cookie-b"}
-    assert first.resources_session_id in server.closed_resources_session_ids
+    assert first.resources_session_id in server.fenced_resources_session_ids
 
 
 def test_health_scorer_only_applies_to_guarded_rows() -> None:

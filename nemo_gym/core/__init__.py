@@ -50,13 +50,22 @@ if TYPE_CHECKING:
         MODEL_POLICY_RESPONSE_TIMEOUT,
         MODEL_REQUEST_ERROR,
         MODEL_TRANSPORT_ERROR,
+        PROVIDER_IO_TIMEOUT,
+        PROVIDER_OOM_KILLED,
+        PROVIDER_STATUS_UNAVAILABLE,
         PROVIDER_UNAVAILABLE,
         SESSION_EXPIRED,
         SESSION_LOST,
         VERIFIER_ERROR,
+        FailureClass,
+        FailureClassificationConfig,
         FailureStage,
+        StageClassificationConfig,
+        classify_failure,
         is_namespaced,
         is_registered,
+        is_server_failure,
+        reporting_failure_kind,
         validate_failure_kind,
     )
     from nemo_gym.core.failure_records import (
@@ -65,6 +74,7 @@ if TYPE_CHECKING:
         FailureEvent,
         FailureReport,
         ModelFailureDetails,
+        SandboxFailureDetails,
         SdkErrorDetails,
     )
     from nemo_gym.core.failure_transport import (
@@ -75,6 +85,16 @@ if TYPE_CHECKING:
         observe_failure,
         reply_failure_report,
         report_for_current_request,
+    )
+    from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
+    from nemo_gym.core.outcome_policy import (
+        OutcomeAction,
+        OutcomeDecision,
+        OutcomePolicyConfig,
+        StageOutcomePolicyConfig,
+        StagePolicyConfig,
+        choose_action,
+        choose_stage_outcome,
     )
     from nemo_gym.core.responses_api_types import (
         CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -138,6 +158,8 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "OperationTiming": "operation_timing",
+    "TimingBoundary": "operation_timing",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
     "AGENT_LIMIT": "failure_kinds",
     "AGENT_ROUTE_FAILED": "failure_kinds",
@@ -156,6 +178,16 @@ _PUBLIC_API = {
     "FailureReport": "failure_records",
     "FailureReportRow": "failure_transport",
     "FailureStage": "failure_kinds",
+    "FailureClass": "failure_kinds",
+    "FailureClassificationConfig": "failure_kinds",
+    "StageClassificationConfig": "failure_kinds",
+    "classify_failure": "failure_kinds",
+    "reporting_failure_kind": "failure_kinds",
+    "is_server_failure": "failure_kinds",
+    "OutcomeDecision": "outcome_policy",
+    "StageOutcomePolicyConfig": "outcome_policy",
+    "StagePolicyConfig": "outcome_policy",
+    "choose_stage_outcome": "outcome_policy",
     "HARNESS_TERMINATION_UNCONFIRMED": "failure_kinds",
     "JUDGE_FAILED": "failure_kinds",
     "JUDGE_UNPARSEABLE": "failure_kinds",
@@ -165,6 +197,7 @@ _PUBLIC_API = {
     "MODEL_TRANSPORT_ERROR": "failure_kinds",
     "MaterializedTask": "episode_types",
     "ModelFailureDetails": "failure_records",
+    "SandboxFailureDetails": "failure_records",
     "NeMoGymChatCompletion": "responses_api_types",
     "NeMoGymChatCompletionAssistantMessageForTrainingParam": "responses_api_types",
     "NeMoGymChatCompletionAssistantMessageParam": "responses_api_types",
@@ -208,6 +241,11 @@ _PUBLIC_API = {
     "NeMoGymResponseUsage": "responses_api_types",
     "NeMoGymSummary": "responses_api_types",
     "NgFailureEvent": "typed_exceptions",
+    "OutcomeAction": "outcome_policy",
+    "OutcomePolicyConfig": "outcome_policy",
+    "PROVIDER_IO_TIMEOUT": "failure_kinds",
+    "PROVIDER_OOM_KILLED": "failure_kinds",
+    "PROVIDER_STATUS_UNAVAILABLE": "failure_kinds",
     "PROVIDER_UNAVAILABLE": "failure_kinds",
     "REQUIRED_TOKEN_METADATA_FIELDS": "responses_api_types",
     "RESPONSES_TO_TRAIN": "responses_api_types",
@@ -222,6 +260,7 @@ _PUBLIC_API = {
     "VERIFIER_ERROR": "failure_kinds",
     "accumulate_response_usage": "responses_api_types",
     "agent_route_failure": "typed_exceptions",
+    "choose_action": "outcome_policy",
     "current_rollout_id": "episode_context",
     "current_verifier_invocation_id": "episode_context",
     "failure_report_for": "typed_exceptions",
