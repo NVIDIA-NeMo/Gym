@@ -39,14 +39,18 @@ from nemo_gym.agents import (
     RUNNER_FILE,
     AgentCloseSessionResponse,
     AgentOutcome,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
     stage_skills,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -662,6 +666,23 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     mcp_tool_timeout_seconds: Optional[float] = Field(default=None, gt=0, allow_inf_nan=False)
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Codex creates: `model_only` allows only the model server's host, `model_and_tools` "
+            "also each MCP grant's host. A borrowed task sandbox keeps its owner's network, so a session that "
+            "borrows one rejects any other value than `inherit`."
+        ),
+    )
+    sandbox_runtime_dir: Optional[str] = Field(
+        default=None,
+        pattern=r"^/",
+        description=(
+            "Directory inside the sandbox that already holds `node/` and `codex/` as `install_codex_runtime.sh` lays "
+            "them out, for sandboxes that cannot download the runtime. Setup checks that it runs `codex_version` "
+            "instead of installing one, in a borrowed sandbox as well as one Codex creates."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
 
     @field_validator("sandbox_logs_dir")
@@ -743,7 +764,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
         marker = self._agent_session_id_from_request(request)
         # Cookies from the previous adapter must never fall back to host execution.
         if marker is None and _SANDBOX_SESSION_KEY in getattr(request, "scope", {}).get("session", {}):
-            raise HTTPException(409, "Codex session cookie has expired")
+            raise AgentSessionConflictError("Codex session cookie names a session that is no longer available")
         return marker
 
     def _require_agent_session(self, agent_session_id: str) -> CodexSandboxSession:
@@ -778,6 +799,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "Codex requires direct SandboxAccess")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "Codex network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str) or not workdir.startswith("/") or ".." in PurePosixPath(workdir).parts:
@@ -834,6 +859,28 @@ class CodexAgent(SimpleResponsesAPIAgent):
 
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    tool_urls=[
+                        # Only the grants Codex writes into config.toml; it leaves out optional ones it cannot name.
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and _codex_mcp_server_name(access.name)
+                    ],
+                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
+                    required_tool_urls=[
+                        str(access.connection.url)
+                        for access in tool_accesses
+                        if isinstance(access, MCPToolAccess) and access.required
+                    ],
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -842,7 +889,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 await provider.aclose()
                 raise
         directory = f"/tmp/nemo-gym-codex-sessions/{uuid4().hex}"
-        runtime = f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
+        runtime = self.config.sandbox_runtime_dir or f"/tmp/nemo-gym-codex-node-22.19.0-{self.config.codex_version}"
         state = CodexSandboxSession(
             request=body,
             session=SandboxSession(
@@ -867,24 +914,50 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"Cannot prepare Codex session: {prepare}; exit={prepared.return_code}, "
                     f"error_type={prepared.error_type}; {prepared.stderr or prepared.stdout}"
                 )
-            # Install only the agent runtime in the existing task sandbox.
-            # Resources has already prepared the task repository and its dependencies.
-            installer = "install_codex_runtime.sh"
-            await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
-            install_command = (
-                f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
-                f"{shlex.quote(self.config.codex_version)}"
-            )
-            installed = await sandbox.exec(
-                install_command,
-                cwd=workdir,
-                timeout_s=self.config.sandbox_install_timeout_seconds,
-            )
-            if installed.return_code != 0 or installed.error_type:
-                raise RuntimeError(
-                    f"Codex installer exited {installed.return_code}, command={install_command}, "
-                    f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
+            if self.config.sandbox_runtime_dir:
+                # The installer checks Python and isolates Codex's own check; a preinstalled runtime gets the same.
+                # CODEX_HOME keeps the check out of the task's HOME, where Codex would otherwise create ~/.codex.
+                version_home = f"{directory}/codex-version-home"
+                checked = await sandbox.exec(
+                    "python3 -c 'import sys; assert sys.version_info >= (3, 8), \"Codex needs Python 3.8 or newer\"' && "
+                    f"mkdir -p {shlex.quote(version_home)} && CODEX_HOME={shlex.quote(version_home)} "
+                    f"{shlex.quote(runtime + '/node/bin/node')} "
+                    f"{shlex.quote(runtime + '/codex/node_modules/@openai/codex/bin/codex.js')} --version",
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
                 )
+                reported = (checked.stdout or "").strip()
+                if checked.error_type:
+                    # A transport failure or timeout may pass on another attempt.
+                    raise RuntimeError(
+                        f"Codex could not check the runtime in {runtime} (error_type={checked.error_type}); "
+                        f"stdout={checked.stdout}; stderr={checked.stderr}"
+                    )
+                if checked.return_code != 0 or reported != f"codex-cli {self.config.codex_version}":
+                    # A missing runtime, another version or no usable Python fails the same way every time.
+                    raise AgentSeedRejectedError(
+                        f"Codex runtime in {runtime} does not run codex_version {self.config.codex_version} "
+                        f"(exit {checked.return_code}); stdout={checked.stdout}; stderr={checked.stderr}"
+                    )
+            else:
+                # Install only the agent runtime in the existing task sandbox.
+                # Resources has already prepared the task repository and its dependencies.
+                installer = "install_codex_runtime.sh"
+                await sandbox.upload(Path(__file__).with_name(installer), f"{directory}/{installer}")
+                install_command = (
+                    f"bash {shlex.quote(directory + '/' + installer)} {shlex.quote(runtime)} "
+                    f"{shlex.quote(self.config.codex_version)}"
+                )
+                installed = await sandbox.exec(
+                    install_command,
+                    cwd=workdir,
+                    timeout_s=self.config.sandbox_install_timeout_seconds,
+                )
+                if installed.return_code != 0 or installed.error_type:
+                    raise RuntimeError(
+                        f"Codex installer exited {installed.return_code}, command={install_command}, "
+                        f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
+                    )
             await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
             # The runner loads the transport from beside itself under this name.
             await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")

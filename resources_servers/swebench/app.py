@@ -416,17 +416,17 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
     async def seed_session(
         self, request: Request, body: SWEBenchSeedSessionRequest | ResourcesSeedSessionRequest
     ) -> SWEBenchSeedSessionResponse | ResourcesSeedSessionResponse:
-        """Create the task sandbox for a legacy instance body or a typed Environment Server seed.
+        """Create the task sandbox for an agent-run seed's instance body or an Environment Server's episode seed.
 
-        A typed seed returns ``sandbox_access`` with the serialized task sandbox and the image's working
-        directory; a legacy seed returns the sandbox handle.
+        An episode seed returns ``sandbox_access`` with the serialized task sandbox and the image's working
+        directory; an agent-run seed returns the sandbox handle.
         """
         if isinstance(body, ResourcesSeedSessionRequest):
             return await self.seed_task_sandbox_session(request, body, SWEBenchInstanceRequest)
         session_id = request.session[SESSION_ID_KEY]
         async with self._locked_task_session(session_id) as record:
-            if record.seed is not None or self._task_session_fence.closed_episode(session_id) is not None:
-                raise ResourcesSessionConflictError("A legacy seed cannot replace a typed resources session")
+            if record.seed is not None or session_id in self._task_session_fences:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
             await self._stop_task_sandbox(session_id)
             try:
                 record.workdir = await self._start_task_sandbox(session_id, body)
@@ -478,7 +478,7 @@ Stderr:
         self._session_id_to_seed_head.pop(session_id, None)
 
     async def verify(self, request: Request, body: SWEBenchVerifyRequest) -> SWEBenchVerifyResponse:
-        """Grade the resources-owned sandbox, reusing the patch and verdict on typed retries."""
+        """Grade the resources-owned sandbox, reusing the patch and verdict on an episode session's retries."""
         return await self.verify_task_sandbox_session(
             request,
             body,
@@ -521,7 +521,7 @@ Stderr:
                 patch_extraction_failed = True
                 model_patch = ""
                 print("Failed to extract patch from container", format_exc(), file=sys.stderr)
-            # A failed stop of a typed session retains the handle and captured patch for a retry.
+            # A failed stop of an episode session retains the handle and captured patch for a retry.
             await self.stop_task_sandbox_after_capture(session_id)
 
         verifier_sandbox_lifecycle_started_at = monotonic()

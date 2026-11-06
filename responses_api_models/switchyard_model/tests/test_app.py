@@ -406,6 +406,194 @@ class TestApp:
         assert seen["max_output_tokens"] == 16
 
 
+class TestReasoningModels:
+    """uses_reasoning_parser makes this server behave like vllm_model on both legs of a turn."""
+
+    def _setup_server(self, **overrides) -> SwitchyardModel:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            switchyard_api_key="dummy_key",  # pragma: allowlist secret
+            switchyard_model="policy-model",
+            **overrides,
+        )
+        return SwitchyardModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def _upstream_reply(self, **message) -> dict:
+        data = _chat_data()
+        data["choices"][0]["message"] = {"role": "assistant", **message}
+        return data
+
+    def test_defaults_keep_the_proxy_transparent(self) -> None:
+        server = self._setup_server()
+        assert server.config.uses_reasoning_parser is False
+        assert server.config.uses_interleaved_reasoning is True
+        assert server.config.sampling_overrides is None
+
+    @pytest.mark.parametrize("field", ["reasoning", "reasoning_content"])
+    def test_upstream_reasoning_is_folded_into_think_tags(self, monkeypatch: MonkeyPatch, field: str) -> None:
+        """vLLM >= 0.16 emits `reasoning`; older servers emit `reasoning_content`. Either folds."""
+        server = self._setup_server(uses_reasoning_parser=True)
+
+        async def mock_create_chat_completion(self, **kwargs):
+            return TestReasoningModels()._upstream_reply(content="Hello!", **{field: "thinking"})
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        message = response.json()["choices"][0]["message"]
+        assert message["content"] == "<think>thinking</think>Hello!"
+        assert "reasoning" not in message and "reasoning_content" not in message
+
+    def test_fold_keeps_tool_calls_and_finish_reason(self, monkeypatch: MonkeyPatch) -> None:
+        """A tool-call turn has reasoning and no text; the call must survive the fold."""
+        server = self._setup_server(uses_reasoning_parser=True)
+        tool_call = {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            data = TestReasoningModels()._upstream_reply(content=None, reasoning="run it", tool_calls=[tool_call])
+            data["choices"][0]["finish_reason"] = "tool_calls"
+            return data
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 200
+        choice = response.json()["choices"][0]
+        assert choice["message"]["content"] == "<think>run it</think>"
+        assert choice["message"]["tool_calls"][0]["function"]["name"] == "bash"
+        assert choice["finish_reason"] == "tool_calls"
+
+    def test_replayed_think_block_is_moved_back_into_reasoning_fields(self, monkeypatch: MonkeyPatch) -> None:
+        """The reverse of the fold: what the agent replays goes upstream the way vllm_model sends it."""
+        server = self._setup_server(uses_reasoning_parser=True)
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        tool_call = {"id": "call_1", "type": "function", "function": {"name": "bash", "arguments": "{}"}}
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "fix it"},
+                    {"role": "assistant", "content": "<think>plan</think>Let me look.", "tool_calls": [tool_call]},
+                    {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+                ]
+            },
+        )
+        assert response.status_code == 200
+        user, assistant, tool = seen["messages"]
+        assert assistant["content"] == "Let me look."
+        assert assistant["reasoning_content"] == "plan"
+        assert assistant["reasoning"] == "plan"
+        assert assistant["tool_calls"][0]["function"]["name"] == "bash"
+        # Only assistant turns are rewritten, and a turn without a think block gains no fields.
+        assert user == {"role": "user", "content": "fix it"}
+        assert tool["content"] == "ok" and "reasoning" not in tool
+
+    def test_interleaved_off_strips_the_block_without_adding_fields(self) -> None:
+        messages = [{"role": "assistant", "content": "<think>plan</think>Let me look."}]
+        app_module._reasoning_to_fields(messages, interleaved=False)
+        assert messages == [{"role": "assistant", "content": "Let me look."}]
+
+    def test_rewrite_handles_list_content_and_leaves_plain_turns_alone(self) -> None:
+        messages = [
+            {"role": "assistant", "content": [{"type": "text", "text": "<think>plan</think>Done."}]},
+            {"role": "assistant", "content": "no reasoning here"},
+        ]
+        app_module._reasoning_to_fields(messages, interleaved=True)
+        assert messages[0]["content"] == [{"type": "text", "text": "Done."}]
+        assert messages[0]["reasoning_content"] == messages[0]["reasoning"] == "plan"
+        assert messages[1] == {"role": "assistant", "content": "no reasoning here"}
+
+    def test_without_the_flag_replayed_content_is_forwarded_untouched(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "assistant", "content": "<think>plan</think>Let me look."}]},
+        )
+        assert seen["messages"][0]["content"] == "<think>plan</think>Let me look."
+        assert "reasoning_content" not in seen["messages"][0]
+
+
+class TestSamplingOverrides:
+    def _setup_server(self, **overrides) -> SwitchyardModel:
+        config = SwitchyardModelConfig(
+            host="0.0.0.0",
+            port=8081,
+            entrypoint="",
+            name="test_switchyard_model",
+            switchyard_base_url="http://127.0.0.1:4000/v1",
+            switchyard_api_key="dummy_key",  # pragma: allowlist secret
+            switchyard_model="policy-model",
+            **overrides,
+        )
+        return SwitchyardModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    def test_pinned_values_win_and_null_clears_a_caller_field(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(sampling_overrides={"temperature": 1.0, "top_p": 0.95, "max_tokens": None})
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2, "max_tokens": 131072},
+        )
+        assert response.status_code == 200
+        assert seen["temperature"] == 1.0
+        assert seen["top_p"] == 0.95
+        # The agent's blanket cap is cleared rather than forwarded.
+        assert "max_tokens" in seen and seen["max_tokens"] is None
+
+    def test_route_id_is_applied_last_and_cannot_be_pinned(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(sampling_overrides={"model": "sneaky"})
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+        assert seen["model"] == "policy-model"
+
+    def test_no_pin_is_transparent(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server()
+        seen: dict = {}
+
+        async def mock_create_chat_completion(self, **kwargs):
+            seen.update(kwargs)
+            return _chat_data()
+
+        monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", mock_create_chat_completion)
+        client = TestClient(server.setup_webserver())
+        client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}], "temperature": 0.2})
+        assert seen["temperature"] == 0.2
+
+
 class TestProxyLifecycle:
     def _launch_config(self, **overrides) -> SwitchyardModelConfig:
         return SwitchyardModelConfig(
@@ -885,7 +1073,7 @@ target = "policy"
 
         manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
         assert manifest["route"] == "policy-model"
-        assert manifest["nemo_switchyard_version"] == "0.2.0"
+        assert manifest["nemo_switchyard_version"] == "0.3.0"
 
         snapshot = json.loads((tmp_path / "condition" / "switchyard-stats.json").read_text())
         assert snapshot["mode"] == "hosted"
@@ -979,7 +1167,7 @@ class _StubUpstream(BaseHTTPRequestHandler):
     """A loopback OpenAI-chat upstream that records what the proxy sends it.
 
     Serving chat completions only is deliberate: a Responses call through the chain then proves
-    Switchyard's responses<->chat translation, which is the code path the 0.2.0 pin exists for.
+    Switchyard's responses<->chat translation through the pinned native proxy.
     """
 
     requests: list  # (path, headers, body) tuples, appended per call; reset by the fixture
@@ -1022,7 +1210,7 @@ class TestFullChainIntegration:
 
     Chain under test: Gym FastAPI app -> NeMoGymAsyncOpenAI -> native Switchyard server
     (routing + wire-format translation in Rust) -> stub upstream. This is the integration the
-    exact 0.2.0 pin protects: the TOML schema, the /v1 endpoints, the session header, and the
+    exact 0.3.0 pin protects: the TOML schema, the /v1 endpoints, the session header, and the
     chat->responses translation emitting the usage detail objects NeMoGymResponse requires.
     """
 
@@ -1086,13 +1274,14 @@ target = "policy"
             server_client=MagicMock(spec=ServerClient, global_config_dict={}),
         )
         app = server.setup_webserver()
+        app.state.switchyard_server = server
         try:
             with TestClient(app) as client:
                 yield client, proxy_port
         finally:
             monkeypatch.undo()
 
-    def test_responses_round_trip_translates_usage(self, gym_app, capfd) -> None:
+    def test_responses_round_trip_translates_usage(self, gym_app) -> None:
         client, _ = gym_app
 
         response = client.post(
@@ -1112,10 +1301,6 @@ target = "policy"
         assert "cached_tokens" in data["usage"]["input_tokens_details"]
         assert "reasoning_tokens" in data["usage"]["output_tokens_details"]
 
-        # The rollout id reached Switchyard's routing metadata: its request log (Rust tracing on
-        # stderr, captured by capfd) records the session id it parsed from Gym's header.
-        assert 'session_id="task0-r1-a0"' in capfd.readouterr().err
-
         # The upstream saw one translated chat call for the target model, not the route name,
         # carrying the deployment's credential.
         (path, headers, body) = _StubUpstream.requests[0]
@@ -1123,10 +1308,9 @@ target = "policy"
         assert path == "/v1/chat/completions"
         assert body["model"] == "upstream/model"
         assert headers_lower["authorization"] == "Bearer stub-upstream-key"  # pragma: allowlist secret
-        # Switchyard 0.2.0 parses x-switchyard-session-id into routing metadata but does not
-        # strip it before forwarding, so the upstream also sees the opaque rollout id. Asserted
-        # as-is so a change in either direction on upgrade is caught, not discovered in the field.
-        assert headers_lower["x-switchyard-session-id"] == "task0-r1-a0"
+        # Unlike 0.2.0, the pinned 0.3.0 proxy does not forward its session header
+        # to the upstream. Gym-to-proxy correlation is asserted by TestApp.
+        assert "x-switchyard-session-id" not in headers_lower
 
     def test_chat_completions_round_trip(self, gym_app) -> None:
         client, _ = gym_app
@@ -1152,3 +1336,52 @@ target = "policy"
         with urllib.request.urlopen(f"http://127.0.0.1:{proxy_port}/v1/stats", timeout=5) as stats_response:
             stats = json.loads(stats_response.read())
         assert json.dumps(stats).count("upstream/model"), stats
+
+    @pytest.mark.parametrize("max_tokens", [16, None])
+    def test_responses_sampling_pins_reach_chat_upstream(self, gym_app, monkeypatch, max_tokens) -> None:
+        client, _ = gym_app
+        server = client.app.state.switchyard_server
+        monkeypatch.setattr(server.config, "sampling_overrides", {"max_tokens": max_tokens, "top_k": 5})
+        response = client.post(
+            "/v1/responses",
+            json={"input": "hi", "max_output_tokens": 99, "temperature": 0.3},
+        )
+        assert response.status_code == 200, response.text
+        upstream_body = _StubUpstream.requests[-1][2]
+        assert upstream_body.get("max_tokens") == max_tokens
+        assert upstream_body.get("max_completion_tokens") is None
+        assert upstream_body["top_k"] == 5
+        assert upstream_body["temperature"] == 0.3
+        assert response.json()["model"] == "upstream/model"
+        assert response.json()["output"][0]["content"][0]["text"] == "Hello from upstream!"
+
+    @pytest.mark.parametrize("interleaved", [False, True])
+    def test_responses_reasoning_replay_matches_chat_setting(self, gym_app, monkeypatch, interleaved) -> None:
+        client, _ = gym_app
+        server = client.app.state.switchyard_server
+        monkeypatch.setattr(server.config, "uses_reasoning_parser", True)
+        monkeypatch.setattr(server.config, "uses_interleaved_reasoning", interleaved)
+        response = client.post(
+            "/v1/responses",
+            json={
+                "input": [
+                    {"role": "user", "content": "hi"},
+                    {"type": "reasoning", "id": "rs1", "summary": [{"type": "summary_text", "text": "plan"}]},
+                    {"role": "assistant", "content": "earlier answer"},
+                    {"role": "user", "content": "continue"},
+                ]
+            },
+        )
+        assert response.status_code == 200, response.text
+        assistant = _StubUpstream.requests[-1][2]["messages"][1]
+        assert assistant["content"] == "earlier answer"
+        assert assistant.get("reasoning") == ("plan" if interleaved else None)
+        assert assistant.get("reasoning_content") == ("plan" if interleaved else None)
+
+    def test_parity_mode_rejects_responses_only_features(self, gym_app, monkeypatch) -> None:
+        client, _ = gym_app
+        monkeypatch.setattr(client.app.state.switchyard_server.config, "uses_reasoning_parser", True)
+        response = client.post("/v1/responses", json={"input": "continue", "previous_response_id": "resp_previous"})
+        assert response.status_code == 422
+        assert "Chat-compatible" in response.json()["detail"]
+        assert not _StubUpstream.requests

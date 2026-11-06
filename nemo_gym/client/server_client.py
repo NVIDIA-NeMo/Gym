@@ -254,7 +254,7 @@ class ServerClient(BaseModel):
             # A /run starts an episode attempt, so with checkpointing it is never sent twice.
             # A dropped connection usually means the server's worker died mid-episode.
             # Sending it again would run the attempt a second time,
-            # and the first run's sessions on other servers would never be freed: the second run replies,
+            # and the first run's sessions on other servers would never be released: the second run replies,
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),

@@ -66,6 +66,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     atomic_write_json,
     manifest_path_for,
     record_resubmit_offset,
+    saved_failure_classification,
     validate_resume,
 )
 from nemo_gym.telemetry.observer import driver_metrics
@@ -252,7 +253,7 @@ class RolloutStore:
 
         materialize_started = perf_counter()
         rows, manifest = prepare_inputs()
-        state = RolloutRecords(manifest, rows)
+        state = RolloutRecords(manifest, rows, classification=saved_failure_classification(output))
         with materialized.open("wb") as file:
             for row in rows:
                 file.write(orjson.dumps(row) + b"\n")
