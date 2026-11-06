@@ -474,7 +474,8 @@ async def test_prepared_row_runs_through_environment_sessions(monkeypatch):
             port=8000,
             entrypoint="app.py",
             api_key="test-key",
-            fire_after=1,  # pragma: allowlist secret
+            # A batch of one is graded; fire_after's smoke mode would mask the row without calling the grader.
+            batch_size=1,  # pragma: allowlist secret
         ),
         server_client=client,
     )
@@ -537,7 +538,7 @@ async def test_prepared_row_runs_through_environment_sessions(monkeypatch):
     submissions = score.call_args.args[0]
     assert submissions[0]["problem_id"] == "Challenge_1_main"
     assert submissions[0]["generated_code"] == "```python\nreturn 1.23\n```"
-    assert len(submissions) == 70
+    assert len(submissions) == 1
 
 
 def _close_body(seed: AgentSeedSessionRequest) -> AgentCloseSessionRequest:
