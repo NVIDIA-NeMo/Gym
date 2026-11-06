@@ -93,7 +93,7 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 from fastapi import FastAPI, Request
 from fastapi.responses import PlainTextResponse
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, TypeAdapter
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
@@ -107,7 +107,9 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    observe_verifier,
 )
+from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.verification import judge_failsafe
 
 
@@ -611,9 +613,19 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
         # Swap the base ``/verify`` route for a session-aware wrapper so a
         # finished rollout releases both its identity and any sandbox, including verifier-only configurations.
         app.router.routes = [r for r in app.router.routes if getattr(r, "path", None) != "/verify"]
-        # Re-apply judge_failsafe: replacing the base route would otherwise drop the
-        # JudgeError -> failures-sidecar guarantee SimpleResourcesServer makes globally.
-        app.post("/verify")(judge_failsafe(self._verify_and_cleanup))
+        config = getattr(self.server_client, "global_config_dict", {})
+        # Keep the base route's grading observations, tracing, and JudgeError handling around cleanup too.
+        app.post("/verify")(
+            traced_verify_endpoint(
+                observe_verifier(
+                    judge_failsafe(self._verify_and_cleanup),
+                    enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
+                    verifier_name=self.config.name,
+                    uninstrumented_models=self.grading_may_use_uninstrumented_model,
+                ),
+                static_attributes={"nemo.gym.server.name": self.config.name},
+            )
+        )
 
         if not self.config.sandbox_provider:
             return app
@@ -816,6 +828,8 @@ class LitmusAgentResourcesServer(SimpleResourcesServer):
                 return LitmusAgentVerifyResponse(
                     **(passthrough | lost_session_verification(f"litmus_agent session {session_id} is closed"))
                 )
+            # The retry request carries the answer and grading data; no sandbox state is required.
+            verification.retain(None)
             return await self.verify(body)
 
     async def verify(self, body: LitmusAgentVerifyRequest) -> LitmusAgentVerifyResponse:

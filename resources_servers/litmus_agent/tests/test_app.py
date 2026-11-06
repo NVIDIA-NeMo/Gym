@@ -41,6 +41,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     check_resources_session_contract,
 )
+from nemo_gym.trajectory import grading_result_binding
 from resources_servers.litmus_agent.app import (
     _ANSWER_FORMAT_REGEXES,
     _CODE_EXEC_DRIVER_PATH,
@@ -820,6 +821,53 @@ def _session_client(**client_options) -> tuple[LitmusAgentResourcesServer, TestC
 
 
 class TestResourcesSessions:
+    @pytest.mark.parametrize("with_provider", [False, True])
+    def test_http_verify_preserves_grading_observation_and_binding(self, with_provider: bool) -> None:
+        server = _make_sandbox_server() if with_provider else _make_server()
+        server.server_client.global_config_dict = {"observability_enabled": True}
+        with TestClient(server.setup_webserver()) as client:
+            assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
+            if with_provider:
+                assert client.post("/stateful_python_code_exec", json={"code": "print(3)"}).status_code == 200
+            response = client.post("/ng-rollout/observed-litmus/verify", json=VERIFY_BODY)
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["reward"] == 1.0
+        (invocation,) = payload["ng_verifier_invocations"]
+        assert invocation["grading_record"] == {
+            "verifier": server.config.name,
+            "score": 1.0,
+            "verdict": "scored",
+            "result_binding_sha256": grading_result_binding(payload),
+        }
+        assert not server.has_session_state("rs-1")
+
+    async def test_request_scored_verify_retries_after_scoring_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server = _make_sandbox_server()
+        request = _FakeRequest("rs-1")
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        await _run_code(server, "rs-1", "print(3)")
+        original_verify = LitmusAgentResourcesServer.verify
+        calls = 0
+
+        async def fail_once_then_score(server, body):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("scoring unavailable")
+            return await original_verify(server, body)
+
+        monkeypatch.setattr(LitmusAgentResourcesServer, "verify", fail_once_then_score)
+        body = LitmusAgentVerifyRequest.model_validate(VERIFY_BODY)
+        with pytest.raises(ValueError, match="scoring unavailable"):
+            await server._verify_and_cleanup(request, body)
+        assert not server.has_session_state("rs-1")
+        assert _LocalFakeProvider.instances[-1].closed == 1
+        retried = await server._verify_and_cleanup(request, body)
+        assert retried.reward == 1.0 and not retried.mask_sample
+        assert calls == 2
+        await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+
     def test_verifier_only_config_releases_identity_and_masks_verify_after_close(self) -> None:
         server = _make_server()
         assert not server.config.sandbox_provider
@@ -881,7 +929,7 @@ class TestResourcesSessions:
         provider = _LocalFakeProvider.instances[-1]
         provider.close_error = RuntimeError("cleanup failed")
         first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
-        assert first.status_code == 500
+        assert first.status_code == 200 and first.json()["reward"] == 1.0
         assert server.checkpoint_participant.is_open("rs-1")
         assert "rs-1" in server._session_episodes
         assert "rs-1" in server._sessions
@@ -991,7 +1039,7 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert server.session_is_closed("rs-1")
 
-    def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self):
+    def test_failed_stop_at_verify_preserves_score_and_keeps_cleanup_owned(self):
         server, client = _session_client(raise_server_exceptions=False)
         assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
         assert client.post("/stateful_python_code_exec", json={"code": "print(1)"}).status_code == 200
@@ -1000,7 +1048,7 @@ class TestResourcesSessions:
 
         verified = client.post("/verify", json=VERIFY_BODY)
 
-        assert verified.status_code == 500
+        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
         # The sandbox stays registered, so the close retries the stop and reports its failure.
         assert "rs-1" in server._sessions
         assert client.post("/close_session", json=_close("rs-1")).status_code == 500
