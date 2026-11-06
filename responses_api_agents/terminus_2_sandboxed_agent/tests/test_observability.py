@@ -11,13 +11,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import TypeAdapter
 
-import nemo_gym.openai_utils as openai_utils
-from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import ServerClient
+import nemo_gym.client.openai_client as openai_client
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2Agent,
@@ -153,7 +152,7 @@ def execution(monkeypatch):
             content=SimpleNamespace(read=AsyncMock(return_value=b"retry")),
         )
 
-    monkeypatch.setattr(openai_utils, "request", transport)
+    monkeypatch.setattr(openai_client, "request", transport)
 
     async def setup(agent, environment):
         agents.append(agent)
@@ -377,13 +376,16 @@ async def test_real_harbor_decisions_survive_saved_projection(
         assert [turn["step_count"] for turn in turns] == [0, 0]
 
 
-@pytest.mark.parametrize(("mode", "call_count"), [("success", 2), ("compaction", 6)])
-def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count):
+@pytest.mark.parametrize(
+    ("mode", "call_count", "rebuilt_ids"),
+    [("success", 2, ["resp_0", "resp_1"]), ("compaction", 6, ["resp_0", "resp_1", "resp_5"])],
+)
+def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count, rebuilt_ids):
     """seed -> responses -> close: the close carries the run's own decisions and the saved record keeps them.
 
     The environment server forwards the close's trajectory on its result. Without it the collector rebuilds
-    one turn per captured model call, so the context-recovery and summarization calls of a compaction count
-    as decisions and the command-batch counts behind each decision are lost.
+    turns from captured model calls. It excludes referenced compaction helpers, but cannot recover the
+    producer's decision grouping or command-batch counts; the unclassified context-recovery call remains.
     """
     execution.mode.value = mode
     turn, close = execution.session_run()
@@ -424,8 +426,8 @@ def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, c
     # The harness named the seeded task the way the collector names the row, so the projection keeps the
     # producer's turns as they are instead of recording an identity mismatch and rewriting every turn.
     assert "producer_trajectory_identity_mismatch" not in gap_codes
-    assert closed["trajectory"]["task_id"] == str(task_id)
-    assert {turn["task_id"] for turn in turns} == {str(task_id)}
+    assert closed["trajectory"]["task_id"] == task_id["task_id"]
+    assert {turn["task_id"] for turn in turns} == {task_id["task_id"]}
     assert "agent_turn_hollow" not in health.unobserved
     if mode == "compaction":
         [compaction] = [r for r in result["ng_agent_observations"]["records"] if r["kind"] == "context_compaction"]
@@ -434,13 +436,14 @@ def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, c
             ref["response_id"] for turn in turns for ref in turn["model_calls"]
         )
 
-    # The symptom this guards against: with the trajectory dropped, every captured call becomes a decision
-    # and no decision keeps its command-batch count.
+    # Dropping the trajectory loses decision grouping and command-batch counts, even though the
+    # compaction observations still exclude their three referenced helpers from rebuilt turns.
     rebuilt_dir = tmp_path / "without_trajectory"
     rebuilt_dir.mkdir()
     rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
-    assert len(rebuilt["turns"]) == call_count
-    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * call_count
+    assert len(rebuilt["model_calls"]) == call_count
+    assert [ref["response_id"] for turn in rebuilt["turns"] for ref in turn["model_calls"]] == rebuilt_ids
+    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * len(rebuilt_ids)
 
 
 @pytest.mark.parametrize(
@@ -457,8 +460,8 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     row loses the decision's model-call reference and its command-batch count: ``cancel_summary`` adds a context
     recovery call before the aborted summarization, which a rebuild from the captured calls counts as a decision.
     """
-    from nemo_gym.rollout_collection import _episode_record
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
+    from nemo_gym.rollouts.rollout_collection import _episode_record
+    from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
 
     execution.mode.value = mode
     turn, close = execution.session_run()
@@ -500,7 +503,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     [decision] = trajectory["turns"]
     assert (decision["turn_no"], decision["step_count"]) == (1, 0)
     assert [ref["response_id"] for ref in decision["model_calls"]] == ["resp_0"]
-    assert decision["task_id"] == trajectory["task_id"] == str(task_id)
+    assert decision["task_id"] == trajectory["task_id"] == task_id["task_id"]
     gap_codes = {gap["code"] for gap in trajectory["gaps"]}
     assert {"turns_unavailable", "producer_trajectory_identity_mismatch"}.isdisjoint(gap_codes)
     if mode == "cancel_summary":
@@ -511,7 +514,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
         )
 
     # The symptom this guards against: a failure row without the trajectory rebuilds a decision from every
-    # captured call that got an answer, helper calls included, and no decision keeps its command-batch count.
+    # answered call without a compaction reference, and no decision keeps its command-batch count.
     rebuilt_dir = tmp_path / "without_trajectory"
     rebuilt_dir.mkdir()
     rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
@@ -597,9 +600,9 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
     """A policy cut off at max_output_tokens inside <think> leaves a reasoning-only output in the
     trajectory (the harness compacts and goes on); the harbor environment server's ATIF export must
     accept that shape and grade the episode, not mask it (review fix)."""
-    from nemo_gym.atif_export import transcript_to_atif
+    from nemo_gym.trajectory import transcript_to_atif
 
-    inner = openai_utils.request
+    inner = openai_client.request
     seen = {"calls": 0}
 
     async def cut_second_response(**kwargs):
@@ -613,7 +616,7 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
             response.read = AsyncMock(return_value=json.dumps(payload).encode())
         return response
 
-    monkeypatch.setattr(openai_utils, "request", cut_second_response)
+    monkeypatch.setattr(openai_client, "request", cut_second_response)
     result = await execution.run(task_id="task-identity")
     output = result["response"]["output"]
     kinds = [(item.get("type"), item.get("role")) for item in output]

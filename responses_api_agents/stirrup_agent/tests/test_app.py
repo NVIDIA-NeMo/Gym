@@ -15,15 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from omegaconf import OmegaConf
+from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.cli.env import validate_server_configs
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
@@ -60,6 +61,33 @@ def _make_config(**fields) -> StirrupAgentWrapperConfig:
 def test_removed_options_are_rejected(option):
     with pytest.raises(ValueError, match=rf"removed options that are no longer supported: `{option}`"):
         _make_config(**{option: "x"})
+
+
+def test_removed_options_are_each_located_at_their_own_key():
+    with pytest.raises(ValidationError) as error:
+        _make_config(judge_only=False, task="t")
+    assert [(detail["loc"], detail["type"]) for detail in error.value.errors()] == [
+        (("judge_only",), "removed_option"),
+        (("task",), "removed_option"),
+    ]
+
+
+def test_validate_server_configs_reports_a_removed_option_at_its_full_path():
+    block = {
+        "entrypoint": "app.py",
+        "host": "0.0.0.0",
+        "port": 8080,
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        "judge_only": False,
+    }
+    config = OmegaConf.create({"gdpval_agent": {"responses_api_agents": {"stirrup_agent": block}}})
+    [problem] = validate_server_configs(config, ["responses_api_agents"])
+    assert (problem.path, problem.config_class, problem.value) == (
+        "gdpval_agent.responses_api_agents.stirrup_agent.judge_only",
+        "StirrupAgentWrapperConfig",
+        False,
+    )
+    assert "removed options that are no longer supported: `judge_only`" in problem.message
 
 
 def _report(**fields) -> dict:

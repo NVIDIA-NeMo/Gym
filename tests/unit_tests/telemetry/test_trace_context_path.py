@@ -29,14 +29,13 @@ from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
-from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
-from nemo_gym.server_utils import (
-    _TRACEPARENT_PATTERN,
+from nemo_gym.client.server_client import _TRACEPARENT_PATTERN, apply_rollout_prefix, trace_context_path_segment
+from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
+from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+from nemo_gym.server_runtime.request_handling.trace_context import (
     TraceContextPathMiddleware,
-    apply_rollout_prefix,
-    install_request_context_isolation,
     install_trace_context_path,
-    trace_context_path_segment,
 )
 from tests.unit_tests.telemetry.conftest import requires_lens
 from tests.unit_tests.telemetry.test_propagation import (
@@ -147,7 +146,7 @@ class TestRedirectLocation:
     HOST = [(b"host", b"m:8000")]
 
     def _restored(self, location, status=307):
-        from nemo_gym.server_utils import _restore_trace_segment_on_redirect
+        from nemo_gym.server_runtime.request_handling.trace_context import _restore_trace_segment_on_redirect
 
         message = {"type": "http.response.start", "status": status, "headers": [(b"location", location.encode())]}
         return dict(
@@ -237,7 +236,7 @@ class TestServerSpanParent:
         """FastAPI redirects the trailing-slash form; the client only has the URL, so the segment must come back.
 
         This app has the plain rollout middleware, which does not restore the rollout prefix on a redirect
-        (the model server's capture middleware does; see test_token_id_capture), so here the segment goes
+        (the model server's capture middleware does; see test_token_capture), so here the segment goes
         back at the root. With the prefix restored it goes right after it: see TestRedirectLocation.
         """
         client = TestClient(app, follow_redirects=False)
@@ -286,8 +285,8 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
 
     from opentelemetry import trace
 
-    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+    from nemo_gym.client.server_client import ServerClient
 
     class _Agent(SimpleResponsesAPIAgent):
         async def responses(self, body=...):

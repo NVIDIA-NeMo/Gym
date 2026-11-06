@@ -28,8 +28,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from nemo_gym import failure_kinds
-from nemo_gym.sandbox.providers.base import SandboxProvider, SandboxSpec
+from nemo_gym.core import failure_kinds
+from nemo_gym.sandbox import SandboxProvider, SandboxSpec
 
 from .reference_cache import CachedReference, ReferenceCache, provider_class_name
 from .runner import (
@@ -194,6 +194,12 @@ class ExecutionPolicy(BaseModel):
         return self.job_timeout_s if self.job_timeout_s is not None else self.minimum_job_timeout_s()
 
 
+# Only bounded proof work after successful reference preflight can be finalized by the opt-in policy.
+CANDIDATE_UNCERTAINTY_REASONS = frozenset(
+    {"symbolic_undecided", "symbolic_growth_limit", "unordered_undecided", "unordered_budget", "comparator_timeout"}
+)
+
+
 @dataclass(frozen=True)
 class GradeResult:
     """Public verdict metadata only: no outputs, expectations, source or provider text."""
@@ -210,6 +216,7 @@ class GradeResult:
     first_failed_case: int | None
     cleanup: dict[str, str]
     sandboxes: dict[str, dict[str, Any]] = field(default_factory=dict)
+    candidate_uncertainty_reasons: tuple[str, ...] = ()
 
 
 def _bounded_text(value: Any, limit: int) -> bool:
@@ -709,7 +716,29 @@ class Grader:
         decided_failures = statuses & {"mismatch", "invalid_candidate"}
         # Precedence: an expectation defect, then the first decided failure (a mismatch or an invalid output), which
         # names the category and the failed case, then uncertainty on any case.
-        if "invalid_expected" in statuses or ("uncertain" in statuses and not decided_failures):
+        if "invalid_expected" in statuses:
+            raise Unscorable("comparator_uncertain", cases)
+        if "uncertain" in statuses and not decided_failures:
+            uncertain = [verdict for verdict in judged["results"] if verdict["status"] == "uncertain"]
+            if all(
+                verdict["side"] == "comparator" and verdict["code"] in CANDIDATE_UNCERTAINTY_REASONS
+                for verdict in uncertain
+            ):
+                failure_class, terminal = UNSCORABLE_CATEGORIES["comparator_uncertain"]
+                return GradeResult(
+                    outcome="unscorable",
+                    reward=None,
+                    category="comparator_uncertain",
+                    failure_class=failure_class,
+                    terminal=terminal,
+                    job_id=job_id,
+                    case_count=cases,
+                    cases_attempted=cases,
+                    cases_equal=counts["equal"],
+                    first_failed_case=None,
+                    cleanup={},
+                    candidate_uncertainty_reasons=tuple(sorted({verdict["code"] for verdict in uncertain})),
+                )
             raise Unscorable("comparator_uncertain", cases)
         for index, verdict in enumerate(judged["results"]):
             status = verdict["status"]

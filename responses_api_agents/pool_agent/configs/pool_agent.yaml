@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+pool_agent:
+  responses_api_agents:
+    pool_agent:
+      entrypoint: app.py
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      pool_version: v1.0.16
+      accept_pool_eula: false
+      context_window: 32768
+      setup_timeout: 900
+      timeout: 900
+      session_close_timeout_seconds: 60
+      failure_artifacts_dir: results/pool-agent-failures
+      sandbox_provider: null
+      sandbox_config: {}

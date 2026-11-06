@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 """Exercise the Node launcher's 429 forwarder and native-session snapshot against real HTTP servers."""
 
+import base64
 import json
 import shutil
 import socket
 import subprocess
+import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -92,6 +94,108 @@ def test_forwarder_retries_only_429_and_retains_every_attempt(tmp_path, statuses
             assert response.read() == b"data: first\n\ndata: last\n\n"
     assert requests == [("/v1/responses", "invocation", b'{"input":"task"}')] * len(statuses)
     assert [json.loads(line)["status"] for line in attempts_path.read_text().splitlines()] == statuses
+
+
+@pytest.mark.parametrize(
+    "damage", [None, "policy", "prompt_only", "failed", "missing_id", "duplicate", "oversize", "truncated"]
+)
+def test_forwarder_retains_only_completed_compaction_identity_without_changing_stream(tmp_path, damage):
+    response = {
+        "id": "helper-id",
+        "status": "completed",
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Summary café"}]}
+        ],
+    }
+    if damage == "missing_id":
+        del response["id"]
+    if damage == "failed":
+        response["status"] = "failed"
+    event = json.dumps({"type": "response.completed", "response": response}, ensure_ascii=False).encode()
+    wire = b": keepalive\r\n\r\nevent: response.completed\r\ndata: " + event + b"\r\n\r\n"
+    if damage == "truncated":
+        wire = wire.rstrip(b"\r\n")
+    if damage == "duplicate":
+        wire += wire
+    # A comment frame larger than the launcher's 8 MiB evidence cap; the stream must still arrive whole.
+    padding = b": " + b"x" * (8 * 1024 * 1024) + b"\n\n" if damage == "oversize" else b""
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            self.wfile.write(padding)
+            for start in range(0, len(wire), 7):
+                self.wfile.write(wire[start : start + 7])
+                self.wfile.flush()
+
+    prompt = (
+        "You are performing a CONTEXT CHECKPOINT COMPACTION."
+        if damage in {"policy", "prompt_only"}
+        else "Summarize the current conversation using a different prompt."
+    )
+    payload = {"input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]}
+    if damage != "prompt_only":
+        payload["client_metadata"] = {
+            "x-codex-turn-metadata": json.dumps({"request_kind": "turn" if damage == "policy" else "compaction"})
+        }
+    attempts_path = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+        with urlopen(Request(f"{proxy}/responses", data=json.dumps(payload).encode())) as forwarded:
+            assert forwarded.read() == padding + wire
+    [attempt] = [json.loads(line) for line in attempts_path.read_text().splitlines()]
+    assert attempt["status"] == 200
+    assert attempt.get("compaction_response") == (
+        {"response_id": "helper-id", "summary": "Summary café"} if damage is None else None
+    )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b"\xff",
+        b"null",
+        b"[]",
+        b"{}",
+        b'{"client_metadata":null}',
+        b'{"client_metadata":[]}',
+        b'{"client_metadata":{}}',
+        *[
+            json.dumps({"client_metadata": {"x-codex-turn-metadata": value}}).encode()
+            for value in (
+                None,
+                {},
+                1,
+                '{"request_kind":',
+                "null",
+                "[]",
+                '"compaction"',
+                "{}",
+                '{"request_kind":"turn"}',
+                '{"request_kind":"prewarm"}',
+                '{"request_kind":["compaction"]}',
+            )
+        ],
+    ],
+)
+def test_compaction_request_rejects_missing_or_malformed_metadata(body):
+    script = (
+        "const { compactionRequest } = await import(process.argv[1]);"
+        "console.log(JSON.stringify(compactionRequest(Buffer.from(process.argv[2], 'base64'))));"
+    )
+    checked = subprocess.run(
+        ["node", "--input-type=module", "-e", script, LAUNCHER.as_uri(), base64.b64encode(body).decode()],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert json.loads(checked.stdout) is False
 
 
 @pytest.mark.parametrize(
@@ -278,6 +382,41 @@ def test_body_failure_retains_http_status_and_transport_error(tmp_path, fault):
         assert records[0]["transport_error"]
 
 
+def test_codex_hanging_up_before_the_response_cancels_the_upstream_stream(tmp_path):
+    received, hung_up, upstream_closed = Event(), Event(), Event()
+
+    class Upstream(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            received.set()
+            hung_up.wait(5)
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            # A model stream that would last the rest of the turn unless the forwarder closes it.
+            try:
+                for _ in range(100):
+                    self.wfile.write(b"data: x\n\n")
+                    self.wfile.flush()
+                    time.sleep(0.05)
+            except OSError:
+                upstream_closed.set()
+
+    attempts_path = tmp_path / "attempts.jsonl"
+    with upstream_server(Upstream) as upstream, rate_limit_proxy(upstream, attempts_path, timeout=10) as proxy:
+        with socket.create_connection(("127.0.0.1", int(proxy.rsplit(":", 1)[1]))) as codex:
+            codex.sendall(b"POST /responses HTTP/1.1\r\nHost: proxy\r\nContent-Length: 2\r\n\r\n{}")
+            assert received.wait(5)
+        # Let the forwarder see the hang-up before the upstream response starts.
+        time.sleep(0.3)
+        hung_up.set()
+        assert upstream_closed.wait(3)
+    assert [json.loads(line) for line in attempts_path.read_text().splitlines()] == [{"status": 200}]
+
+
 def test_snapshot_joins_native_sessions_in_path_order(tmp_path):
     sessions = tmp_path / "home/.codex/sessions"
     # Path order compares components: "2026/9" sorts after "2026/10", and a/b.jsonl before a.b/c.jsonl.
@@ -301,6 +440,26 @@ def test_snapshot_joins_native_sessions_in_path_order(tmp_path):
         '{"id":"a/b"}',
         '{"id":"a.b/c"}',
     ]
+
+
+def test_launcher_reached_through_a_symlink_still_runs(tmp_path):
+    (tmp_path / "home/.codex/sessions").mkdir(parents=True)
+    (tmp_path / "home/.codex/sessions/rollout.jsonl").write_text('{"id":"only"}\n')
+    # For example, a task image whose /tmp is a symlink.
+    linked = tmp_path / "linked"
+    linked.symlink_to(LAUNCHER.parent, target_is_directory=True)
+    subprocess.run(
+        ["node", str(linked / LAUNCHER_FILE), "--snapshot", str(tmp_path)], check=True, capture_output=True, timeout=10
+    )
+    assert (tmp_path / "native_session.jsonl").read_text() == '{"id":"only"}'
+
+
+def test_snapshot_keeps_every_line_of_a_long_rollout_file(tmp_path):
+    (tmp_path / "home/.codex/sessions").mkdir(parents=True)
+    lines = [json.dumps({"index": index}) for index in range(200_000)]
+    (tmp_path / "home/.codex/sessions/rollout.jsonl").write_text("\n".join(lines) + "\n")
+    subprocess.run(["node", str(LAUNCHER), "--snapshot", str(tmp_path)], check=True, capture_output=True, timeout=30)
+    assert (tmp_path / "native_session.jsonl").read_text().split("\n") == lines
 
 
 def test_snapshot_without_native_sessions_writes_nothing(tmp_path):

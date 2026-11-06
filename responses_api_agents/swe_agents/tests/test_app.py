@@ -26,15 +26,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import responses_api_agents.swe_agents.app as swe_app
-from nemo_gym.config_types import ModelServerRef, OmegaConf
-from nemo_gym.global_config import CACHE_DIR_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import CACHE_DIR_KEY_NAME, ModelServerRef
+from nemo_gym.config.config_types import OmegaConf
+from nemo_gym.core import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    rollout_context,
 )
-from nemo_gym.rollout_correlation import rollout_context
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.swe_agents.app import (
+    EVAL_TIMEOUT,
     ActiveContainerCommand,
     AgentPromptOverride,
     BaseDatasetHarnessProcessor,
@@ -55,6 +61,7 @@ from responses_api_agents.swe_agents.app import (
     SWERebenchDatasetProcessor,
     _extract_instance_dict,
     _extract_replay_system_content,
+    _masked_failure,
     _parse_replay_messages,
     _render_opencode_user_message,
     _resolve_opencode_workspace_path,
@@ -3097,7 +3104,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3141,7 +3148,7 @@ class TestSWEBenchWrapperRun:
         )
 
         with patch.object(SWEBenchWrapper, "responses", new_callable=AsyncMock, return_value=mock_response):
-            from nemo_gym.base_resources_server import BaseRunRequest
+            from nemo_gym.server_runtime import BaseRunRequest
 
             body = BaseRunRequest(
                 responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
@@ -3624,7 +3631,7 @@ class TestEvaluatorLaunchFailure:
         )
         wrapper = _create_wrapper(monkeypatch)
         wrapper._sem = asyncio.Semaphore(1)
-        wrapper._vllm_converter = swe_app.VLLMConverter(return_token_id_information=True)
+        wrapper._vllm_converter = swe_app.ChatCompletionsConverter(return_token_id_information=True)
         processor = NVInternalDatasetProcessor(config=params)
         with patch.object(swe_app.runner_ray_remote, "remote", new_callable=AsyncMock, return_value=completed_report):
             response = await wrapper._inner_responses(params, processor)
@@ -3634,6 +3641,8 @@ class TestEvaluatorLaunchFailure:
         assert result.reward == 0.0
         assert result.mask_sample is expected_mask
         assert result.instance_config.mask_sample is expected_mask
+        assert result.failure_kind == (PROVIDER_UNAVAILABLE if expected_mask else None)
+        assert bool(result.failure_reason) is expected_mask
         assert result.response.output[-1].generation_token_ids == [3, 4]
         if outcome == "failed_tests":
             # A completed negative verifier result is a valid policy outcome.
@@ -3644,3 +3653,28 @@ class TestEvaluatorLaunchFailure:
     def test_legacy_metrics_do_not_imply_launch_failure(self) -> None:
         metrics = SWEBenchMetrics.model_validate({"patch_exists": True, "eval_timed_out": False})
         assert metrics.eval_launch_failed is False
+
+
+@pytest.mark.parametrize(
+    ("metrics", "expected_kind"),
+    [
+        # An unmeasured reward outranks the agent's own limit.
+        ({"eval_launch_failed": True, "agent_error_kind": "max_iteration"}, PROVIDER_UNAVAILABLE),
+        ({"oom_killed": True, "agent_error_kind": "oom"}, PROVIDER_OOM_KILLED),
+        ({"eval_oom_killed": True, "agent_error_kind": "max_iteration"}, PROVIDER_OOM_KILLED),
+        ({"eval_timed_out": True, "agent_error_kind": "context_window"}, EVAL_TIMEOUT),
+        ({"agent_timed_out": True, "resolved": True}, AGENT_TIMEOUT),
+        ({"agent_error_kind": "max_iteration", "resolved": True}, AGENT_LIMIT),
+        ({"agent_error_kind": "context_window", "resolved": False}, MODEL_CONTEXT_LIMIT),
+        ({"agent_error_kind": "stuck_in_loop", "resolved": False}, None),
+        ({"agent_error_kind": "other", "resolved": True}, None),
+    ],
+)
+def test_masked_failure_names_the_first_matching_kind(metrics: dict, expected_kind: Optional[str]) -> None:
+    masked_failure = _masked_failure(SWEBenchMetrics.model_validate(metrics))
+    if expected_kind is None:
+        assert masked_failure is None
+    else:
+        kind, reason = masked_failure
+        assert kind == expected_kind
+        assert reason

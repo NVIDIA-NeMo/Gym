@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
+from nemo_gym.agents import CleanupReceipt
 
 
 ERROR_EVENT_CHARS = 4000

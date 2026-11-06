@@ -22,17 +22,19 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils.sandbox_python import SandboxPythonRuntime
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
-    _AgentSessionRecord,
+    SandboxPythonRuntime,
+    SandboxSession,
+    check_agent_seed_rejected,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import (
+from nemo_gym.agents.base_responses_api_agent import _AgentSessionRecord
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -40,13 +42,11 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,
     NeMoGymResponseReasoningItem,
+    TaskId,
 )
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.sandbox import SandboxExecResult, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,
@@ -413,7 +413,7 @@ class TestSanity:
             ({}, "Hermes requires sandbox_access or a configured sandbox_provider for an episode session"),
         ],
     )
-    def test_unsupported_seed_is_refused_with_a_final_422(self, unsupported: dict, reason: str) -> None:
+    def test_unsupported_seed_is_refused_with_a_terminal_422(self, unsupported: dict, reason: str) -> None:
         hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
         seed = AgentSeedSessionRequest(
             agent_session_id="session",
@@ -429,7 +429,7 @@ class TestSanity:
     def _sandbox_session(
         monkeypatch, sandbox, *, config=None, tool_accesses=()
     ) -> tuple[HermesAgent, SimpleNamespace, AgentSeedSessionRequest]:
-        import nemo_gym.base_responses_api_agent as base_agent
+        import nemo_gym.agents.base_responses_api_agent as base_agent
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -836,8 +836,8 @@ class TestSigtermHandler:
             loop.close()
 
     def test_interrupted_agent_id_cleared_when_run_conversation_raises(self, monkeypatch) -> None:
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1183,8 +1183,8 @@ class TestRolloutCorrelation:
     def test_responses_applies_rollout_prefix(self, monkeypatch) -> None:
         from fastapi.testclient import TestClient
 
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1227,7 +1227,7 @@ class TestRolloutCorrelation:
 
 class TestMaxTokens:
     def _agent_and_seen(self, monkeypatch, **config_kwargs) -> tuple[HermesAgent, dict]:
-        import nemo_gym.base_responses_api_agent as base_agent
+        import nemo_gym.agents.base_responses_api_agent as base_agent
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1251,14 +1251,14 @@ class TestMaxTokens:
         return agent, seen
 
     def test_max_tokens_passed_to_ai_agent(self, monkeypatch) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         agent, seen = self._agent_and_seen(monkeypatch, max_tokens=4096)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
         assert seen["max_tokens"] == 4096
 
     def test_max_tokens_defaults_to_none(self, monkeypatch) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         agent, seen = self._agent_and_seen(monkeypatch)
         asyncio.run(agent.responses(request=None, body=NeMoGymResponseCreateParamsNonStreaming(input="hi")))
@@ -1271,8 +1271,8 @@ class TestObservability:
         [("local", "no_sandbox_runtime"), ("docker", "sandbox_observation_unavailable")],
     )
     def test_observation_failure_does_not_change_response(self, monkeypatch, terminal_backend, runtime_gap) -> None:
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)
@@ -1381,8 +1381,8 @@ class TestObservability:
         assert "rollout_id" not in verify_json
 
     def test_observer_failure_does_not_mask_agent_exception(self, monkeypatch) -> None:
-        import nemo_gym.base_responses_api_agent as base_agent
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        import nemo_gym.agents.base_responses_api_agent as base_agent
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         monkeypatch.setattr(base_agent, "get_first_server_config_dict", lambda _gc, _name: {"host": "h", "port": 1})
         server_client = MagicMock(spec=ServerClient)

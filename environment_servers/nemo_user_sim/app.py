@@ -17,53 +17,55 @@ from fastapi import Body
 from pydantic import ConfigDict, Field
 
 from environment_servers.nemo_user_sim.episode_contracts import (
-    UserSimEpisodeFailure,
     UserSimEpisodeRequest,
     UserSimEpisodeResponse,
     UserSimEpisodeResult,
 )
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    CleanupHandle,
-    HandledEpisodeError,
-    dependency_failure,
-    is_retryable_dependency_error,
-    is_retryable_dependency_status,
-)
-from nemo_gym.base_resources_server import (
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ResourcesSeedSessionRequest,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.client import format_exception_with_response_body, get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
+from nemo_gym.config import (
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
+    get_first_server_config_dict,
 )
-from nemo_gym.failure_kinds import FailureStage
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    FailureStage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
+    NgFailureEvent,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
-from nemo_gym.server_utils import request as http_request
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    CleanupHandle,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
+    dependency_failure,
+    is_retryable_dependency_error,
+    is_retryable_dependency_status,
+)
+from nemo_gym.trajectory import (
+    AgentObservationBundle,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,
@@ -595,7 +597,7 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         *,
         capture_training_tokens: bool,
     ) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         target_config = get_first_server_config_dict(self.server_client.global_config_dict, target_name)
         token_capture = (
             capture_training_tokens
@@ -611,10 +613,9 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         error: Exception,
         *,
         terminal: bool | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         return dependency_failure(
             error,
-            failure_model=UserSimEpisodeFailure,
             stage=stage,
             terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
             name_error_type=True,

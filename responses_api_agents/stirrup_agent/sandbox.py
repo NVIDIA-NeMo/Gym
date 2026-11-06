@@ -10,12 +10,10 @@ from pathlib import Path
 from shlex import quote
 from typing import Any
 
-from nemo_gym.agent_utils.sandbox_python import SandboxPythonRuntime
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 
 
 # The sandbox runs the Stirrup version installed with this server, with its dependencies at this server's versions.
@@ -25,11 +23,7 @@ RUNTIME = SandboxPythonRuntime(
     harness="stirrup",
     requirements=(STIRRUP_REQUIREMENT,),
     import_check="import stirrup",
-    overrides=tuple(
-        line
-        for line in Path(__file__).with_name("overrides.txt").read_text().splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ),
+    overrides=(f"pillow=={importlib.metadata.version('Pillow')}",),
 )
 # Outside the working directory, so the model's files stay its own.
 RUNTIME_DIR = RUNTIME.directory

@@ -30,23 +30,32 @@ from fastapi import Request
 from omegaconf import ListConfig
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    sandbox_server_url,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
+    FailureBoundary,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    failure_kinds,
+    observe_failure,
 )
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxCreateError,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
 LOG = logging.getLogger(__name__)
@@ -87,6 +96,55 @@ _WORKDIR_KEYS = {
     "opencode": "repo_dir",
     "terminus_2": "workspace_root",
 }
+
+
+def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
+    """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
+
+    Shared sandbox events retain their explicit kind. Other provider exceptions identify
+    infrastructure failure but do not establish OOM from message text or exit codes.
+    Runner output never decides it: the agent's own commands can exit on a signal.
+    """
+    if isinstance(exc, NgFailureEvent):
+        return exc.failure_kind if exc.boundary == FailureBoundary.SANDBOX else None
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    infra = (
+        "SandboxApiException" in names
+        or type(exc).__module__.startswith("opensandbox.")
+        or isinstance(exc, (SandboxCreateError, TimeoutError, ConnectionError))
+    )
+    if not infra:
+        return None
+    return failure_kinds.PROVIDER_UNAVAILABLE
+
+
+def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="harness-agent-sandbox-failure",
+        created_at=0,
+        model=params.model or "unknown",
+        object="response",
+        output=[],
+        parallel_tool_calls=params.parallel_tool_calls,
+        tool_choice=params.tool_choice,
+        tools=[],
+    )
+
+
+def _masked_result(
+    body: "HarnessAgentRunRequest", failure_kind: str | None, reason: str | None
+) -> "HarnessAgentVerifyResponse":
+    return HarnessAgentVerifyResponse.model_validate(
+        body.model_dump()
+        | {
+            "response": _empty_response(body.responses_create_params).model_dump(mode="json"),
+            "reward": 0.0,
+            "mask_sample": True,
+            "evaluation_completed": False,
+            "failure_kind": failure_kind,
+            "failure_reason": (reason or "")[:4000],
+        }
+    )
 
 
 def resolve_agent(name: str) -> tuple[str, str, str]:
@@ -204,7 +262,8 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "--exclude=*.pyc",
                 "--exclude=.*",
                 "--exclude=node_modules",
-                "--exclude=data",
+                # The agent's own datasets; nemo_gym/data is library code and ships.
+                f"--exclude={agent_pkg}/data",
                 "--exclude=tests",
                 "--exclude=outputs",
                 "--exclude=workspaces",
@@ -287,11 +346,13 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 "url_prefix": self.url_path_for_run("", body),
             }
             token = _RUN_CONTEXT.set(run_context)
+            phase = "agent"
             try:
                 if self.config.forward_mcp_tools:
                     run_context["mcp"] = self._mcp_server_entry(seed)
                 agent_resp = await self.responses(request, body.responses_create_params)
                 agent_resp_json = agent_resp.model_dump(mode="json")
+                phase = "verify"
                 verify_resp = await self.server_client.post(
                     server_name=self.config.resources_server.name,
                     url_path="/verify",
@@ -308,6 +369,23 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     ):
                         verify_json["reward"] = 0.0
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
+            except Exception as exc:
+                await self._close_run_sandbox(run_context)
+                failure_kind = sandbox_infra_failure_kind(exc)
+                if failure_kind is None:
+                    raise
+                if isinstance(exc, NgFailureEvent):
+                    observe_failure(exc)
+                # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
+                LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
+                sandbox_id = (descriptor or {}).get("sandbox_id") if isinstance(descriptor, Mapping) else None
+                facts = sandbox_failure_prefix(
+                    phase=phase,
+                    sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                    reason=provider_error_reason(exc),
+                    http_status=error_to_http_status(exc),
+                )
+                return _masked_result(body, failure_kind, f"{facts}{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
