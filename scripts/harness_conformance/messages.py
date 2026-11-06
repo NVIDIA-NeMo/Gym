@@ -33,8 +33,14 @@ def messages_sse(response: dict) -> Iterator[str]:
 
 
 def messages_response(
-    model: str, response_id: str, content: dict, *, usage: bool, index: int,
-    input_tokens: int | None = None, output_tokens: int = 8,
+    model: str,
+    response_id: str,
+    content: dict,
+    *,
+    usage: bool,
+    index: int,
+    input_tokens: int | None = None,
+    output_tokens: int = 8,
 ) -> dict:
     response = {
         "id": response_id,

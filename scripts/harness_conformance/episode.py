@@ -270,6 +270,16 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 )
             elif harness == "simple":
                 agent_config.update(max_steps=scenario.tool_steps + 4)
+            elif harness == "claude_code":
+                agent_config.update(max_turns=scenario.tool_steps + 4)
+            elif harness == "miniswe_sandboxed":
+                agent_config["harness"]["step_limit"] = scenario.tool_steps + 4
+            elif harness == "terminus_2_sandboxed":
+                agent_config.update(
+                    max_turns=scenario.tool_steps + 4,
+                    enable_summarize=scenario.compaction,
+                    model_context_limit=32768,
+                )
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:

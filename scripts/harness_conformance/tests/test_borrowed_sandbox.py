@@ -9,8 +9,7 @@ import os
 import pytest
 from scripts.harness_conformance.local_sandbox import ProbeLocalProvider, borrowable_local_provider
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox import get_provider_class
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, get_provider_class
 
 
 async def test_borrowed_commands_share_workspace_and_owner_controls_cleanup(tmp_path):

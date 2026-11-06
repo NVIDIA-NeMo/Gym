@@ -39,7 +39,17 @@ from .messages import is_title_request, messages_response, messages_sse
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "Bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec", "python_cell")
+SHELL_TOOLS = (
+    "bash",
+    "Bash",
+    "terminal",
+    "shell",
+    "shell_command",
+    "exec_command",
+    "code_exec",
+    "exec",
+    "python_cell",
+)
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
@@ -54,14 +64,20 @@ SUMMARY_PROMPTS = (
     "The context window is approaching its limit. Please create a concise summary",
     "Create a structured handoff summary for a later assistant",
 )
+# Harbor 0.22.0 summarizes, asks handoff questions, then answers them.
+TERMINUS_SUMMARY_PROMPTS = (
+    "You are about to hand off your work to another AI agent.",
+    "You are picking up work from a previous AI agent on this task:",
+    "The next agent has a few questions for you, please answer each of them one by one in detail:",
+)
 
 
-def is_compaction_request(body: dict) -> bool:
+def is_compaction_request(body: dict, *, prefixes: tuple[str, ...] = SUMMARY_PROMPTS) -> bool:
     messages = body.get("messages", body.get("input", []))
     if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
         return False
     last = messages[-1]
-    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(SUMMARY_PROMPTS)
+    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(prefixes)
 
 
 @dataclass
@@ -287,7 +303,8 @@ class Probe:
             status = self.scenario.http_errors[-1]
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
-        compacting = self.scenario.compaction is not None and is_compaction_request(body)
+        summary_prompts = TERMINUS_SUMMARY_PROMPTS if self.harness == "terminus_2_sandboxed" else SUMMARY_PROMPTS
+        compacting = self.scenario.compaction is not None and is_compaction_request(body, prefixes=summary_prompts)
         if status != 200:
             payload = {
                 "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
@@ -303,8 +320,15 @@ class Probe:
                 ):
                     raise ValueError("tool execution or model-visible result was not witnessed")
                 if compacting:
-                    if self.scenario.compaction is not True or not self.tool_calls or self.compaction_response_ids:
-                        raise ValueError("unexpected compaction request outside the single summary stage")
+                    helper_count = len(self.compaction_response_ids)
+                    expected_summary = (
+                        helper_count < len(TERMINUS_SUMMARY_PROMPTS)
+                        and is_compaction_request(body, prefixes=(TERMINUS_SUMMARY_PROMPTS[helper_count],))
+                        if self.harness == "terminus_2_sandboxed"
+                        else helper_count == 0
+                    )
+                    if self.scenario.compaction is not True or not self.tool_calls or not expected_summary:
+                        raise ValueError("unexpected compaction request outside the prescribed summary stage")
                     output = [
                         {
                             "type": "message",

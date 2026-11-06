@@ -107,7 +107,15 @@ def install_runtime(harness: str) -> None:
     if harness == "nooa":
         subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
         return
-    if harness in ("hermes", "stirrup", "simple", "openclaw", "miniswe_sandboxed", "claude_code", "terminus_2_sandboxed"):
+    if harness in (
+        "hermes",
+        "stirrup",
+        "simple",
+        "openclaw",
+        "miniswe_sandboxed",
+        "claude_code",
+        "terminus_2_sandboxed",
+    ):
         # Runtimes are locked dependencies or installed during agent-session setup.
         return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
