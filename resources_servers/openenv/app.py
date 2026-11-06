@@ -153,7 +153,11 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         return mapping.get(json_type, str)
 
     def _make_mcp_handler(self, tool_name: str, request_model: type):
-        """Create a POST handler for an MCP tool."""
+        """Create a POST handler for an MCP tool.
+
+        Tool handlers take no session lock: nothing between _open_session and the reward update awaits, so verify and
+        close (which release under session_lock) cannot interleave. A handler that awaits must take the lock.
+        """
 
         async def handler(request: Request, body: request_model) -> dict:
             session = self._open_session(request)

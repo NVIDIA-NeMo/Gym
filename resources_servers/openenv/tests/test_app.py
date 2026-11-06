@@ -1079,7 +1079,7 @@ class TestResourcesSessions:
 
 
 @pytest.mark.parametrize("stage", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+def test_cookie_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
@@ -1101,7 +1101,7 @@ def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None
     ],
     ids=["session_id_without_envelope", "envelope_without_session_id"],
 )
-def test_malformed_typed_seed_does_not_fall_back_to_legacy(malformed: dict, expose_tools_over_mcp: bool) -> None:
+def test_malformed_typed_seed_does_not_fall_back_to_cookie_seed(malformed: dict, expose_tools_over_mcp: bool) -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     server.config.expose_tools_over_mcp = expose_tools_over_mcp
     app = server.setup_webserver()
@@ -1156,7 +1156,7 @@ def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed:
         assert not server.session_is_verified(sid)
 
 
-def test_next_legacy_run_keeps_its_cookie_and_starts_a_new_environment() -> None:
+def test_next_cookie_run_keeps_its_cookie_and_starts_a_new_environment() -> None:
     server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={}).status_code == 200
@@ -1213,7 +1213,7 @@ def test_checkpoint_retire_retries_failed_environment_close() -> None:
         assert envs[0].close.call_count == 2
 
 
-def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+def test_typed_seed_cannot_replace_a_live_cookie_session() -> None:
     server = _session_server()[0]
     with TestClient(server.setup_webserver()) as client:
         assert client.post("/seed_session", json={}).status_code == 200
@@ -1252,3 +1252,40 @@ def test_failed_cookie_reseed_keeps_previous_reward_until_initialization_succeed
         assert server._sessions == {}
         replacement.close.assert_called_once()
         envs[0].close.assert_called_once()
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_verify_retry_returns_a_retained_zero_reward(typed: bool) -> None:
+    """A reward of 0.0 is evidence, not a missing receipt: the retry is graded, not masked."""
+    server, envs = _session_server()  # reset reward 0.0, no steps taken
+    with TestClient(server.setup_webserver()) as client:
+        body = _typed_seed().model_dump(mode="json") if typed else {}
+        assert client.post("/seed_session", json=body).status_code == 200
+        first = client.post("/verify", json=VERIFY_BODY).json()
+        retry = client.post("/verify", json=VERIFY_BODY).json()
+
+    assert first["reward"] == 0.0 and first["mask_sample"] is False
+    assert retry["reward"] == 0.0 and retry["mask_sample"] is False
+    envs[0].close.assert_called_once()
+
+
+def test_partly_reset_cookie_reseed_cannot_serve_tools_or_supply_a_reward() -> None:
+    """Reset and cleanup both fail on a cookie reseed: the handle stays owned, but it serves nothing."""
+    server, envs = _session_server(reset_obs=MagicMock(reward=0.5, done=False))
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        # The first run is still live (never verified), so no finished-run receipt can mask the check under test.
+        assert client.post("/seed_session", json={}).status_code == 200
+
+        broken = _make_mock_env()
+        broken.reset.side_effect = RuntimeError("reset failed")
+        broken.close.side_effect = [RuntimeError("cleanup failed"), None]
+        server._env_class = MagicMock(return_value=broken)
+        server._action_class = MagicMock()
+
+        assert client.post("/seed_session", json={}).status_code == 500
+        [session_id] = server._sessions
+        assert server._sessions[session_id].env is broken  # still owned for a retry
+
+        assert client.post("/step", json={}).status_code == 404
+        broken.step.assert_not_called()
+        assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is True

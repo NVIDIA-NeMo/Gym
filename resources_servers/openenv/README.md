@@ -225,19 +225,20 @@ The shipped configs (`configs/openenv_{echo,coding,maze}.yaml`) pair OpenEnv wit
 to `simple_agent`. That agent seeds by cookie with the dataset row, so these configs use the cookie seed, not the
 typed seed described next.
 
-An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest` instead of the legacy
+An Environment Server such as `single_agent_turn` seeds with a typed `ResourcesSeedSessionRequest` instead of a cookie seed's row
 body. The environment instance is keyed by its `resources_session_id`, and the session cookie is bound to that ID so
 the agent's tool calls reach it. Seeding the same ID again for the same episode keeps the instance it already has; a
 seed that binds the ID to another episode is refused with 409. The rows carry no task fields, so the seed reads nothing from `task_data`.
 
-`/verify` closes both typed and legacy environments before checkpoint tracking ends. It keeps only the measured
+`/verify` closes both typed and cookie-seeded environments before checkpoint tracking ends. It keeps only the measured
 reward and optional typed identity for `session_close_retry_window_seconds`, so a lost reply can be retried without
-keeping an environment alive. `/close_session` fences that record and releases any still-active or incomplete
-instance. If `env.close()` raises, ownership is retained and close or checkpoint retirement can retry. An instance
+keeping an environment alive. `/close_session` releases any still-active or incomplete
+instance, drops that record and fences the episode, so a later `/verify` is masked. If `env.close()` raises, ownership is retained and close or checkpoint retirement can retry. An instance
 whose reset and cleanup both failed remains owned until cleanup succeeds. Checkpoint retirement also releases live
-instances. A typed seed cannot reopen a verified or closed ID, and a legacy seed cannot replace a typed or closed
-session; a new legacy `/run` reusing a verified legacy cookie replaces the finished run's environment under the
-same session ID.
+instances. A typed seed cannot reopen a verified or closed ID, and a cookie seed cannot replace a typed or closed
+session; a new cookie-seeded `/run` reusing a verified cookie replaces the finished run's environment under the
+same session ID. A cookie reseed whose reset fails keeps the previous run's reward answerable for
+`session_close_retry_window_seconds`: a `/verify` on that cookie returns it until a reseed succeeds or the window ends.
 
 A tool call (`/step` or `/<tool_name>`) for a session the server no longer holds fails with 404
 (`failure_kind: session_lost`), and `/verify` for it returns a masked sample (`mask_sample: true`) instead of a
