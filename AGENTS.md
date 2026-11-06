@@ -17,11 +17,36 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
-- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
-  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
-  synonyms.
+- Follow [Terminology](#terminology) in code, docs, and PR text.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
+
+## Terminology
+
+One concept gets one name, everywhere: identifiers, config keys, CLI flags, wire fields, docstrings, comments, log and
+error messages, test names, docs, commit messages, and PR text.
+
+- `fern/versions/latest/pages/about/concepts/key-terminology.mdx` is the source of truth. Use its terms in every section,
+  not only Sessions, and never use a term its **Not** column rejects. Its "Other features" list names the few features
+  that keep a word in their own sense.
+- When a change introduces a concept, add it to the glossary in the same PR: the term, a one-sentence definition, and
+  any synonyms to reject. Before naming it, grep `nemo_gym/` and the docs for an existing term for the same concept,
+  and reuse it.
+- Do not reuse an existing name for different behavior. Two operations share a name only when they behave the same;
+  for example, token capture's retire, delete, and fence mean the same thing in every store that offers them.
+- Renaming a public name is an API change: keep the old name working with a deprecation warning
+  (`nemo_gym/_moved_paths.py` for modules and names), and update the glossary.
+- Spell out Gym components: resources server, agent server, model server, environment server. Never "resource server",
+  "env server", or invented abbreviations such as "RS". Established names (HTTP, JSON, MCP, GPU) and abbreviations the
+  glossary lists are fine. Code identifiers and command names stay verbatim.
+- Name what a thing is, not its age or origin. Do not use "native", "new", "old", or "v2" as part of a concept's name,
+  and use "legacy" only for the `legacy_agent` path and an agent's own `/run` episode. For example, say "episode
+  request" or "flat row", not "native request" or "legacy row".
+- Gym serves evaluation and training alike, so its terms must read correctly for both. Do not adopt a training
+  framework's vocabulary for a Gym concept; integration docs map the framework's terms onto Gym's.
+- Metric and attribute names follow `fern/versions/latest/pages/observability/metrics.mdx`: durations in milliseconds
+  end in `_ms`, counters end in `_total`, and Gym attributes live under `nemo.gym.`.
+- Reviewers flag a new synonym, a reused name, or a missing glossary entry as a finding.
 
 ## Code provenance
 
