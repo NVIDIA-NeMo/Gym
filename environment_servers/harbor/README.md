@@ -60,6 +60,15 @@ when every measured turn named some, else names none. On the single-turn path th
 the sum of the same keys); when a roll-up's components do not sum to its reward, the episode names none and the
 server logs a warning naming the task, the keys and both numbers.
 
+A dataset whose verifiers write several metrics and no `reward` key names the one that is the score with
+`reward_key` in `dataset.toml` (`[gym.defaults]`, or `[gym.tasks."<id>".verifier]` for one task; a `task.toml`
+cannot set it, so a task folder scores the same under Harbor). That key is the reward and the key a step's
+scalar `min_reward` gates; every key stays in `verifier_rewards` and the result names no components. A file
+without the key is measured 0 with `harbor:invalid_reward`. `reward.txt` reads as a `reward` key, so a task that
+writes it needs `reward_key` unset or `"reward"`. A dataset graded by `verifier.py` cannot set it: the verifier
+returns a number or a dict with a `reward` key. `gym dataset publish` strips the `[gym]` table, so a published
+dataset is scored by Harbor's own rule.
+
 `reward_components` here is Harbor's optional, task-specific reading of `reward.json`, not the shared multi-reward
 contract of `BaseMultiRewardVerifyResponse` (a required mapping with the same objective keys on every task of an
 environment): a task names whatever keys its `test.sh` wrote, two tasks of one dataset may name different ones, and a
@@ -1571,7 +1580,7 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table; `task_data.py` | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own. `task_data.py`: the `TaskData` model every task's `task_data.json` fields are validated against (materialize, seed, collate) |
+| Dataset | `dataset.toml`, `[gym]` table; `task_data.py` | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`), `reward_key` (the `reward.json` key that is the score); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own. `task_data.py`: the `TaskData` model every task's `task_data.json` fields are validated against (materialize, seed, collate) |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels, shared storage and `volume_sources` for Compose volumes |
 | Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs, `compose_overlay` (the job's extra Compose files, MCP entries and prompt template) |
 

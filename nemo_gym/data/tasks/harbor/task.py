@@ -414,6 +414,12 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         data = tomllib.loads((path / TASK_FILE).read_text())
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
+        # `[verifier].reward_key` changes the score and Harbor ignores it, so it comes from dataset.toml alone: in the
+        # task's own file it stays an unknown key, and the folder scores the same under Gym and under Harbor.
+        verifier_table = data.get("verifier")
+        if isinstance(verifier_table, dict) and "reward_key" in verifier_table:
+            logger.warning("%s: ignoring unknown key `verifier.reward_key` (set it in dataset.toml)", path / TASK_FILE)
+            data["verifier"] = {key: value for key, value in verifier_table.items() if key != "reward_key"}
         legacy_mode = data.get("multi_step_reward_mode")
         if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
             # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own
@@ -483,6 +489,11 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
     python_verifier = python_verifier_for(path, root) if not turns else None
+    if python_verifier is not None and config.verifier.reward_key is not None:
+        raise HarborTaskError(
+            f"{path.name}: reward_key applies to test.sh verifiers; a {VERIFIER_FILE} verifier names its score by "
+            "returning a number or a dict with a `reward` key"
+        )
     if not turns and python_verifier is None and not (path / "tests").is_dir():
         raise HarborTaskError(f"{path} has no tests/ folder (and the dataset has no {VERIFIER_FILE} to grade it with)")
     try:
@@ -772,9 +783,10 @@ def task_digest(
     if not dataset.shapes_tasks and shared_verifier_digest is None:
         return folder_digest
     # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
-    # shaping table with a repeat count hashes the same as one without.
+    # shaping table with a repeat count hashes the same as one without. Defaults left unset (None) are left out
+    # too, so a dataset that sets none of them keeps the digests it had before those keys existed.
     applied: dict[str, Any] = {
-        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
+        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}, exclude_none=True),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
     if shared_verifier_digest is not None:
