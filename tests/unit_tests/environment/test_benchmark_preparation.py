@@ -417,3 +417,15 @@ def test_the_cli_exits_76_and_leaves_the_kind_for_the_chain_guard(tmp_path, monk
 
     assert exited.value.code == 76
     assert failure_file.read_text() == "environment_prepare_failed\n"
+
+
+def test_an_in_process_preparer_that_raises_is_a_typed_terminal_stop(tmp_path) -> None:
+    script = tmp_path / "prepare.py"
+    script.write_text("def prepare(**kwargs):\n    raise ValueError('bad row')\n")
+    benchmark = SimpleNamespace(name="demo", dataset=SimpleNamespace(jsonl_fpath=str(tmp_path / "out.jsonl")))
+
+    with pytest.raises(benchmark_preparation.PreparationFailedError) as stopped:
+        benchmark_preparation._multiprocess_benchmark_prepare_fn((benchmark, str(script), {}, None))
+
+    assert "ValueError: bad row" in str(stopped.value)
+    assert stopped.value.stop_exit_code == 76
