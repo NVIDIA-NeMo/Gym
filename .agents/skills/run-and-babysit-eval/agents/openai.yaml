@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Evaluation Run"
+  short_description: "Submit, resume, recover and gate a Gym evaluation until its result can be trusted"
+  default_prompt: "Use $run-and-babysit-eval to take this Gym evaluation from its config to an accepted result."

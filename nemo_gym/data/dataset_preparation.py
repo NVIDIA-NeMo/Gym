@@ -404,7 +404,7 @@ def _sidecar_excluded_dataset_fields(
     """
     excluded = {"agent", "taskset", *_CATALOG_DATASET_FIELDS}
     if preparation and isinstance(dataset, DatasetConfig):
-        excluded.update({"prepare_script", "prepare_dependencies"})
+        excluded.update({"prepare_script", "prepare_dependencies", "prepare_project"})
     return excluded
 
 

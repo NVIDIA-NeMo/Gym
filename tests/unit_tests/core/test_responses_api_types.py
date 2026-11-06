@@ -103,6 +103,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseMcpListTools,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
@@ -179,6 +180,24 @@ class TestNeMoGymResponseCreateParamsNonStreaming:
         assert (
             InputAdditionalTools.model_validate(replay_dump).model_dump(mode="json", exclude_unset=True) == replay_dump
         )
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            NeMoGymResponseOutputMessage(
+                id="msg_1", content=[NeMoGymResponseOutputText(text="hi", annotations=[])], status="completed"
+            ),
+            NeMoGymResponseFunctionToolCall(call_id="call_1", name="get_weather", arguments="{}"),
+            NeMoGymResponseReasoningItem(id="rs_1", summary=[]),
+        ],
+        ids=["message", "function_call", "reasoning"],
+    )
+    def test_typed_output_item_keeps_its_default_tags_on_replay(self, item: Any) -> None:
+        # A typed item left at its default type and role must replay as the same item, not lose those tags.
+        replay = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+
+        assert type(replay.input[0]) is type(item)
+        assert replay.input[0].model_dump(mode="json") == item.model_dump(mode="json")
 
     def test_failed_computer_output_preserved_then_status_removed_for_replay(self) -> None:
         payload = {
@@ -1911,9 +1930,9 @@ def _classes_the_converter_can_emit() -> List[str]:
     import ast
     import inspect
 
-    from nemo_gym.models import chat_completions_converter as responses_converter
+    from nemo_gym.models import chat_completions_converter
 
-    tree = ast.parse(inspect.getsource(responses_converter))
+    tree = ast.parse(inspect.getsource(chat_completions_converter))
     func = next(
         node
         for node in ast.walk(tree)
@@ -1966,7 +1985,7 @@ def test_every_item_the_converter_can_emit_has_a_training_variant() -> None:
     registered = {cls.__name__ for cls in RESPONSES_TO_TRAIN}
     missing = sorted(set(emitted) - registered)
     assert not missing, (
-        f"ResponsesConverter.postprocess_assistant_message_dict can emit {missing}, and "
+        f"ChatCompletionsConverter.postprocess_assistant_message_dict can emit {missing}, and "
         f"chat_completions_converter.py hands response_output[-1] to training_variant_of(), so a "
         f"rollout carrying token IDs would fail there.\n"
         f"Fix: declare `class <Name>ForTraining(<Name>, TokenIDLogProbMixin)`, add it to "

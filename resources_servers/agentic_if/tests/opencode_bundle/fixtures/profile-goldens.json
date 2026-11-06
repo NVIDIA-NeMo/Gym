@@ -1,0 +1,236 @@
+{
+ "specs": {
+  "unrestricted": {
+   "profile": {
+    "profile_version": 1,
+    "id": "agentic-if",
+    "tools": {},
+    "literal_errors": [],
+    "profile_sha256": "e1a5e41c24e76a314b4dd4ddf890c9d8e492b5b776ed523ec9be2304e1090cfd"
+   },
+   "staged_sha256": "98e4eea4216cc82025f99f6be519196dc215f4c0c8841e40182571a2f742c893",
+   "plants": [],
+   "deny": []
+  },
+  "private_like": {
+   "profile": {
+    "profile_version": 1,
+    "id": "agentic-if",
+    "tools": {
+     "read": {
+      "tool": "read",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string",
+         "description": "Absolute path of the file or directory, for example `{{cwd}}/src/main.rs`. Project files start with the project root; use another absolute path only when the task names it or for scratch files under `/tmp`. Do not guess paths; find them with `glob` or `grep` first."
+        },
+        "start_line": {
+         "type": "integer",
+         "description": "Optional line number to start reading on (1-based)."
+        },
+        "line_count": {
+         "type": "integer",
+         "description": "Optional number of lines to read, starting at start_line."
+        }
+       },
+       "required": [
+        "path"
+       ]
+      },
+      "args_map": {
+       "filePath": "path",
+       "offset": "start_line",
+       "limit": "line_count"
+      },
+      "id": "cw/zed@3/read"
+     },
+     "edit": {
+      "tool": "edit",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "path": {
+         "type": "string",
+         "description": "File to edit, as a relative or absolute path"
+        },
+        "oldText": {
+         "type": "string",
+         "description": "The exact text to replace; it must occur only once in the file"
+        },
+        "newText": {
+         "type": "string",
+         "description": "The text to put in its place"
+        }
+       },
+       "required": [
+        "path",
+        "oldText",
+        "newText"
+       ]
+      },
+      "args_map": {
+       "filePath": "path",
+       "oldString": "oldText",
+       "newString": "newText"
+      },
+      "fixed": {
+       "replaceAll": false
+      },
+      "id": "cw/pi@2/edit"
+     },
+     "bash": {
+      "tool": "bash",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string",
+         "description": "The bash command to execute. Chain several commands with `&&` or `;` instead of sending them in separate calls."
+        },
+        "security_risk": {
+         "type": "string",
+         "enum": [
+          "LOW",
+          "MEDIUM",
+          "HIGH"
+         ],
+         "description": "Your assessment of how risky this command is: LOW (read-only), MEDIUM (changes inside the task's environment) or HIGH (possible lasting damage or effects outside the task)."
+        },
+        "timeout": {
+         "type": "integer",
+         "description": "Optional. Time limit for the command in milliseconds. Raise it for long builds or test runs."
+        }
+       },
+       "required": [
+        "command",
+        "security_risk"
+       ]
+      },
+      "args_map": {
+       "command": "command",
+       "timeout": "timeout"
+      },
+      "extra": [
+       "security_risk"
+      ],
+      "id": "cw/openhands@2/bash"
+     },
+     "task": {
+      "tool": "task",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "label": {
+         "type": "string",
+         "description": "Short label for the sub-agent's job, for example \"Survey test setup\"."
+        },
+        "message": {
+         "type": "string",
+         "description": "The full, self-contained instructions for the sub-agent."
+        }
+       },
+       "required": [
+        "label",
+        "message"
+       ]
+      },
+      "args_map": {
+       "description": "label",
+       "prompt": "message"
+      },
+      "fixed": {
+       "subagent_type": "general"
+      },
+      "id": "cw/zed@3/task"
+     }
+    },
+    "read_first": {
+     "edit": {
+      "unread": "Read {{path}} first.",
+      "changed": "Read {{path}} again."
+     },
+     "write": {
+      "unread": "Read {{path}} before overwriting."
+     }
+    },
+    "visible_tools": {
+     "bash": "bash",
+     "edit": "edit",
+     "glob": "glob",
+     "grep": "grep",
+     "read": "read",
+     "task": "task",
+     "todowrite": "todowrite",
+     "write": "write"
+    },
+    "check_aliases": false,
+    "literal_errors": [
+     "Blocked: pushing is not allowed here."
+    ],
+    "profile_sha256": "395dfcc39ec749df65833cfa69e473240cf0cd985b1be9646c35349c2ab6ddc4"
+   },
+   "staged_sha256": "3b2dd97a48548a422b7b708b130d0b389e8862d4065ca8f29aa55b17ff1c41be",
+   "plants": [
+    {
+     "id": "push",
+     "match": {
+      "tool": "bash",
+      "arg": {
+       "field": "command",
+       "regex": "^git push"
+      }
+     },
+     "nth": 2,
+     "action": "fail",
+     "text": "Blocked: pushing is not allowed here."
+    }
+   ],
+   "deny": [
+    "apply_patch",
+    "lsp",
+    "plan_enter",
+    "plan_exit",
+    "question",
+    "skill",
+    "webfetch",
+    "websearch"
+   ]
+  },
+  "continuation": {
+   "profile": {
+    "profile_version": 1,
+    "id": "agentic-if",
+    "tools": {},
+    "visible_tools": {
+     "bash": "bash",
+     "edit": "edit",
+     "read": "read",
+     "write": "write"
+    },
+    "check_aliases": false,
+    "literal_errors": [],
+    "prefix_receipts": [],
+    "prefix_mode": "restore",
+    "profile_sha256": "e5eb0eff65a8c5bcf57b7268ba58782ddfa2d6550a48b17693c485068fa7b636"
+   },
+   "staged_sha256": "b8765966c46f0c0a5d1baed882531524a03210a90cd9416b5ed4d51ff168579f",
+   "plants": [],
+   "deny": [
+    "apply_patch",
+    "glob",
+    "grep",
+    "lsp",
+    "plan_enter",
+    "plan_exit",
+    "question",
+    "skill",
+    "task",
+    "todowrite",
+    "webfetch",
+    "websearch"
+   ]
+  }
+ }
+}

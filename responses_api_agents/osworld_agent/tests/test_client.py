@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any, Dict, List
@@ -19,6 +20,7 @@ import pytest
 
 from responses_api_agents.osworld_agent import client as osworld_client
 from responses_api_agents.osworld_agent import remote_environment as osworld_remote
+from responses_api_agents.osworld_agent import taskgen_plugins
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
     OSWorldGuestStartTimeoutError,
@@ -341,6 +343,84 @@ def test_gym_policy_runner_preserves_existing_pyautogui_flow(monkeypatch) -> Non
     assert FakeEnv.instances[0].kwargs["action_space"] == "pyautogui"
     assert FakeEnv.instances[0].kwargs["enable_proxy"] is False
     assert FakeEnv.instances[0].actions == ["DONE"]
+
+
+@pytest.mark.parametrize(
+    "failure_stage", [None, "registration", "reset", "rollout", "evaluate", "close", "close_cancel"]
+)
+def test_task_plugins_are_cleaned_before_reusing_a_worker(monkeypatch, failure_stage) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    getters = ModuleType("desktop_env.evaluators.getters")
+    metrics = ModuleType("desktop_env.evaluators.metrics")
+    evaluators = ModuleType("desktop_env.evaluators")
+    evaluators.getters, evaluators.metrics = getters, metrics
+    monkeypatch.setitem(sys.modules, "desktop_env.evaluators", evaluators)
+    monkeypatch.setitem(sys.modules, getters.__name__, getters)
+    monkeypatch.setitem(sys.modules, metrics.__name__, metrics)
+    monkeypatch.setattr(taskgen_plugins, "_REGISTERED", {})
+    monkeypatch.setattr(taskgen_plugins, "_INSTALLED", [], raising=False)
+
+    def generated_task(value: float) -> Dict[str, Any]:
+        modules = {
+            "getters": "def get_shared(env, config):\n    return config\n",
+            "metrics": f"def check_shared(*args):\n    return {value!r}\n",
+        }
+        return {
+            "id": "generated-task",
+            "instruction": "Finish the task.",
+            "taskgen_plugins": {
+                "schema": taskgen_plugins.SCHEMA,
+                "getters": ["shared"],
+                "metrics": ["check_shared"],
+                "modules": modules,
+                "sha256": taskgen_plugins.plugin_digest(modules),
+            },
+        }
+
+    def fail(*args: Any, **kwargs: Any) -> None:
+        if failure_stage == "close_cancel":
+            raise KeyboardInterrupt("cancelled while closing environment")
+        raise RuntimeError(f"injected {failure_stage} failure")
+
+    def evaluate(_env: FakeEnv) -> float:
+        return metrics.check_shared()
+
+    monkeypatch.setattr(FakeEnv, "evaluate", evaluate)
+    with monkeypatch.context() as scoped:
+        task = generated_task(1.0)
+        if failure_stage == "registration":
+            task["taskgen_plugins"]["metrics"].append("missing_metric")
+        if failure_stage in {"reset", "evaluate", "close"}:
+            scoped.setattr(FakeEnv, failure_stage, fail)
+        elif failure_stage == "close_cancel":
+            scoped.setattr(FakeEnv, "close", fail)
+        with pytest.raises(KeyboardInterrupt) if failure_stage == "close_cancel" else nullcontext():
+            result = osworld_client.run_osworld_task(
+                task,
+                model_fn=fail if failure_stage == "rollout" else lambda *_args: "```DONE```",
+                env_class_path="fake.FakeEnv",
+                sleep_after_execution=0,
+            )
+            if failure_stage is None:
+                assert result.score == 1.0
+            elif failure_stage != "close":
+                assert result.error is not None
+
+    assert not hasattr(getters, "get_shared")
+    assert not hasattr(metrics, "check_shared")
+    assert taskgen_plugins._REGISTERED == {}
+    assert taskgen_plugins._INSTALLED == []
+
+    # Same process, same function names, different evaluator implementation.
+    next_result = osworld_client.run_osworld_task(
+        generated_task(0.25),
+        model_fn=lambda *_args: "```DONE```",
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+    )
+    assert next_result.score == 0.25
+    assert next_result.error is None
+    assert not hasattr(metrics, "check_shared")
 
 
 def test_guest_idle_inhibitor_uses_non_login_shell_without_changing_settings() -> None:
@@ -777,6 +857,27 @@ def test_raw_reward_mode_preserves_partial_osworld_score(monkeypatch) -> None:
     assert result.score == 0.4
     assert result.reward == 0.4
     assert result.finished is True
+
+
+@pytest.mark.parametrize(
+    ("score", "answer", "expected_reward"),
+    [(1.0, "```DONE```", 1.0), (0.4, "```DONE```", -1.0), (0.0, "```FAIL```", 0.0)],
+)
+def test_signed_v1_reward_mode_penalizes_false_done(monkeypatch, score, answer, expected_reward) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setattr(FakeEnv, "evaluate", lambda _self: score)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "signed-score", "instruction": "Finish the task."},
+        model_fn=lambda _system, _instruction, _history: answer,
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+        reward_mode="signed_v1",
+    )
+
+    assert result.score == score
+    assert result.reward == expected_reward
 
 
 def test_evaluator_failure_remains_runtime_ineligible(monkeypatch) -> None:
