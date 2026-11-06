@@ -155,7 +155,8 @@ it ("unstable sources"), so never edit a run while you read it. Keep the JSON li
   reads `RESUMING`: read `ok`, `dispatched` and `job_id` from the JSON line, not the exit code.
 
 The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_id`,
-`unsupported`, `mlflow`, `reverify`, `judge_job`, `walltime_plan`, `pin_plan`, `scheduler_refusal`, `reader_token`.
+`unsupported`, `operator_verdict`, `mlflow`, `reverify`, `judge_job`, `walltime_plan`, `pin_plan`,
+`scheduler_refusal`, `reader_token`.
 
 - `decision.action`: `noop`, `reverify`, `resubmit`, `fresh-restart`, `stop`, with its `reason` (it ends
   with `resumed across operational drift: <settings>` when the latest resume crossed such drift).
@@ -177,6 +178,15 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
   `omitted_samples`, `score`, `errors`, `warnings`, `retry_budget` (`infra` and `attempts`, each with its
   `configured` cap and recorded `extension`), `observed_grading_recovery` (counts of recovered grading
   attempts; null when there are none), `health_verdict`, and `mlflow_delivery`.
+
+- `operator_verdict` (also inside `gate_task`, and printed on stderr as `operator verdict: <state>: <reason>;
+  action: <action>`): the one reading to act on. `accept` is `SUCCESS` with complete coverage, run health `PASS`
+  and a `noop` decision. `needs_action` is any STOP, `FAILED`, incomplete coverage, failed run health, or an
+  `UNVERIFIED` whose cause is known (`gate_task.unverified_cause` and the one-sentence warning name it with counts;
+  the full reason is in `evaluation_health.detail`). `unknown` is an `UNVERIFIED` without a known cause, a live
+  job, or evidence the reader could not read. Rollout quality never changes the state: when it flags every
+  rollout, an `accept` says so ("accepted by contract; every rollout ended on a failed model call: check the
+  served configuration") and its action is to read the rollout quality.
 
 Where the evidence lives, relative to the run directory: `gym-job.json` (the submission record),
 `resolved-config.yaml`, the journals (`walltime-extension-journal.jsonl`, `repin-journal.jsonl`,
@@ -202,6 +212,7 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 
 | The inspection says | Do |
 | --- | --- |
+| `operator_verdict` is `needs_action` | Do exactly the printed action: `gym eval resubmit --recover` (now, or after the quota reset time it names), or fix what it names and `gym eval submit` again. The rows below say how each recovery option is spelled. |
 | NOOP, `RUNNING` (`continuation <job> live`) | Wait for the job to end, then inspect again. |
 | Eligible work, `PLANNED` | Run it, with the variables the saved config forwards (`compute.cluster.forward_env`) set in that shell; a missing one stops the dispatch. A run submitted from the login node usually forwards none: its credentials are the `runtime:` entries of the saved `resolved-config.yaml`, which the dispatch does not check, so set those variables (an `HF_TOKEN`, say) in the dispatching shell too, or the resumed job starts without them. |
 | `reverify`, `PLANNED` (only rows with a saved answer remain: a judge failure, or a verify call lost in transport) | Run it: the saved answers are judged again and the policy is not called. A run that served its own model, and nothing else beside it, gets a judge-only job on one CPU node. Its partition is the first of: `--judge-partition <partition>`, a node pool of the saved config with `gpus_per_node: 0`, or the partition `NEMO_GYM_REMOTE_READER_SRUN` names. Its QOS is the first of: `--judge-qos <qos>`, the QOS of the saved CPU pool, the `-q`/`--qos` of `NEMO_GYM_REMOTE_READER_SRUN` when it names this partition or none, the partition's default. Slurm refuses a GPU QOS on a CPU partition (`QOSMinGRES`): pass `--judge-qos`. With no CPU pool and no reader placement, pass `--judge-partition`, or the recovery stops with nothing queued (next row). A run that serves its judge on a node pool of its own gets a judge-only job on that saved pool instead and keeps the run's QOS; `--judge-partition` and `--judge-qos` are not used (when you pass them the report says `--judge-partition/--judge-qos apply to the CPU judge profile only; not used`). A run with both judge failures and policy work is resubmitted; it re-judges the saved failures before its policy work and again at the end. |

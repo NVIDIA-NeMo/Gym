@@ -1,0 +1,250 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""The operator verdict: accept, needs_action or unknown, and an UNVERIFIED that names its cause."""
+
+from nemo_gym.orchestration.recovery import (
+    IdentityEvidence,
+    IdentityState,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+    operator_verdict,
+    operator_verdict_line,
+    with_operator_verdict,
+)
+from tests.unit_tests.orchestration.test_evaluation_health import _gate, _run
+
+
+def _ready(collected):
+    """A read score and no MLflow requirement, so only the run's own facts decide the gate."""
+    collected.score = 0.9
+    collected.quality["provenance"]["mlflow"]["tracking_required"] = False
+    return collected
+
+
+def _verdict(collected):
+    decision, _, task = _gate(collected)
+    return operator_verdict(task, decision), task, decision
+
+
+def _decision(action, reason, counts, *, expected=10, **extra):
+    identities = {state.value: [(i, 0) for i in range(n)] for state, n in counts.items()}
+    return RecoveryDecision(
+        action=action, reason=reason, expected=expected, counts=counts, identities=identities, evidence=[], **extra
+    )
+
+
+def _failed_task(**extra):
+    return {"status": "FAILED", "expected_samples": 10, "errors": ["x"], "warnings": []} | extra
+
+
+def test_a_clean_complete_run_is_accepted_with_nothing_to_do():
+    verdict, task, _ = _verdict(_ready(_run(100)))
+    assert task["status"] == "SUCCESS"
+    assert verdict == {
+        "state": "accept",
+        "reason": "100 of 100 rollouts scored, run health PASS, nothing to recover",
+        "action": "none",
+    }
+    assert operator_verdict_line(verdict) == (
+        "operator verdict: accept: 100 of 100 rollouts scored, run health PASS, nothing to recover; action: none"
+    )
+
+
+def test_a_final_model_failure_is_still_accepted():
+    verdict, task, _ = _verdict(_ready(_run(90, settled={"model_context_limit": 10})))
+    assert task["status"] == "SUCCESS" and verdict["state"] == "accept" and verdict["action"] == "none"
+
+
+def test_accept_names_a_run_whose_every_rollout_ended_on_a_failed_model_call():
+    collected = _ready(_run(32))
+    collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 32
+    verdict, task, _ = _verdict(collected)
+    assert task["status"] == "SUCCESS"
+    assert verdict == {
+        "state": "accept",
+        "reason": "accepted by contract; every rollout ended on a failed model call: check the served configuration",
+        "action": "read rollout quality: 32 of 32 rollouts flagged rollout_ended_on_failed_model_call",
+    }
+
+
+def test_accept_names_a_run_where_no_task_had_a_successful_model_call():
+    collected = _ready(_run(8))
+    collected.quality["issues"]["task_no_successful_model_calls"] = 8
+    verdict, _, _ = _verdict(collected)
+    assert verdict["state"] == "accept"
+    assert (
+        verdict["reason"]
+        == "accepted by contract; no task had a successful model call: check the served configuration"
+    )
+    assert verdict["action"] == "read rollout quality: 8 of 8 rollouts flagged task_no_successful_model_calls"
+
+
+def test_some_flagged_rollouts_are_a_signal_not_a_reason_to_change_the_verdict():
+    collected = _ready(_run(100))
+    collected.quality["issues"]["rollout_ended_on_failed_model_call"] = 5
+    verdict, _, _ = _verdict(collected)
+    assert verdict["state"] == "accept" and verdict["action"] == "none"
+
+
+def test_evaluation_side_failures_over_the_limit_need_action():
+    verdict, task, _ = _verdict(_ready(_run(97, settled={"model_transport_error": 3})))
+    assert task["status"] == "FAILED"
+    assert verdict["state"] == "needs_action"
+    assert verdict["reason"] == "3 of 100 trials failed on the evaluation side (model_transport_error 3)"
+    assert verdict["action"] == "fix the failing infrastructure then `gym eval submit` again"
+
+
+def test_recoverable_work_says_recover_now():
+    decision = _decision(
+        RecoveryAction.RESUBMIT, "2 failures can retry", {IdentityState.SCORED: 8, IdentityState.RETRYABLE: 2}
+    )
+    verdict = operator_verdict({"status": "PLANNED", "expected_samples": 10, "errors": []}, decision)
+    assert verdict == {
+        "state": "needs_action",
+        "reason": "8 of 10 rollouts are settled; 2 retryable remain",
+        "action": "`gym eval resubmit --recover` now",
+    }
+
+
+def test_a_quota_stop_waits_for_the_reset_then_recovers():
+    decision = _decision(
+        RecoveryAction.STOP,
+        "6 saved answer(s) wait on the grading provider's quota (provider_quota_exhausted), which resets at "
+        "2026-01-02 03:04 UTC; nothing can be graded before then",
+        {IdentityState.SCORED: 4, IdentityState.TERMINAL: 6},
+    )
+    verdict = operator_verdict(_failed_task(), decision)
+    assert verdict["state"] == "needs_action"
+    assert verdict["reason"] == "6 of 10 saved answers wait on the grading provider quota"
+    assert verdict["action"] == "wait until 2026-01-02 03:04 UTC then `gym eval resubmit --recover` (quota)"
+
+
+def test_a_credentials_stop_names_the_fix_and_a_new_submit():
+    decision = _decision(
+        RecoveryAction.STOP,
+        "10 failure(s) typed provider_credentials_rejected: the sandbox provider answered 401",
+        {IdentityState.TERMINAL: 10},
+    )
+    verdict = operator_verdict(_failed_task(), decision)
+    assert verdict["state"] == "needs_action"
+    assert verdict["action"] == "fix the provider credentials then `gym eval submit` again"
+
+
+def test_an_unowned_failure_stop_names_the_dominant_failure_kind():
+    decision = _decision(RecoveryAction.STOP, "96 failure(s) have no registered kind", {IdentityState.UNKNOWN: 10})
+    decision.evidence = [
+        IdentityEvidence(identity=(i, 0), state=IdentityState.UNKNOWN, failure_kind="collection_dispatch_failed")
+        for i in range(10)
+    ]
+    verdict = operator_verdict(_failed_task(), decision)
+    assert verdict["state"] == "needs_action"
+    assert (
+        verdict["action"] == "fix the producer of the collection_dispatch_failed failures then `gym eval submit` again"
+    )
+
+
+def test_incomplete_coverage_needs_action():
+    decision = _decision(RecoveryAction.NOOP, "x", {IdentityState.SCORED: 8, IdentityState.MISSING: 2})
+    verdict = operator_verdict({"status": "SUCCESS", "expected_samples": 10, "errors": []}, decision)
+    assert verdict["state"] == "needs_action"
+    assert verdict["reason"] == "coverage is incomplete: 2 missing"
+    assert verdict["action"] == "`gym eval resubmit --recover` now"
+
+
+def test_a_live_job_and_missing_evidence_are_unknown():
+    live = _decision(RecoveryAction.NOOP, "x", {IdentityState.SCORED: 5}, scheduler_live=True)
+    assert operator_verdict({"status": "RUNNING", "errors": []}, live)["state"] == "unknown"
+    nothing = operator_verdict(None, None)
+    assert nothing == {
+        "state": "unknown",
+        "reason": "no evidence was collected",
+        "action": "inspect again once the reader runs",
+    }
+    unread = _decision(RecoveryAction.UNKNOWN, "nothing was read or decided", {})
+    assert operator_verdict(_failed_task(), unread)["state"] == "unknown"
+
+
+def test_an_unread_score_is_unknown_not_a_failed_run():
+    collected = _run(100)
+    verdict, task, _ = _verdict(collected)
+    assert task["status"] == "FAILED"
+    assert verdict["state"] == "unknown" and verdict["reason"] == "no score was read"
+
+
+def _uncovered(collected, rows):
+    for row in collected.results[:rows]:
+        row["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"] = None
+    return collected
+
+
+def _judge_failure(task, status):
+    return {
+        "_ng_task_index": task,
+        "_ng_rollout_index": 0,
+        "failure_kind": "judge_failed",
+        "_ng_failure_http_status": status,
+        "_ng_failure_terminal": False,
+        "mask_sample": True,
+    }
+
+
+def test_unverified_after_a_judge_outage_names_the_cause_with_counts():
+    collected = _ready(_uncovered(_run(64), 59))
+    collected.failures = [_judge_failure(task, 401) for task in range(59) for _ in range(2)]
+    verdict, task, _ = _verdict(collected)
+    assert task["status"] == "UNVERIFIED"
+    cause = "59 of 64 rows were re-judged after a judge failure (401 from the judge model server); 59 rows have no recorded grading"
+    assert task["unverified_cause"] == {"kind": "judge_rejudged", "reason": cause}
+    [warning] = [w for w in task["warnings"] if w.startswith("response/trial health unknown")]
+    assert warning == f"response/trial health unknown: ['{cause}']"
+    assert "trial: UNOBSERVED 59 of 64" in task["evaluation_health"]["detail"]
+    assert verdict == {
+        "state": "needs_action",
+        "reason": f"unverified: {cause}",
+        "action": "fix the judge model server or its credentials then `gym eval submit` again",
+    }
+
+
+def test_unverified_without_a_cause_is_unknown():
+    collected = _ready(_run(100, settled={}))
+    collected.quality["artifacts"]["healthy"] = True
+    decision, _, task = _gate(collected)
+    task = {**task, "status": "UNVERIFIED", "unverified_cause": {"kind": "zero_rewards_unprovable", "reason": "r"}}
+    verdict = operator_verdict(task, decision)
+    assert verdict["state"] == "unknown"
+    assert verdict["reason"] == "unverified without a known cause: r"
+    assert verdict["action"] == "report the run as unverified; no operator action is known"
+
+
+def test_unverified_unobserved_grading_names_the_producer():
+    verdict, task, _ = _verdict(_ready(_uncovered(_run(100), 10)))
+    assert task["status"] == "UNVERIFIED"
+    assert task["unverified_cause"]["kind"] == "grading_unobserved"
+    assert verdict["state"] == "needs_action"
+    assert verdict["reason"].startswith("unverified: 10 of 100 rows have no recorded grading")
+    assert verdict["action"] == "fix the verifier that saves no grading record then `gym eval submit` again"
+
+
+def test_the_outcome_carries_the_verdict_in_both_places():
+    decision, _, task = _gate(_ready(_run(10)))
+    outcome = with_operator_verdict(RecoveryOutcome(decision=decision, ok=True, dispatched=None, gate_task=task))
+    assert outcome.operator_verdict == outcome.gate_task["operator_verdict"]
+    assert outcome.operator_verdict["state"] == "accept"
+    assert "operator_verdict" in outcome.model_dump(mode="json")
+    assert (
+        with_operator_verdict(RecoveryOutcome(decision=decision, ok=False, dispatched=None)).operator_verdict["state"]
+        == "unknown"
+    )
