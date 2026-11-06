@@ -13,17 +13,17 @@ from aiohttp import ClientError
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.client.http_client import get_response_json, raise_for_status
-from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.core.responses_api_types import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
 from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
 from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema
