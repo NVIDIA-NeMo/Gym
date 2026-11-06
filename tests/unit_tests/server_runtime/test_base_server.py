@@ -1322,8 +1322,9 @@ class TestRunWebserverProxyKwargs:
     def test_uvicorn_starts_with_the_shutdown_signals_unblocked(self, monkeypatch: MonkeyPatch) -> None:
         # A process starts with the signal mask of the thread that launched it, and Ray blocks SIGINT in every thread
         # of its workers, NeMo RL's Gym actor among them: the servers it launched never got RunHelper's interrupt.
+        # SIGTERM is blocked too, so the test fails if the helper unblocks only SIGINT.
         def launch_from_a_ray_worker_thread() -> None:
-            signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT,))
+            signal.pthread_sigmask(signal.SIG_BLOCK, (signal.SIGINT, signal.SIGTERM))
             self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=1)
 
         with ThreadPoolExecutor(max_workers=1) as pool:

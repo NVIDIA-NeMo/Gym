@@ -259,7 +259,8 @@ def _unblock_shutdown_signals() -> None:
     """Let SIGINT and SIGTERM, on which uvicorn shuts a server down, reach this process. A process starts with the
     signal mask of the thread that launched it, and Ray blocks SIGINT in every thread of its workers: a server that a
     Ray worker launches, as NeMo RL's Gym actor launches every server through RunHelper, would otherwise leave
-    RunHelper's interrupt pending and never run its shutdown."""
+    RunHelper's interrupt pending and never run its shutdown. Unblocking SIGTERM is defensive: Ray (2.58) blocks it
+    only in its own IO threads, which run no actor code."""
     signal.pthread_sigmask(signal.SIG_UNBLOCK, (signal.SIGINT, signal.SIGTERM))
 
 

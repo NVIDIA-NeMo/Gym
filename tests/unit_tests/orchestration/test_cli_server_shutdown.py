@@ -20,16 +20,16 @@ from nemo_gym.config.global_config import SERVER_SHUTDOWN_TIMEOUT_SECONDS_KEY_NA
 from nemo_gym.orchestration.server_venv import run_command
 
 
-def _runner(processes, grace=0.1):
+def _runner(processes, grace_s=0.1):
     runner = server_supervisor.RunHelper()
     runner._processes = processes
     runner._head_server = None
-    runner._server_shutdown_timeout_seconds = grace
+    runner._server_shutdown_timeout_seconds = grace_s
     return runner
 
 
-def _wait_for(path, process, timeout=5):
-    deadline = time.monotonic() + timeout
+def _wait_for(path, process, timeout_s=5):
+    deadline = time.monotonic() + timeout_s
     while not path.exists():
         assert process.poll() is None and time.monotonic() < deadline
         time.sleep(0.01)
@@ -81,7 +81,7 @@ print('cleanup finished', flush=True)
         _wait_for(ready, process)
         assert int(ready.read_text()) == process.pid
         assert process.pid != os.getsid(0)
-        runner = _runner({"server": process}, grace=2)
+        runner = _runner({"server": process}, grace_s=2)
         runner.shutdown()
         runner.shutdown()
         assert process.returncode == 0
@@ -94,6 +94,9 @@ print('cleanup finished', flush=True)
 def test_server_launched_with_the_interrupt_blocked_still_receives_it(tmp_path):
     # Ray blocks SIGINT in every thread of its workers, and a process starts with the mask of the thread that launched
     # it: every server that NeMo RL's Gym actor launches starts with the interrupt blocked.
+    # This test covers the blocked mask passing through the launch shell and the log tee. Its stand-in calls the helper
+    # itself, so the call in `run_webserver` is covered by the unit test in
+    # tests/unit_tests/server_runtime/test_base_server.py (test_uvicorn_starts_with_the_shutdown_signals_unblocked).
     started_blocked, ready, stopped = tmp_path / "started_blocked", tmp_path / "ready", tmp_path / "stopped"
     script = f"""
 import signal, sys, time
@@ -119,9 +122,9 @@ while True:
     with ThreadPoolExecutor(max_workers=1) as pool:
         process = pool.submit(launch_from_a_thread_that_blocks_the_interrupt).result()
     try:
-        _wait_for(ready, process, timeout=30)  # the stand-in imports the server runtime first
+        _wait_for(ready, process, timeout_s=30)  # the stand-in imports the server runtime first
         assert started_blocked.read_text() == "True"  # the block reached it through its launch shell and log tee
-        _runner({"server": process}, grace=10).shutdown()
+        _runner({"server": process}, grace_s=10).shutdown()
         assert stopped.exists()  # yet it ran its own shutdown
         assert process.returncode == 0
         assert "server stopping" in (tmp_path / "logs/server.log").read_text()
@@ -206,7 +209,7 @@ def test_shutdown_uses_shared_grace_and_reap_deadlines(monkeypatch):
     monkeypatch.setattr(
         server_supervisor, "_signal_server_group", lambda process, sig: calls.append(("signal", process, sig))
     )
-    _runner(dict(zip(("first", "second"), processes)), grace=0.3).shutdown()
+    _runner(dict(zip(("first", "second"), processes)), grace_s=0.3).shutdown()
     waits = [call[2] for call in calls if call[0] == "wait"]
     assert waits == pytest.approx([0.3, 0, server_supervisor._FORCE_KILL_REAP_TIMEOUT_SEC, 0])
     kill_indexes = [i for i, call in enumerate(calls) if call[0] == "signal" and call[2] == signal.SIGKILL]
