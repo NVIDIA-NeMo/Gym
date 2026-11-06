@@ -1236,7 +1236,6 @@ def test_strict_export_does_not_use_a_request_alias_as_the_response_model() -> N
 @pytest.mark.parametrize(
     ("model_call_index", "finish_reason", "message"),
     [
-        (0, "stop", "contradicts the captured tool calls"),
         (0, "end_turn", "contradicts the captured tool calls"),
         (0, "stop_sequence", "contradicts the captured tool calls"),
         (1, "tool_calls", "contradicts the captured text-only output"),
@@ -1252,6 +1251,36 @@ def test_strict_export_rejects_finish_reasons_that_contradict_the_exported_step(
     rollout["ng_trajectory"]["model_calls"][model_call_index]["response_metadata"]["finish_reason"] = finish_reason
 
     with pytest.raises(AtifExportError, match=message):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_rejects_a_chat_stop_reason_on_a_tool_call_step() -> None:
+    rollout = _canonical_rollout()
+    metadata = rollout["ng_trajectory"]["model_calls"][0]["response_metadata"]
+    metadata["dialect"] = "chat"
+    metadata["finish_reason"] = "stop"
+
+    with pytest.raises(AtifExportError, match="Chat finish reason"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
+def test_strict_export_accepts_the_stop_reason_of_a_forced_tool_call_on_a_responses_call() -> None:
+    # The model adapter notes the chat finish reason on a completed Responses call, and a named or forced tool
+    # call finishes with "stop" there.
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["model_calls"][0]["response_metadata"]["finish_reason"] = "stop"
+
+    trajectory = gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+    assert [call.function_name for call in trajectory.steps[2].tool_calls] == ["search", "read"]
+    assert trajectory.steps[2].extra["nemo_gym"]["model_call"]["response_metadata"]["finish_reason"] == "stop"
+
+
+def test_strict_export_still_rejects_a_truncated_responses_tool_call() -> None:
+    rollout = _canonical_rollout()
+    rollout["ng_trajectory"]["model_calls"][0]["response_metadata"]["finish_reason"] = "length"
+
+    with pytest.raises(AtifExportError, match="indicates an incomplete model response"):
         gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
 
 

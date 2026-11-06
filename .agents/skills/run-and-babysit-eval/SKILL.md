@@ -178,6 +178,14 @@ The line's keys: `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched
   `configured` cap and recorded `extension`), `observed_grading_recovery` (counts of recovered grading
   attempts; null when there are none), `health_verdict`, and `mlflow_delivery`.
 
+Run accounting and rollout quality are two things to read. Run accounting (`run.artifacts.healthy` and
+`unhealthy_reasons` in `quality_summary.json`) counts expected, completed, missing and failed rollouts; a failure
+counts whatever its cause, so a counted model zero is a failure row and can reach a configured failure limit.
+Rollout quality (`run.verdicts`, per-rollout `findings`, task flags such as `task_no_successful_model_calls`)
+says how far to trust each measurement and fails nothing. Accept or promote a smoke or a run only on the
+recovery gate's `gate_task.status` and `evaluation_health.status` from `--recover --inspect`, as in section 6;
+a healthy accounting with every rollout measured can still be `UNVERIFIED`.
+
 Where the evidence lives, relative to the run directory: `gym-job.json` (the submission record),
 `resolved-config.yaml`, the journals (`walltime-extension-journal.jsonl`, `repin-journal.jsonl`,
 `unsafe-resume-journal.jsonl`); in `<benchmark>/`, `logs/driver-<job id>.log` and
@@ -211,6 +219,8 @@ GDP-PDF, Stirrup, the benchmarks that read `UNVERIFIED` by construction) are in
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (N above the recorded limit, 0 for none; 600 s unless the benchmark's `run` sets it). |
 | STOP typed `driver_install_failed` (the installer's error is quoted; `logs/driver-<job id>.log` has the rest) | Fix the cause (the ref, the network, the image), then `--recover`. |
 | STOP typed `provider_credentials_rejected` (the sandbox provider answered 401 or 403) | Fix the credentials, then `--recover`. |
+| FAILED, the driver log ends `ValueError: Environment server must return an episode result or failure.` (or `InvalidRolloutResult`), the chain did not continue | A server replied in a shape the collector cannot use. It is deterministic: retrying cannot help. Fix the server or the benchmark pairing (the benchmark config names which server), optionally set `+route_failures_to_sidecar=true` to keep the other tasks' results while diagnosing, then `gym eval submit` again. Never `--recover`. |
+| STOP typed `environment_protocol_violation` (the first results of one environment server were all replies the collector cannot use) | Same: fix the server or the benchmark pairing, then `gym eval submit` again. Never `--recover`. |
 | STOP typed `collection_resume_refused`, or a **semantic** configuration difference (data, limits, repeats, model, sampling, judge or grading) | Usually a fresh run (section 8). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"` (records the reason and the user; never bypasses corrupt history). Operational differences (timeouts, retries, ports, concurrency, paths, tracking) resume by themselves with a warning. If the saved fingerprint no longer matches, continue at the run's own pin and report it; a resume on a newer Gym can be refused after setup, which costs an allocation. |
 | STOP: a resumed segment saved no rollout (its walltime was shorter than setup plus one rollout) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
 | The chain's walltime cap is spent, or the chain's accounting is unknown (a requeued segment) | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime; journaled. For unknown accounting the explicit budget is what continues it, optionally with `--extend-retries`. When both budgets are spent, give `--extend-retries N` and `--max-walltime HH:MM:SS --walltime-reason "<why>"` in one call. |

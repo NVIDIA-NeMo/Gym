@@ -1007,7 +1007,7 @@ gym eval resubmit GYM_JOB_ID BENCHMARK [options]
 | `--acknowledge-failed-judge-jobs`, `--acknowledge-reason TEXT` | With `--recover`: after the last two judge-only jobs ended without settling a saved answer, allow exactly one more; journaled in `judge-job-acknowledgement-journal.jsonl`. |
 | `--score-key JSON`, `--score-agent NAME`, `--score-environment NAME` | With `--recover`: the metric path in the aggregate (a JSON list) and the entry it is read from, by `agent_ref.name` and `_ng_environment_server`. Without them the score gate reports the score as unavailable. |
 | `--mlflow-run-id ID`, `--mlflow-status STATUS` | With `--recover`: an MLflow run and the terminal status you read from the server. They perform no export. |
-| `--max-unhealthy-fraction F` | With `--recover`: the per-rollout health criterion, reported in warnings; it does not change the verdict. |
+| `--max-unhealthy-fraction F` | With `--recover`: the rollout quality criterion, reported in warnings; it does not change the verdict. |
 | `--max-response-failure-fraction F`, `--max-trial-failure-fraction F` | With `--recover`: reported under `criteria` with `applied: false`; they do not change the verdict. |
 | `--policy-timeout-counts-as-model true\|false` | With `--recover`: whether a policy-model response timeout is the model's fault (default `true`). |
 
