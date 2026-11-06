@@ -2012,7 +2012,7 @@ COMMANDS = {
                     "--max-unhealthy-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the per-rollout health criterion, reported in warnings; it does not change the verdict.",
+                    help="With --recover: the rollout quality criterion, reported in warnings; it does not change the verdict.",
                 ),
             ),
             Flag(
