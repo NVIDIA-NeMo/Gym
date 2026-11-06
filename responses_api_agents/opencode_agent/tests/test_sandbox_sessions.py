@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import base64
 import json
 import shlex
 import sqlite3
@@ -169,7 +170,11 @@ class Sandbox:
         return self.exec.return_value
 
     async def upload(self, source, destination):
-        self.files[destination] = Path(source).read_text()
+        data = Path(source).read_bytes()
+        try:
+            self.files[destination] = data.decode()
+        except UnicodeDecodeError:
+            self.files[destination] = data
 
     async def download(self, source, destination):
         if source.endswith("/opencode.db") and source not in self.files:
@@ -586,6 +591,55 @@ async def test_http_keeps_an_empty_answer_when_the_final_gym_reply_is_only_reaso
     # The observed conversation keeps the same empty answer for the final reply.
     observed = [item for item in invocation["conversation"] if item.get("id") == "part-2-0"]
     assert [(item["type"], item["content"][0]["text"]) for item in observed] == [("message", "")]
+
+
+PNG = b"\x89PNG\r\n\x1a\n\x00\xff"
+PNG_URI = "data:image/png;base64," + base64.b64encode(PNG).decode()
+
+
+def test_session_attaches_prompt_images_and_declares_image_input(setup):
+    agent, sandbox = setup
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post(
+            "/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": [{"role": "user", "content": prompt}]}
+        )
+        assert result.status_code == 200, result.text
+        payload = sandbox.params()
+        assert payload["prompt"] == "What is shown?"
+        image_path = payload["command"][payload["command"].index("--file") + 1]
+        assert image_path.startswith(f"{sandbox.directory}/input-media/") and image_path.endswith(".png")
+        assert sandbox.files[image_path] == PNG
+        model = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])["provider"]["nemo_gym"]["models"]["dummy_model"]
+        assert model["attachment"] is True
+        assert model["modalities"]["input"] == ["text", "image"]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"role": "user", "content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]}],
+        [
+            {"role": "system", "content": [{"type": "input_image", "image_url": PNG_URI}]},
+            {"role": "user", "content": "task"},
+        ],
+    ],
+)
+def test_session_rejects_images_it_cannot_attach(setup, items):
+    agent, sandbox = setup
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": items})
+        assert result.status_code == 422, result.text
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+    assert not sandbox.launch.called
 
 
 @pytest.mark.parametrize("part_type", ["text", "reasoning"])
