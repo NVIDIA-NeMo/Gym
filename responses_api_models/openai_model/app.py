@@ -31,6 +31,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
 from nemo_gym.telemetry import MeteredSemaphore
+from responses_api_models.openai_model.provider_refusals import provider_refusal, refusal_response
 
 
 LOG = logging.getLogger(__name__)
@@ -132,6 +133,10 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
+    provider_refusal_codes: frozenset[Literal["bio_policy", "content_filter", "content_policy_violation"]] = Field(
+        default_factory=frozenset,
+        description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
+    )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
@@ -192,12 +197,13 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
         ),
     )
     propagate_upstream_http_status_codes: frozenset[int] = Field(
-        default_factory=frozenset,
+        default_factory=lambda: frozenset({401, 403, 429}),
         description=(
             "Upstream HTTP error statuses returned to the caller with that status "
             "and the provider's error body, instead of HTTP 500. A status that "
             "upstream_retry_policy retries until it is exhausted still returns "
-            "HTTP 500. Empty keeps the historical generic exception behavior."
+            "HTTP 500. The default forwards a rejected credential (401, 403) and a rate limit (429), "
+            "so a caller names the real cause; an empty set keeps the historical generic exception behavior."
         ),
     )
     upstream_retry_policy: UpstreamRetryPolicy = Field(
@@ -371,7 +377,16 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 ]
 
         async def create_and_validate() -> NeMoGymResponse:
-            response_dict = await self._client.create_response(**body_dict)
+            try:
+                response_dict = await self._client.create_response(**body_dict)
+            except ClientResponseError as error:
+                raw_body = getattr(error, "response_content", None)
+                refusal = provider_refusal(error.status, raw_body, self.config.provider_refusal_codes)
+                if refusal is None:
+                    raise
+                return NeMoGymResponse.model_validate(
+                    refusal_response(self.config.openai_model, refusal, raw_body, request=body_dict)
+                )
             response_dict = _normalize_reasoning_content(response_dict)
             reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (

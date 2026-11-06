@@ -74,21 +74,26 @@ if TYPE_CHECKING:
         BaseSeedSessionResponse,
         BaseVerifyRequest,
         BaseVerifyResponse,
-        ClosedResourcesSessionRecords,
         ResourcesCloseSessionRequest,
         ResourcesCloseSessionResponse,
         ResourcesSeedRejectedError,
         ResourcesSeedSessionRequest,
         ResourcesSeedSessionResponse,
         ResourcesSessionConflictError,
-        ResourcesSessionFence,
+        ResourcesSessionFences,
+        ResourcesSessionLocks,
         ResourcesSessionLostError,
         ResourcesVerifyRequest,
         ReverifyMode,
         SimpleResourcesServer,
         lost_session_verification,
     )
-    from nemo_gym.server_runtime.base_server import SimpleServer
+    from nemo_gym.server_runtime.base_server import (
+        SimpleServer,
+        async_rollout_prefix_hook,
+        rollout_prefix_hook,
+        with_rollout_prefix,
+    )
     from nemo_gym.server_runtime.mcp_auto_exposure import (
         TOKEN_HEADER,
         MCPTool,
@@ -124,6 +129,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "async_rollout_prefix_hook": "base_server",
+    "rollout_prefix_hook": "base_server",
+    "with_rollout_prefix": "base_server",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
     "AgentSessionParticipant": "_checkpoint.agent",
@@ -142,7 +150,6 @@ _PUBLIC_API = {
     "CheckpointRequest": "_checkpoint.control",
     "CleanupContext": "base_environment_server",
     "CleanupHandle": "base_environment_server",
-    "ClosedResourcesSessionRecords": "base_resources_server",
     "CommitRequest": "_checkpoint.control",
     "DirectHTTPToolAccess": "tool_access",
     "EnvironmentParticipant": "_checkpoint.environment",
@@ -164,7 +171,8 @@ _PUBLIC_API = {
     "ResourcesSeedSessionRequest": "base_resources_server",
     "ResourcesSeedSessionResponse": "base_resources_server",
     "ResourcesSessionConflictError": "base_resources_server",
-    "ResourcesSessionFence": "base_resources_server",
+    "ResourcesSessionFences": "base_resources_server",
+    "ResourcesSessionLocks": "base_resources_server",
     "ResourcesSessionLostError": "base_resources_server",
     "ResourcesVerifyRequest": "base_resources_server",
     "RestoreRequest": "_checkpoint.control",

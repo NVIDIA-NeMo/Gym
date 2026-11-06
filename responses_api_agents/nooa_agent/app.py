@@ -16,18 +16,25 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from fastapi import Body, FastAPI, HTTPException, Request
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    rollout_context,
+)
 from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation
@@ -62,6 +69,17 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+
+    def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
+        """Report a trusted model rejection; the environment owns grading and retry policy."""
+        status = native_result.get("model_status_code")
+        if (
+            native_result.get("termination_reason") == NOOATerminationReason.MODEL_REJECTED
+            and type(status) is int
+            and 400 <= status <= 599
+        ):
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -191,7 +209,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             if is_transient_infrastructure_error(error):
                 raise HTTPException(503, "NOOA dependency request failed") from error
             raise
-        return finalize_run_result(state.result)[0]
+        return self.report_outcome(
+            finalize_run_result(state.result)[0],
+            {
+                "termination_reason": state.result.termination_reason,
+                "model_status_code": state.result.model_status_code,
+            },
+        )
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         assert isinstance(state, NOOASessionState)

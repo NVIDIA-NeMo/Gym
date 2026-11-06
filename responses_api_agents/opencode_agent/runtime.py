@@ -4,6 +4,11 @@
 """Stock OpenCode plus the same observability patch, locally and in sandboxes."""
 
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+
+if TYPE_CHECKING:
+    from nemo_gym.sandbox import SandboxExecResult
 
 
 OPENCODE_VERSION = "1.17.11"
@@ -22,3 +27,11 @@ OBSERVABILITY_PATCH = ASSISTANT_MESSAGE_PLUGIN_SOURCE
 def apply_observability_patch(config: dict, *, plugin_path: Path = ASSISTANT_MESSAGE_PLUGIN_SOURCE) -> None:
     """Register the shared correlation plugin at its execution-side location."""
     config.setdefault("plugin", []).append(plugin_path.as_uri())
+
+
+def command_failure_reason(message: str, result: "SandboxExecResult") -> str:
+    """Keep bounded raw diagnostics; an error status need not represent a process exit."""
+    return (
+        f"{message[:512]}; return_code={result.return_code}; error_type={str(result.error_type)[:128]}; "
+        f"stdout_tail={repr(result.stdout or '')[-400:]}; stderr_tail={repr(result.stderr or '')[-400:]}"
+    )

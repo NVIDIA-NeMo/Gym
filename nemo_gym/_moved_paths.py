@@ -666,6 +666,44 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.sandbox.config", "0.8.0", "SANDBOX_BLOCK_VOLUME_SOURCES_KEY validate_volume_sources"),
         **_names("nemo_gym.utils.path_utils", "0.8.0", "materialized_path_for"),
     },
+    "nemo_gym.comparison.runner": {
+        **_names("nemo_gym.eval.comparison.loading", "0.8.0", "resolve_agent_selections"),
+    },
+    "nemo_gym.cli.eval": {
+        # Split out of eval. The helpers lost their leading underscore because other modules call them now.
+        "_datasets_to_prepare": MovedPath(
+            new="nemo_gym.environment.benchmark_preparation:datasets_to_prepare", since="0.8.0"
+        ),
+        "_prepare_datasets": MovedPath(
+            new="nemo_gym.environment.benchmark_preparation:prepare_datasets", since="0.8.0"
+        ),
+        "_gym_relative_path": MovedPath(
+            new="nemo_gym.environment.benchmark_preparation:gym_relative_path", since="0.8.0"
+        ),
+        **_names(
+            "nemo_gym.environment.benchmark_preparation",
+            "0.8.0",
+            "_install_prepare_dependencies _multiprocess_benchmark_prepare_fn",
+        ),
+        # eval imported these for code that moved out of it.
+        **_names("nemo_gym", "0.8.0", "PARENT_DIR"),
+        **_names("nemo_gym.environment.benchmarks", "0.8.0", "BenchmarkConfig"),
+        **_names("nemo_gym.config.config_types", "0.8.0", "BenchmarkDatasetConfig DatasetConfig"),
+        **_names(
+            "nemo_gym.config.global_config",
+            "0.8.0",
+            "get_first_server_config_dict resolve_dataset_agent taskset_environment_server_name",
+        ),
+        **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
+        **_names("nemo_gym.orchestration.jobs", "0.8.0", "installed_gym_commit"),
+    },
+    "nemo_gym.cli.main": {
+        # Split out of main. The asset lookup lost its leading underscore because other modules call it now.
+        "_ASSETS": MovedPath(new="nemo_gym.environment.assets:ASSETS", since="0.8.0"),
+        "_asset_config_path": MovedPath(new="nemo_gym.environment.assets:asset_config_path", since="0.8.0"),
+        # main imported this for code that moved out of it.
+        **_names("nemo_gym", "0.8.0", "component_search_roots"),
+    },
     "nemo_gym.cli.env": {
         # Split out of env.
         **_names(
@@ -800,6 +838,26 @@ _RENAMED_TOKEN_CAPTURE_NAMES: dict[str, dict[str, MovedPath]] = {
 for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
     _listed = MOVED_NAMES.setdefault(_module, {})
     assert not set(_listed) & set(_renamed), f"{_module} lists a renamed token capture name twice"
+    _listed.update(_renamed)
+
+# ResponsesConverter renamed ChatCompletionsConverter: AnthropicConverter also converts to and from the Responses API.
+# The chat_completions_converter entries also serve its old module path, nemo_gym.responses_converter.
+_CONVERTER = "nemo_gym.models.chat_completions_converter"
+_RENAMED_CONVERTER_NAMES: dict[str, dict[str, MovedPath]] = {
+    _CONVERTER: {
+        "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+        "ResponsesConverterState": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverterState", since="0.8.0"),
+    },
+    "nemo_gym.models": {
+        "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+    },
+    "nemo_gym.models.token_capture.completion": {
+        "ResponsesConverter": MovedPath(new=f"{_CONVERTER}:ChatCompletionsConverter", since="0.8.0"),
+    },
+}
+for _module, _renamed in _RENAMED_CONVERTER_NAMES.items():
+    _listed = MOVED_NAMES.setdefault(_module, {})
+    assert not set(_listed) & set(_renamed), f"{_module} lists a renamed converter name twice"
     _listed.update(_renamed)
 
 
