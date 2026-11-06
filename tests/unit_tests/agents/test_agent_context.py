@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import errno
+import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -43,3 +46,39 @@ def test_a_missing_or_wrong_kind_of_artifact_refuses_the_seed(root: Path, path: 
         resolve_agent_context_artifact(AgentContextArtifact(path=path), root, kind=kind)
 
     assert raised.value.status_code == 422
+
+
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [("documents/x/manifest\x00.json", "embedded null"), ("documents/" + "a" * 5000, "File name too long")],
+    ids=["nul-byte", "long-name"],
+)
+def test_a_path_the_filesystem_cannot_look_up_refuses_the_seed(root: Path, path: str, reason: str) -> None:
+    """A retry would meet the same error, so the seed answers a final 422, not a 500 that is retried."""
+    # A NUL byte cannot pass validation; an artifact built without it reaches the filesystem.
+    artifact = AgentContextArtifact.model_construct(path=path)
+
+    with pytest.raises(AgentSeedRejectedError, match=reason) as raised:
+        resolve_agent_context_artifact(artifact, root, kind="file")
+
+    assert raised.value.status_code == 422
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_an_unreadable_artifact_refuses_the_seed(root: Path) -> None:
+    (root / "documents" / "x").chmod(0)
+    try:
+        with pytest.raises(AgentSeedRejectedError, match="Permission denied"):
+            resolve_agent_context_artifact(AgentContextArtifact(path="documents/x/manifest.json"), root, kind="file")
+    finally:
+        (root / "documents" / "x").chmod(0o755)
+
+
+def test_an_io_error_on_the_artifacts_storage_stays_retryable(root: Path) -> None:
+    with (
+        patch.object(Path, "is_file", side_effect=OSError(errno.EIO, "Input/output error")),
+        pytest.raises(OSError) as raised,
+    ):
+        resolve_agent_context_artifact(AgentContextArtifact(path="documents/x/manifest.json"), root, kind="file")
+
+    assert not isinstance(raised.value, AgentSeedRejectedError)

@@ -30,8 +30,10 @@ class AgentContextArtifact(BaseModel):
     @field_validator("path")
     @classmethod
     def require_relative_path(cls, path: str) -> str:
-        if "\\" in path or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
-            raise ValueError(f"artifact path must be relative, use '/' separators and contain no '..': {path!r}")
+        if "\\" in path or "\x00" in path or PurePosixPath(path).is_absolute() or ".." in PurePosixPath(path).parts:
+            raise ValueError(
+                f"artifact path must be relative, use '/' separators and contain no '..' or NUL byte: {path!r}"
+            )
         return path
 
 
@@ -52,11 +54,11 @@ class AgentContext(BaseModel):
     def check_keys_and_size(self) -> "AgentContext":
         if shared := sorted(self.values.keys() & self.artifacts.keys()):
             raise ValueError(f"agent_context keys must appear in values or artifacts, not both: {shared}")
-        size = len(json.dumps(self.values, separators=(",", ":")).encode())
+        size = len(json.dumps(self.values, separators=(",", ":"), ensure_ascii=False).encode())
         if size > AGENT_CONTEXT_MAX_VALUES_BYTES:
             raise ValueError(
-                f"agent_context values take {size} bytes as JSON, over the {AGENT_CONTEXT_MAX_VALUES_BYTES}-byte limit; "
-                "pass large content as an artifact"
+                f"agent_context values take {size} bytes as UTF-8 JSON, over the {AGENT_CONTEXT_MAX_VALUES_BYTES}-byte "
+                "limit; pass large content as an artifact"
             )
         return self
 
