@@ -41,7 +41,9 @@ try:
         ImageToolsEpisode,
         ImageToolsGymToolLogic,
         ImageToolsSettings,
+        assistant_text,
         extract_image_refs,
+        final_assistant_response,
     )
 except ImportError:
     from base import (
@@ -49,7 +51,9 @@ except ImportError:
         ImageToolsEpisode,
         ImageToolsGymToolLogic,
         ImageToolsSettings,
+        assistant_text,
         extract_image_refs,
+        final_assistant_response,
     )
 
 
@@ -79,27 +83,13 @@ class ImageToolsRewardVerifyResponse(BaseVerifyResponse):
 
 def _assistant_turns(response: NeMoGymResponse) -> list[str]:
     """Each model call's assistant text, as the agent read it: the turns are split at the observations it appended."""
-    turns: list[list[str]] = [[]]
+    turns: list[list[Any]] = [[]]
     for item in response.output:
-        role = getattr(item, "role", None)
-        if role == "user":
+        if getattr(item, "role", None) == "user":
             turns.append([])
-            continue
-        if getattr(item, "type", None) != "message" or role != "assistant":
-            continue
-        content = getattr(item, "content", None)
-        if isinstance(content, str):
-            turns[-1].append(content)
-        elif isinstance(content, list):
-            turns[-1].extend(text for part in content if isinstance(text := getattr(part, "text", None), str))
-    return ["\n".join(texts).strip() for texts in turns]
-
-
-def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
-    for output_item in reversed(response.output):
-        if getattr(output_item, "type", None) == "message" and getattr(output_item, "role", None) == "assistant":
-            return response.model_copy(update={"output": [output_item]})
-    return response
+        else:
+            turns[-1].append(item)
+    return [assistant_text(items) for items in turns]
 
 
 class ImageToolsRewardServer(SimpleResourcesServer):
@@ -144,16 +134,8 @@ class ImageToolsRewardServer(SimpleResourcesServer):
                 f"The rollout came from agent {files.get('agent')!r}, but this server replays "
                 f"{self.config.agent_server.name!r}'s settings",
             )
-        # The verifier scores the final answer, as it does for the agent's own /run.
-        verify_body = body.model_dump(mode="json") | {
-            "response": _final_assistant_response(body.response).model_dump(mode="json")
-        }
-        verify_response = await self.server_client.post(
-            server_name=verifier.name, url_path="/verify", json=verify_body
-        )
-        await raise_for_status(verify_response)
-        result = await get_response_json(verify_response)
-
+        # Replay first: a rollout the replay cannot reproduce is rejected before the verifier (possibly a judge
+        # model) is called for it.
         episode = await asyncio.to_thread(self._replay, body)
         tool_call_count = int(episode.metadata.get("tool_call_count", 0))
         reported = files.get("image_tools_output_paths") or []
@@ -165,6 +147,16 @@ class ImageToolsRewardServer(SimpleResourcesServer):
                 f"Replaying the rollout ran {tool_call_count} image tools, but the agent reports {len(reported)}; "
                 "check that this server can read the row's source images",
             )
+
+        # The verifier scores the final answer, as it does for the agent's own /run.
+        verify_body = body.model_dump(mode="json") | {
+            "response": final_assistant_response(body.response).model_dump(mode="json")
+        }
+        verify_response = await self.server_client.post(
+            server_name=verifier.name, url_path="/verify", json=verify_body
+        )
+        await raise_for_status(verify_response)
+        result = await get_response_json(verify_response)
 
         base_reward = float(result.get("reward", 0.0))
         return ImageToolsRewardVerifyResponse.model_validate(

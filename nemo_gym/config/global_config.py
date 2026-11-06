@@ -224,6 +224,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "codex_agent",
         "harbor_oracle_agent",
         "hermes_agent",
+        "image_tools_agent",
         "langgraph_agent",
         "kilocode_agent",
         "miniswe_sandboxed_agent",

@@ -120,7 +120,7 @@ The `stop` on `</tool_call>` is what makes the rollout end *at* the decision.
 ## Tool reward server
 
 `tool_reward_app.py` is a second resources server in this directory. It scores
-`image_tools_agent` rollouts when the agent runs under a `single_agent_turn`
+`image_tools_agent` rollouts when the agent runs under a `single_agent_turn_legacy`
 Environment Server instead of its own `/run`
 (`responses_api_agents/image_tools_agent/configs/image_tools_agent_single_agent_turn.yaml`):
 
@@ -133,6 +133,7 @@ Environment Server instead of its own `/run`
   tools than the agent reports, for example because this server cannot read a source
   image, verification fails with a terminal 422 instead of scoring another rollout.
   So does a rollout from an agent other than the one whose settings it replays.
+  The replay runs before the verifier, so a rejected rollout costs no verifier call.
 - The reward is the verifier's reward plus the tool reward, at most 1.0, as in the
   agent's `/run`.
 

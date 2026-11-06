@@ -37,7 +37,9 @@ from resources_servers.image_tools import (
     ImageToolsEpisode,
     ImageToolsGymToolLogic,
     ImageToolsSettings,
+    assistant_text,
     extract_image_refs,
+    final_assistant_response,
 )
 
 
@@ -92,24 +94,6 @@ def _pil_to_data_url(path: str, fmt: str = "JPEG") -> str:
     return f"data:image/{fmt.lower()};base64,{encoded}"
 
 
-def _extract_text_from_response(response: NeMoGymResponse) -> str:
-    texts: list[str] = []
-    for output_item in response.output:
-        if getattr(output_item, "type", None) != "message":
-            continue
-        if getattr(output_item, "role", None) != "assistant":
-            continue
-        content = getattr(output_item, "content", None)
-        if isinstance(content, list):
-            for part in content:
-                text = getattr(part, "text", None)
-                if isinstance(text, str):
-                    texts.append(text)
-        elif isinstance(content, str):
-            texts.append(content)
-    return "\n".join(texts).strip()
-
-
 def _with_rollout_files(response: NeMoGymResponse, rollout_info: dict[str, Any], agent: str) -> NeMoGymResponse:
     """Carry the agent's name and the crop files this rollout wrote on the response, for the tool reward verifier."""
     files = {
@@ -118,13 +102,6 @@ def _with_rollout_files(response: NeMoGymResponse, rollout_info: dict[str, Any],
         "image_tools_generation_image_paths": rollout_info["image_tools_generation_image_paths"],
     }
     return response.model_copy(update={IMAGE_TOOLS_ROLLOUT_KEY: files})
-
-
-def _final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
-    for output_item in reversed(response.output):
-        if getattr(output_item, "type", None) == "message" and getattr(output_item, "role", None) == "assistant":
-            return response.model_copy(update={"output": [output_item]})
-    return response
 
 
 class ImageToolsAgent(SimpleResponsesAPIAgent):
@@ -289,7 +266,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
             # this async loop would stall the event loop for every other
             # concurrent rollout, so hand the whole synchronous call to a thread.
             # Keeping base.py synchronous matters -- the verifiers import it too.
-            observation = await asyncio.to_thread(episode.step, _extract_text_from_response(model_response))
+            observation = await asyncio.to_thread(episode.step, assistant_text(model_response.output))
             if observation is None:
                 break
 
@@ -331,7 +308,7 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         )
 
         verify_request_body = body.model_dump()
-        verify_request_body["response"] = _final_assistant_response(model_response).model_dump()
+        verify_request_body["response"] = final_assistant_response(model_response).model_dump()
         verify_request = ImageToolsAgentVerifyRequest.model_validate(verify_request_body)
         verify_response = await self.server_client.post(
             server_name=resource_name,

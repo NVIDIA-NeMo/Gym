@@ -174,7 +174,7 @@ async def test_settings_the_agent_leaves_unset_take_the_agents_defaults(image: P
 
 
 async def test_a_replay_that_disagrees_with_the_agent_is_a_terminal_failure(image: Path) -> None:
-    server, _ = _server({}, base_reward=1.0)
+    server, post = _server({}, base_reward=1.0)
     output = [_message(ZOOM), _message("observation", role="user"), _message("A car.")]
 
     with pytest.raises(HTTPException) as error:
@@ -182,6 +182,8 @@ async def test_a_replay_that_disagrees_with_the_agent_is_a_terminal_failure(imag
 
     assert error.value.status_code == 422
     assert "ran 1 image tools, but the agent reports 2" in error.value.detail
+    # The replay runs first, so the rejected rollout costs no verifier call.
+    post.assert_not_awaited()
 
 
 async def test_a_source_image_this_server_cannot_read_is_a_terminal_failure(tmp_path: Path) -> None:

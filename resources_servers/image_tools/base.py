@@ -33,6 +33,8 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from PIL import Image
 
+    from nemo_gym.core import NeMoGymResponse
+
 
 IMAGE_TOOL_NAMES = frozenset(
     {
@@ -278,6 +280,31 @@ def extract_last_assistant_text(message_log: list[dict[str, Any]]) -> str:
         if message.get("role") == "assistant":
             return str(message.get("content") or "")
     return ""
+
+
+def assistant_text(output_items: list[Any]) -> str:
+    """The assistant text of one model call's output items, the text the image tools read their calls from.
+
+    The agent and the tool reward verifier's replay both use it, so the replay parses the same text the agent did.
+    """
+    texts: list[str] = []
+    for item in output_items:
+        if getattr(item, "type", None) != "message" or getattr(item, "role", None) != "assistant":
+            continue
+        content = getattr(item, "content", None)
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(text for part in content if isinstance(text := getattr(part, "text", None), str))
+    return "\n".join(texts).strip()
+
+
+def final_assistant_response(response: NeMoGymResponse) -> NeMoGymResponse:
+    """The response cut down to its last assistant message: the answer the task's verifier scores."""
+    for output_item in reversed(response.output):
+        if getattr(output_item, "type", None) == "message" and getattr(output_item, "role", None) == "assistant":
+            return response.model_copy(update={"output": [output_item]})
+    return response
 
 
 def _round_by_factor(number: int, factor: int) -> int:
