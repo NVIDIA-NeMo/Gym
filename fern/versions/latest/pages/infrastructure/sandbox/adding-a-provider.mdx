@@ -78,6 +78,10 @@ New provider implementations must follow this lifecycle and failure contract:
   changing the result; see [Failure observations](/observability/rollout-failures#recovered-failures).
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
+- To run an argument list without a shell, implement `SupportsSandboxExecArgv` (`exec_takes_argv()` returning
+  `True`); `exec()` then also receives `command` as a `list[str]`. Run it as the process's argv, never join it into
+  shell text, and raise `SandboxExecArgvUnsupportedError` before running anything for an option you can honor only
+  through a shell. `AsyncSandbox.exec` refuses a list for a provider without the capability.
 
 OpenSandbox implements this contract. See [Required provider migrations](./index#required-provider-migrations)
 for the built-in providers that must adopt it in follow-up changes.
