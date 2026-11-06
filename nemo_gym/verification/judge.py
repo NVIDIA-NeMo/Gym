@@ -63,6 +63,8 @@ from nemo_gym.core.episode_context import (
 )
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
 )
 from nemo_gym.core.failure_records import FailureBoundary, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureReportRow, observe_failure, report_for_current_request
@@ -134,6 +136,37 @@ def judge_call_failed(
     )
 
 
+JUDGE_PROVIDER_STOP_KINDS = (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED)
+"""The kinds of a judge provider that cannot grade until an operator acts: its quota resets or its key is fixed."""
+
+
+def judge_provider_stopped(message: str, *, failure_kind: str, operation: str) -> NgFailureEvent:
+    """The resources server boundary's stop of a judge provider that refuses to grade (quota or credentials).
+
+    ``judge_failsafe`` routes it like a judge failure, so the row keeps its saved answer and recovery grades it again
+    from that answer; the kind tells recovery and the run that no attempt can succeed until the operator acts.
+    """
+    if failure_kind not in JUDGE_PROVIDER_STOP_KINDS:
+        raise ValueError(f"not a judge provider stop kind: {failure_kind!r}")
+    return NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=failure_kind,
+        failure_reason=bounded_text(message, 2000),
+        operation=operation,
+        stage="verification",
+        message_args=(message,),
+    )
+
+
+def is_judge_provider_stop(error: BaseException) -> bool:
+    """Whether ``error`` is a ``judge_provider_stopped`` event."""
+    return (
+        isinstance(error, NgFailureEvent)
+        and error.boundary == FailureBoundary.RESOURCES_SERVER
+        and error.failure_kind in JUDGE_PROVIDER_STOP_KINDS
+    )
+
+
 def is_judge_failure(error: BaseException) -> bool:
     """Whether ``error`` is a judge failure: the ``JudgeError`` a parser raises, or a ``judge_failed`` event."""
     return isinstance(error, JudgeError) or (
@@ -157,6 +190,11 @@ def _judge_error(
     each of its attempts with ``operation_id`` and ``attempt_id`` and records the reply's status.
     """
     message = f"{type(error).__name__}: {error}"
+    content = getattr(error, "response_content", None)
+    if content:
+        # The reply's own body names the upstream cause (a rejected credential, say), bounded like the reason.
+        text = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+        message += f"; reply: {bounded_text(text, 500)}"
     return judge_call_failed(
         message,
         operation="judge.request",
@@ -299,8 +337,9 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
         try:
             return await verify_fn(*args, **kwargs)
         except JUDGE_FAILURES as e:
-            if not is_judge_failure(e):
+            if not (is_judge_failure(e) or is_judge_provider_stop(e)):
                 raise
+            kind = e.failure_kind if is_judge_provider_stop(e) else JUDGE_FAILED
             body = kwargs.get("body") or next(
                 (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
                 None,
@@ -314,7 +353,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "reward": 0.0,
                 "mask_sample": True,
                 # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
-                "failure_kind": JUDGE_FAILED,
+                "failure_kind": kind,
                 "failure_reason": error,
                 # Keep older NeMo RL consumers working during top-level field migration.
                 "instance_config": {
@@ -326,7 +365,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             }
             # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
             failure = e
-            if not (isinstance(e, NgFailureEvent) and e.failure_kind == JUDGE_FAILED):
+            if not (isinstance(e, NgFailureEvent) and e.failure_kind == kind):
                 failure = judge_call_failed(error, operation="judge.verify")
                 failure.__cause__ = e
             data |= FailureReportRow.fields(report_for_current_request(failure))
