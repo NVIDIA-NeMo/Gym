@@ -208,6 +208,33 @@ class _UnstoppableHandle:
 
 
 class TestResourcesSessions:
+    async def test_request_scored_verify_retries_after_scoring_failure(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        server, _ = _session_server()
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "rs-1"}
+        await server.seed_session(ResourcesSeedSessionRequest.model_validate(_seed("rs-1")), request=request)
+        handle = _UnstoppableHandle()
+        handle.stoppable = True
+        server._sessions["rs-1"] = handle
+        calls = 0
+
+        def fail_once_then_score(actual, expected):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("scoring unavailable")
+            return _answers_match(actual, expected)
+
+        monkeypatch.setattr("app._answers_match", fail_once_then_score)
+        body = PythonMathVerifyRequest.model_validate(VERIFY_BODY)
+        with pytest.raises(ValueError, match="scoring unavailable"):
+            await server.verify(request, body)
+        assert server._sessions == {} and handle.close_attempts == 1
+        retried = await server.verify(request, body)
+        assert retried.reward == 1.0 and not retried.mask_sample
+        assert calls == 2
+        await server.close_resources_session(ResourcesCloseSessionRequest.model_validate(_close("rs-1")))
+
     async def test_verify_cleanup_prevents_late_worker_allocation(self, monkeypatch: pytest.MonkeyPatch) -> None:
         server, _ = _session_server()
         request = MagicMock()
@@ -247,7 +274,7 @@ class TestResourcesSessions:
         handle = _UnstoppableHandle()
         server._sessions["rs-1"] = handle
         first = client.post(prefix + "/verify", json=VERIFY_BODY, headers={"x-ng-checkpoint-close-follows": "1"})
-        assert first.status_code == 500
+        assert first.status_code == 200 and first.json()["reward"] == 1.0
         assert server.checkpoint_participant.is_open("rs-1")
         assert "rs-1" in server._session_episodes
         assert server._sessions["rs-1"] is handle
@@ -576,7 +603,7 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert server.session_is_closed("rs-1")
 
-    def test_failed_stop_at_verify_keeps_ownership_and_fails_the_request(self) -> None:
+    def test_failed_stop_at_verify_preserves_score_and_keeps_cleanup_owned(self) -> None:
         server, app = _session_server()
         client = TestClient(app, raise_server_exceptions=False)
         assert client.post("/seed_session", json=_seed("rs-1")).status_code == 200
@@ -585,10 +612,14 @@ class TestResourcesSessions:
 
         verified = client.post("/verify", json=VERIFY_BODY)
 
-        assert verified.status_code == 500
+        assert verified.status_code == 200 and verified.json()["reward"] == 1.0
         assert handle.close_attempts == 1
         # The worker stays registered, so the close retries the stop and reports a failure.
         assert server._sessions["rs-1"] is handle
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 500
+        handle.stoppable = True
+        assert client.post("/close_session", json=_close("rs-1")).status_code == 200
+        assert server._sessions == {}
 
     def test_execute_after_close_is_a_lost_session(self) -> None:
         server, app = _session_server()

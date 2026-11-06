@@ -292,6 +292,8 @@ class PythonExecutorResourcesServer(SimpleResourcesServer):
                     **(body.model_dump() | lost_session_verification(f"math_with_code session {session_id} is closed"))
                 )
 
+            # The retry request carries the answer and grading data; no Python worker state is required.
+            verification.retain(None)
             expected = body.expected_result
 
             # Extract actual answer from final assistant message
