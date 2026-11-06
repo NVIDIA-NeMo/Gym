@@ -2,7 +2,7 @@
 
 The 87 official [SkillsBench](https://github.com/benchflow-ai/skillsbench) tasks as plain Harbor task folders for
 the generic `harbor` environment server, with each task's skills. Every task declares
-`skills_dir = "/root/.agents/skills"`, and the server uploads the task's `environment/skills/` there at seed. The
+`skills_dir = "/skills"`, and the server uploads the task's `environment/skills/` there at seed. The
 no-skill condition is the sibling entry, [`skillsbench_no_skill`](../skillsbench_no_skill/README.md).
 
 ```sh

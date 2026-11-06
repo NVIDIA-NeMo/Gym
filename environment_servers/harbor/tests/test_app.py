@@ -2402,8 +2402,8 @@ class StubProvider:
 
 
 class TestComposeAndRouting:
-    def compose_server(self, tmp_path, monkeypatch):
-        server, task, _, _ = make_server(tmp_path, monkeypatch)
+    def compose_server(self, tmp_path, monkeypatch, *, skills=False):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, skills=skills)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
         (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
         (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
@@ -3318,6 +3318,33 @@ class TestComposeAndRouting:
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
 
+    async def test_a_groups_skills_reach_main_after_the_group_started_and_before_the_harness(
+        self, tmp_path, monkeypatch
+    ):
+        """The adapter starts main, runs its command and waits for its image healthcheck before the seed uploads
+        the task's skills, so in a Compose group they reach the harness session, not main's own startup."""
+        server, task, compose, _, _ = self.compose_server(tmp_path, monkeypatch, skills=True)
+        main = compose.services["main"]
+        start_compose = server._create_compose
+        uploads_at_group_start: list[int] = []
+
+        async def start_compose_recording_uploads(*args, **kwargs):
+            group = await start_compose(*args, **kwargs)
+            uploads_at_group_start.append(len(TestTaskSkills.skills_uploads(main, "/app/.skills")))
+            return group
+
+        monkeypatch.setattr(server, "_create_compose", start_compose_recording_uploads)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert uploads_at_group_start == [0]
+        (upload,) = TestTaskSkills.skills_uploads(main, "/app/.skills")
+        assert upload["user"] == "root"
+        context_write = next(c for c in main.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert main.execs.index(upload) < main.execs.index(context_write)
+        assert len(server.server_client.seed_bodies()) == 1
+
     @pytest.mark.parametrize("compose_user,expected_user", [("nobody", "nobody"), ("1000", 1000)])
     async def test_task_healthcheck_uses_own_compose_user_without_job_overlay(
         self, tmp_path, monkeypatch, compose_user, expected_user
@@ -4008,7 +4035,8 @@ class TestTaskSkills:
     """The seed uploads a task's ``environment/skills/`` to its ``skills_dir`` before the task's entrypoint runs.
 
     Harbor expects the image to hold ``skills_dir`` already; a task that runs a prebuilt image ships its skills in
-    the build context only (SkillsBench), so the server puts them where the task says, for every harness.
+    the build context only (SkillsBench), so the server puts them where the task says, for every harness, unless
+    the image already filled that folder.
     """
 
     SKILLS_TOML = TASK_TOML.replace(
@@ -4042,11 +4070,14 @@ class TestTaskSkills:
         response = await run_episode(server, task)
 
         assert response.failure is None, response.failure
-        # One archive, extracted as root into skills_dir and opened to every user, before the task's entrypoint
-        # (and so its healthcheck) and the agent seed, as an image that copied them in would hold them.
+        # One archive, extracted as root into skills_dir, its skill folders opened to every user, before the task's
+        # entrypoint (and so its healthcheck) and the agent seed, as an image that copied them in would hold them.
         (upload,) = self.skills_uploads(sandbox)
         assert upload["user"] == "root"
-        assert "chmod -R a+rX /root/.agents/skills" in upload["command"]
+        assert "chmod" not in upload["command"]
+        (opened,) = [c for c in sandbox.execs if "chmod -R a+rX" in c["command"]]
+        assert opened["user"] == "root"
+        assert "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; true" in opened["command"]
         assert uploads_at_entrypoint == [1]
         assert uploads_at_seed == [1]
         # The skill folder travels whole, without what the task digest ignores.
@@ -4066,6 +4097,57 @@ class TestTaskSkills:
 
         assert response.failure is None, response.failure
         assert len(self.skills_uploads(sandbox, "/app/.skills")) == 1
+        # The harness reads the path the skills went to, absolute as Harbor asks for it.
+        context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert '"skills_dir": "/app/.skills"' in context_write["command"]
+
+    @pytest.mark.parametrize(
+        "probe,uploaded,opened",
+        [
+            pytest.param(1, False, None, id="filled-by-the-image"),
+            pytest.param(0, True, "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; true", id="empty"),
+            pytest.param(
+                2,
+                True,
+                "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; chmod a+rX -- /root/.agents/skills 2>/dev/null; true",
+                id="missing",
+            ),
+        ],
+    )
+    async def test_an_image_that_filled_skills_dir_keeps_it_and_only_a_new_folder_is_opened(
+        self, tmp_path, monkeypatch, probe, uploaded, opened
+    ):
+        class Probed(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "ls -A /root/.agents/skills" in command:
+                    self.execs.append({"command": command, "cwd": cwd, "env": env, "user": user, "seen": None})
+                    return SandboxExecResult(stdout="", stderr="", return_code=probe)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = Probed()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox, toml=self.SKILLS_TOML, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(self.skills_uploads(sandbox)) == int(uploaded)
+        assert [c["command"] for c in sandbox.execs if "chmod -R a+rX" in c["command"]] == ([opened] if opened else [])
+        # The harness is told where the skills are either way.
+        assert any("/tmp/.nemo-gym/task.json" in c["command"] for c in sandbox.execs)
+
+    @pytest.mark.parametrize("skills_dir", ["/", ".", "./", "/app", "/app/skills/..", "~/.skills", "$HOME/skills"])
+    async def test_a_skills_dir_the_upload_would_open_too_widely_is_refused(self, tmp_path, monkeypatch, skills_dir):
+        """The upload opens what it writes to every user: ``/`` or the working directory would open far more than
+        the skills, and the server cannot place a path only a shell resolves."""
+        toml = TASK_TOML.replace("storage_mb = 10240\n", f'storage_mb = 10240\nskills_dir = "{skills_dir}"\n')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert f"skills_dir {skills_dir!r} names no folder" in response.failure.failure_reason
+        assert uploaded_file(sandbox, "SKILL.md") == [] and server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
 
     async def test_a_task_without_skills_dir_uploads_nothing(self, tmp_path, monkeypatch):
         """Skills in the build context alone are the Dockerfile's to copy; nothing names a place for them."""

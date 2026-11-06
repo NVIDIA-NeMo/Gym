@@ -12,7 +12,14 @@ import pytest
 
 import benchmarks.skillsbench.prepare as source_module
 import benchmarks.skillsbench.prepare_harbor_env as prepare_module
-from benchmarks.skillsbench.prepare_harbor_env import AGENT_SKILL_PATHS, DATASETS, ENTRIES_DIR, SKILLS_DIR, _adapt_task
+from benchmarks.skillsbench.prepare_harbor_env import (
+    AGENT_SKILL_PATHS,
+    DATASETS,
+    ENTRIES_DIR,
+    ORACLE_WRAPPER,
+    SKILLS_DIR,
+    _adapt_task,
+)
 from nemo_gym.data.tasks.harbor.dataset_config import read_dataset_config
 from nemo_gym.data.tasks.harbor.entries import find_entry
 from nemo_gym.data.tasks.harbor.models import HarborTaskConfig
@@ -62,7 +69,11 @@ def test_adapt_task_preserves_prompt_and_sandbox_policy(tmp_path: Path) -> None:
     ).read_text()
     assert "ln -s /tests /verifier" in (with_skill / "tests" / "test.sh").read_text()
     assert (with_skill / "tests" / "test.original.sh").read_text() == "python /verifier/test_outputs.py\n"
-    assert "ln -s /solution /oracle" in (with_skill / "solution" / "solve.sh").read_text()
+    # The oracle also finds the skills at /app/skills while solve.sh runs, and the link is gone after it.
+    assert (with_skill / "solution" / "solve.sh").read_text() == ORACLE_WRAPPER
+    assert "ln -s /solution /oracle" in ORACLE_WRAPPER
+    assert "ln -s /skills /app/skills" in ORACLE_WRAPPER and "trap 'rm -f /app/skills' EXIT" in ORACLE_WRAPPER
+    assert (with_skill / "solution" / "solve.original.sh").read_text() == "echo solved\n"
     # Gym's Harbor loader reads the file with its own field names, nothing deprecated.
     config = HarborTaskConfig.model_validate(converted)
     assert config.environment.skills_dir == SKILLS_DIR
@@ -73,8 +84,9 @@ def test_adapt_task_preserves_prompt_and_sandbox_policy(tmp_path: Path) -> None:
     no_skill_toml = tomllib.loads((no_skill / "task.toml").read_text())
     assert "skills_dir" not in no_skill_toml["environment"]
     assert no_skill_toml["environment"]["docker_image"] == "registry.example/skillsbench/example:abc123"
-    # Nothing builds from the skills, so the no-skill task does not carry them.
+    # Nothing builds from the skills, so the no-skill task does not carry them, and its oracle gets no link.
     assert not (no_skill / "environment" / "skills").exists()
+    assert "/app/skills" not in (no_skill / "solution" / "solve.sh").read_text()
 
     # The image-pinned official revision stores the same resource settings
     # under `environment`, while newer task packages use `sandbox`.

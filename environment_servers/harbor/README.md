@@ -110,15 +110,18 @@ compose_variables:
 ```
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
 `[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
-sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). A task that declares
-`skills_dir` and ships `environment/skills/` has that folder uploaded to `skills_dir` at seed, as root, once the
-working directory exists and before the task's entrypoint, healthcheck and harness session (a relative `skills_dir`
-is read from the working directory). The uploaded tree is opened to every user; the folders above it keep the
-image's modes, so a task user other than root needs a `skills_dir` it can reach.
-Harbor expects the image to hold the folder already (a Dockerfile `COPY skills ...`); the upload also covers a task
-that runs a prebuilt or pulled image whose skills live only in the build context, as runners that deploy skills at
-start (BenchFlow's SkillsBench) expect, and gives an image that already holds them the same files again. A task
-without `environment/skills/` uploads nothing. With `task_mcp_grants:
+sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does); a relative `skills_dir` is
+written there as the absolute path it resolves to in the working directory. A task that declares `skills_dir` and
+ships `environment/skills/` has that folder uploaded to `skills_dir` at seed, as root, once the working directory
+exists, when the sandbox's `skills_dir` is missing or empty. In a single sandbox that is before the task's
+entrypoint, healthcheck and harness session; a Compose group's main has already run its command and passed its
+image healthcheck by then, so there the skills reach the harness session only. Harbor expects the image to hold the
+folder already (a Dockerfile `COPY skills ...`), and an image that filled it keeps it as built; the upload covers a
+task that runs a prebuilt or pulled image whose skills live only in the build context, as runners that deploy
+skills at start (BenchFlow's SkillsBench) expect. A task without `environment/skills/` uploads nothing. The
+uploaded skill folders are opened to every user, and `skills_dir` itself when the upload made it; a `skills_dir`
+of `/` or the working directory, or one only a shell resolves (`~`, `$`), is refused. The folders above it keep
+the image's modes, so a task user other than root needs a `skills_dir` it can reach. With `task_mcp_grants:
 optional` or `required`, the `streamable-http` URL entries are also granted to the agent as MCP tool
 accesses, as declared; a Compose sidecar's URL names its service, which resolves inside the task's group.
 A task that declares MCP servers or `skills_dir` is refused to a harness that does not declare

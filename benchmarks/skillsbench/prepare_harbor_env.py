@@ -36,8 +36,19 @@ DATASETS = {"with-skill": "skillsbench", "no-skill": "skillsbench_no_skill"}
 ENTRY_FILES = ("README.md", "dataset.toml")
 ENTRY_SUFFIXES = (".yaml",)
 # Where the with-skill condition's skills land at seed: the environment server uploads the task's
-# `environment/skills/` there, and harnesses read the path from the task context.
-SKILLS_DIR = "/root/.agents/skills"
+# `environment/skills/` there, and harnesses read the path from the task context. Harbor's own skills example uses
+# it, it stays out of every task's working directory, and reference solutions that import a skill's scripts search it.
+SKILLS_DIR = "/skills"
+# Some of those reference solutions search only /app/skills, where BenchFlow's oracle mode puts skills. The oracle
+# alone gets that path, as a link for the length of solve.sh, so the agent and the verifier still see one folder.
+ORACLE_WRAPPER = f"""#!/bin/bash
+set -e
+if [ ! -e /oracle ]; then ln -s /solution /oracle; fi
+if [ -d /app ] && [ -d {SKILLS_DIR} ] && [ ! -e /app/skills ] && ln -s {SKILLS_DIR} /app/skills 2>/dev/null; then
+  trap 'rm -f /app/skills' EXIT
+fi
+bash /solution/solve.original.sh
+"""
 # Agent skill locations a task Dockerfile may bake skills into; the no-skill condition clears them.
 AGENT_SKILL_PATHS = (
     "/root/.agents/skills",
@@ -77,7 +88,10 @@ def _adapt_task(source: Path, destination: Path, skill_mode: str, docker_image: 
     if skill_mode == "no-skill" and not _BAKES_SKILLS.search(dockerfile.read_text()):
         # Nothing builds from the skills any more, so the no-skill task does not carry them at all.
         shutil.rmtree(environment / "skills", ignore_errors=True)
-    skills_dir = SKILLS_DIR if skill_mode == "with-skill" else None
+    skills_dir = None
+    if skill_mode == "with-skill":
+        skills_dir = SKILLS_DIR
+        (destination / "solution" / "solve.sh").write_text(ORACLE_WRAPPER)
     (destination / "task.toml").write_text(
         task_toml(source.name, definition, image, skills_dir=skills_dir, current_schema=True)
     )

@@ -166,6 +166,14 @@ def resolve_env_templates(env: dict[str, str], secrets: Mapping[str, str] | None
     return resolved
 
 
+def _skills_path(skills_dir: str, workdir: str) -> str | None:
+    """``skills_dir`` as the absolute path the seed uploads to, a relative one read from ``workdir``; ``None`` for one
+    only a shell resolves (``~``, ``$``), which the server cannot place."""
+    if skills_dir.startswith("~") or "$" in skills_dir:
+        return None
+    return posixpath.normpath(posixpath.join(workdir, skills_dir))
+
+
 def _task_sandbox_env(task: HarborTask) -> dict[str, str]:
     """The agent sandbox's environment: the task's image layer as recorded, under the host-resolved ``[environment.env]``.
 
@@ -296,29 +304,57 @@ class HarborSessionMixin:
         return merged_mcp_servers(task.config.environment.mcp_servers, self.config.compose_overlay)
 
     async def _upload_task_skills(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
-        """Put the task's ``environment/skills/`` at its ``skills_dir``, as root, before anything of the task runs.
+        """Put the task's ``environment/skills/`` at its ``skills_dir``, as root, unless the image already holds them.
 
         Harbor reads ``skills_dir`` as a folder the image already holds, which a Dockerfile ``COPY skills ...``
         line fills. A task that runs a prebuilt or pulled image keeps its skills only in the build context, where
-        runtime-deploying runners (BenchFlow's SkillsBench) take them from; uploading that folder at seed covers
-        both shapes, and an image that already holds the same files gets them again unchanged. A task without the
-        folder uploads nothing, so a ``skills_dir`` the image provides on its own stays as built. A relative
-        ``skills_dir`` is read from the working directory. The uploaded tree is opened to every user (``chmod -R
-        a+rX``); the folders above it keep the image's modes, so a task user other than root also needs a
-        ``skills_dir`` it can reach (a ``/root/...`` one is not, where ``/root`` is ``0700``).
+        runtime-deploying runners (BenchFlow's SkillsBench) take them from, so the seed uploads that folder when
+        ``skills_dir`` is missing or empty in the sandbox. An image that built or trimmed its own skills keeps
+        them as built, as does one whose task has no ``environment/skills/``. A relative ``skills_dir`` is read
+        from the working directory (:func:`_skills_path`). The upload opens what it writes to every user (``chmod
+        -R a+rX`` on the uploaded folders, and on ``skills_dir`` itself only when the upload made it), so a
+        ``skills_dir`` of ``/`` or the working directory, or one only a shell resolves, is refused. The folders
+        above it keep the image's modes, so a task user other than root also needs a ``skills_dir`` it can reach
+        (a ``/root/...`` one is not, where ``/root`` is ``0700``).
+
+        In a single sandbox this runs before the task's entrypoint, healthcheck and harness session. A Compose
+        group's main was started by the adapter, its command run and its image healthcheck waited, before the
+        seed gets here, so there the skills reach only the harness session.
         """
         skills_dir = task.config.environment.skills_dir
         source = task.path / "environment" / "skills"
         if not skills_dir or not source.is_dir():
             return
-        target = posixpath.join(workdir, skills_dir)
-        await upload_dir(sandbox, source, target, make_readable=True, ignore=is_ignored)
+        target = _skills_path(skills_dir, workdir)
+        if target is None or target in ("/", posixpath.normpath(workdir)):
+            raise HTTPException(
+                422, f"{task.task_id}: skills_dir {skills_dir!r} names no folder the task's skills can be uploaded to"
+            )
+        quoted = shlex.quote(target)
+        # 0: an empty folder, 1: a folder the image filled, 2: no folder yet.
+        probe = await exec_as_root(sandbox, f'[ -d {quoted} ] || exit 2; [ -z "$(ls -A {quoted})" ]', timeout_s=60)
+        if probe.return_code == 1:
+            LOGGER.debug("%s: skills_dir %s is already filled by the image; not uploading", task.task_id, target)
+            return
+        await upload_dir(sandbox, source, target, ignore=is_ignored)
+        folders = [
+            posixpath.join(target, entry.name) for entry in sorted(source.iterdir()) if not is_ignored(entry.name)
+        ]
+        opened = " ".join(shlex.quote(folder) for folder in folders)
+        # Best effort, as upload_dir's own readability fix-up is.
+        fixup = f"chmod -R a+rX -- {opened} 2>/dev/null; " if folders else ""
+        if probe.return_code == 2:
+            fixup += f"chmod a+rX -- {quoted} 2>/dev/null; "
+        if fixup:
+            await exec_as_root(sandbox, f"{fixup}true", timeout_s=60)
 
-    async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask) -> None:
+    async def _write_task_context(self, sandbox: AsyncSandbox, task: HarborTask, workdir: str) -> None:
         """Leave the task's in-sandbox tool declarations where a harness can read them.
 
         ``/tmp/.nemo-gym/task.json`` carries ``mcp_servers`` (Harbor's ``[[environment.mcp_servers]]`` with the
-        job-level overlay's entries merged in by name, :meth:`_task_mcp_servers`) and ``skills_dir``. Harnesses
+        job-level overlay's entries merged in by name, :meth:`_task_mcp_servers`) and ``skills_dir``, absolute as
+        Harbor asks for it: a relative one resolved against the working directory, as the skills upload reads it
+        (one only a shell resolves is passed as written). Harnesses
         that know how to talk to task MCP servers from inside the sandbox read it at session start; nothing in
         the episode protocol needs to change for that.
         """
@@ -328,7 +364,8 @@ class HarborSessionMixin:
             return
         context = {
             "mcp_servers": [server.model_dump(mode="json") for server in servers],
-            "skills_dir": environment.skills_dir,
+            "skills_dir": environment.skills_dir
+            and (_skills_path(environment.skills_dir, workdir) or environment.skills_dir),
         }
         payload = shlex.quote(json.dumps(context))
         # Root first, falling back to the default user on sandboxes that cannot switch identities; /tmp

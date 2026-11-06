@@ -376,9 +376,11 @@ report yourself.
 - **SkillsBench agent timeouts.** On the OpenHands path the row is final and scored. Many are zeros
   without a verifier result (the sandbox was discarded before verification, or the verifier produced
   nothing). Report the score over the rows the verifier graded beside the headline score. On the `harbor`
-  environment server a harness that stops at the task's `[agent].timeout_sec` reports `agent_limit` and the
-  row is verified and scored as usual; an episode that overruns the task's whole budget fails with
-  `harbor:task_deadline` and is retried.
+  environment server a harness that returns at the task's `[agent].timeout_sec` is verified and scored as
+  usual, and the timeout signal is the harness's own: mini-SWE records
+  `response.metadata.miniswe_termination = "timeout"`. Such a row carries no failure kind, neither
+  `agent_timeout` nor `agent_limit` (the iteration cap), so don't count timeouts by kind or from reward 0. An
+  episode that overruns the task's whole budget fails with `harbor:task_deadline` and is retried.
 - **AutomationBench rows that ended on a serving timeout or a 5xx.** They are graded on the partial world.
   Count them from `rollout_error` before you publish a score; its `kind_candidate` is a candidate
   (`http_5xx`, `http_429`, `timeout`, `connection`, among others), and the verifier's own time limit leaves no

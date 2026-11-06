@@ -41,7 +41,7 @@ Git, and a new preparation replaces them:
 
 | Condition | Dataset entry | Skills |
 | --- | --- | --- |
-| with-skill | `environments/harbor/skillsbench` | `task.toml` declares `skills_dir = "/root/.agents/skills"`; the environment server uploads the task's `environment/skills/` there at seed |
+| with-skill | `environments/harbor/skillsbench` | `task.toml` declares `skills_dir = "/skills"`; the environment server uploads the task's `environment/skills/` there at seed |
 | no-skill | `environments/harbor/skillsbench_no_skill` | no `skills_dir` and no `environment/skills/`; a task image that builds skills into the standard agent skill locations has them removed before the agent starts |
 
 `SKILLSBENCH_SKILL_MODE=with-skill` or `no-skill` prepares one condition only. Each task declares the official
@@ -71,13 +71,12 @@ gym eval run skillsbench_no_skill --agent miniswe_sandboxed_agent --sandbox open
 `skipped.json`; `--exclude-tasks fix-visual-stability` leaves out a task whose Compose service has to be built (see below). On a host without an
 image builder that is 83 of the 87 tasks. Add `--only-tasks <name> --concurrency 1` for a first check.
 `gym dataset validate skillsbench --sandbox opensandbox --exclude-tasks fix-visual-stability` plays every reference solution through the same
-server, leaving out the tasks it cannot load. Eight official reference solutions import scripts from a task skill and look for them only where
-BenchFlow's oracle mode or older images put skills (`/app/skills`, a relative `skills/`, `/app/environment/skills`,
-`/root/.claude/skills` or `/skills`), never under `/root/.agents/skills`, so they fail validation on this path (and
-in the no-skill condition, which has no skills at all): `3d-scan-calc`, `exceltable-in-ppt`, `jax-computing-basics`,
-`pddl-airport-planning`, `pddl-tpp-planning`, `pptx-reference-formatting`, `travel-planning` and
-`video-silence-remover`. Agent runs are unaffected, because the prompt names the skills folder. Skills are not
-uploaded to those other paths too, so that the with-skill condition offers the model one skills location. Set
+server, leaving out the tasks it cannot load. Eight official reference solutions import scripts from a task skill.
+Four of them (`3d-scan-calc`, `exceltable-in-ppt`, `pptx-reference-formatting`, `video-silence-remover`) search
+`/skills`; the other four (`jax-computing-basics`, `pddl-airport-planning`, `pddl-tpp-planning`, `travel-planning`)
+search only `/app/skills`, where BenchFlow's oracle mode puts skills, so the with-skill oracle wrapper links
+`/app/skills` to `/skills` while `solve.sh` runs and removes the link afterwards. The agent and the verifier see one
+skills folder. All eight fail validation in the no-skill condition, which has no skills at all. Set
 `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for the OpenSandbox provider. A sandboxed harness calls Gym's model server from inside the
 task sandbox, so run Gym where the sandboxes can reach it (`gym eval run` advertises the model server's
 absolute address for such a harness).
@@ -88,7 +87,7 @@ Rows, results and verifier logs are labelled by the entry's name (`skillsbench` 
 ### Skills and harnesses
 
 Skills stay plain files: in the with-skill condition the environment server places each task's skills at
-`/root/.agents/skills` (the cross-harness [Agent Skills](https://agentskills.io/specification) location) and writes
+`/skills` (the location Harbor's own skills example uses, outside every task's working directory) and writes
 the path to `/tmp/.nemo-gym/task.json` in the sandbox. A harness that declares `supports_task_tool_context` reads it
 there and points its model at the folder, so loading and the tools the model uses do not depend on the harness. A
 task with `skills_dir` is refused to a harness that does not declare it, rather than run without its skills; at
@@ -96,7 +95,7 @@ this revision `miniswe_sandboxed_agent` declares it and tells the model where th
 condition declares no `skills_dir` and runs on any sandboxed harness.
 
 Three tasks' skills (`3d-scan-calc`, `lean4-proof`, `video-silence-remover`) name their own scripts under
-`/root/.claude/skills/`; the skills reach the model under `/root/.agents/skills/`, so the model must follow the
+`/root/.claude/skills/`; the skills reach the model under `/skills/`, so the model must follow the
 folder it was given, as with any non-Claude harness in the official runner.
 
 ### Differences from the official runner
