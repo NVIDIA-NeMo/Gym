@@ -24,8 +24,8 @@ import shlex
 import shutil
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Callable, Mapping, Sequence
-from contextlib import AbstractAsyncContextManager, nullcontext
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -328,6 +328,17 @@ class _PauseClock:
 
     def queued(self) -> AbstractAsyncContextManager[None]:
         return self._activation.queued()
+
+
+@asynccontextmanager
+async def _slot(semaphore: asyncio.Semaphore, *, deadline: float | None) -> AsyncIterator[None]:
+    """Hold one of the agent's concurrency slots for the body when checkpointing is off; wait until ``deadline``."""
+    async with asyncio.timeout_at(deadline):
+        await semaphore.acquire()
+    try:
+        yield
+    finally:
+        semaphore.release()
 
 
 class _ActivationDeadlineExpired(Exception):
@@ -1996,10 +2007,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         previous_session_id = state.harness_session_id
         failure = None
         try:
-            async with activation.queued() if activation is not None else nullcontext():
-                async with asyncio.timeout_at(deadline):
-                    await self.sem.acquire()
-            try:
+            # The slot goes back on every path, including a retire or close while a checkpoint holds it parked.
+            async with (
+                activation.slot(self.sem, deadline=deadline)
+                if activation is not None
+                else _slot(self.sem, deadline=deadline)
+            ):
                 if deadline is None:
                     # A first activation's budget starts once it holds a slot, as Pi's does: staging spends it,
                     # and OpenCode runs for what remains.
@@ -2022,8 +2035,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         close_timeout=self.config.session_close_timeout_seconds,
                         deadline=deadline,
                     )
-            finally:
-                self.sem.release()
         except TimeoutError as exc:
             if state.is_continuation and not state.session.launch_started:
                 raise _ActivationDeadlineExpired from None
