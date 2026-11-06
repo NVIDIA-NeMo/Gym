@@ -36,6 +36,7 @@ from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAP
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, PROVIDER_UNAVAILABLE
 from nemo_gym.sandbox import (
     ApptainerProvider,
     AsyncSandbox,
@@ -111,6 +112,8 @@ class TerminalBenchMetrics(BaseModel):
     container_timed_out: bool = False
     sandbox_failed: bool = False
     mask_sample: bool = False
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     ray_queue_time: Optional[float] = None
     agent_run_time: Optional[float] = None
@@ -422,6 +425,27 @@ class AnyTerminalVerifyResponse(TerminalBenchMetrics, BaseVerifyResponse):
     instance_config: Dict[str, Any]
 
 
+def _masked_failure(
+    agent_error_type: Optional[str],
+    eval_error_type: Optional[str],
+    sandbox_error: Optional[str],
+) -> tuple[Optional[str], Optional[str]]:
+    """The ``failure_kind`` and ``failure_reason`` of a masked run, or ``(None, None)`` when nothing masks it.
+
+    ``*_error_type`` is the ``error_type`` of the agent or eval ``exec`` result (``"timeout"`` or ``"sandbox"``);
+    ``sandbox_error`` is the message of an exception the sandbox raised. The run's first failure names it.
+    """
+    if sandbox_error is not None:
+        return PROVIDER_UNAVAILABLE, sandbox_error
+    for stage, error_type in (("agent", agent_error_type), ("eval", eval_error_type)):
+        if error_type == "sandbox":
+            return PROVIDER_UNAVAILABLE, f"the sandbox failed during the {stage} command"
+        if error_type == "timeout":
+            kind = AGENT_TIMEOUT if stage == "agent" else "anyterminal_agent:eval_timeout"
+            return kind, f"the {stage} command timed out"
+    return None, None
+
+
 ### Sandbox provider selection
 
 
@@ -599,7 +623,7 @@ class RunTerminalAgent(BaseModel):
             env["NGTB_MODEL_URL"] = cfg.model_server_url
         return env
 
-    async def _run_agent(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
+    async def _run_agent(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, Optional[str]]:
         t0 = time.time()
         result = await sandbox.exec(
             _apt_root_sandbox(cfg) + (cfg.agent_command_str or ""),
@@ -620,7 +644,7 @@ class RunTerminalAgent(BaseModel):
         if result.return_code != 0:
             detail = result.stderr or result.stdout or ""
             print(f"[{cfg.task_name}] agent exit {result.return_code}: {detail[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type in ("timeout", "sandbox")
+        return time.time() - t0, result.error_type if result.error_type in ("timeout", "sandbox") else None
 
     async def _stage_tests(self, cfg: AnyTerminalInstanceConfig) -> None:
         """Copy the task's test files into the staging dir, visible to the sandbox at /tests."""
@@ -630,7 +654,7 @@ class RunTerminalAgent(BaseModel):
             shutil.rmtree(staging_tests)
         shutil.copytree(src, staging_tests)
 
-    async def _run_eval(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, bool]:
+    async def _run_eval(self, sandbox: AsyncSandbox, cfg: AnyTerminalInstanceConfig) -> tuple[float, Optional[str]]:
         t0 = time.time()
         test_cmd = (
             "rm -rf /tests && ln -s /trajectories_mount/staging/tests /tests && "
@@ -642,7 +666,7 @@ class RunTerminalAgent(BaseModel):
         result = await sandbox.exec(_apt_root_sandbox(cfg) + test_cmd, timeout_s=cfg.tb_eval_timeout, user="root")
         if result.return_code != 0:
             print(f"[{cfg.task_name}] eval exit {result.return_code}: {(result.stderr or '')[-2000:]}", flush=True)
-        return time.time() - t0, result.error_type in ("timeout", "sandbox")
+        return time.time() - t0, result.error_type if result.error_type in ("timeout", "sandbox") else None
 
     async def process_single_datapoint(self) -> bool:
         cfg = self.config
@@ -659,28 +683,30 @@ class RunTerminalAgent(BaseModel):
                 metadata=cfg.sandbox_default_metadata,
             ),
         )
-        agent_timed_out = container_timed_out = False
+        agent_error_type = eval_error_type = sandbox_error = None
         sandbox_failed = False
         agent_run_time = eval_run_time = None
         try:
             await sandbox.start()
             if not self._uses_bind_mounts(cfg):
                 await self._stage_remote_runtime(sandbox, cfg)
-            agent_run_time, agent_timed_out = await self._run_agent(sandbox, cfg)
+            agent_run_time, agent_error_type = await self._run_agent(sandbox, cfg)
             await self._stage_tests(cfg)
             if not self._uses_bind_mounts(cfg):
                 await self._stage_remote_tests(sandbox, cfg)
-            eval_run_time, container_timed_out = await self._run_eval(sandbox, cfg)
+            eval_run_time, eval_error_type = await self._run_eval(sandbox, cfg)
             if not self._uses_bind_mounts(cfg):
                 await self._collect_remote_outputs(sandbox, cfg)
         except Exception as e:
             sandbox_failed = True
+            sandbox_error = repr(e)
             print(f"[{cfg.task_name}] sandbox run failed: {e}", flush=True)
         finally:
             try:
                 await sandbox.stop()
             except Exception as e:
                 sandbox_failed = True
+                sandbox_error = sandbox_error or repr(e)
                 print(f"[{cfg.task_name}] sandbox cleanup failed: {e}", flush=True)
             shutil.rmtree(cfg.persistent_dir / "staging", ignore_errors=True)
 
@@ -694,6 +720,9 @@ class RunTerminalAgent(BaseModel):
             except (ValueError, OSError):
                 pass
 
+        agent_timed_out = agent_error_type is not None
+        container_timed_out = eval_error_type is not None
+        failure_kind, failure_reason = _masked_failure(agent_error_type, eval_error_type, sandbox_error)
         metrics = TerminalBenchMetrics(
             ray_queue_time=time.time() - cfg.ray_queue_timestamp,
             resolved=resolved,
@@ -701,6 +730,8 @@ class RunTerminalAgent(BaseModel):
             container_timed_out=container_timed_out,
             sandbox_failed=sandbox_failed,
             mask_sample=bool(container_timed_out or agent_timed_out or sandbox_failed),
+            failure_kind=failure_kind,
+            failure_reason=failure_reason,
             agent_run_time=agent_run_time,
             eval_run_time=eval_run_time,
             total_run_time=total_run_time,

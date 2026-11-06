@@ -41,6 +41,7 @@ from responses_api_agents.anyswe_agent.app import (
     SWEBenchMetrics,
     _classify_agent_error,
     _dataset_family,
+    _masked_failure_kind,
     _model_url_for_rollout,
     _r2e_resolved,
     _safe_config_json,
@@ -307,6 +308,25 @@ class TestSandboxAPI:
         assert _should_mask_sample(False, None, False, "eval_timeout")
         assert _should_mask_sample(False, None, False, "sandbox")
         assert not _should_mask_sample(False, None, False, "eval_error")
+
+    @pytest.mark.parametrize(
+        "args,kind",
+        [
+            ((False, None, False, "sandbox"), "provider_unavailable"),
+            ((False, None, False, "sandbox", "provider_command_outcome_unknown"), "provider_command_outcome_unknown"),
+            ((False, None, True, None), "agent_timeout"),
+            ((False, None, False, "eval_timeout"), "anyswe_agent:eval_timeout"),
+            ((True, "max_iteration", False, None), "agent_limit"),
+            ((True, "context_window", False, None), "model_context_limit"),
+            ((False, None, False, None), None),
+            ((True, "other", False, None), None),
+            ((False, "max_iteration", False, "eval_error"), None),
+        ],
+    )
+    def test_a_masked_sample_names_its_failure_kind(self, args, kind) -> None:
+        assert _masked_failure_kind(*args) == kind
+        # A kind is named exactly when the sample is masked.
+        assert (kind is not None) is _should_mask_sample(*args[:4])
 
     def test_dataset_routes(self) -> None:
         assert _dataset_family("princeton-nlp/SWE-bench_Verified") == "swebench"
@@ -611,6 +631,8 @@ class TestSandboxGradingFailures:
         assert response.mask_sample is (error is not None)
         assert response.error_kind == ("sandbox" if error is not None else None)
         assert response.instance_config["mask_sample"] is response.mask_sample
+        assert response.failure_kind == (failure_kind if error is not None else None)
+        assert (response.failure_reason is not None) is (error is not None)
         if error is not None:
             event = log.report.events[error.event_id]
             assert event.failure_kind == failure_kind

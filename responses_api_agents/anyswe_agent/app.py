@@ -42,6 +42,7 @@ from nemo_gym.core import (
     NgFailureEvent,
     observe_failure,
 )
+from nemo_gym.core.failure_kinds import AGENT_LIMIT, AGENT_TIMEOUT, MODEL_CONTEXT_LIMIT, PROVIDER_UNAVAILABLE
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -63,6 +64,8 @@ class SWEBenchMetrics(BaseModel):
     eval_timed_out: Optional[bool] = None
     error_kind: Optional[str] = None
     mask_sample: Optional[bool] = None
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     agent_run_time: Optional[float] = None
 
@@ -161,6 +164,30 @@ def _should_mask_sample(
         or agent_timed_out
         or error_kind in ("eval_timeout", "sandbox")
     )
+
+
+def _masked_failure_kind(
+    resolved: bool,
+    agent_error_kind: Optional[str],
+    agent_timed_out: bool,
+    error_kind: Optional[str],
+    sandbox_failure_kind: Optional[str] = None,
+) -> Optional[str]:
+    """The ``failure_kind`` of a masked sample, or None when ``_should_mask_sample`` does not mask it.
+
+    A sandbox failure keeps the kind its event carried and is a ``provider_unavailable`` otherwise.
+    """
+    if error_kind == "sandbox":
+        return sandbox_failure_kind or PROVIDER_UNAVAILABLE
+    if agent_timed_out:
+        return AGENT_TIMEOUT
+    if error_kind == "eval_timeout":
+        return "anyswe_agent:eval_timeout"
+    if resolved and agent_error_kind == "max_iteration":
+        return AGENT_LIMIT
+    if resolved and agent_error_kind == "context_window":
+        return MODEL_CONTEXT_LIMIT
+    return None
 
 
 def _dataset_family(dataset_name: str) -> str:
@@ -378,6 +405,9 @@ class AnySweVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
     # may be absent, and it wins the MRO. Restate the contract field so a consumer reading
     # this response's schema sees the contract's type, default and description.
     mask_sample: bool = BaseVerifyResponse.model_fields["mask_sample"]
+    # The same holds for the failure fields `SWEBenchMetrics` declares to parse the metrics file.
+    failure_kind: Optional[str] = BaseVerifyResponse.model_fields["failure_kind"]
+    failure_reason: Optional[str] = BaseVerifyResponse.model_fields["failure_reason"]
 
 
 def _pack_runtime(deps_dir: Path, archive_path: Path) -> None:
@@ -761,6 +791,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         )
         result = None
         sandbox_failed = False
+        sandbox_failure_kind: Optional[str] = None
+        sandbox_failure_reason: Optional[str] = None
         sandbox = AsyncSandbox(params.resolved_sandbox_provider, spec)
         started = time.time()
         try:
@@ -837,6 +869,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         except Exception as exc:
             if isinstance(exc, NgFailureEvent):
                 observe_failure(exc)
+                sandbox_failure_kind = exc.failure_kind
+            sandbox_failure_reason = repr(exc)
             sandbox_failed = True
             update_metrics(
                 params.metrics_fpath,
@@ -845,6 +879,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     "patch_exists": False,
                     "error_kind": "sandbox",
                     "mask_sample": True,
+                    "failure_kind": sandbox_failure_kind or PROVIDER_UNAVAILABLE,
+                    "failure_reason": sandbox_failure_reason,
                     "agent_run_time": time.time() - started,
                 },
             )
@@ -861,6 +897,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
 
         agent_error = ""
         agent_timed_out = False
+        eval_timeout_reason: Optional[str] = None
         error_kind = "sandbox" if sandbox_failed else None
         if result is not None:
             (params.persistent_dir / "agent_result.json").write_text(
@@ -877,6 +914,7 @@ class AnySweAgent(SimpleResponsesAPIAgent):
             agent_timed_out = result.error_type == "timeout"
             if result.error_type == "sandbox":
                 error_kind = "sandbox"
+                sandbox_failure_reason = agent_error[-500:] or "the sandbox could not run the agent command"
         if saved is not None:
             agent_error += saved.model_dump_json()
         agent_error_kind = _classify_agent_error(agent_error)
@@ -890,18 +928,30 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                     raise
                 observe_failure(exc)
                 error_kind = "sandbox"
+                sandbox_failure_kind, sandbox_failure_reason = exc.failure_kind, repr(exc)
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except SandboxCreateError as exc:
                 error_kind = "sandbox"
+                sandbox_failure_reason = repr(exc)
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except (asyncio.TimeoutError, TimeoutError) as exc:
                 error_kind = "eval_timeout"
+                eval_timeout_reason = repr(exc)
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except Exception as exc:
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
 
         eval_timed_out = error_kind == "eval_timeout"
         mask_sample = _should_mask_sample(resolved, agent_error_kind, agent_timed_out, error_kind)
+        failure_kind = _masked_failure_kind(
+            resolved, agent_error_kind, agent_timed_out, error_kind, sandbox_failure_kind
+        )
+        failure_reason = (
+            (sandbox_failure_reason if error_kind == "sandbox" else None)
+            or (f"the agent run timed out after {params.swebench_agent_timeout}s" if agent_timed_out else None)
+            or eval_timeout_reason
+            or (f"the resolved run ended with {agent_error_kind}" if failure_kind else None)
+        )
         update_metrics(
             params.metrics_fpath,
             {
@@ -913,6 +963,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 "eval_timed_out": eval_timed_out,
                 "error_kind": error_kind,
                 "mask_sample": mask_sample,
+                "failure_kind": failure_kind,
+                "failure_reason": failure_reason,
                 "agent_run_time": time.time() - started,
             },
         )
