@@ -140,8 +140,13 @@ _LOOSE_SCHEME_RE = re.compile(r"^(https?):/*", re.IGNORECASE)
 # A query value that names a host, with or without a scheme: ``hf.co/datasets/x``, ``scale.com./x``.
 _BARE_URL_RE = re.compile(r"^(?:https?:)?(?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}\.?(?:[:/?#]|$)", re.IGNORECASE)
 # The operand is host characters only, so ``(site:a.org OR site:b.org)``, ``site:a.org|site:b.org`` and
-# ``site:b.org,`` yield the bare hosts; one leading dot (``site:.b.org``) is dropped.
-_SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re.IGNORECASE)
+# ``site:b.org,`` yield the bare hosts; one leading dot (``site:.b.org``) is dropped. Typographic quotes and
+# guillemets (``site:“b.org”``, ``site:«b.org»``) are read like ASCII quotes, and openers may be stacked
+# (``site:((b.org))``).
+_SITE_QUOTES = "\"'‘’‚‛“”„‟«»‹›"
+_SITE_OPERATOR_RE = re.compile(
+    r"\bsite:\s*[" + _SITE_QUOTES + r"(\[]*\.?([^\s" + _SITE_QUOTES + r"()\[\],;|]+)", re.IGNORECASE
+)
 _SLASH_RUN_RE = re.compile(r"/{2,}")
 # A ``site:`` operand after ``normalize_hostname`` and with trailing punctuation dropped: labels of letters, digits,
 # ``-`` and ``_``, optionally after ``*.``.

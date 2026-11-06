@@ -74,7 +74,9 @@ Beyond the families, the protocol's own refusals:
   space) when they match `url_patterns` or
   `patterns_case_sensitive`, when a `site:`
   operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
-  site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; one leading dot, the
+  site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; typographic quotes
+  and guillemets around it (`site:“b.org”`, `site:«b.org»`) are read like ASCII quotes, and stacked
+  openers (`site:((b.org))`) are skipped; one leading dot, the
   scheme, `www.`, any path and trailing punctuation (`site:huggingface.co!`) are stripped before the
   check; an operand that is then not a hostname of letters, digits, `-` and `_` labels, optionally after
   `*.`, is refused as `malformed_url` rather than skipped), or when they
