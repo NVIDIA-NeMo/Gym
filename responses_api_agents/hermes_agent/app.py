@@ -738,6 +738,9 @@ class HermesAgent(SimpleResponsesAPIAgent):
             **(response.metadata or {}),
             "harness_execution": "sandbox",
             AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+            "agent_execution_finished": str(
+                state.session.execution_finished and not timed_out and result.get("stop_reason") != "wall_time"
+            ).lower(),
         }
         if timed_out or response.metadata.get("stop_reason") == "wall_time":
             response.metadata["hermes_error_type"] = "TimeoutError"

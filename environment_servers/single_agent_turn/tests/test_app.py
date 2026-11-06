@@ -290,6 +290,23 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
 
 
+@pytest.mark.parametrize("finished", ["true", "false"])
+async def test_process_completion_survives_verifier_omitting_response_metadata(finished: str) -> None:
+    environment, client = _environment_server(token_capture=True)
+    agent_response = _agent_response().model_copy(
+        update={"status": "incomplete", "metadata": {"agent_execution_finished": finished}}
+    )
+    client.responses[2] = _Response(agent_response.model_dump(mode="json"))
+
+    reply = await environment.run_request(_request())
+
+    assert reply.failure is None
+    # Model output limits and process timeouts both produce incomplete responses;
+    # only explicit process evidence decides the harness-unfinished training mask.
+    assert reply.result.agent_execution_finished is (finished == "true")
+    assert reply.result.reward == 1.0
+
+
 @pytest.mark.parametrize(
     "verifier_fields",
     [

@@ -473,6 +473,11 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             )
             await raise_for_status(verify_http_response)
             result = SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            finished = (agent_response.metadata or {}).get("agent_execution_finished")
+            if finished in ("true", "false"):
+                # Preserve explicit process evidence even when verification omits
+                # response metadata. Never infer it from model completion status.
+                result = result.model_copy(update={"agent_execution_finished": finished == "true"})
             explicit_terminal = (result.model_extra or {}).get(TERMINAL_RESPONSE_ID_KEY)
             if not (isinstance(explicit_terminal, str) and explicit_terminal):
                 terminal = (agent_response.metadata or {}).get(TERMINAL_RESPONSE_ID_KEY)

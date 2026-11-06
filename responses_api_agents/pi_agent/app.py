@@ -1074,6 +1074,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "harness_execution": "sandbox",
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "pi_version": self.config.pi_version,
+                "agent_execution_finished": str(state.session.execution_finished).lower(),
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )

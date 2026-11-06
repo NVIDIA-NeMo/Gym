@@ -16,6 +16,25 @@ RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "err
 OK = SandboxExecResult(stdout="", stderr="", return_code=0)
 
 
+@pytest.mark.parametrize(
+    ("receipt", "expected"),
+    [
+        (None, False),
+        (RECEIPT, True),
+        ({**RECEIPT, "return_code": 1}, False),
+        ({**RECEIPT, "return_code": None}, False),
+        ({**RECEIPT, "timed_out": True}, False),
+        ({**RECEIPT, "error": "exec failed"}, False),
+    ],
+)
+def test_execution_finished_requires_successful_process_exit(receipt, expected):
+    session = SandboxSession(
+        sandbox=AsyncMock(spec=AsyncSandbox), session_dir="/session", workdir="/app", harness="test"
+    )
+    session.cleanup = receipt
+    assert session.execution_finished is expected
+
+
 @pytest.fixture
 def receipt_reader(monkeypatch):
     reader = AsyncMock(return_value=json.dumps(RECEIPT))
