@@ -1048,7 +1048,8 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             # again; a seed that would change or drop the question is a conflict, so a caller who holds a session
             # (a sandbox reaching the plain route with the rollout's credentials) cannot swap the span check
             # out from under it. A fresh session seeded from inside the sandbox is NOT caught here: that needs
-            # an authenticated seed channel (see the README).
+            # an authenticated seed channel (see the README). Nor is a session the cap has forgotten: only a typed
+            # seed checks the fence, so an untyped seed through its cookie installs whatever question it brings.
             if question is None or QuestionSpans(question, self.config.verbatim_span_words).digest != current.digest:
                 logger.warning(
                     "hle_web_tools refused to re-seed session %s with %s",

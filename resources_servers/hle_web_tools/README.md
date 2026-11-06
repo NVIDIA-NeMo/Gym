@@ -15,7 +15,8 @@ egress policy admits the tool-server host can call them directly; a call without
 token lands in a fresh session that carries no question. Every blocklist family applies on both routes,
 and `web_search` is refused for any session that was not seeded with a question
 (`require_seeded_question`, default on), so such a session fails closed rather than being served without
-the span rule. A seeded session keeps its question for its whole life: a retried seed with the same
+the span rule. A seeded session keeps its question while the server holds it (see the session cap under
+Blocklist semantics): a retried seed with the same
 question is served again, and a seed that would change or drop the question is refused with HTTP 409, so
 a caller holding a session cannot swap the span check out from under it.
 
@@ -23,7 +24,8 @@ a caller holding a session cannot swap the span check out from under it.
 unauthenticated route, and a sandbox whose egress policy admits the tool-server host
 (`network_access: model_and_tools` admits the whole host, so it always does) can `POST /seed_session` for
 a **fresh** session with a question of its choice and search from that session; the 409 above refuses
-re-seeding an existing session and does not cover a new one. The session cookie and MCP token are signed
+re-seeding an existing session and does not cover a new one or one the session cap has forgotten. The
+session cookie and MCP token are signed
 with a key derived from public config (`get_session_middleware_key`: the server class name and the
 instance name), so they are not a secret that could tell the agent server's seed from the sandbox's.
 Closing this needs an authenticated seed channel, a secret the agent server holds and the sandbox never
@@ -106,8 +108,17 @@ Beyond the families, the protocol's own refusals:
   sessions are held; past that the least recently seeded one is forgotten, question and episode binding
   together, with a WARNING naming it, and its searches are refused as `unseeded_session`; a forgotten
   typed session's ID is fenced as if its episode had closed it, so a later seed of that ID gets HTTP 409.
-  The cap must therefore exceed the peak number of rollouts open at once. The words of a blocked span are never
-  logged, only their count.
+  Only a typed session closed through `/close_session` frees its slot before then. A session an Agent seeds
+  with its run body, which is how the OpenCode preset seeds, is never closed, so held sessions add up over
+  the server's life, and a rollout's question is forgotten once more than 10,000 later seeds reach the same
+  server while that rollout is still running, however few rollouts are open at once. For a harness that
+  closes its sessions, the cap must exceed the peak number of sessions open at once. A forgotten Agent
+  (untyped) session is not fenced, and neither is a typed ID against a later untyped seed: a later seed
+  carrying its cookie installs whatever question it brings (HTTP 200), so once the cap forgets a session,
+  a caller holding its cookie can swap its span check. This is the same unauthenticated-seed residual as a
+  sandbox-seeded fresh session (above), and so is a flood of unauthenticated seeds past the cap, which
+  makes the server forget other rollouts' questions, so their searches fail closed as `unseeded_session`.
+  The words of a blocked span are never logged, only their count.
 - **Fetch URLs** must be `http(s)` URLs with a host, at most 4,096 characters long, with no userinfo
   (no `@` anywhere in the authority, even an empty `https://@host`) and no backslash, whitespace or
   control character anywhere: those are the characters on which WHATWG fetchers and Python's
