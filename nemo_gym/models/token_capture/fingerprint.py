@@ -51,6 +51,7 @@ FINGERPRINT_VERSION = 4
 
 _FINGERPRINT_DOMAIN = b"nemo-gym-lineage"
 _CONTEXT_DOMAIN = b"nemo-gym-lineage-context"
+_TOOL_CALL_TURN_DOMAIN = b"nemo-gym-tool-call-turn"
 _INSTRUCTION_ROLES = frozenset({"system", "developer"})
 # The tool OpenCode substitutes, in the history it sends back, for a call to a tool it does not offer.
 _UNAVAILABLE_TOOL_PLACEHOLDER = "invalid"
@@ -66,7 +67,7 @@ def assistant_fingerprint(messages: list[dict]) -> str:
     User and tool content is excluded from the lookup key.
     Dialect-specific tool-call shapes normalize to the same hash input.
     """
-    hasher = hashlib.sha256(_FINGERPRINT_DOMAIN)
+    fields: list[bytes] = []
     count = 0
     for message in messages or []:
         if not isinstance(message, dict):
@@ -75,15 +76,15 @@ def assistant_fingerprint(messages: list[dict]) -> str:
             continue
         count += 1
         for content_type, payload in _content_of(message.get("content")):
-            _update_field(hasher, b"\x00", content_type)
-            _update_field(hasher, b"\x01", payload)
+            _add_field(fields, b"\x00", content_type)
+            _add_field(fields, b"\x01", payload)
         for call_id, name, arguments in _tools_of(message):
-            _update_field(hasher, b"\x02", call_id)
-            _update_field(hasher, b"\x03", name)
-            _update_field(hasher, b"\x04", arguments)
+            _add_field(fields, b"\x02", call_id)
+            _add_field(fields, b"\x03", name)
+            _add_field(fields, b"\x04", arguments)
     if count == 0:
         return ""
-    return hasher.hexdigest()
+    return _digest(_FINGERPRINT_DOMAIN, fields)
 
 
 def conversation_digest(messages: list[dict]) -> str:
@@ -99,27 +100,27 @@ def conversation_digest(messages: list[dict]) -> str:
     conversation. Reusing the parent's tokens then serves the instruction text
     the model actually saw, which is what training needs.
     """
-    hasher = hashlib.sha256(_CONTEXT_DOMAIN)
+    fields: list[bytes] = []
     for message in messages or []:
         if not isinstance(message, dict):
             raise ValueError(f"request item is not an object: {type(message).__name__}")
         role = str(message.get("role") or message.get("type") or "")
-        _update_field(hasher, b"\x00", role)
+        _add_field(fields, b"\x00", role)
         if _is_instruction_item(message):
             continue
         for content_type, payload in _content_of(message.get("content")):
-            _update_field(hasher, b"\x01", content_type)
-            _update_field(hasher, b"\x02", payload)
+            _add_field(fields, b"\x01", content_type)
+            _add_field(fields, b"\x02", payload)
         for call_id, name, arguments in _tools_of(message):
-            _update_field(hasher, b"\x03", call_id)
-            _update_field(hasher, b"\x04", name)
-            _update_field(hasher, b"\x05", arguments)
+            _add_field(fields, b"\x03", call_id)
+            _add_field(fields, b"\x04", name)
+            _add_field(fields, b"\x05", arguments)
         # Include tool results.
         # Summarizing, redacting, or truncating a result changes the request context.
         for call_id, output in _tool_results_of(message):
-            _update_field(hasher, b"\x06", call_id)
-            _update_field(hasher, b"\x07", output)
-    return hasher.hexdigest()
+            _add_field(fields, b"\x06", call_id)
+            _add_field(fields, b"\x07", output)
+    return _digest(_CONTEXT_DOMAIN, fields)
 
 
 def canonicalize_tool_arguments(value: Any) -> str:
@@ -307,12 +308,28 @@ def _canonical_json(value: Any) -> str:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 
-def _update_field(hasher: Any, tag: bytes, value: str) -> None:
-    """Hash one tagged, length-delimited UTF-8 field."""
+def _add_field(fields: list[bytes], tag: bytes, value: str) -> None:
+    """Append one tagged, length-delimited UTF-8 field to a digest's input."""
     encoded = value.encode("utf-8")
-    hasher.update(tag)
-    hasher.update(len(encoded).to_bytes(8, "big"))
-    hasher.update(encoded)
+    fields.append(tag)
+    fields.append(len(encoded).to_bytes(8, "big"))
+    fields.append(encoded)
+
+
+def _digest(domain: bytes, fields: list[bytes]) -> str:
+    """SHA-256 of the domain and every field, hashed in a single call.
+
+    hashlib releases the GIL for each update of 2 KiB or more and must take it back afterwards.
+    A long conversation has hundreds of fields that large.
+    Hashing them one update at a time gives up the GIL hundreds of times per digest.
+    The event loop and other threads can run while it is released.
+    Taking it back can then wait up to the interpreter's switch interval, 5 ms by default.
+    One call over the joined bytes gives up the GIL once.
+    The digest is the same as hashing the same bytes field by field.
+    """
+    hasher = hashlib.sha256(domain)
+    hasher.update(b"".join(fields))
+    return hasher.hexdigest()
 
 
 def _served_tool_name(name: str, arguments: str) -> str:
@@ -357,7 +374,7 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozense
     were lowercased, still matches when the turn's served names had no capital letters; a turn
     served with a capitalized name then resolves only through the strict fingerprint.
     """
-    hasher = hashlib.sha256(b"nemo-gym-tool-call-turn")
+    fields: list[bytes] = []
     seen_ids: set[str] = set()
     for item in items or []:
         if not isinstance(item, dict):
@@ -367,19 +384,19 @@ def tool_call_turn_fingerprint(items: list[dict], *, read_placeholders: frozense
         content = _content_of(item.get("content"))
         tools = _tools_of(item)
         if not content and not tools:
-            _update_field(hasher, b"\x05", "empty-assistant")
+            _add_field(fields, b"\x05", "empty-assistant")
         for content_type, payload in content:
-            _update_field(hasher, b"\x00", content_type)
-            _update_field(hasher, b"\x01", payload)
+            _add_field(fields, b"\x00", content_type)
+            _add_field(fields, b"\x01", payload)
         for call_id, name, arguments in tools:
             if not call_id or not name or call_id in seen_ids:
                 return ""
             seen_ids.add(call_id)
-            _update_field(hasher, b"\x02", call_id)
+            _add_field(fields, b"\x02", call_id)
             served = _served_tool_name(name, arguments) if call_id in read_placeholders else name
             # Without case: OpenCode renames a call whose lowercase name is a known tool to that name.
-            _update_field(hasher, b"\x03", served.lower())
-    return hasher.hexdigest() if seen_ids else ""
+            _add_field(fields, b"\x03", served.lower())
+    return _digest(_TOOL_CALL_TURN_DOMAIN, fields) if seen_ids else ""
 
 
 def echoed_tool_call_turn_fingerprints(items: list[dict]) -> list[str]:
