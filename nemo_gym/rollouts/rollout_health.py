@@ -1506,7 +1506,7 @@ def _limit_text(value: float | None) -> str:
 
 
 def _run_health_line(artifacts: dict[str, Any]) -> str:
-    """Run health: evaluation-side failures against the configured limits, and the coverage reasons."""
+    """Run health: failed rollouts against the configured limits, and the coverage reasons."""
     healthy = artifacts.get("healthy")
     parts = ["not evaluated" if healthy is None else "healthy" if healthy else "UNHEALTHY"]
     if (failed := artifacts.get("failed")) is not None:
@@ -1519,7 +1519,7 @@ def _run_health_line(artifacts: dict[str, Any]) -> str:
         f"not final {_limit_text(limits.get('max_not_final_failure_fraction'))}"
     )
     parts.extend(artifacts.get("unhealthy_reasons") or [])
-    return "run health (infra failures vs limit): " + "; ".join(parts)
+    return "run health (failures vs limit): " + "; ".join(parts)
 
 
 def format_health_report(result: HealthCheckResult) -> str:
