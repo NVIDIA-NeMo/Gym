@@ -623,13 +623,15 @@ def test_runner_marker_survives_redirected_stdout(tmp_path, capture):
     root = Path(__file__).resolve().parents[3]
     mount = tmp_path / "gym_mount"
     mount.mkdir()
+    expected_block = {"enabled": True, "all_agents": True} if capture else None
     (mount / "nemo_gym").symlink_to(root / "nemo_gym", target_is_directory=True)
     (mount / "stub_agent.py").write_text(
         "import io, sys\nfrom types import SimpleNamespace\n"
         "Config = SimpleNamespace\n"
         "class Agent:\n"
         "    def __init__(self, **kwargs):\n"
-        f"        assert bool(kwargs['server_client'].global_config_dict.get('token_id_capture')) == {capture!r}\n"
+        "        block = kwargs['server_client'].global_config_dict.get('token_id_capture')\n"
+        f"        assert block == {expected_block!r}\n"
         "    async def responses(self, request, params):\n"
         "        sys.stdout = io.StringIO()\n"
         "        return SimpleNamespace(model_dump_json=lambda: '{}')\n"
