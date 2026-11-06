@@ -336,6 +336,17 @@ def test_gym_rollout_to_atif_preserves_provenance_turns_metrics_and_tool_identit
     }
 
 
+def test_gym_rollout_to_atif_asks_for_referenced_questions_to_be_restored() -> None:
+    """A row collected with ``model_call_payloads: reference`` names its turn questions' capture lines instead."""
+    rollout = _canonical_rollout()
+    turn = rollout["ng_trajectory"]["turns"][0]
+    turn["question"] = None
+    turn["payload_ref"] = {"capture_file": "0-0.capture.jsonl", "call_index": 0}
+
+    with pytest.raises(AtifExportError, match=r"turns\[0\]\.question: only referenced .*resolve_model_call_payloads"):
+        gym_rollout_to_atif(rollout, session_id="evaluation-42", agent_version="2.3.1")
+
+
 def test_gym_rollout_to_atif_preserves_optional_function_output_item_ids() -> None:
     rollout = _canonical_rollout()
     conversation = rollout["ng_trajectory"]["invocations"][0]["conversation"]
