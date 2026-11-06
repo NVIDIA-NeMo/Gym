@@ -44,7 +44,7 @@ import pytest
 import requests
 import yaml
 
-from nemo_gym.server_runtime.request_handling.session_routing import SESSION_CLAIMS_DIR
+from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNERS_DIR
 from nemo_gym.server_runtime.runtime_dir import RUNTIME_ROOT
 
 
@@ -232,10 +232,10 @@ class Deployment:
         children = psutil.Process(self.procs["resources"].pid).children()
         return [child for child in children if "resource_tracker" not in " ".join(child.cmdline())]
 
-    def claimant(self, session_id: str) -> str:
-        """The worker that claims a resources session: the routing ID in its claim file."""
+    def owner(self, session_id: str) -> str:
+        """The worker that owns a resources session: the routing ID in its owner file."""
         digest = hashlib.sha256(session_id.encode("utf-8")).hexdigest()
-        pattern = os.path.join(RUNTIME_ROOT, f"ng-{self.procs['resources'].pid}-*", SESSION_CLAIMS_DIR, digest)
+        pattern = os.path.join(RUNTIME_ROOT, f"ng-{self.procs['resources'].pid}-*", SESSION_OWNERS_DIR, digest)
         [path] = glob.glob(pattern)
         return Path(path).read_text()
 
@@ -376,7 +376,7 @@ def test_state_stored_at_seed_is_found_at_verify(deployment: Deployment) -> None
 
     results = asyncio.run(run_all())
     assert Counter(reward for reward, _ in results) == Counter({1.0: EPISODES})
-    owners = {deployment.claimant(_session_id(cookies)) for _, cookies in results}
+    owners = {deployment.owner(_session_id(cookies)) for _, cookies in results}
     # Even one shared TCP connection must route checks to sessions owned by every worker.
     assert len(owners) == WORKERS
 
@@ -455,7 +455,7 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
 
     sessions = asyncio.run(_seed_each_worker(deployment))
     # Kill a worker with seeded sessions while the other workers retain theirs.
-    owner_of = {_session_id(cookies): deployment.claimant(_session_id(cookies)) for cookies in sessions}
+    owner_of = {_session_id(cookies): deployment.owner(_session_id(cookies)) for cookies in sessions}
     owners = Counter(owner_of.values())
     assert len(owners) > 1, owners
     # uvicorn replaces the worker; the replacement does not hold the killed worker's sessions.
