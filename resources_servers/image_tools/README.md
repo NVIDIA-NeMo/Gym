@@ -120,9 +120,9 @@ The `stop` on `</tool_call>` is what makes the rollout end *at* the decision.
 ## Tool reward server
 
 `tool_reward_app.py` is a second resources server in this directory. It scores
-`image_tools_agent` rollouts when the agent runs under a `single_agent_turn_legacy`
-Environment Server instead of its own `/run`
-(`responses_api_agents/image_tools_agent/configs/image_tools_agent_single_agent_turn.yaml`):
+`image_tools_agent` rollouts under the `single_agent_turn_legacy` Environment Server
+that `responses_api_agents/image_tools_agent/configs/image_tools_agent.yaml` declares,
+in place of the agent's own `/run`:
 
 - It sends the final assistant message to the verifier that the row's
   `image_tools_base_agent_ref` selects from the agent's `resource_servers_by_agent`.
