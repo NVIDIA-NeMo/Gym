@@ -13,7 +13,7 @@ from nemo_gym.agents.base_responses_api_agent import AgentSeedSessionRequest
 
 
 def check_agent_seed_rejected(app: FastAPI, seed: AgentSeedSessionRequest) -> str:
-    """Seed ``seed`` through ``app``, and raise AssertionError unless the agent refuses it as final.
+    """Seed ``seed`` through ``app``, and raise AssertionError unless the agent refuses it as terminal.
 
     The refusal must be HTTP 422 with a string ``detail``, which is what ``AgentSeedRejectedError`` gives, so the
     Environment Server fails the episode once with the agent's reason. A plain ``ValueError`` gives 500, which is
@@ -24,7 +24,7 @@ def check_agent_seed_rejected(app: FastAPI, seed: AgentSeedSessionRequest) -> st
     client = TestClient(app, raise_server_exceptions=False)
     response = client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
     assert response.status_code == 422, (
-        f"unsupported seed must fail with a final 422 from AgentSeedRejectedError, got {response.status_code}: "
+        f"unsupported seed must fail with a terminal 422 from AgentSeedRejectedError, got {response.status_code}: "
         f"{response.text}"
     )
     try:

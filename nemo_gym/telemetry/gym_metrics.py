@@ -589,3 +589,29 @@ def record_rollout_health(verdict: str, *, outcome: str, flagged_checks: Iterabl
             "Rollouts flagged by a trajectory health check.",
             {HEALTH_CHECK_ATTRIBUTE: check, ROLLOUT_OUTCOME_ATTRIBUTE: outcome},
         )
+
+
+def record_sandbox_resource_sample(values: dict[str, Any], attributes: dict[str, Any]) -> None:
+    """Export execd snapshots as gauges; timestamped raw observations remain on resource spans."""
+    from nemo_gym.telemetry.setup import is_metrics_exporter_active
+
+    if not is_metrics_exporter_active():
+        return
+    meter = _meter()
+    if meter is None:
+        return
+    for field, unit in (
+        ("cpu_count", "{cpu}"),
+        ("cpu_used_percentage", "%"),
+        ("memory_total_mib", "MiBy"),
+        ("memory_used_mib", "MiBy"),
+    ):
+        value = values.get("nemo.gym.sandbox.sample." + field)
+        if value is None:
+            continue
+        name = "gym.sandbox." + field
+        try:
+            gauge = _get_or_create(meter, name, lambda name=name, unit=unit: meter.create_gauge(name, unit=unit))
+            gauge.set(value, attributes=attributes)
+        except Exception:
+            logger.debug("Could not export sandbox resource gauge", exc_info=True)
