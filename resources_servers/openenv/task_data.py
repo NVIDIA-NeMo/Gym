@@ -4,8 +4,8 @@
 
 Generic wrapper around Meta's OpenEnv environments. The task lives entirely OUT of the row:
 environment selection is config-driven (``OpenEnvResourcesServerConfig.env_class`` /
-``action_class`` / ``reset_kwargs`` / ``is_mcp``, ``app.py:53``), the per-session env is created
-at /seed_session with only the configured ``reset_kwargs``, and verify() (``app.py:234``) takes a
+``action_class`` / ``reset_kwargs`` / ``is_mcp``), the per-session env is created
+at /seed_session with only the configured ``reset_kwargs``, and ``OpenEnvResourcesServer.verify`` takes a
 bare ``BaseVerifyRequest`` and reads zero row fields — reward is the per-session
 ``accumulated_reward`` populated by /step and the MCP tool endpoints during the rollout. Rows
 carry no task-specific fields at all: per-env variation (coding / echo / maze prompts and tools)
