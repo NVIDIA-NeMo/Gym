@@ -20,6 +20,7 @@ import os
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
@@ -27,6 +28,7 @@ from fastapi import FastAPI
 from pydantic import Field, field_validator
 
 from nemo_gym.client import request
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -127,6 +129,30 @@ def refresh_partial_metrics(cache_dir: Optional[Path]) -> None:
 
 LOG = logging.getLogger(__name__)
 
+
+def _quota_reason(exc: "CritPtRateLimitExceeded", now: float) -> str:
+    """Why a batch stopped on a quota error, with the reset time from AA's Retry-After (else its reset header)."""
+    if exc.retry_after_seconds > 0:
+        reset_unix: float = now + exc.retry_after_seconds
+    else:
+        reset_unix = exc.reset_unix
+    when = (
+        datetime.fromtimestamp(reset_unix, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        if reset_unix > 0
+        else "an unknown time"
+    )
+    reason = f"AA quota exhausted, resets at {when}; grade with replay or resubmit after the reset"
+    notes = "; ".join(getattr(exc, "__notes__", []))
+    return f"{reason} ({notes})" if notes else reason
+
+
+def _access_reason(exc: "CritPtAccessDenied") -> str:
+    return (
+        f"AA denied access (HTTP {exc.status}): the account holding the API key is not approved for CritPt grading; "
+        "use an approved key, then grade with replay or resubmit"
+    )
+
+
 # failure_kind of a row graded by nobody on purpose (smoke mode). It is namespaced, not a registered kind: recovery
 # keeps a masked row with an unregistered kind as the result, so it is neither regraded nor rerun.
 SMOKE_NOT_GRADED = "critpt:smoke_not_graded"
@@ -155,7 +181,7 @@ class CritPtRateLimitExceeded(RuntimeError):
 
 
 class CritPtAccessDenied(RuntimeError):
-    """Raised when the AA scoring API returns HTTP 403 (key's account not approved).
+    """Raised when the AA scoring API returns HTTP 401 or 403 (key rejected, or its account not approved).
 
     Distinct from :class:`CritPtRateLimitExceeded` (429, "approved but out of
     quota"): a 403 means AA never looked at the submissions, so no quota was
@@ -165,10 +191,11 @@ class CritPtAccessDenied(RuntimeError):
     approved recovers instead of failing the whole cohort.
     """
 
-    def __init__(self, body: str):
+    def __init__(self, body: str, status: int = 403):
         self.body = body
+        self.status = status
         super().__init__(
-            f"CritPt AA denied access (HTTP 403): the account holding this API key is not on "
+            f"CritPt AA denied access (HTTP {status}): the account holding this API key is not on "
             f"AA's CritPt approved list. No quota was consumed and retrying will not help. "
             f"Request approval by emailing critpt@artificialanalysis.ai from an institutional "
             f"address, naming the account that holds the key. AA response: {body!r}"
@@ -404,7 +431,7 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     len(submissions_snapshot),
                     self.config.cache_dir,
                 )
-                future.set_exception(e)
+                future.set_result({"_not_graded": PROVIDER_QUOTA_EXHAUSTED, "_reason": _quota_reason(e, time.time())})
             except CritPtAccessDenied as e:
                 LOG.error(
                     "CritPt AA REFUSED ACCESS on all %d configured key(s) (HTTP 403). None of the "
@@ -419,13 +446,14 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     len(submissions_snapshot),
                     self.config.cache_dir,
                 )
-                future.set_exception(e)
+                future.set_result({"_not_graded": PROVIDER_CREDENTIALS_REJECTED, "_reason": _access_reason(e)})
             except Exception as e:
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
 
-        # A failed AA call (quota, access, 4xx/5xx, timeouts) is a grader failure, not a model failure: type it
-        # as judge_failed so judge_failsafe masks the row instead of returning an anonymous 500.
+        # A quota or key error is terminal: the row comes back masked and unverified (see `_not_graded` below), typed
+        # with a registered kind that keeps its saved answer and is never regenerated. Any other failed AA call (4xx/5xx, timeouts) is a grader failure, not a
+        # model failure: type it as judge_failed so judge_failsafe masks the row and it is judged again.
         result = await reraise_judge_errors(self._await_batch(future, body.problem_id))
         if "_not_graded" in result:
             LOG.warning("CritPt verify: %s not graded (%s)", body.problem_id, result["_not_graded"])
@@ -691,8 +719,8 @@ async def _call_api(
         # grading. AA rejects at the auth layer, so nothing was graded and no quota
         # was spent. Typed so the caller can rotate to another key and log an
         # actionable message instead of a bare RuntimeError.
-        if response.status == 403:
-            raise CritPtAccessDenied(body=body)
+        if response.status in (401, 403):
+            raise CritPtAccessDenied(body=body, status=response.status)
         # Retry only on 5xx (transient AA server errors). Non-429 4xx means a bad
         # request/payload that won't succeed on retry, so fail fast with the
         # response body for debugging.

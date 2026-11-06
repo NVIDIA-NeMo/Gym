@@ -43,6 +43,19 @@ already has it. With `num_repeats=N` and 70 problems, this produces N independen
 70 unique `problem_id`s — N AA API calls total, each scored as a separate run. Assumes
 uniform `num_repeats` across problems (which `gym eval run --no-serve` enforces).
 
+## Grading errors
+
+Real runs send full batches of 70 real submissions only; a smoke run never calls AA (see below).
+
+- **Quota or key errors stop the batch.** AA answers HTTP 429 when the quota is exhausted and 401 or 403
+  when the key is rejected or its account is not approved. Retrying cannot help, so every row of the
+  batch comes back masked and unverified (no accuracy), keeps its saved answer and is not regenerated:
+  `provider_quota_exhausted` for 429, with the reset time from `Retry-After` in the reason
+  (`AA quota exhausted, resets at <UTC time>; grade with replay or resubmit after the reset`), and
+  `provider_credentials_rejected` for 401/403. Grade the saved answers with replay after the reset, or
+  resubmit with an approved key.
+- **Any other AA failure** (a 4xx/5xx, a timeout) is `judge_failed`: the rows are masked and graded again.
+
 ## Dataset Format
 
 Two JSONL files coexist with different shapes:
@@ -73,8 +86,9 @@ Both signals surface in the run log, prefixed with the resources-server instance
   always increases), `<B>` is the pending-batch index, and `<K>/70` is that batch's fill.
 - Batch-fire log line (WARNING level):
   `CritPt batch full (70 submissions); firing AA API.`
-- On AA API failure, full exception + traceback is logged via `LOG.exception(...)` and
-  every waiter in that batch is failed with the same exception.
+- On a quota or key error, an ERROR line names the cause and the cache path. On any other AA API
+  failure, the full exception + traceback is logged via `LOG.exception(...)` and every waiter in that
+  batch is failed as `judge_failed`.
 
 `GET /status` returns the live buffer count:
 

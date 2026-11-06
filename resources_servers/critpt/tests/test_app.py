@@ -15,6 +15,7 @@
 import asyncio
 import json
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,6 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NgFailureEvent,
 )
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, PROVIDER_QUOTA_EXHAUSTED
 from nemo_gym.verification import is_judge_failure, judge_failsafe
 from resources_servers.critpt.app import (
     _REPO_ROOT,
@@ -102,6 +104,36 @@ def grader_failed(cause_type):
     assert is_judge_failure(info.value)
     assert isinstance(info.value.__cause__, cause_type)
     holder.value = info.value.__cause__
+
+
+async def verify_pair(server) -> list:
+    """Verify two rollouts that fill a batch of two; the results are the masked rows of a terminal AA error."""
+    fence = "```"
+    return list(
+        await asyncio.gather(
+            server.verify(_make_verify_request(fence + "python" + chr(10) + "a=1" + chr(10) + fence, problem_id="p1")),
+            server.verify(_make_verify_request(fence + "python" + chr(10) + "b=2" + chr(10) + fence, problem_id="p2")),
+        )
+    )
+
+
+def assert_terminal_stop(results: list, kind: str) -> str:
+    """Every row is masked and unverified (no accuracy) with ``kind``; returns the shared reason."""
+    assert len(results) == 2
+    for r in results:
+        assert r.mask_sample is True and r.reward == 0.0
+        assert r.accuracy is None and r.timeout_rate is None
+        assert r.failure_kind == kind
+    assert results[0].failure_reason == results[1].failure_reason
+    return results[0].failure_reason
+
+
+NOW = 1_000_000.0
+
+
+def reset_text(retry_after_seconds: int) -> str:
+    """The UTC reset time a quota reason names for a Retry-After of this many seconds, at NOW."""
+    return datetime.fromtimestamp(NOW + retry_after_seconds, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
 class TestResolveCacheDir:
@@ -549,14 +581,11 @@ class TestKeyRotation:
             ]
         )
         try:
-            with grader_failed(CritPtRateLimitExceeded) as exc_info:
-                await asyncio.gather(
-                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
-                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
-                )
-            # The surfaced exception carries the last attempt's signals.
-            assert exc_info.value.retry_after_seconds == 30
-            assert exc_info.value.reset_unix == 999
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+            reason = assert_terminal_stop(results, PROVIDER_QUOTA_EXHAUSTED)
+            # The reset time comes from the last attempt's Retry-After (30s), not the reset header.
+            assert reset_text(30) in reason
             assert mock_request.call_count == 3
         finally:
             _stop_patches(patches)
@@ -568,11 +597,9 @@ class TestKeyRotation:
 
         mock_request, patches = _mock_api_sequence([{"status": 429, "headers": {"Retry-After": "60"}, "body": "rl"}])
         try:
-            with grader_failed(CritPtRateLimitExceeded):
-                await asyncio.gather(
-                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
-                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
-                )
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+            assert_terminal_stop(results, PROVIDER_QUOTA_EXHAUSTED)
             assert mock_request.call_count == 1
         finally:
             _stop_patches(patches)
@@ -628,14 +655,11 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([{"status": 403, "body": self._DENIED_BODY}])
         try:
-            with grader_failed(CritPtAccessDenied) as exc_info:
-                await asyncio.gather(
-                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
-                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
-                )
-            assert "approved access" in exc_info.value.body
-            # The message must tell the operator what to actually do.
-            assert "critpt@artificialanalysis.ai" in str(exc_info.value)
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+            reason = assert_terminal_stop(results, PROVIDER_CREDENTIALS_REJECTED)
+            # The reason tells the operator what to actually do.
+            assert "HTTP 403" in reason and "use an approved key" in reason
             assert mock_request.call_count == 1
         finally:
             _stop_patches(patches)
@@ -648,11 +672,9 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([{"status": 403, "body": self._DENIED_BODY}])
         try:
-            with grader_failed(CritPtAccessDenied):
-                await asyncio.gather(
-                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
-                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
-                )
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+            assert_terminal_stop(results, PROVIDER_CREDENTIALS_REJECTED)
             assert mock_request.call_count == 1
         finally:
             _stop_patches(patches)
@@ -702,11 +724,9 @@ class TestAccessDenied:
             ]
         )
         try:
-            with grader_failed(CritPtAccessDenied):
-                await asyncio.gather(
-                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
-                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
-                )
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+            assert_terminal_stop(results, PROVIDER_CREDENTIALS_REJECTED)
             assert mock_request.call_count == 3
         finally:
             _stop_patches(patches)
@@ -722,13 +742,11 @@ class TestAccessDenied:
 
         mock_request, patches = _mock_api_sequence([denied, limited] if denied_first else [limited, denied])
         try:
-            with grader_failed(CritPtRateLimitExceeded) as exc_info:
-                await asyncio.gather(
-                    server.verify(_make_verify_request("```python\na=1\n```", problem_id="p1")),
-                    server.verify(_make_verify_request("```python\nb=2\n```", problem_id="p2")),
-                )
-            assert (exc_info.value.retry_after_seconds, exc_info.value.reset_unix) == (60, 111)
-            assert "1 of 2 key(s) were denied" in "\n".join(getattr(exc_info.value, "__notes__", []))
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+            reason = assert_terminal_stop(results, PROVIDER_QUOTA_EXHAUSTED)
+            assert reset_text(60) in reason
+            assert "1 of 2 key(s) were denied" in reason
             assert mock_request.call_count == 2
         finally:
             _stop_patches(patches)
@@ -771,6 +789,75 @@ class TestKeyFingerprint:
         fp = _key_fingerprint(secret)
         assert secret not in fp
         assert fp not in secret
+
+
+class TestTerminalAaErrors:
+    """A quota or key error ends the batch as masked, unverified rows that keep their saved answer."""
+
+    @pytest.mark.asyncio
+    async def test_quota_reason_names_the_reset_time_from_retry_after(self):
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+        mock_request, patches = _mock_api_sequence(
+            [{"status": 429, "headers": {"Retry-After": "3600", "X-Ratelimit-Reset": "1"}, "body": "rl"}]
+        )
+        try:
+            with patch("resources_servers.critpt.app.time.time", return_value=NOW):
+                results = await verify_pair(server)
+        finally:
+            _stop_patches(patches)
+        reason = assert_terminal_stop(results, PROVIDER_QUOTA_EXHAUSTED)
+        assert (
+            reason
+            == f"AA quota exhausted, resets at {reset_text(3600)}; grade with replay or resubmit after the reset"
+        )
+
+    @pytest.mark.asyncio
+    async def test_quota_reason_falls_back_to_the_reset_header(self):
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+        mock_request, patches = _mock_api_sequence(
+            [{"status": 429, "headers": {"X-Ratelimit-Reset": "86400"}, "body": "rl"}]
+        )
+        try:
+            results = await verify_pair(server)
+        finally:
+            _stop_patches(patches)
+        assert "resets at 1970-01-02 00:00 UTC" in assert_terminal_stop(results, PROVIDER_QUOTA_EXHAUSTED)
+
+    @pytest.mark.asyncio
+    async def test_401_is_a_rejected_key_not_a_judge_failure(self):
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"]))
+        mock_request, patches = _mock_api_sequence([{"status": 401, "body": "bad key"}])
+        try:
+            results = await verify_pair(server)
+            assert mock_request.call_count == 1
+        finally:
+            _stop_patches(patches)
+        reason = assert_terminal_stop(results, PROVIDER_CREDENTIALS_REJECTED)
+        assert "HTTP 401" in reason
+
+    @pytest.mark.asyncio
+    async def test_terminal_batch_keeps_its_submissions_in_the_cache(self, tmp_path):
+        server = _make_server(
+            _make_config(batch_size=2, api_key=["k0"], cache_dir=tmp_path, unique_cache_per_run=False)
+        )
+        mock_request, patches = _mock_api_sequence([{"status": 429, "headers": {"Retry-After": "60"}, "body": "rl"}])
+        try:
+            results = await verify_pair(server)
+        finally:
+            _stop_patches(patches)
+        assert_terminal_stop(results, PROVIDER_QUOTA_EXHAUSTED)
+        assert len(_read_jsonl(tmp_path / "submissions.jsonl")) == 2
+        assert not (tmp_path / "aa_responses.jsonl").exists()
+
+    @pytest.mark.asyncio
+    async def test_server_error_stays_a_masked_judge_failure(self):
+        server = _make_server(_make_config(batch_size=2, api_key=["k0"], api_max_retries=1))
+        mock_request, patches = _mock_api_sequence([{"status": 500, "body": "boom"}])
+        try:
+            with grader_failed(RuntimeError):
+                await verify_pair(server)
+        finally:
+            _stop_patches(patches)
 
 
 class TestGraderFailureTyping:
