@@ -3,8 +3,11 @@
 
 """The sandboxes a resources server lends to a harness, one per resources session."""
 
+import asyncio
 import logging
 from collections.abc import Mapping
+
+import anyio
 
 from nemo_gym.config.global_config import get_global_config_dict
 from nemo_gym.core.episode_types import TaskId
@@ -16,6 +19,10 @@ from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config
 LOGGER = logging.getLogger(__name__)
 # Provider label values stay within the common 63-character limit.
 _LABEL_LIMIT = 63
+# A provider stop that hangs must not hold a close, a failed seed or the shutdown forever.
+STOP_TIMEOUT_S = 120.0
+# The supervisor gives a server about a second to exit, so shutdown stops sandboxes concurrently, this many at a time.
+SHUTDOWN_STOP_CONCURRENCY = 64
 
 
 class LentSandboxes:
@@ -25,6 +32,11 @@ class LentSandboxes:
     :class:`ResourcesSessionLocks` lock. The server keeps any other session state, such as task files it serves or a
     tool workspace, and calls :meth:`release_all` at shutdown. A server that grades in the lent sandbox after the
     episode reads it with :meth:`get` before the close.
+
+    The harness gets an ``operate`` descriptor: it may use the sandbox but not destroy it. Every stop runs to its end
+    within ``STOP_TIMEOUT_S``, also when the request that asked for it is cancelled. A session that is never closed
+    keeps its sandbox until shutdown, or until the provider reclaims it after ``sandbox_config.ttl_s``, so set
+    ``ttl_s`` above the episode deadline plus the time that grading and cleanup take.
     """
 
     def __init__(
@@ -72,7 +84,7 @@ class LentSandboxes:
             access = await self._access(sandbox)
         except BaseException:
             try:
-                await sandbox.stop()
+                await _stop(sandbox)
             except Exception:
                 LOGGER.exception(
                     "Failed to stop an undescribed sandbox for resources session %s", resources_session_id
@@ -86,21 +98,38 @@ class LentSandboxes:
         sandbox = self._sandboxes.get(resources_session_id)
         if sandbox is None:
             return
-        await sandbox.stop()
-        del self._sandboxes[resources_session_id]
+        await _stop(sandbox)
+        self._sandboxes.pop(resources_session_id, None)
 
     async def release_all(self) -> None:
         """Stop every sandbox still lent, as at server shutdown. A failed stop is logged and the rest go on."""
-        for resources_session_id in list(self._sandboxes):
-            try:
-                await self.release(resources_session_id)
-            except Exception:
-                LOGGER.exception("Failed to stop the sandbox lent for resources session %s", resources_session_id)
+        stopping = asyncio.Semaphore(SHUTDOWN_STOP_CONCURRENCY)
+
+        async def release(resources_session_id: str) -> None:
+            async with stopping:
+                try:
+                    await self.release(resources_session_id)
+                except Exception:
+                    LOGGER.exception("Failed to stop the sandbox lent for resources session %s", resources_session_id)
+
+        await asyncio.gather(*(release(resources_session_id) for resources_session_id in list(self._sandboxes)))
 
     async def _access(self, sandbox: AsyncSandbox) -> SandboxAccess:
         return SandboxAccess(
             connection=DirectSandboxConnection(
-                provider_config_ref=self._provider, descriptor=await sandbox.serialize()
+                # The harness may operate the sandbox but not destroy it; this server stops it at close.
+                provider_config_ref=self._provider,
+                descriptor=await sandbox.serialize(scope="operate"),
             ),
             workdir=self._workdir,
         )
+
+
+async def _stop(sandbox: AsyncSandbox) -> None:
+    """Stop ``sandbox`` within ``STOP_TIMEOUT_S``, even while the request that owns it is being cancelled.
+
+    A client that disconnects cancels its request handler and every later await in it, so an unshielded stop would
+    never run, and the sandbox would outlive every reference to it.
+    """
+    with anyio.CancelScope(shield=True), anyio.fail_after(STOP_TIMEOUT_S):
+        await sandbox.stop()
