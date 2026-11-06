@@ -263,7 +263,9 @@ class TestClientSideStop:
         cfg = dict(
             wire=wire, tool_definitions_json=None, extra_body={}, openai_model="m", max_tokens=1024, temperature=0.6
         )
-        object.__setattr__(server, "config", type("C", (), cfg | dict(top_p=None, debug=False))())
+        object.__setattr__(
+            server, "config", type("C", (), cfg | dict(top_p=None, debug=False, render_assistant_text=False))()
+        )
         server._steer, server._primer, server._prefill = defaults["steer"], defaults["primer"], defaults["prefill"]
         server._stop = list(defaults["stop"])
         server._semaphore = asyncio.Semaphore(1)
@@ -300,7 +302,7 @@ class TestFunctionCallingWire:
     def _server(self, **overrides):
         # Build the prompt without constructing the web server: mirror
         # model_post_init's wire resolution on a bare object.
-        cfg = dict(wire="function_calling", tool_definitions_json=self.TOOLS) | overrides
+        cfg = dict(wire="function_calling", tool_definitions_json=self.TOOLS, render_assistant_text=False) | overrides
         defaults = BM.WIRE_DEFAULTS[cfg["wire"]]
         server = BM.BaseModelServer.__new__(BM.BaseModelServer)
         object.__setattr__(server, "config", type("C", (), cfg)())
@@ -329,6 +331,27 @@ class TestFunctionCallingWire:
         rendered = BM.render_transcript([{"role": "assistant", "content": "ignored prose", "tool_calls": calls}])
         assert rendered.startswith("\nAssistant (tool call): [")
         assert "ignored prose" not in rendered
+
+    def test_assistant_text_renders_before_its_calls_when_enabled(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        message = {"role": "assistant", "content": " Found it; now edit. ", "tool_calls": calls}
+        assert BM.render_transcript([message], assistant_text=True) == (
+            "\nAssistant: Found it; now edit." + BM.render_transcript([message])
+        )
+
+    def test_assistant_text_flag_skips_turns_without_text(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        for content in (None, "", "  \n", [{"type": "output_text", "text": ""}]):
+            message = {"role": "assistant", "content": content, "tool_calls": calls}
+            assert BM.render_transcript([message], assistant_text=True) == BM.render_transcript([message])
+
+    def test_assistant_text_flag_leaves_the_primer_on_the_tool_call_line(self):
+        calls = [{"id": "c", "type": "function", "function": {"name": "bash", "arguments": "{}"}}]
+        messages = [{"role": "user", "content": "task"}, {"role": "assistant", "content": "look", "tool_calls": calls}]
+        prompt = self._server(render_assistant_text=True).build_prompt(messages)
+        assert "\nAssistant: look\nAssistant (tool call): [" in prompt
+        assert prompt.endswith(BM.BASH_TOOL_STEER + "\nAssistant (tool call): " + '[{"')
+        assert "look" not in self._server().build_prompt(messages)
 
     def test_tool_calls_render_in_litellm_key_order(self):
         # The reference bridge rendered calls as mini re-sent them, i.e. after

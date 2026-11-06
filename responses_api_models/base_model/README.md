@@ -34,6 +34,7 @@ against a path that does not exist, which scores as a quiet 0.
 | `tool_definitions_json` | none | the tool schema as a JSON string, rendered verbatim into the prompt |
 | `max_tool_calls_per_turn` | 3 | calls beyond this in one turn are dropped |
 | `tool_names` | none | `function_calling` only. None: `bash` calls, keeping just `command` (mini-swe-agent). A list: calls to any of these tools, with whatever JSON-object arguments the model wrote (e.g. AutomationBench's `api_search`, `api_fetch`, `base64_encode`) |
+| `render_assistant_text` | false | render the text an assistant turn carried alongside its tool calls, as an `Assistant:` line before the calls. Off matches the reference bridge, which dropped it. The primer still opens the candidate's turn on the tool-call line, so the candidate sees narrated turns but cannot narrate its own |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
 
 `configs/base_model.yaml` defines `policy_model`, which reads `policy_base_url` and `policy_model_name` from

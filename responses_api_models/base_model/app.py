@@ -168,16 +168,23 @@ def litellm_tool_call(call: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def render_transcript(messages: List[Dict[str, Any]]) -> str:
+def render_transcript(messages: List[Dict[str, Any]], assistant_text: bool = False) -> str:
     """Flatten a conversation to a `Role: content` transcript.
 
     One newline precedes each role marker and no blank lines separate turns,
     which is what makes the stop markers land exactly on turn boundaries.
+
+    An assistant turn with tool calls renders as its calls only, which is what
+    the reference bridge showed the model. With `assistant_text`, text the turn
+    carried alongside its calls renders first, as its own "Assistant:" line.
     """
     blocks = []
     for message in messages:
         role = message.get("role")
         if message.get("tool_calls"):
+            text = message_text(message.get("content")).strip() if assistant_text else ""
+            if text:
+                blocks.append(f"\nAssistant: {text}")
             calls = [litellm_tool_call(call) for call in message["tool_calls"]]
             blocks.append(f"\nAssistant (tool call): {json.dumps(calls, ensure_ascii=False)}")
             continue
@@ -343,6 +350,14 @@ class BaseModelServerConfig(BaseResponsesAPIModelConfig):
     # those names with whatever JSON-object arguments the model wrote.
     tool_names: Optional[List[str]] = None
 
+    # Render the text an assistant turn carried alongside its tool calls, as an
+    # "Assistant:" line before the calls. Off by default: the reference bridge
+    # dropped it, and DeepSWE's prompts are checked byte-for-byte against it.
+    # Turn it on where no such reference exists and the traces narrate their
+    # calls (AutomationBench). The primer still opens the candidate's turn on
+    # the tool-call line, so the candidate itself cannot write text first.
+    render_assistant_text: bool = False
+
     max_tokens: int = 1024
     temperature: float = 0.6
     top_p: Optional[float] = None
@@ -384,7 +399,13 @@ class BaseModelServer(SimpleResponsesAPIModel):
         header = ""
         if self.config.tool_definitions_json:
             header = f"\nTool definitions:\n{self.config.tool_definitions_json}\n\n"
-        return header + render_transcript(messages) + self._steer + self._primer + self._prefill
+        return (
+            header
+            + render_transcript(messages, self.config.render_assistant_text)
+            + self._steer
+            + self._primer
+            + self._prefill
+        )
 
     async def _complete(
         self, messages: List[Dict[str, Any]], body_dict: Dict[str, Any]
