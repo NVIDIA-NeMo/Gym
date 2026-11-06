@@ -46,6 +46,7 @@ The shared defaults are:
 | Admitted failure | Action | Class |
 | --- | --- | --- |
 | Confirmed OOM in the agent's assigned sandbox during `agent` execution | `count_as_zero` | `model` |
+| Agent exhausts its assigned time budget (`agent_timeout`) | `count_as_zero` | `model` |
 | Confirmed OOM during `seed` | `retry` | `evaluation` |
 | Inconclusive verification attempt, including confirmed OOM | `retry` | `evaluation` |
 | Verification failure reporting cancellation, shutdown, a SIGTERM interruption or lost worker (`kill_shaped`) or rejected credentials | `fail` ungraded | `evaluation` |
@@ -57,6 +58,12 @@ sandbox-create timeout is `evaluation`; class alone does not authorize a retry.
 A `retry` decision never authorizes replaying an uncertain command. The caller retains its retry safety checks
 and existing attempt/deadline budget; exhaustion stays ungraded. Task cancellation continues to propagate. Verification rules apply to inconclusive attempts,
 not ordinary verifier scores. `count_as_zero` ends the episode without retry and includes its zero in the denominator.
+
+The environment's agent-outcome policy sends reported `model_context_limit` failures to verification and
+applies a counted zero for reported `agent_timeout` failures. This can change scores and denominators compared
+with runs that excluded those failures or verified timed-out answers. A counted zero records completed policy
+grading while preserving the agent failure; it does not run the benchmark verifier. Incomplete responses without
+explicit failure metadata retain their existing handling. Override these rules when a benchmark requires it.
 
 Policies are configurable. This fragment is a `StageOutcomePolicyConfig` value; place it under the consuming
 server's field of that type. It overrides the agent OOM action without replacing the other stages:

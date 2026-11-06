@@ -12,6 +12,7 @@ import resources_servers.deepswe.app as app_module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    AGENT_TIMEOUT,
     ENVIRONMENT_SERVER_FAILED,
     PROVIDER_OOM_KILLED,
     SESSION_LOST,
@@ -75,13 +76,19 @@ def _config(
 def test_agent_failure_policy_uses_shared_defaults_and_accepts_partial_rules(task_assets: Path) -> None:
     default = _config(task_assets).outcome_policy.by_stage["agent"]
     assert default.default_action == OutcomeAction.FAIL
-    assert default.by_failure_kind == {PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO}
+    assert default.by_failure_kind == {
+        AGENT_TIMEOUT: OutcomeAction.COUNT_AS_ZERO,
+        PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO,
+    }
     assert default.by_status_code == {}
     override = _config(
         task_assets, agent_policy={"by_failure_kind": {PROVIDER_OOM_KILLED: "count_as_zero"}}
     ).outcome_policy.by_stage["agent"]
     assert override.default_action == OutcomeAction.FAIL
-    assert override.by_failure_kind == {PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO}
+    assert override.by_failure_kind == {
+        AGENT_TIMEOUT: OutcomeAction.COUNT_AS_ZERO,
+        PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO,
+    }
 
 
 @pytest.mark.parametrize("action", ["verify", "retry"])
@@ -931,7 +938,7 @@ async def test_confirmed_agent_sandbox_oom_applies_policy_without_collecting_or_
     assert response.failure_kind == PROVIDER_OOM_KILLED
     assert response.response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY]
     assert response.model_patch_bytes == 0
-    assert response.evaluation_completed is False
+    assert response.evaluation_completed is counted
     assert "no patch could be collected" in (response.failure_reason or "")
     assert "sandbox_id='agent-sandbox'" in (response.failure_reason or "")
     create_sandbox.assert_awaited_once()

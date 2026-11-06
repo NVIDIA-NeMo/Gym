@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Annotated, ClassVar
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT,
     CANCELLED,
     FAILURE_KINDS,
     KILL_SHAPED,
@@ -157,7 +158,10 @@ class StagePolicyConfig(OutcomePolicyConfig):
 def _default_stage_policies() -> dict[FailureStage, StagePolicyConfig]:
     return {
         "agent": StagePolicyConfig(
-            by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO},
+            by_failure_kind={
+                AGENT_TIMEOUT: OutcomeAction.COUNT_AS_ZERO,
+                PROVIDER_OOM_KILLED: OutcomeAction.COUNT_AS_ZERO,
+            },
         ),
         "seed": StagePolicyConfig(
             by_failure_kind={PROVIDER_OOM_KILLED: OutcomeAction.RETRY},

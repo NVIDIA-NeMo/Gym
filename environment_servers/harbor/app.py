@@ -56,7 +56,7 @@ from uuid import uuid4
 
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException
-from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PositiveFloat, computed_field, model_validator
 
 from environment_servers.harbor.entrypoint import (
     ENTRYPOINT_FAILED_KIND,
@@ -87,14 +87,17 @@ from environment_servers.harbor.verifier import (
 from nemo_gym import RESULTS_DIR
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
+    AGENT_OUTCOME_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentContinuationRequirements,
+    AgentOutcome,
     AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
     OutcomeAction,
+    agent_outcome_decision,
     agent_outcome_policy,
 )
 from nemo_gym.client import get_response_json, raise_boundary_failure, raise_for_status
@@ -112,6 +115,7 @@ from nemo_gym.core import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     FailureBoundary,
+    FailureClass,
     NeMoGymResponse,
     NgFailureEvent,
     TaskId,
@@ -151,14 +155,19 @@ from nemo_gym.server_runtime import (
     SingleAgentTurnFailure,
     SingleAgentTurnResult,
     ToolAccess,
+    apply_zero_score,
     dependency_failure,
     handled_episode_failure,
     is_handled_episode_failure,
+    observe_verifier,
+    verification_outcome,
 )
 from nemo_gym.trajectory import (
     AgentObservationBundle,
     AtifExportError,
     TrajectoryRecord,
+    VerifierInvocation,
+    selected_verifier_completion,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
@@ -182,6 +191,21 @@ class HarborTurnResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    ng_verifier_invocations: list[VerifierInvocation] = Field(default_factory=list, exclude_if=lambda value: not value)
+    ng_verifier_invocation_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    legacy_evaluation_completed: bool | None = Field(
+        default=None, validation_alias="evaluation_completed", exclude=True, repr=False
+    )
+
+    @computed_field
+    @property
+    def evaluation_completed(self) -> bool | None:
+        if self.ng_verifier_invocation_id is None:
+            return self.legacy_evaluation_completed
+        return selected_verifier_completion(self.ng_verifier_invocations, self.ng_verifier_invocation_id)
+
+    failure_outcome_action: OutcomeAction | None = None
+    failure_outcome_attribution: FailureClass | None = None
     reward: float
     verifier_rewards: dict[str, float] | None = None
     # The keys of reward.json that sum to `reward`, when the file names no `reward` key (see verifier.py).
@@ -1041,6 +1065,19 @@ class HarborEnvironmentServer(
         agent's sandbox or, for a step that verifies separately (:meth:`_turn_separate`), in a verifier sandbox of
         its own. A transcript the converter cannot represent masks the turn instead of grading it; a collection the
         sandbox could not serve masks it as an outage."""
+        decision = agent_outcome_decision(agent_response, config=self.config.agent_outcome_policy)
+        if decision.action == OutcomeAction.COUNT_AS_ZERO:
+            outcome = AgentOutcome.model_validate_json(agent_response.metadata[AGENT_OUTCOME_METADATA_KEY])
+            fields = await apply_zero_score(
+                {
+                    "response": agent_response.model_dump(mode="json"),
+                    "failure_kind": outcome.failure_kind,
+                    "failure_reason": agent_response.error.message if agent_response.error else outcome.failure_kind,
+                },
+                decision=decision,
+            )
+            fields.pop("response")
+            return fields
         task = session.task
         try:
             if turn is None:
@@ -1355,7 +1392,7 @@ class HarborEnvironmentServer(
         handing test.sh a half-finished sandbox and recording a real 0. In a multi-step task this ends the
         episode at the turn that failed; a verify cause is graded as before."""
         action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
-        if action != OutcomeAction.VERIFY:
+        if action not in (OutcomeAction.VERIFY, OutcomeAction.COUNT_AS_ZERO):
             raise self._failure(
                 stage="agent",
                 failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
@@ -1592,7 +1629,7 @@ class HarborEnvironmentServer(
                 failure_kind=last.failure_kind,
             )
         sessions = sum(1 for result in results if result.response is not None)
-        episode = HarborEpisodeResult(
+        episode_fields = dict(
             responses_create_params=inputs[results.index(ran)].responses_create_params,
             response=ran.response,
             # Fresh sessions leave one record per step on the turns, as Harbor's steps/<name>/agent/ does; the
@@ -1609,8 +1646,41 @@ class HarborEnvironmentServer(
             turn_reward_strategy=strategy,
             turns_without_verifier_result=sum(1 for result in results if result.verifier_rewards is None),
             stopped_after_turn=stopped_after,
-            **roll_up_turns(results, strategy, task_id=request.task.task_id),
         )
+
+        async def aggregate() -> HarborEpisodeResult:
+            # The roll-up is a separate grading operation; a turn's zero policy does not
+            # describe a possibly nonzero mean over the episode's other turns.
+            rolled = roll_up_turns(results, strategy, task_id=request.task.task_id)
+            source = next(
+                (
+                    turn
+                    for turn in reversed(results)
+                    if turn.failure_kind and turn.failure_kind == rolled.get("failure_kind")
+                ),
+                None,
+            )
+            decision = {
+                "failure_outcome_action": source.failure_outcome_action
+                if strategy == "final" and source is not None and source.failure_outcome_action is not None
+                else None,
+                "failure_outcome_attribution": source.failure_outcome_attribution if source is not None else None,
+            }
+            return HarborEpisodeResult(
+                **{
+                    **episode_fields,
+                    **rolled,
+                    **decision,
+                    **verification_outcome("incomplete" if rolled.get("mask_sample") else "completed"),
+                }
+            )
+
+        graded = await observe_verifier(aggregate, enabled=True, verifier_name="harbor_turn_aggregation")()
+        graded.ng_verifier_invocations = [
+            *(inv for turn in results for inv in turn.ng_verifier_invocations),
+            *graded.ng_verifier_invocations,
+        ]
+        episode = graded
         self._trace_score(task.task_id, request.episode_id.capture_key, episode)
         return HarborEpisodeResponse(episode_id=request.episode_id, task_id=request.task.task_id, result=episode)
 

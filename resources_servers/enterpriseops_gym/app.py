@@ -113,7 +113,6 @@ class EnterpriseOpsGymVerifyRequest(BaseVerifyRequest):
 
 class EnterpriseOpsGymVerifyResponse(EnterpriseOpsGymVerifyRequest, BaseVerifyResponse):
     # False when the database rejected a verifier's query: a defect of the task, not a hard task.
-    evaluation_completed: bool
     verifier_pass_rate: float
     num_verifiers: int
     num_verifiers_passed: int

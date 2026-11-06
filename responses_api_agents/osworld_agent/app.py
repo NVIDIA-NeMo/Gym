@@ -537,7 +537,9 @@ class OSWorldVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
     response: OSWorldAgentResponse
     horizon_reached: bool = False
-    evaluation_completed: bool = True
+    legacy_evaluation_completed: bool | None = Field(
+        default=True, validation_alias="evaluation_completed", exclude=True, repr=False
+    )
     runtime_eligible: bool = True
     runtime_admission_reason: str = "legacy_runtime_valid"
     runtime_admission_policy_id: str = LEGACY_RUNTIME_ADMISSION_POLICY_ID

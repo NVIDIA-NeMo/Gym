@@ -136,7 +136,6 @@ class SWERebenchVerifyRequest(SWERebenchInstanceRequest, BaseVerifyRequest):
 
 
 class SWERebenchVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str

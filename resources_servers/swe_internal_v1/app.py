@@ -126,7 +126,6 @@ class SweInternalV1VerifyRequest(SweInternalV1InstanceRequest, BaseVerifyRequest
 
 
 class SweInternalV1VerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str

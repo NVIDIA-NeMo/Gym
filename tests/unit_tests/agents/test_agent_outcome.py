@@ -13,6 +13,17 @@ from nemo_gym.core.failure_kinds import FAILURE_KINDS, MODEL_REQUEST_ERROR
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 
 
+def test_partial_timeout_override_keeps_environment_oom_admission_and_shared_attribution():
+    from nemo_gym.agents.agent_outcome import AgentOutcomePolicyConfig
+
+    config = AgentOutcomePolicyConfig(by_failure_kind={"agent_timeout": "verify"})
+    assert config.by_failure_kind["provider_oom_killed"] == "verify"
+    assert config.by_failure_kind["agent_timeout"] == "verify"
+    from nemo_gym.core.failure_kinds import classify_failure
+
+    assert classify_failure(failure_kind="agent_timeout", stage="agent", config=config.classification) == "model"
+
+
 def test_inherited_outcome_reporting_preserves_response_and_marks_unknown():
     class Agent(SimpleResponsesAPIAgent):
         async def responses(self, body):
@@ -82,13 +93,11 @@ def test_rejects_unregistered_failure_kinds(kind):
         AgentOutcome.model_validate_json(json.dumps(fields))
 
 
-def test_class_action_cannot_bypass_environment_supported_actions():
-    from pydantic import ValidationError
-
+def test_environment_supports_local_zero_grading():
     from nemo_gym.agents.agent_outcome import AgentOutcomePolicyConfig
 
-    with pytest.raises(ValidationError, match="does not support count_as_zero"):
-        AgentOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})
+    config = AgentOutcomePolicyConfig(by_failure_class={"model": "count_as_zero"})
+    assert config.by_failure_class["model"] == "count_as_zero"
 
 
 def test_agent_class_action_uses_its_configured_shared_mapping():
@@ -115,3 +124,51 @@ def test_agent_class_action_uses_its_configured_shared_mapping():
     assert agent_outcome_policy(response, config=policy) == "fail"
     policy.classification.by_failure_kind["model_policy_response_timeout"] = "evaluation"
     assert agent_outcome_policy(response, config=policy) == "retry"
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete", "completed"])
+@pytest.mark.parametrize(
+    "kind,action",
+    [
+        ("model_transport_error", "retry"),
+        ("agent_timeout", "count_as_zero"),
+        ("model_context_limit", "verify"),
+        ("agent_limit", "verify"),
+    ],
+)
+def test_observed_failure_policy_is_independent_of_response_status(status, kind, action):
+    from nemo_gym.agents.agent_outcome import agent_outcome_decision
+
+    response = NeMoGymResponse(
+        id="test",
+        object="response",
+        created_at=0,
+        model="test",
+        output=[],
+        status=status,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        metadata={AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind).model_dump_json()},
+    )
+    assert agent_outcome_decision(response).action == action
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete", "completed"])
+def test_malformed_outcome_cannot_be_graded(status):
+    from nemo_gym.agents.agent_outcome import agent_outcome_decision
+
+    response = NeMoGymResponse(
+        id="test",
+        object="response",
+        created_at=0,
+        model="test",
+        output=[],
+        status=status,
+        parallel_tool_calls=False,
+        tool_choice="auto",
+        tools=[],
+        metadata={AGENT_OUTCOME_METADATA_KEY: "invalid"},
+    )
+    decision = agent_outcome_decision(response)
+    assert decision.action == "fail" and decision.attribution == "unknown"

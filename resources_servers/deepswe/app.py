@@ -35,6 +35,7 @@ from nemo_gym.core import (
     FailureReportRow,
     NgFailureEvent,
     OutcomeAction,
+    OutcomeDecision,
     RequestFailureLog,
     SandboxFailureDetails,
     StageOutcomePolicyConfig,
@@ -58,6 +59,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    apply_zero_score,
     lost_session_verification,
 )
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
@@ -172,7 +174,6 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     failure_report: FailureReport | None = Field(default=None, exclude_if=lambda value: value is None)
 
     task_id: str
-    evaluation_completed: bool
     apply_failed: bool = False
     verifier_exit_code: int | None = None
     verifier_error: str | None = None
@@ -854,7 +855,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "_ng_failure_counts_as_zero": False,
             }
 
-        return DeepSWEVerifyResponse.model_validate(
+        response = DeepSWEVerifyResponse.model_validate(
             body.model_dump(exclude={"saved_model_patch", "saved_model_patch_sha256"})
             | result.model_dump()
             | {
@@ -883,6 +884,14 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
             | agent_failure_fields
             | (lost_session_verification(patch_error) if failure_kind == SESSION_LOST else {})
         )
+        if agent_failure_action == OutcomeAction.COUNT_AS_ZERO:
+            response = DeepSWEVerifyResponse.model_validate(
+                await apply_zero_score(
+                    response.model_dump(mode="json"),
+                    decision=OutcomeDecision(action=agent_failure_action, attribution=failure_outcome_attribution),
+                )
+            )
+        return response
 
 
 if __name__ == "__main__":

@@ -116,6 +116,52 @@ async def test_echoed_historical_selection_does_not_certify_a_new_execution():
     assert result["ng_verifier_invocation_id"] != "old"
 
 
+def test_result_completion_roundtrip_uses_exact_invocation_and_does_not_invent_history():
+    from nemo_gym.trajectory.trajectory_record import VerifierInvocation
+
+    body = {
+        "responses_create_params": {"input": []},
+        "response": {
+            "id": "r",
+            "created_at": 0,
+            "model": "test",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+        "reward": 0.0,
+    }
+    result = BaseVerifyResponse.model_validate(body | {"evaluation_completed": False})
+    assert result.evaluation_completed is False and result.ng_verifier_invocations == []
+    assert BaseVerifyResponse.model_validate(body).evaluation_completed is None
+    result = BaseVerifyResponse.model_validate(
+        body
+        | {
+            "evaluation_completed": False,
+            "ng_verifier_invocation_id": "grade",
+            "ng_verifier_invocations": [
+                {"invocation_id": "grade", "status": "completed"},
+                {"invocation_id": "later", "status": "failed"},
+            ],
+        }
+    )
+    assert result.evaluation_completed is True
+    assert BaseVerifyResponse.model_validate_json(result.model_dump_json()).evaluation_completed is True
+
+    class CanonicalResult(BaseVerifyResponse):
+        model_config = {"extra": "allow"}
+
+    canonical = result.model_dump()
+    canonical["ng_trajectory"] = {"verifier_invocations": canonical.pop("ng_verifier_invocations")}
+    assert CanonicalResult.model_validate(canonical).evaluation_completed is True
+    result.ng_verifier_invocations[0].status = "unknown"
+    assert result.evaluation_completed is None and "evaluation_completed" not in result.model_dump()
+    result.ng_verifier_invocations = [VerifierInvocation(invocation_id="another", status="completed")]
+    assert result.evaluation_completed is None
+
+
 def collected(path: Path, rollout_id: str, result: dict) -> dict:
     record = {**result, "_ng_rollout_id": rollout_id}
     merge_model_call_capture_into_record(record, [path], include_payloads=True)

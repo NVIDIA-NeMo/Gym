@@ -17,6 +17,7 @@ import unicodedata
 from typing import Any, ClassVar, Literal, Optional
 
 from fastapi import FastAPI
+from pydantic import Field
 
 from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.server_runtime import (
@@ -28,6 +29,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     observe_programmatic_grading,
+    verification_outcome,
 )
 
 
@@ -75,7 +77,9 @@ class MCQAVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
     # Every verify path grades the row (an unparsed answer scores 0), so none is incomplete: gym-p0/v1 TE-6.
-    evaluation_completed: bool = True
+    legacy_evaluation_completed: bool | None = Field(
+        default=True, validation_alias="evaluation_completed", exclude=True, repr=False
+    )
 
 
 class MCQADualVerifyResponse(MCQAVerifyResponse, BaseMultiRewardVerifyResponse):
@@ -460,6 +464,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
             strict_reward = float(strict is not None and strict == gold)
             normalized_reward = float(normalized is not None and normalized == gold)
             return MCQADualVerifyResponse(
+                **verification_outcome("completed"),
                 **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
                 reward=strict_reward,
                 reward_components={"strict_boxed": strict_reward, "normalized": normalized_reward},
@@ -474,6 +479,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
             match = MILU_V2_ANSWER_PATTERN.search(text)
             pred = next((group.upper() for group in match.groups() if group), None) if match else None
             return MCQAVerifyResponse(
+                **verification_outcome("completed"),
                 **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
                 reward=float(pred is not None and pred == gold),
                 expected_answer=gold,
@@ -482,6 +488,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
 
         if not text:
             return MCQAVerifyResponse(
+                **verification_outcome("completed"),
                 **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
                 reward=0.0,
                 expected_answer=gold,
@@ -544,6 +551,7 @@ class MCQAResourcesServer(SimpleResourcesServer):
         reward = 1.0 if is_correct else 0.0
 
         return MCQAVerifyResponse(
+            **verification_outcome("completed"),
             **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
             reward=reward,
             expected_answer=gold,

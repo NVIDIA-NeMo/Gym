@@ -19,6 +19,7 @@ from hypotest.env.interpreter_env import InterpreterEnv
 from pydantic import Field, JsonValue, model_validator
 
 from nemo_gym.core import JUDGE_FAILED
+from nemo_gym.server_runtime import verification_outcome
 from resources_servers.aviary.app import AviaryResourcesServer
 from resources_servers.aviary.schemas import (
     AviaryAgentVerifyRequest,
@@ -70,7 +71,12 @@ class HypotestResourcesServer(AviaryResourcesServer[InterpreterEnv, HypotestData
             # the standard Gym failure fields for evaluation consumers too.
             instance_config = dict(payload.get("instance_config") or {})
             instance_config.update(mask_sample=True, agent_error_kind="rubric_model")
-            payload.update(instance_config=instance_config, mask_sample=True, failure_kind=JUDGE_FAILED)
+            payload.update(
+                instance_config=instance_config,
+                mask_sample=True,
+                failure_kind=JUDGE_FAILED,
+                **verification_outcome("failed", failure_kind=JUDGE_FAILED),
+            )
         return AviaryAgentVerifyResponse.model_validate(payload)
 
     async def close(self, request: Request, body: AviaryCloseRequest) -> AviaryCloseResponse:

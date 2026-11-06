@@ -85,12 +85,11 @@ class VerifyResponse(VerifyRequest, BaseVerifyResponse):
     judge_rejected_responses: list[JudgeRejection] = Field(default_factory=list, exclude_if=lambda value: not value)
     grading_result: Evaluation | None = None
     # Whether grading ran to completion, as Gym's evidence gate reads it: a masked rollout's did not.
-    evaluation_completed: bool | None = None
 
     @model_validator(mode="after")
     def completion_follows_masking(self) -> "VerifyResponse":
         if self.evaluation_completed is None:
-            self.evaluation_completed = not self.mask_sample
+            self.legacy_evaluation_completed = not self.mask_sample
         return self
 
 

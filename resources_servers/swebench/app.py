@@ -155,7 +155,6 @@ class SWEBenchVerifyRequest(SWEBenchInstanceRequest, BaseVerifyRequest):
 
 
 class SWEBenchVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
 
     # Misc metrics

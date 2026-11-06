@@ -32,6 +32,7 @@ from pydantic import (
     PrivateAttr,
     SerializerFunctionWrapHandler,
     TypeAdapter,
+    computed_field,
     field_validator,
     model_serializer,
 )
@@ -70,7 +71,7 @@ from nemo_gym.server_runtime.request_handling.rollout_context import RolloutCont
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier, verification_outcome
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
-from nemo_gym.trajectory.trajectory_record import VerifierInvocation
+from nemo_gym.trajectory.trajectory_record import VerifierInvocation, selected_verifier_completion
 from nemo_gym.verification.judge import judge_failsafe
 
 
@@ -192,8 +193,40 @@ class BaseVerifyResponse(BaseVerifyRequest):
     )
     ng_verifier_invocations: list[VerifierInvocation] = Field(default_factory=list, exclude_if=lambda value: not value)
     ng_verifier_invocation_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
-    # Retained while server schemas migrate; observe_verifier projects the selected status here.
-    evaluation_completed: bool | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Input compatibility for producers and saved rows that predate invocation-owned completion.
+    # Loading such a row must not manufacture an invocation that was never observed.
+    legacy_evaluation_completed: bool | None = Field(
+        default=None, validation_alias="evaluation_completed", exclude=True, repr=False
+    )
+
+    @computed_field
+    @property
+    def evaluation_completed(self) -> bool | None:
+        """Completion of the invocation selected for this result, independent of reward and masking.
+
+        Rows without an invocation reference retain their supplied completion value during migration.
+        Missing, ambiguous or unknown referenced evidence stays unavailable.
+        """
+        if self.ng_verifier_invocation_id is None:
+            return self.legacy_evaluation_completed
+        invocations = self.ng_verifier_invocations
+        if not invocations:
+            trajectory = getattr(self, "ng_trajectory", None)
+            invocations = (
+                [VerifierInvocation.model_validate(item) for item in trajectory.get("verifier_invocations", [])]
+                if isinstance(trajectory, dict)
+                else trajectory.verifier_invocations
+                if trajectory is not None
+                else []
+            )
+        return selected_verifier_completion(invocations, self.ng_verifier_invocation_id)
+
+    @model_serializer(mode="wrap")
+    def _serialize_completion(self, handler: SerializerFunctionWrapHandler) -> dict:
+        data = handler(self)
+        if data.get("evaluation_completed") is None:
+            data.pop("evaluation_completed", None)
+        return data
 
     mask_sample: bool = Field(
         default=False,
@@ -381,8 +414,6 @@ class ResourcesSessionLostError(HTTPException):
 class LostSessionVerification(TypedDict):
     """The verify response fields of a masked sample for a session the server no longer holds."""
 
-    evaluation_completed: bool
-
     reward: float
     mask_sample: bool
     failure_kind: str
@@ -410,7 +441,6 @@ def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) 
         "mask_sample": True,
         "failure_kind": failure_kind,
         "failure_reason": reason,
-        "evaluation_completed": False,
         **verification_outcome("incomplete", failure_kind=failure_kind),
     }
 

@@ -50,7 +50,6 @@ class SandboxedVerifyResponse(BaseVerifyResponse, VerifierTestCounts):
     model_config = ConfigDict(extra="allow")
 
     session_id: str
-    evaluation_completed: bool
     termination: AgentTermination
     infrastructure_error: str | None = None
     sandbox_resource_limit: SandboxResourceLimit | None = None

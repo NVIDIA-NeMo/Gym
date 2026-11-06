@@ -120,7 +120,6 @@ class DeNovoSWEVerifyRequest(DeNovoSWEInstanceRequest, BaseVerifyRequest):
 
 
 class DeNovoSWEVerifyResponse(BaseVerifyResponse):
-    evaluation_completed: bool
     resolved: bool
     patch_applied: bool
     instance_id: str
