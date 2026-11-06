@@ -35,10 +35,12 @@ if __package__:
         OpenAICompatibleJudge,
         write_transcript_event,
     )
+    from .lab_harbor.judge_config import validate_judges
     from .lab_harbor.scoring import score_rubric
 else:
     from lab_harbor.document_ids import CORRECTION_VERSION, document_id_aliases
     from lab_harbor.judge import OpenAICompatibleJudge, write_transcript_event
+    from lab_harbor.judge_config import validate_judges
     from lab_harbor.scoring import score_rubric
 
 
@@ -81,7 +83,7 @@ def _write_report(scores: dict[str, Any], output_dir: Path) -> None:
         "td,th{border:1px solid #ddd;padding:8px;vertical-align:top;}"
         "table{border-collapse:collapse;width:100%;}</style></head><body>"
         f"<h1>{html_lib.escape(str(scores['summary']))}</h1>"
-        f"<p>Score: {scores['score']:.2f} | Judge: {html_lib.escape(str(scores['judge_model']))}</p>"
+        f"<p>Score: {scores['score']:.2f} | Judge: {html_lib.escape(str(scores.get('judge_model', 'unavailable')))}</p>"
         "<table><thead><tr><th>ID</th><th>Verdict</th><th>Title</th><th>Reasoning</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></body></html>"
     )
@@ -98,7 +100,7 @@ def _document_tool_versions() -> dict[str, str | None]:
     return versions
 
 
-def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, Any] | None = None) -> dict[str, Any]:
+def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, Any]) -> dict[str, Any]:
     task_config = json.loads(Path(args.task_json).read_text(encoding="utf-8"))
     metadata = task_config.get("metadata") or {}
     aliases = document_id_aliases(
@@ -111,8 +113,8 @@ def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, 
     config = _read_json_if_exists(run_dir / "config.json")
     metrics = _read_json_if_exists(run_dir / "metrics.json")
 
-    override = judge_override or {}
-    judge_model = override.get("model_name") or os.environ.get("LAB_JUDGE_MODEL", args.judge_model)
+    override = judge_override
+    judge_model = override["model_name"]
     judge_kwargs = {
         "model": judge_model,
         "base_url": override.get("base_url") or os.environ.get("LAB_JUDGE_BASE_URL") or args.judge_base_url,
@@ -215,28 +217,21 @@ def _run_single_verifier(args: argparse.Namespace, *, judge_override: dict[str, 
     return scores
 
 
-STANDARD_JUDGE_MODELS = ("claude-sonnet-4-6", "gpt-5.5")
-
-
 def run_verifier(args: argparse.Namespace) -> dict[str, Any]:
-    """Score one run with an explicit single or official averaged dual-judge profile."""
-    profile = os.environ.get("LAB_JUDGE_PROFILE", "official_dual")
-    if profile == "single":
-        return _run_single_verifier(args)
-    if profile != "official_dual":
-        raise ValueError(f"Unknown LAB judge profile: {profile!r}")
-    raw = os.environ.get("LAB_JUDGES")
-    judges = json.loads(raw) if raw else [{"model_name": name} for name in STANDARD_JUDGE_MODELS]
-    if not isinstance(judges, list) or len(judges) != 2 or any(not isinstance(item, dict) for item in judges):
-        raise ValueError("Official dual judging requires two judge configurations")
-    canonical = [str(item.get("model_name", "")).removeprefix("openai-compatible/").split("/")[-1] for item in judges]
-    if set(canonical) != set(STANDARD_JUDGE_MODELS):
-        raise ValueError("Official dual judging requires claude-sonnet-4-6 and gpt-5.5")
+    """Score with one explicit judge or average the official pair's task scores."""
     verifier_dir = Path(args.verifier_dir)
     verifier_dir.mkdir(parents=True, exist_ok=True)
     aggregate_path = verifier_dir / "scores_dual.json"
     aggregate_path.unlink(missing_ok=True)
     Path(args.reward_json).unlink(missing_ok=True)
+    try:
+        raw = json.loads(os.environ.get("LAB_JUDGES", "null"))
+    except json.JSONDecodeError:
+        raise ValueError("LAB_JUDGES must be a JSON list of one or two judge configurations") from None
+    judges = validate_judges(raw)
+    if len(judges) == 1:
+        return _run_single_verifier(args, judge_override=judges[0])
+    canonical = [judge["model_name"].split("/")[-1] for judge in judges]
     per_judge = {}
     errors = []
     for index, spec in enumerate(judges):
@@ -327,7 +322,6 @@ def write_failure_outputs(args: argparse.Namespace, exc: Exception) -> dict[str,
         "error_type": error_type,
         "run_id": config.get("run_id") or metrics.get("run_id") or "harbor-run",
         "task": config.get("task") or metrics.get("task") or task_config.get("title", ""),
-        "judge_model": os.environ.get("LAB_JUDGE_MODEL", args.judge_model),
         "judge_model_base_url": (os.environ.get("LAB_JUDGE_BASE_URL") or args.judge_base_url),
         "scored_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -380,7 +374,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--run-dir", default="/logs/agent/artifacts/lab-run")
     parser.add_argument("--verifier-dir", default="/logs/verifier")
     parser.add_argument("--reward-json", default="/logs/verifier/reward.json")
-    parser.add_argument("--judge-model", default="openai-compatible/model")
     parser.add_argument("--judge-base-url", default=None)
     parser.add_argument("--judge-api-key", default=None)
     return parser

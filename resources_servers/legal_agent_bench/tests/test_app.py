@@ -1,7 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 from nemo_gym.client import ServerClient
 from resources_servers.legal_agent_bench.app import (
@@ -12,6 +15,7 @@ from resources_servers.legal_agent_bench.app import (
 
 
 def _server(tmp_path, **overrides) -> LegalAgentBenchResourcesServer:
+    overrides.setdefault("judges", [{"model_name": "gpt-5.5"}])
     config = LegalAgentBenchResourcesServerConfig(
         name="legal_agent_bench",
         host="127.0.0.1",
@@ -44,14 +48,13 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
         tmp_path,
         judge_base_url="https://judge.example/v1",
         judge_api_key="test-key",  # pragma: allowlist secret
-        judge_model_name="provider/model-name",
+        judges=[{"model_name": "provider/model-name"}],
         judge_temperature=0.2,
     )
     judge_env = {
-        "LAB_JUDGE_PROFILE": "official_dual",
         "LAB_JUDGE_BASE_URL": "https://judge.example/v1",
         "LAB_JUDGE_API_KEY": "test-key",  # pragma: allowlist secret
-        "LAB_JUDGE_MODEL": "openai-compatible/provider/model-name",
+        "LAB_JUDGES": json.dumps([{"model_name": "provider/model-name"}]),
         "LAB_JUDGE_TEMPERATURE": "0.2",
         "LAB_JUDGE_REQUEST_TIMEOUT_SECONDS": "90",
         "LAB_JUDGE_MAX_RETRIES": "1",
@@ -85,7 +88,7 @@ def test_startup_prepares_assets_then_rebuilds_runtime(tmp_path) -> None:
     assert "/verify" in {route.path for route in app.routes}
 
 
-def test_judge_model_is_preserved_through_openai_compatible_prefix() -> None:
+def test_judge_route_is_preserved_in_explicit_list() -> None:
     config = LegalAgentBenchResourcesServerConfig(
         name="legal_agent_bench",
         host="127.0.0.1",
@@ -93,10 +96,18 @@ def test_judge_model_is_preserved_through_openai_compatible_prefix() -> None:
         entrypoint="app.py",
         judge_base_url="https://judge.example/v1",
         judge_api_key="test-key",  # pragma: allowlist secret
-        judge_model_name="provider/model-name",
+        judges=[{"model_name": "provider/model-name"}],
     )
     env = _build_verifier_env(config)
 
     assert env["LAB_JUDGE_BASE_URL"] == "https://judge.example/v1"
     assert env["LAB_JUDGE_API_KEY"] == "test-key"  # pragma: allowlist secret
-    assert env["LAB_JUDGE_MODEL"] == "openai-compatible/provider/model-name"
+    assert json.loads(env["LAB_JUDGES"]) == [{"model_name": "provider/model-name"}]
+    assert config.judge_profile == "single"
+    assert "LAB_JUDGE_MODEL" not in env and "LAB_JUDGE_PROFILE" not in env
+
+
+@pytest.mark.parametrize("legacy", [{"judge_profile": "single"}, {"judge_model_name": "old-model"}])
+def test_legacy_selector_cannot_conflict_with_explicit_list(tmp_path, legacy) -> None:
+    with pytest.raises(ValueError, match="Select judges through lab_judges"):
+        _server(tmp_path, **legacy)
