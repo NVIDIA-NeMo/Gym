@@ -855,6 +855,22 @@ class TestBuildVerifyPayload:
         )
         assert _build_verify_payload(pair) == {"_ng_task_index": 0, **fields, "response": {"output": "hello"}}
 
+    def test_the_agents_context_is_not_sent_to_the_resources_server(self) -> None:
+        context = {"artifacts": {"media": {"path": "figs/1"}}}
+        task_input = {
+            "responses_create_params": {"input": "q1"},
+            "task_data": {"answer": 42},
+            "agent_context": context,
+        }
+        pair = InputRolloutPair(input={"task_input": task_input}, rollout={"response": {}})
+        assert _build_verify_payload(pair) == {
+            "responses_create_params": {"input": "q1"},
+            "answer": 42,
+            "response": {},
+        }
+        flat = InputRolloutPair(input={"answer": 42, "agent_context": context}, rollout={"response": {}})
+        assert _build_verify_payload(flat) == {"answer": 42, "response": {}}
+
     def test_mixed_input_preserves_fields_and_rejects_conflicts(self) -> None:
         pair = InputRolloutPair(
             input={"task_input": {"task_data": {"answer": 42}, "instance_id": "a"}},

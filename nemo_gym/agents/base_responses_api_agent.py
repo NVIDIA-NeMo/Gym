@@ -172,6 +172,12 @@ class AgentSeedSessionRequest(BaseModel):
             raise ValueError("tool access names must be unique within an agent session")
         return tool_accesses
 
+    @field_validator("agent_context")
+    @classmethod
+    def omit_empty_agent_context(cls, agent_context: AgentContext | None) -> AgentContext | None:
+        """An empty context is no context, so the seed goes out as one without the key, as older agents accept."""
+        return agent_context if agent_context is not None and agent_context.fields() else None
+
     # Keep the model schema; a serializer return annotation would replace it.
     @model_serializer(mode="wrap")
     def _serialize_optional_metadata(self, handler: SerializerFunctionWrapHandler):

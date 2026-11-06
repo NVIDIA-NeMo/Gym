@@ -314,9 +314,10 @@ Some harnesses need task data beyond the initial model input, such as a document
 }
 ```
 
-- `values` holds small inline JSON fields, at most 64 KiB in all.
-- `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..`. The content never travels in the seed.
+- `values` holds small inline JSON fields, at most 64 KiB in all as UTF-8 JSON.
+- `artifacts` names files and directories by a path relative to a root the agent configures. The path cannot be absolute or contain `..` or a NUL byte. The content never travels in the seed.
 - A key appears in `values` or in `artifacts`, not both.
+- An empty `agent_context` counts as none: the seed then omits the key.
 
 An agent declares the keys it reads as a Pydantic model in `agent_context_model`. A field typed `AgentContextArtifact` takes an artifact; any other field takes a value. Before `_seed_agent_session_state()` runs, the base class checks the seed against that model and refuses it with HTTP 422 when:
 
@@ -324,23 +325,37 @@ An agent declares the keys it reads as a Pydantic model in `agent_context_model`
 - the seed carries a key the model does not declare,
 - a required key is missing or a value has the wrong type.
 
-No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. In `_seed_agent_session_state()`, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses a path that leaves `root`, also through a symlink, or that is not a file or directory as `kind` says, with HTTP 422. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes.
+No agent declares a model by default, so a task with context fails on an agent that cannot use it instead of running without it. Where the agent builds its session state, read the typed context with `self.parse_agent_context(body)` and resolve each artifact with `resolve_agent_context_artifact(artifact, root, kind=...)` from `nemo_gym.agents`. It refuses with HTTP 422 a path that leaves `root`, also through a symlink, that is not a file or directory as `kind` says, or that cannot be looked up, such as a name that is too long. The check runs on resolved paths, so a directory under `root` that is a symlink to other storage counts as outside it: configure the real directory as the root. For a directory artifact, only the directory itself is checked; files under it can be symlinks to anywhere, so resolve each file you read and check that it stays under the directory. Read or stage the content when the activation runs, and remove anything you staged, such as a temporary directory or a sandbox upload, when the session closes.
+
+A `SimpleAgent` subclass resolves its context in `_new_session_state()`, which the seed and a checkpoint restore both call; context resolved only in `_seed_agent_session_state()` is lost when a restore rebuilds the session. It puts the context into the model request in `_create_session_episode()`, which creates each session activation's episode. Override `_create_session_episode()`, never `responses()`: environment validation infers `custom-gym-agent-loop` for any agent that overrides `responses()`, while the agent loop is still Simple Agent's.
 
 ```python
 class FigureContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     media: AgentContextArtifact
-    tag: str = ""
+    tag: str
+
+
+@dataclass
+class FigureSessionState(SimpleAgentSessionState):
+    media_dir: Path | None = None
 
 
 class FigureAgent(SimpleAgent):
     agent_context_model = FigureContext
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> FigureSessionState:
+        state = super()._new_session_state(body)
         context = self.parse_agent_context(body)
         media_dir = resolve_agent_context_artifact(context.media, Path(self.config.media_base_dir), kind="directory")
-        ...
+        # dataclasses.fields: copy Simple Agent's state and add the resolved directory.
+        inherited = {field.name: getattr(state, field.name) for field in fields(state)}
+        return FigureSessionState(**inherited, media_dir=media_dir)
+
+    async def _create_session_episode(self, state, body, **kwargs):
+        body = add_figure_images(body, state.media_dir)  # the agent's own request builder
+        return await super()._create_session_episode(state, body, **kwargs)
 ```
 
 On the legacy `/run` path, `agent_context` is one more field of the row the agent receives.

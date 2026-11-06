@@ -218,6 +218,30 @@ def test_legacy_adapter_preserves_task_identity_and_data():
     assert "agent_context" not in request.task.task_input.task_data
 
 
+def test_a_malformed_agent_context_gets_the_typed_runs_final_422() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    context = {"artifacts": {"media": {"path": "../outside"}}}
+    row = {"task_id": "task", "_ng_rollout_id": "rollout", "responses_create_params": {"input": "task"}}
+    episode_request = {
+        "episode_id": {"rollout_id": "rollout"},
+        "task": {
+            "task_id": {"taskset": "resources", "task_id": "task"},
+            "task_input": {"responses_create_params": {"input": "task"}, "task_data": {}, "agent_context": context},
+        },
+    }
+
+    typed = TestClient(environment_server.setup_webserver()).post("/run", json=episode_request)
+    flat = TestClient(adapter.setup_webserver()).post("/run", json={**row, "agent_context": context})
+    episode = TestClient(adapter.setup_webserver()).post("/run", json=episode_request)
+
+    assert typed.status_code == flat.status_code == episode.status_code == 422
+    path_loc = ["task", "task_input", "agent_context", "artifacts", "media", "path"]
+    assert typed.json()["detail"][0]["loc"] == ["body", *path_loc]
+    assert flat.json()["detail"][0]["loc"] == episode.json()["detail"][0]["loc"] == path_loc
+    assert client.calls == []
+
+
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
 def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str) -> None:
     environment_server, client = _environment_server()

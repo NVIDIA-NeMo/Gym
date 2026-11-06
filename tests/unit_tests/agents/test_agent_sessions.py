@@ -313,7 +313,10 @@ def _context_agent(agent_class: type[_Agent]) -> _Agent:
 
 
 def test_a_seed_without_agent_context_keeps_its_wire_form() -> None:
-    assert "agent_context" not in _seed_request().model_dump(mode="json")
+    without_context = _seed_request().model_dump(mode="json")
+    assert "agent_context" not in without_context
+    # An agent server that predates agent_context forbids the key, so an empty context is sent as none.
+    assert _seed_request(agent_context=AgentContext()).model_dump(mode="json") == without_context
     seed = _seed_request(agent_context=AgentContext(values={"tag": "figqa2"}))
     assert AgentSeedSessionRequest.model_validate(seed.model_dump(mode="json")) == seed
 
