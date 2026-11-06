@@ -49,7 +49,11 @@ A lingering `status: started` or missing binding still blocks resume.
 | Confirmed `dispatch_status: not_dispatched`, with a settled error receipt | Fix connectivity, then explicitly resume. Policy generation retries the same seed/token cap; judging retries the saved answer. |
 | Judge error receipt with received HTTP 3xx/4xx/5xx headers, including a truncated error body | Fix the service or credentials, then explicitly resume judging. Non-2xx responses do not consume the two-review budget. Transient 429/5xx responses may already have exhausted their bounded transport retries. |
 | Complete policy stream already accepted as `status: generated`, with a settled journal and trusted Gym projection | Resume normally. A read error after a saved terminal event and `[DONE]` is already handled by the adapter; keep the first complete answer. |
-| Interrupted 2xx body without an accepted complete delivery; `dispatch_status: unknown` without the judge non-2xx evidence above; `status: started`; or missing receipt/projection | Keep the run stopped. This release has no general repair/import command for these states. Preserve the evidence for a maintainer-reviewed recovery. |
+| Policy SSE read timeout, disconnect or payload truncation after successful HTTP headers, settled as `dispatch_status: response_received` | An incomplete attempt advances within the bounded delivery schedule. Resume retains its original partial bytes and receipt. |
+| Interrupted judge 2xx body without an accepted complete delivery; `dispatch_status: unknown` without the judge non-2xx evidence above; `status: started`; or missing receipt/projection | Keep the run stopped. This release has no general repair/import command for these states. Preserve the evidence for a maintainer-reviewed recovery. |
+
+Older runs with policy receipts already marked `unknown` remain stopped; this
+change does not rewrite historical receipts or migrate runtime fingerprints.
 
 Never make a receipt resumable by changing its status, adding `[DONE]`, rewriting
 hashes, deleting an attempt, or restoring a snapshot that omits later dispatches.

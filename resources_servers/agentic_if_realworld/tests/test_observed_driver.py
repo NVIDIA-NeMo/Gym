@@ -5,11 +5,12 @@
 import asyncio
 import copy
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ClientPayloadError, ServerDisconnectedError, SocketTimeoutError
 from fastapi.testclient import TestClient
 
 from benchmarks.agentic_if_realworld import rollout_driver
@@ -28,17 +29,20 @@ from responses_api_models.agentic_if_text.app import TextModel, TextModelConfig
 
 
 @pytest.mark.parametrize(
-    "observed,connection_failures,incomplete_first,text",
+    "observed,connection_failures,incomplete_first,text,stream_failure",
     [
-        (True, 0, False, "OK."),
-        (False, 0, False, "OK."),
-        (True, 1, False, "OK."),
-        (True, 2, False, "OK.."),
-        (True, 1, True, "OK."),
+        (True, 0, False, "OK.", None),
+        (False, 0, False, "OK.", None),
+        (True, 1, False, "OK.", None),
+        (True, 2, False, "OK..", None),
+        (True, 1, True, "OK.", None),
+        (True, 0, True, "OK.", SocketTimeoutError),
+        (True, 0, True, "OK.", ServerDisconnectedError),
+        (True, 0, True, "OK.", ClientPayloadError),
     ],
 )
 def test_http_resume_and_connection_recovery(
-    tmp_path, monkeypatch, observed, connection_failures, incomplete_first, text
+    tmp_path, monkeypatch, observed, connection_failures, incomplete_first, text, stream_failure
 ):
     create(tmp_path / "data")
     dataset = core.Dataset(tmp_path / "data", synthetic=True)
@@ -89,6 +93,16 @@ def test_http_resume_and_connection_recovery(
             if len(policy_calls) <= connection_failures:
                 raise ClientConnectorError(None, ConnectionRefusedError())
             partial = incomplete_first and len(policy_calls) == connection_failures + 1
+            if partial and stream_failure:
+
+                class InterruptedStream(Response):
+                    async def iter_chunked(self, size):
+                        yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+                        raise stream_failure("Synthetic interrupted HTTP 200 stream")
+
+                response = InterruptedStream(200, None)
+                response.headers = {"content-type": "text/event-stream"}
+                return response
             return Response(
                 200,
                 {
@@ -230,7 +244,13 @@ def test_http_resume_and_connection_recovery(
         if observed:
             assert verifications[0]["ng_verifier_invocations"] != verifications[1]["ng_verifier_invocations"]
             assert record["ng_trajectory"]["verifier_invocations"] == verifications[0]["ng_verifier_invocations"]
-        if observed and connection_failures == 0:
+        if stream_failure:
+            failed = core.read(receipts / "model" / (receipt_ids[0] + ".json"))
+            assert failed["reason"] == stream_failure.__name__
+            assert failed["dispatch_status"] == "response_received"
+            assert failed["response_body_complete"] is False
+            assert b'"partial"' in Path(failed["raw_attempts"][0]["path"]).read_bytes()
+        if observed and connection_failures == 0 and not incomplete_first:
             journal_path = next((receipts / "cells").glob("*.json"))
             journal = core.read(journal_path)
             assert journal["result"]["ng_verifier_invocations"] == verifications[0]["ng_verifier_invocations"]

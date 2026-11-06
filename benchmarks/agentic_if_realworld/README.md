@@ -179,6 +179,10 @@ and judging independently. Preserve saved response hashes and receipts.
 `--concurrency N` runs up to N tasks at once, each with its own journal. A policy
 transport error (429, 5xx, timeout) moves a task to its next attempt, as an
 incomplete delivery does, only when a response establishes the delivery outcome.
+A successful policy SSE response interrupted by a read timeout, disconnect or
+payload truncation is an incomplete delivery and advances within the same bounded
+schedule. Partial bytes and their receipt remain saved; an answer already saved
+through its terminal event and `[DONE]` remains selected.
 A connection refusal or connect timeout stops the run; explicit resume retries
 the same seed and token cap while retaining the failed receipt. A complete saved
 SSE answer remains selected even if the connection fails after its final event.

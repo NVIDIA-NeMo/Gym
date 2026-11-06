@@ -313,6 +313,56 @@ def test_connect_failure_stops_and_explicit_resume_retries_same_phase(dataset, t
     assert len(calls) == 2
 
 
+def test_broken_policy_streams_exhaust_only_the_frozen_schedule(dataset, tmp_path, monkeypatch):
+    from aiohttp import SocketTimeoutError
+
+    from nemo_gym.client import http_client
+    from resources_servers.agentic_if_realworld.benchmark.transport import wire_call
+    from resources_servers.agentic_if_realworld.tests.test_transport import Response
+
+    calls = []
+
+    class InterruptedStream(Response):
+        async def iter_chunked(self, size):
+            yield b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n'
+            raise SocketTimeoutError("Synthetic policy read timeout")
+
+    async def request(*args, **kwargs):
+        calls.append((kwargs["json"]["seed"], kwargs["json"]["max_tokens"]))
+        response = InterruptedStream(200, None)
+        response.headers = {"content-type": "text/event-stream"}
+        return response
+
+    async def generate(row, seed, cap, receipt_id, attempt_index):
+        path = tmp_path / "model" / (receipt_id + ".json")
+        receipt = await wire_call(
+            {**dataset.request("synthetic"), "seed": seed, "max_tokens": cap, "stream": True},
+            endpoint="http://synthetic.invalid",
+            key_env="SYNTHETIC",
+            path=path,
+        )
+        return {
+            "complete": False,
+            "dispatch_status": receipt["dispatch_status"],
+            "receipt_path": str(path),
+            "receipt_sha256": digest(path),
+        }
+
+    async def no_judge(*args, **kwargs):
+        raise AssertionError("Partial policy bytes must never be judged")
+
+    monkeypatch.setattr(http_client, "request", request)
+    monkeypatch.setenv("SYNTHETIC", "synthetic")
+    args = {"directory": tmp_path / "run", "settings": {}, "generate": generate, "verify": no_judge}
+    result = asyncio.run(run_cell(dataset, "synthetic", **args))
+    assert result["mask_sample"] is True and result["reason"] == "incomplete_delivery_budget_exhausted"
+    assert calls == list(PHASES)
+    saved = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert asyncio.run(run_cell(dataset, "synthetic", **args, resume=True)) == result
+    assert calls == list(PHASES)
+    assert all(path.read_bytes() == value for path, value in saved.items())
+
+
 def test_judge_transport_recovery_never_regenerates_selected_answer(dataset, tmp_path, monkeypatch):
     from nemo_gym.client import http_client
     from resources_servers.agentic_if_realworld.benchmark.scoring import score

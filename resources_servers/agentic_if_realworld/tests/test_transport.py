@@ -387,8 +387,12 @@ def test_transport_only_marks_proven_connect_failures_as_not_dispatched(tmp_path
 
 
 @pytest.mark.parametrize("done", [False, True])
-def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeypatch, done):
-    from aiohttp import ClientPayloadError
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("failure", ["payload", "timeout", "disconnect"])
+def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeypatch, done, stream, failure):
+    from aiohttp import ClientPayloadError, ServerDisconnectedError, SocketTimeoutError
+
+    errors = {"payload": ClientPayloadError, "timeout": SocketTimeoutError, "disconnect": ServerDisconnectedError}
 
     event = {"choices": [{"delta": {"content": "OK."}, "finish_reason": "stop"}]}
     raw = ("data: " + json.dumps(event) + "\n\n" + ("data: [DONE]\n\n" if done else "")).encode()
@@ -396,7 +400,7 @@ def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeyp
     class InterruptedStream(Response):
         async def iter_chunked(self, size):
             yield raw
-            raise ClientPayloadError("stream ended after saved bytes")
+            raise errors[failure]("stream ended after saved bytes")
 
     response = InterruptedStream(200, None)
     response.headers = {"content-type": "text/event-stream"}
@@ -407,14 +411,34 @@ def test_read_error_preserves_only_a_saved_complete_sse_stream(tmp_path, monkeyp
     monkeypatch.setattr(http_client, "request", request)
     monkeypatch.setenv("SYNTHETIC", "synthetic")
     receipt = asyncio.run(
-        wire_call({}, endpoint="http://synthetic.invalid", key_env="SYNTHETIC", path=tmp_path / "receipt.json")
+        wire_call(
+            {"stream": stream},
+            endpoint="http://synthetic.invalid",
+            key_env="SYNTHETIC",
+            path=tmp_path / "receipt.json",
+        )
     )
     assert receipt["status"] == ("generated" if done else "delivery_error")
     assert len(receipt["raw_attempts"]) == 1
     if done:
         assert delivered(verified_response(receipt))["message"]["content"] == "OK."
     else:
-        assert receipt["dispatch_status"] == "unknown"
+        assert receipt["dispatch_status"] == ("response_received" if stream else "unknown")
+        assert receipt["response_body_complete"] is False
+        assert (tmp_path / "receipt.a1.http").read_bytes() == raw
+        saved = {path: path.read_bytes() for path in tmp_path.iterdir()}
+        assert (
+            asyncio.run(
+                wire_call(
+                    {"stream": stream},
+                    endpoint="http://synthetic.invalid",
+                    key_env="SYNTHETIC",
+                    path=tmp_path / "receipt.json",
+                )
+            )
+            == receipt
+        )
+        assert all(path.read_bytes() == value for path, value in saved.items())
 
 
 @pytest.mark.parametrize("status", [401, 404, 429, 503])

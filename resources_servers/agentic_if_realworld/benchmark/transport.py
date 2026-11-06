@@ -134,7 +134,13 @@ class RetryableTransportError(ValueError):
 
 async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> dict:
     """Save before dispatch. Existing started receipts require explicit reconciliation."""
-    from aiohttp import ClientConnectorError, ClientTimeout, ConnectionTimeoutError
+    from aiohttp import (
+        ClientConnectionError,
+        ClientConnectorError,
+        ClientPayloadError,
+        ClientTimeout,
+        ConnectionTimeoutError,
+    )
 
     from nemo_gym.client import request
 
@@ -239,7 +245,11 @@ async def wire_call(body: dict, *, endpoint: str, key_env: str, path: Path) -> d
                 try:
                     value = replay_sse(raw_path, require_done=True)
                 except (ValueError, TypeError, KeyError):
-                    pass
+                    if body.get("stream") is True and isinstance(
+                        error, (ClientConnectionError, ClientPayloadError, TimeoutError)
+                    ):
+                        # Received policy headers settle dispatch; partial bytes cannot be a selected answer.
+                        record["dispatch_status"] = "response_received"
                 else:
                     # EOF/read failure after a saved terminal event cannot discard a completed answer.
                     record.update(status="generated", response=value)
