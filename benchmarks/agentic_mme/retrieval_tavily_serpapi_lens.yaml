@@ -9,7 +9,6 @@ agentic_mme_agent:
       retrieval:
         mode: live
         search_provider: tavily
-        lens_provider: serpapi
         tavily_api_key: ${oc.env:TAVILY_API_KEY,""}
         serpapi_api_key: ${oc.env:SERPAPI_API_KEY,""}
         allow_image_upload: true

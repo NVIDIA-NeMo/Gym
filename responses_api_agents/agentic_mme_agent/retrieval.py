@@ -8,10 +8,10 @@ The web-search provider is configurable (search_provider):
     serpapi  serpapi.com (engine=google / google_lens), answers mapped to Serper's shape
     tavily   api.tavily.com/search        google_search only
     exa      api.exa.ai/search            google_search only
-google_lens_search (reverse image search) runs through SerpAPI's Google Lens, which takes the image
-through SerpAPI's own Image API (lens_provider: serpapi | none; default "auto" = serpapi when it is
-the search provider, else none), e.g. Tavily text search with SerpAPI's Google Lens:
-search_provider=tavily, lens_provider=serpapi.
+google_lens_search (reverse image search) is always offered with text search, as in the benchmark,
+and runs through SerpAPI's Google Lens, which takes the image through SerpAPI's own Image API. Live
+retrieval therefore needs serpapi_api_key and allow_image_upload whatever the text-search provider,
+e.g. Tavily text search with SerpAPI's Google Lens.
 
 cache_root (optional) puts a shared local cache in front of every live call (search_cache.py:
 flat files + FTS5 fuzzy index over earlier queries, Lens results keyed by image pixels, fetched
@@ -85,15 +85,14 @@ SEARCH_PROVIDERS = ("serper", "serpapi", "tavily", "exa")
 CONTAMINATION_PATTERNS = ("agentic-mme", "agentic_mme", "agentic mme", "agenticmme", "crystal1047", "chos3ne11ven")
 # A filtered page fails with the same error as a page the provider has no content for.
 PAGE_UNAVAILABLE = "no page content available for this URL"
-# Providers that can answer google_lens_search (reverse image search through Google Lens). Serper's
+# The provider that answers google_lens_search (reverse image search through Google Lens). Serper's
 # Lens needs the image at a public URL, i.e. a third-party image host; this integration does not use one.
-LENS_PROVIDERS = ("serpapi",)
+LENS_PROVIDER = "serpapi"
 
 
 class RetrievalConfig(BaseModel):
     mode: Literal["disabled", "live", "replay"] = "disabled"
     search_provider: Literal["serper", "serpapi", "tavily", "exa"] = "serper"
-    lens_provider: Literal["auto", "serpapi", "none"] = "auto"
     fetch_provider: Literal["jina", "exa"] = "jina"
     # Case-insensitive substrings; an empty list disables the contamination guard.
     contamination_patterns: list[str] = Field(default_factory=lambda: list(CONTAMINATION_PATTERNS))
@@ -107,7 +106,8 @@ class RetrievalConfig(BaseModel):
     cache_root: str = ""
     cache_fuzzy_threshold: float = Field(default=0.0, ge=0, le=1)
     cache_write: bool = True
-    # Consent to send task images to SerpAPI for Google Lens (required for google_lens_search).
+    # Consent to send task images to SerpAPI for Google Lens; required for live retrieval, since
+    # google_lens_search is always offered with text search.
     allow_image_upload: bool = False
     timeout_seconds: float = Field(default=30, gt=0, le=300)
     max_response_bytes: int = Field(default=2_000_000, gt=0, le=10_000_000)
@@ -118,23 +118,18 @@ class RetrievalConfig(BaseModel):
             raise ValueError(
                 f"live retrieval with search_provider={self.search_provider} requires {self.search_provider}_api_key"
             )
-        lens = self.lens_provider_resolved()
-        if self.mode == "live" and lens != "none" and not self.provider_key(lens):
-            raise ValueError(f"google_lens_search with lens_provider={lens} requires {lens}_api_key")
+        if self.mode == "live" and not self.provider_key(LENS_PROVIDER):
+            raise ValueError("live retrieval requires serpapi_api_key: google_lens_search runs through SerpAPI")
+        if self.mode == "live" and not self.allow_image_upload:
+            raise ValueError(
+                "live retrieval requires allow_image_upload=true: google_lens_search uploads the image to SerpAPI"
+            )
         if self.mode == "live" and self.fetch_provider == "exa" and not self.exa_api_key.get_secret_value():
             raise ValueError("fetch_webpage with fetch_provider=exa requires exa_api_key")
         return self
 
     def provider_key(self, provider: str | None = None) -> str:
         return getattr(self, f"{provider or self.search_provider}_api_key").get_secret_value()
-
-    def lens_provider_resolved(self) -> str:
-        if self.lens_provider == "auto":
-            return self.search_provider if self.search_provider in LENS_PROVIDERS else "none"
-        return self.lens_provider
-
-    def lens_available(self) -> bool:
-        return self.lens_provider_resolved() != "none"
 
 
 # SerpAPI's Image API (POST /image) accepts JPEG/PNG/WebP up to 500 KB; the image_id lasts 10 minutes.
@@ -432,7 +427,7 @@ class Retrieval:
         if isinstance(args, SearchArgs):
             return cache.get_search(args.query, self.config.search_provider, args.gl, args.hl)
         if isinstance(args, LensArgs):
-            hit = cache.get_lens(workspace.get(args.image_index), self.config.lens_provider_resolved())
+            hit = cache.get_lens(workspace.get(args.image_index), LENS_PROVIDER)
         else:
             hit = cache.get_browse(args.url, self.config.fetch_provider)
         return hit, "exact" if hit is not None else "miss", None
@@ -443,7 +438,7 @@ class Retrieval:
         elif isinstance(args, SearchArgs):
             cache.put_search(args.query, out["raw"], self.config.search_provider, args.gl, args.hl)
         else:
-            cache.put_lens(workspace.get(args.image_index), out["raw"], self.config.lens_provider_resolved())
+            cache.put_lens(workspace.get(args.image_index), out["raw"], LENS_PROVIDER)
 
     async def _live(self, name: str, args: BaseModel, workspace: ImageWorkspace) -> dict[str, Any]:
         if isinstance(args, FetchArgs):
@@ -470,9 +465,7 @@ class Retrieval:
             # full_text (the whole page) feeds the cache and the contamination scan; _decontaminate
             # drops it before the result reaches the model.
             return {"ok": True, "tool": name, "url": args.url, "context": text[: args.max_chars], "full_text": text}
-        if isinstance(args, LensArgs) and not self.config.lens_available():
-            raise ValueError(f"reverse image search is not available (lens_provider={self.config.lens_provider})")
-        provider = self.config.lens_provider_resolved() if isinstance(args, LensArgs) else self.config.search_provider
+        provider = LENS_PROVIDER if isinstance(args, LensArgs) else self.config.search_provider
         key = self.config.provider_key(provider)
         if isinstance(args, SearchArgs) and provider in ("tavily", "exa"):
             if provider == "tavily":

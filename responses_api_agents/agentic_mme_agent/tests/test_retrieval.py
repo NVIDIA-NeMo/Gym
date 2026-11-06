@@ -13,6 +13,11 @@ from responses_api_agents.agentic_mme_agent.retrieval import Retrieval, Retrieva
 from responses_api_agents.agentic_mme_agent.tools import ImageWorkspace
 
 
+def live(**kwargs) -> RetrievalConfig:
+    """A live config. Google Lens comes with every text search, so SerpAPI and upload consent are always set."""
+    return RetrievalConfig(**({"mode": "live", "serpapi_api_key": "lens", "allow_image_upload": True} | kwargs))
+
+
 @pytest.fixture
 def workspace():
     workspace = ImageWorkspace()
@@ -107,7 +112,7 @@ async def test_disabled_and_lens_index(workspace) -> None:
     with pytest.raises(ValueError, match="disabled"):
         await Retrieval(RetrievalConfig()).call("google_search", {"query": "x"}, workspace)
     with pytest.raises(ValueError, match="image_index"):
-        config = RetrievalConfig(mode="live", serper_api_key="test")
+        config = live(serper_api_key="test")
         await Retrieval(config).call("google_lens_search", {"image_index": 8}, workspace)
 
 
@@ -115,7 +120,7 @@ async def test_disabled_and_lens_index(workspace) -> None:
 async def test_live_search_payload(workspace, monkeypatch) -> None:
     http = AsyncMock(return_value=b'{"organic":[{"title":"Result","link":"https://example.com"}]}')
     monkeypatch.setattr(retrieval, "http_payload", http)
-    config = RetrievalConfig(mode="live", serper_api_key="test-serper")
+    config = live(serper_api_key="test-serper")
     result = await Retrieval(config).call("google_search", {"query": "q"}, workspace)
     args, kwargs = http.call_args
     assert args[1:] == ("POST", "https://google.serper.dev/search")
@@ -129,17 +134,13 @@ async def test_live_search_payload(workspace, monkeypatch) -> None:
 async def test_lens_upload_optin_and_flow(workspace, monkeypatch) -> None:
     http = AsyncMock()
     monkeypatch.setattr(retrieval, "http_payload", http)
-    client = Retrieval(RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test"))
-    with pytest.raises(ValueError, match="allow_image_upload"):
-        await client.call("google_lens_search", {}, workspace)
+    # Lens comes with every text search, so live retrieval needs upload consent and the SerpAPI key.
+    with pytest.raises(ValidationError, match="allow_image_upload"):
+        RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test")
+    with pytest.raises(ValidationError, match="serpapi_api_key"):
+        RetrievalConfig(mode="live", serper_api_key="test", allow_image_upload=True)
     http.assert_not_called()
-    # Serper has no Lens here (it needs a third-party image host): the tool is unavailable.
-    assert not RetrievalConfig(mode="live", serper_api_key="test", allow_image_upload=True).lens_available()
-    with pytest.raises(ValidationError):
-        RetrievalConfig(mode="live", serper_api_key="test", lens_provider="serper")
-    client = Retrieval(
-        RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test", allow_image_upload=True)
-    )
+    client = Retrieval(live(search_provider="serpapi", serpapi_api_key="test", allow_image_upload=True))
     http.side_effect = [b'{"image_id": "img-1"}', b'{"visual_matches":[{"title":"red"}]}']
     result = await client.call("google_lens_search", {}, workspace)
     assert result["ok"]
@@ -151,7 +152,7 @@ async def test_lens_upload_optin_and_flow(workspace, monkeypatch) -> None:
 async def test_fetch_truncates_and_invalid_providers_fail(workspace, monkeypatch) -> None:
     http = AsyncMock(return_value=b"abcdef")
     monkeypatch.setattr(retrieval, "http_payload", http)
-    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="test", jina_api_key="jina"))
+    client = Retrieval(live(serper_api_key="test", jina_api_key="jina"))
     assert (await client.call("fetch_webpage", {"url": "https://example.com", "max_chars": 3}, workspace))[
         "context"
     ] == "abc"
@@ -160,9 +161,7 @@ async def test_fetch_truncates_and_invalid_providers_fail(workspace, monkeypatch
     with pytest.raises(ValueError, match="invalid JSON"):
         await client.call("google_search", {"query": "q"}, workspace)
     http.return_value = b'{"error": "no image"}'
-    upload_client = Retrieval(
-        RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="test", allow_image_upload=True)
-    )
+    upload_client = Retrieval(live(search_provider="serpapi", serpapi_api_key="test", allow_image_upload=True))
     with pytest.raises(ValueError, match="image upload"):
         await upload_client.call("google_lens_search", {}, workspace)
 
@@ -210,9 +209,12 @@ def _fake_request(payload):
 def test_provider_keys_are_required_per_provider() -> None:
     with pytest.raises(ValidationError):
         RetrievalConfig(mode="live", search_provider="serpapi", serper_api_key="only-serper")
-    for provider in ("serper", "serpapi", "tavily", "exa"):
-        config = RetrievalConfig(mode="live", search_provider=provider, **{f"{provider}_api_key": "k"})
-        assert config.lens_available() == (provider == "serpapi")
+    for provider in ("serper", "tavily", "exa"):
+        assert live(search_provider=provider, **{f"{provider}_api_key": "k"})
+        with pytest.raises(ValidationError, match="serpapi_api_key"):  # Lens needs SerpAPI with any text search
+            RetrievalConfig(
+                mode="live", search_provider=provider, allow_image_upload=True, **{f"{provider}_api_key": "k"}
+            )
 
 
 @pytest.mark.asyncio
@@ -224,7 +226,7 @@ async def test_serpapi_search_maps_to_serper_shape_and_normalises_zh(workspace, 
         }
     )
     monkeypatch.setattr(retrieval, "request", http)
-    client = Retrieval(RetrievalConfig(mode="live", search_provider="serpapi", serpapi_api_key="k"))
+    client = Retrieval(live(search_provider="serpapi", serpapi_api_key="k"))
     out = await client.call("google_search", {"query": "q", "hl": "zh"}, workspace)
     assert out["raw"]["organic"] == [{"title": "T", "link": "https://a.example", "snippet": "S", "date": None}]
     assert out["raw"]["knowledgeGraph"]["title"] == "KG"
@@ -253,28 +255,24 @@ async def test_serpapi_search_maps_to_serper_shape_and_normalises_zh(workspace, 
 async def test_tavily_and_exa_search_map_to_serper_shape(workspace, monkeypatch, provider, payload, url) -> None:
     http = _fake_request(payload)
     monkeypatch.setattr(retrieval, "request", http)
-    client = Retrieval(RetrievalConfig(mode="live", search_provider=provider, **{f"{provider}_api_key": "k"}))
+    client = Retrieval(live(search_provider=provider, **{f"{provider}_api_key": "k"}))
     out = await client.call("google_search", {"query": "q"}, workspace)
     hit = out["raw"]["organic"][0]
     assert hit["title"] == "T" and hit["link"] == "https://a.example" and 0 < len(hit["snippet"]) <= 600
     assert http.call_args.args[:2] == ("POST", url)
-    with pytest.raises(ValueError, match="reverse image search"):
-        await client.call("google_lens_search", {"image_index": 0}, workspace)
 
 
 @pytest.mark.asyncio
 async def test_tavily_search_with_serpapi_lens(workspace, monkeypatch) -> None:
     with pytest.raises(ValidationError):  # Lens through SerpAPI needs the SerpAPI key
-        RetrievalConfig(mode="live", search_provider="tavily", tavily_api_key="t", lens_provider="serpapi")
+        RetrievalConfig(mode="live", search_provider="tavily", tavily_api_key="t", allow_image_upload=True)
     config = RetrievalConfig(
         mode="live",
         search_provider="tavily",
         tavily_api_key="t",
-        lens_provider="serpapi",
         serpapi_api_key="s",
         allow_image_upload=True,  # SerpAPI hosts the image itself
     )
-    assert config.lens_available()
     calls = []
 
     async def fake_payload(cfg, method, url, **kwargs):
@@ -316,8 +314,8 @@ async def test_exa_fetch_provider_uses_contents_endpoint(workspace, monkeypatch)
     http = AsyncMock(return_value=json.dumps({"results": [{"url": "https://a.example", "text": "x" * 100}]}).encode())
     monkeypatch.setattr(retrieval, "http_payload", http)
     with pytest.raises(ValidationError, match="fetch_provider=exa requires exa_api_key"):
-        RetrievalConfig(mode="live", serper_api_key="s", fetch_provider="exa")
-    client = Retrieval(RetrievalConfig(mode="live", search_provider="exa", exa_api_key="k", fetch_provider="exa"))
+        live(serper_api_key="s", fetch_provider="exa")
+    client = Retrieval(live(search_provider="exa", exa_api_key="k", fetch_provider="exa"))
     page = await client.call("fetch_webpage", {"url": "https://a.example", "max_chars": 10}, workspace)
     assert page["context"] == "x" * 10 and "full_text" not in page
     args, kwargs = http.call_args
@@ -338,7 +336,7 @@ async def test_contamination_guard_drops_benchmark_items(workspace, monkeypatch)
     ]
     http = AsyncMock(return_value=json.dumps({"organic": organic}).encode())
     monkeypatch.setattr(retrieval, "http_payload", http)
-    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s"))
+    client = Retrieval(live(serper_api_key="s"))
     result = await client.call("google_search", {"query": "q"}, workspace)
     assert [r["title"] for r in result["raw"]["organic"]] == ["Clean"]
     assert result["contaminated"] == 2 and "Mirror" not in result["context"]
@@ -354,7 +352,7 @@ async def test_contamination_guard_drops_benchmark_items(workspace, monkeypatch)
     page = await client.call("fetch_webpage", {"url": "https://blog.example/post"}, workspace)
     assert page["error"] == retrieval.PAGE_UNAVAILABLE and not page["ok"] and page["contaminated"] == 1
     # An empty pattern list disables the guard.
-    off = Retrieval(RetrievalConfig(mode="live", serper_api_key="s", contamination_patterns=[]))
+    off = Retrieval(live(serper_api_key="s", contamination_patterns=[]))
     assert (
         "agentic_mme" in (await off.call("fetch_webpage", {"url": "https://blog.example/post"}, workspace))["context"]
     )
@@ -366,7 +364,7 @@ async def test_contamination_guard_scans_the_page_past_max_chars(workspace, monk
     page_text = "The fossil sold for 44.6 million. " + "filler " * 100 + "Source: the Agentic-MME benchmark."
     http = AsyncMock(return_value=page_text.encode())
     monkeypatch.setattr(retrieval, "http_payload", http)
-    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s"))
+    client = Retrieval(live(serper_api_key="s"))
     page = await client.call("fetch_webpage", {"url": "https://blog.example/post", "max_chars": 40}, workspace)
     assert page["error"] == retrieval.PAGE_UNAVAILABLE and not page["ok"] and page["contaminated"] == 1
     assert "44.6" not in json.dumps(page) and "full_text" not in page
@@ -377,7 +375,7 @@ async def test_contamination_guard_scans_full_cached_pages(tmp_path, workspace, 
     page_text = "The fossil sold for 44.6 million. " + "filler " * 100 + "Source: the Agentic-MME benchmark."
     http = AsyncMock(return_value=page_text.encode())
     monkeypatch.setattr(retrieval, "http_payload", http)
-    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s", cache_root=str(tmp_path)))
+    client = Retrieval(live(serper_api_key="s", cache_root=str(tmp_path)))
     args = {"url": "https://blog.example/post", "max_chars": 40}
     miss = await client.call("fetch_webpage", args, workspace)
     hit = await client.call("fetch_webpage", args, workspace)
@@ -394,11 +392,9 @@ async def test_contamination_guard_filters_cache_hits_but_cache_keeps_raw(tmp_pa
     ]
     http = AsyncMock(return_value=json.dumps({"organic": organic}).encode())
     monkeypatch.setattr(retrieval, "http_payload", http)
-    off = Retrieval(
-        RetrievalConfig(mode="live", serper_api_key="s", cache_root=str(tmp_path), contamination_patterns=[])
-    )
+    off = Retrieval(live(serper_api_key="s", cache_root=str(tmp_path), contamination_patterns=[]))
     assert len((await off.call("google_search", {"query": "cached q"}, workspace))["raw"]["organic"]) == 2
-    on = Retrieval(RetrievalConfig(mode="live", serper_api_key="s", cache_root=str(tmp_path)))
+    on = Retrieval(live(serper_api_key="s", cache_root=str(tmp_path)))
     hit = await on.call("google_search", {"query": "cached q"}, workspace)
     assert hit["cache"] == "exact" and [r["title"] for r in hit["raw"]["organic"]] == ["Clean"]
     assert http.call_count == 1
@@ -423,7 +419,7 @@ SERPER_ANSWER = {
 @pytest.mark.asyncio
 async def test_search_is_shown_as_compact_text_without_answer_box(workspace, monkeypatch) -> None:
     monkeypatch.setattr(retrieval, "http_payload", AsyncMock(return_value=json.dumps(SERPER_ANSWER).encode()))
-    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s"))
+    client = Retrieval(live(serper_api_key="s"))
     result = await client.call("google_search", {"query": "eiffel tower height"}, workspace)
     context = result["context"]
     assert context.startswith("[KnowledgeGraph] Eiffel Tower\n  - Wrought-iron tower in Paris")

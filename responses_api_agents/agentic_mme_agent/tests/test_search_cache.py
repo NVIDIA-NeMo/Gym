@@ -58,6 +58,7 @@ async def test_fuzzy_hit_shows_the_model_which_query_it_answers(tmp_path, monkey
         mode="live",
         search_provider="serpapi",
         serpapi_api_key="s",
+        allow_image_upload=True,
         cache_root=str(tmp_path),
         cache_fuzzy_threshold=0.8,
     )
@@ -87,7 +88,6 @@ async def test_miss_calls_provider_then_later_calls_hit_without_network(tmp_path
         mode="live",
         search_provider="tavily",
         tavily_api_key="t",
-        lens_provider="serpapi",
         serpapi_api_key="s",
         allow_image_upload=True,
         cache_root=str(tmp_path),

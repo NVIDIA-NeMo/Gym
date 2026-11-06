@@ -113,9 +113,9 @@ the network.
 ### Web search providers and shared cache
 
 `retrieval.search_provider` picks the text-search backend (`serper`, `serpapi`,
-`tavily`, `exa`); `retrieval.lens_provider` picks Google Lens (`serpapi` or `none`;
-`auto` is `serpapi` when SerpAPI is the search provider). With Serper, Tavily or Exa text
-search, Lens is off unless `lens_provider: serpapi` is set. Every result is
+`tavily`, `exa`). Google Lens (google_lens_search) is always offered with text search,
+as in the benchmark, and always runs through SerpAPI, so live retrieval needs
+`serpapi_api_key` and `allow_image_upload: true` whatever the text-search provider. Every result is
 normalised to the Serper shape, so the model sees the same tool output either way.
 Ready-made overlays for `benchmarks/agentic_mme/config.yaml` (keys come from the
 environment):
@@ -123,8 +123,6 @@ environment):
 | overlay | text search | Lens | keys |
 |---|---|---|---|
 | retrieval_serpapi.yaml | SerpAPI | SerpAPI | SERPAPI_API_KEY |
-| retrieval_tavily.yaml | Tavily | none | TAVILY_API_KEY |
-| retrieval_exa.yaml | Exa (search + pages) | none | EXA_API_KEY |
 | retrieval_tavily_serpapi_lens.yaml | Tavily | SerpAPI | TAVILY_API_KEY, SERPAPI_API_KEY |
 | retrieval_exa_serpapi_lens.yaml | Exa (search + pages) | SerpAPI | EXA_API_KEY, SERPAPI_API_KEY |
 

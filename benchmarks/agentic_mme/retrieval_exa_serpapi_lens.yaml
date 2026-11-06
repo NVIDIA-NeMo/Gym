@@ -10,7 +10,6 @@ agentic_mme_agent:
         mode: live
         search_provider: exa
         fetch_provider: exa
-        lens_provider: serpapi
         exa_api_key: ${oc.env:EXA_API_KEY,""}
         serpapi_api_key: ${oc.env:SERPAPI_API_KEY,""}
         allow_image_upload: true

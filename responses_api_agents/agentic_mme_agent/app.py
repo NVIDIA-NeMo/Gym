@@ -88,9 +88,9 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
     def tool_schemas(self) -> list[dict[str, Any]]:
         tools = dict(IMAGE_TOOLS)
         if self.config.retrieval.mode != "disabled":
+            # Text search always comes with reverse image search (Google Lens), in live and replay mode alike,
+            # so a replay offers exactly the tools of the run it replays.
             tools.update(RETRIEVAL_TOOLS)
-            if self.config.retrieval.mode == "live" and not self.config.retrieval.lens_available():
-                tools.pop("google_lens_search")  # Tavily / Exa: no reverse image search
         return [function_schema(name, model, description) for name, (model, description) in tools.items()]
 
     async def _episode(
