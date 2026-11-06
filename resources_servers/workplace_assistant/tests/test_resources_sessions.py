@@ -273,7 +273,7 @@ def test_mcp_tool_calls_reach_the_tables_seeded_under_the_callers_id() -> None:
     ],
 )
 @pytest.mark.parametrize("over_mcp", [False, True])
-def test_malformed_typed_seed_cannot_fall_back_to_legacy(payload: dict[str, Any], over_mcp: bool) -> None:
+def test_malformed_typed_seed_cannot_fall_back_to_cookie_seed(payload: dict[str, Any], over_mcp: bool) -> None:
     server = make_server(expose_tools_over_mcp=over_mcp)
     webserver = server.setup_webserver()
     maybe_auto_expose(server, webserver)
@@ -294,7 +294,7 @@ def test_a_run_seed_keeps_a_row_with_its_own_task_id() -> None:
 
 
 @pytest.mark.parametrize("completed", ["active", "verified", "closed"])
-def test_legacy_seed_cannot_replace_a_typed_session(completed: str) -> None:
+def test_cookie_seed_cannot_replace_a_typed_session(completed: str) -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json=seed_json()).status_code == 200
@@ -383,7 +383,7 @@ def test_reverify_without_a_session_is_explicitly_unsupported() -> None:
     assert client.post("/verify", json=verify_json(SEND)).json()["mask_sample"] is True
 
 
-def test_next_legacy_run_keeps_its_cookie_and_replaces_the_finished_run() -> None:
+def test_next_cookie_run_keeps_its_cookie_and_replaces_the_finished_run() -> None:
     server = make_server()
     client = TestClient(server.setup_webserver())
     assert client.post("/seed_session", json={}).status_code == 200
@@ -401,7 +401,7 @@ def test_next_legacy_run_keeps_its_cookie_and_replaces_the_finished_run() -> Non
     assert server.session_id_to_tool_env == {}
 
 
-def test_typed_seed_cannot_adopt_a_live_legacy_session() -> None:
+def test_typed_seed_cannot_adopt_a_live_cookie_session() -> None:
     server = make_server()
     webserver = server.setup_webserver()
     legacy, typed = TestClient(webserver), TestClient(webserver)

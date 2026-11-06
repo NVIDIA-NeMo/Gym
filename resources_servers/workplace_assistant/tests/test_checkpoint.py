@@ -27,7 +27,11 @@ from omegaconf import DictConfig
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ResourcesSessionConflictError
+from nemo_gym.server_runtime import (
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
+)
 from resources_servers.workplace_assistant import app as workplace_app
 from resources_servers.workplace_assistant.app import (
     WorkbenchResourcesServer,
@@ -426,6 +430,24 @@ async def test_an_unused_restored_cookie_session_can_be_adopted_without_resettin
     await restored.seed_session(request, typed_seed())
     assert _export_tool_env(restored.session_id_to_tool_env["typed-session"]) == _export_tool_env(tool_env)
     assert restored._session_episodes["typed-session"] == (typed_seed().episode_id, typed_seed().task_id)
+
+
+async def test_a_typed_seed_with_invalid_task_data_cannot_adopt_a_restored_session() -> None:
+    source, source_app = make_server()
+    async with client_for(source_app) as client:
+        await client.post("/ng-rollout/r/seed_session", json=SEED)
+        await call_tools(client, BEFORE, "r")
+    [(session_id, tool_env)] = source.session_id_to_tool_env.items()
+    restored, _ = make_server()
+    await restored.restore_session_states({"typed-session": _export_tool_env(tool_env)})
+
+    request = Request({"type": "http", "session": {}})
+    invalid = typed_seed().model_copy(update={"task_data": {"ground_truth": []}})
+    with pytest.raises(ResourcesSeedRejectedError):
+        await restored.seed_session(request, invalid)
+
+    assert restored.session_identity("typed-session") is None
+    assert "typed-session" in restored._restored_unbound_sessions
 
 
 async def test_a_restored_cookie_session_in_use_cannot_be_adopted(tmp_path: Path) -> None:

@@ -192,6 +192,8 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     async def route_to_python_function(self, path: str, body: WorkbenchRequest, request: Request) -> WorkbenchResponse:
         session_id = request.session[SESSION_ID_KEY]
 
+        # No await between this lookup and the call, so verify and close (which release under session_lock) cannot
+        # interleave with a tool call; take session_lock if this ever awaits.
         if session_id not in self.session_id_to_tool_env:
             raise ResourcesSessionLostError("No seeded workplace_assistant session for this tool call")
         # The cookie run's first tool call claims restored tables, so another episode's typed seed cannot adopt them.
