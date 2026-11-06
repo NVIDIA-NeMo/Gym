@@ -270,9 +270,9 @@ def resolve_agent_selections(
 
 
 def resolve_source_agent_selections(
+    *,
     baseline_files: Sequence[RunFile],
     candidate_files: Sequence[RunFile],
-    *,
     agent_name: Optional[str] = None,
     baseline_agent_name: Optional[str] = None,
     baseline_agent_names: Optional[Sequence[str]] = None,
@@ -359,7 +359,7 @@ def build_loaded_run(run_file: RunFile, agent_name: str) -> LoadedRun:
 
 
 def validate_independent_sources(
-    baseline_files: Sequence[RunFile], candidate_files: Sequence[RunFile], *, selection: SourceAgentSelection
+    *, baseline_files: Sequence[RunFile], candidate_files: Sequence[RunFile], selection: SourceAgentSelection
 ) -> None:
     """Reject reused selected source observations, including filesystem aliases."""
     seen: Dict[Tuple[str, Path, str], RunFile] = {}

@@ -16,7 +16,7 @@
 
 from math import isfinite, sqrt
 from statistics import fmean, stdev
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple, TypeGuard
 
 from scipy.stats import t
 
@@ -32,7 +32,7 @@ from nemo_gym.eval.comparison.loading import LoadedRun, is_token_accounting_only
 from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, Stat, is_primary_metric
 
 
-def _finite_number(value: object) -> bool:
+def _finite_number(value: object) -> TypeGuard[int | float]:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
 
 

@@ -20,6 +20,7 @@ from nemo_gym.config.global_config import TASK_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.statistics.unpaired_welch_fixed_suite import summarize_sample
 from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
 from nemo_gym.eval.comparison.suite.schema import (
+    CoverageStatus,
     SuiteCoverage,
     SuiteRunSummary,
     SuiteSampleSummary,
@@ -34,7 +35,7 @@ def pool_suite_summaries(
         return summaries[0]
     scores = [score for source in summaries for score in source.repeat_scores]
     coverages = [source.coverage for source in summaries]
-    status = (
+    status: CoverageStatus = (
         "incomplete"
         if collection_notes or any(coverage.status == "incomplete" for coverage in coverages)
         else "unverified"

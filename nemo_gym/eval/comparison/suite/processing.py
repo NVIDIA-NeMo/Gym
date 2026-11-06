@@ -156,7 +156,12 @@ def compare_suite_cell(
     candidate_runs = tuple(_select_metric_repeats(run, metrics) for run in candidate_runs)
     baseline_coverage = [run_coverage(run) for run in baseline_runs]
     candidate_coverage = [run_coverage(run) for run in candidate_runs]
-    collection_notes = check_collection_coverage(baseline_runs, candidate_runs, baseline_coverage, candidate_coverage)
+    collection_notes = check_collection_coverage(
+        baseline=baseline_runs,
+        candidate=candidate_runs,
+        baseline_coverage=baseline_coverage,
+        candidate_coverage=candidate_coverage,
+    )
     baseline_count = sum(run.repeat_count for run in baseline_runs)
     candidate_count = sum(run.repeat_count for run in candidate_runs)
     if baseline_count < 2 or candidate_count < 2:

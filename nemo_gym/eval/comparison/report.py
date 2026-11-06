@@ -134,13 +134,13 @@ def _run_summary_table(result: ComparisonResult, comparison: AgentComparison) ->
         row("Run", f"`{result.baseline.label}`", [f"`{run.label}`" for run in runs]),
         row(
             "Rollouts",
-            "See pooled sources below" if result.baseline.sources else f"`{result.baseline.rollouts_jsonl_fpath}`",
-            ["See pooled sources below" if run.sources else f"`{run.rollouts_jsonl_fpath}`" for run in runs],
+            "See pooled sources" if result.baseline.sources else f"`{result.baseline.rollouts_jsonl_fpath}`",
+            ["See pooled sources" if run.sources else f"`{run.rollouts_jsonl_fpath}`" for run in runs],
         ),
         row(
             "Aggregate metrics",
-            "See pooled sources below" if result.baseline.sources else f"`{result.baseline.aggregate_metrics_fpath}`",
-            ["See pooled sources below" if run.sources else f"`{run.aggregate_metrics_fpath}`" for run in runs],
+            "See pooled sources" if result.baseline.sources else f"`{result.baseline.aggregate_metrics_fpath}`",
+            ["See pooled sources" if run.sources else f"`{run.aggregate_metrics_fpath}`" for run in runs],
         ),
         row(
             "Agent",

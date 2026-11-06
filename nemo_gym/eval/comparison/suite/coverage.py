@@ -14,10 +14,12 @@
 # limitations under the License.
 """Validate recorded and planned task coverage for suite comparisons."""
 
+from typing import cast
+
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.eval.comparison.suite.loading import LoadedSuiteRun
-from nemo_gym.eval.comparison.suite.schema import SuiteCoverage
+from nemo_gym.eval.comparison.suite.schema import CoverageStatus, SuiteCoverage
 
 
 def recorded_task_sets(run: LoadedSuiteRun) -> tuple[dict[int, frozenset[int]], list[str], bool]:
@@ -92,17 +94,19 @@ def run_coverage(run: LoadedSuiteRun) -> SuiteCoverage:
         notes.append("Recorded task sets differ between repeats.")
     if complete_identities and run.repeat_rows:
         recorded_indices = set(recorded)
-        metric_indices = {row[ROLLOUT_INDEX_KEY_NAME] for row in run.repeat_rows}
+        metric_indices = {cast(int, row[ROLLOUT_INDEX_KEY_NAME]) for row in run.repeat_rows}
         if recorded_indices != metric_indices:
             incomplete = True
             notes.append("Stored repeat metric indices differ from recorded rollout indices.")
     for row in run.repeat_rows:
+        # The loader validates every stored repeat index before constructing this run.
+        repeat_index = cast(int, row[ROLLOUT_INDEX_KEY_NAME])
         missing = row.get("missing_count", 0)
         count = row.get("sample_count")
         if isinstance(missing, (int, float)) and missing > 0:
             incomplete = True
             notes.append(f"Repeat {row[ROLLOUT_INDEX_KEY_NAME]} reports missing task observations.")
-        expected_count = len(recorded.get(row[ROLLOUT_INDEX_KEY_NAME], ())) if complete_identities else len(run.groups)
+        expected_count = len(recorded.get(repeat_index, ())) if complete_identities else len(run.groups)
         if isinstance(count, int) and expected_count and count != expected_count:
             incomplete = True
             notes.append(f"Repeat {row[ROLLOUT_INDEX_KEY_NAME]} sample_count disagrees with recorded task identities.")
@@ -110,9 +114,10 @@ def run_coverage(run: LoadedSuiteRun) -> SuiteCoverage:
     verified = False
     if run.planned_tasks_by_repeat is not None:
         planned = run.planned_tasks_by_repeat
-        planned_tasks = set().union(*planned.values())
+        planned_tasks: set[int] = set().union(*planned.values())
         planned_count = len(planned_tasks)
-        group_tasks = {group[TASK_INDEX_KEY_NAME] for group in run.groups}
+        # recorded_task_sets has already validated the group task indices.
+        group_tasks = {cast(int, group[TASK_INDEX_KEY_NAME]) for group in run.groups}
         if run.groups and group_tasks != planned_tasks:
             incomplete = True
             missing_tasks = planned_tasks - group_tasks
@@ -155,7 +160,7 @@ def run_coverage(run: LoadedSuiteRun) -> SuiteCoverage:
         notes.append("Planned coverage is unverified: materialized inputs are unavailable.")
     if not complete_identities:
         notes.append("Recorded repeat task coverage is unverified: group rollout identities are unavailable.")
-    status = "incomplete" if incomplete else "verified" if verified else "unverified"
+    status: CoverageStatus = "incomplete" if incomplete else "verified" if verified else "unverified"
     return SuiteCoverage(
         status=status,
         recorded_task_count=len(run.groups),
@@ -191,6 +196,7 @@ def _check_paired_coverage(
 
 
 def check_collection_coverage(
+    *,
     baseline: tuple[LoadedSuiteRun, ...],
     candidate: tuple[LoadedSuiteRun, ...],
     baseline_coverage: list[SuiteCoverage],

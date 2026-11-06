@@ -69,8 +69,8 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
         for index, fpath in enumerate(candidate_paths)
     ]
     selections, warnings, skipped = resolve_source_agent_selections(
-        baseline_files,
-        candidate_files,
+        baseline_files=baseline_files,
+        candidate_files=candidate_files,
         agent_name=config.agent_name,
         baseline_agent_name=config.baseline_agent_name,
         baseline_agent_names=config.baseline_agent_names,
@@ -80,7 +80,9 @@ def build_comparison_result(config: ComparisonConfig, command: str) -> Compariso
     comparisons = []
     for selection in selections:
         if baseline_pooled or candidate_pooled:
-            validate_independent_sources(baseline_files, candidate_files, selection=selection)
+            validate_independent_sources(
+                baseline_files=baseline_files, candidate_files=candidate_files, selection=selection
+            )
         baseline_runs = [
             build_loaded_run(source, agent) for source, agent in zip(baseline_files, selection.baseline_agents)
         ]

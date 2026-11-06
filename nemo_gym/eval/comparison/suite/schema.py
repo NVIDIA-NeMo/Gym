@@ -119,10 +119,13 @@ class SuiteSampleSummary(_SuiteModel):
     sample_variance: float
 
 
+CoverageStatus = Literal["verified", "unverified", "incomplete"]
+
+
 class SuiteCoverage(_SuiteModel):
     """Recorded and planned task-coverage evidence for one selected agent."""
 
-    status: Literal["verified", "unverified", "incomplete"]
+    status: CoverageStatus
     recorded_task_count: int
     planned_task_count: int | None = None
     notes: list[str] = Field(default_factory=list)

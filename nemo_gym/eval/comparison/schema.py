@@ -14,9 +14,9 @@
 # limitations under the License.
 """Config and result schema for `gym eval compare`.
 
-Every candidate-varying field is a list, positionally parallel to `ComparisonResult.candidates`.
-v0 only ever compares one candidate, but keeping the shape list-valued means lifting that
-restriction later is a behavior change rather than a schema change.
+Configuration lists follow source order, including agent selectors and aggregate overrides.
+Pooled candidate sources produce one result side; candidate-varying result fields follow
+`ComparisonResult.candidates`. Comparison currently supports one candidate side.
 """
 
 from pathlib import Path
