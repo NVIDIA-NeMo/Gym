@@ -152,12 +152,20 @@ separator; a seed whose tools differ from what the endpoint serves fails with 40
 ## Sandboxed harnesses
 
 Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
-`configs/officeenv_sandbox.yaml` runs OfficeEnv episodes for Pi in agent-session mode behind the
-`single_agent_turn_legacy` Environment Server, with the tools over MCP as above. Each episode also:
+`configs/officeenv_sandbox_episodes.yaml` is the resources server for sandboxed episodes, and each
+harness config composes it with a harness in agent-session mode behind the
+`single_agent_turn_legacy` Environment Server: `configs/officeenv_sandbox.yaml` runs Pi, with the
+tools over MCP as above; `configs/officeenv_sandbox_codex.yaml` (Codex CLI),
+`configs/officeenv_sandbox_miniswe.yaml` (mini-SWE), `configs/officeenv_sandbox_opencode.yaml`
+(OpenCode), `configs/officeenv_sandbox_openclaw.yaml` (OpenClaw) and
+`configs/officeenv_sandbox_terminus_2.yaml` (Terminus 2) run rows whose apps are commands (below),
+with no MCP tools. Each episode also:
 
 1. borrows a sandbox: the seed starts one from `sandbox_config.image` (built from
-   `sandbox/Dockerfile`) with Gym's sandbox provider named by `sandbox_provider`, and lends it to
-   the harness as `SandboxAccess`. Seeding the episode again lends the same sandbox;
+   `sandbox/Dockerfile`), or from another configured image when the row needs tools that one
+   lacks (see Images and what a row needs), with Gym's sandbox provider named by
+   `sandbox_provider`, and lends it to the harness as `SandboxAccess`. Seeding the episode again
+   lends the same sandbox;
    verification stops it (or `/close_session`, when verification did not), and so does shutting
    the server down;
 2. moves file content between the workspace and the file apps (Google Drive, Box, SharePoint,
@@ -217,6 +225,91 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
 
+### Images and what a row needs
+
+A row may say what its task needs in the sandbox beyond the shell, curl and Python 3.12 with
+pandas and openpyxl, as `sandbox_needs` (`TOOL_SETS`): `documents` is python-docx, python-pptx,
+pypdf, pdfplumber and reportlab, and Poppler's `pdftotext`, `pdfinfo` and `pdftoppm`; `office` is
+LibreOffice without a display, which converts documents (`soffice --headless --convert-to pdf`,
+or `docx`, `xlsx`, `pptx`) and recalculates a workbook's formulas as it converts it.
+`sandbox_config.provides` says what `sandbox_config.image` has, and `sandbox_config.images` lists
+more images with what each provides. A row's episode gets the first image that provides all it
+needs, `image` first, and a row that no configured image serves is refused at seed, before its
+world is built (400 `unsupported_needs`). The workspace's `README.md` lists what the episode's
+image has, and with `block_internet` says that nothing else can be installed.
+`sandbox/prepare_rows.py` copies an example task's `sandbox_needs` to its row.
+
+`sandbox/Dockerfile.documents` adds both to an episode image, with pinned Python packages and
+LibreOffice 7.4 and Poppler 22.12 from Debian 12. It builds on `sandbox/Dockerfile`'s image by
+default, or on another with `--build-arg BASE=<image>`, such as a training image with a harness
+staged in it:
+
+```bash
+docker build -t officeenv-sandbox:pilot resources_servers/officeenv/sandbox
+docker build -f resources_servers/officeenv/sandbox/Dockerfile.documents \
+  -t officeenv-sandbox:documents resources_servers/officeenv/sandbox
+```
+
+Serve it to every row:
+
+```yaml
+sandbox_config:
+  image: officeenv-sandbox:documents
+  provides: [documents, office]
+```
+
+or only to the rows that need it, since it is about 700 MB larger:
+
+```yaml
+sandbox_config:
+  image: officeenv-sandbox:pilot
+  images:
+    - image: officeenv-sandbox:documents
+      provides: [documents, office]
+```
+
+A cell whose sandboxes have no internet pulls the image from a registry, pinned by digest: its
+tools cannot be installed at sandbox start, as the OpenSandbox config installs pandas and openpyxl.
+
+### Images per harness
+
+A harness that runs in the sandbox installs its runtime there at session start (Pi and Codex
+fetch Node and their package), which a sandbox without the internet cannot do.
+`sandbox/Dockerfile.harness` builds one image per harness on the documents image: each target
+runs the harness adapter's own installer as the adapter runs it (`sandbox/harness_runtime.sh`),
+so the runtime is where the adapter looks for it at session start and the adapter downloads
+nothing. Build from the Gym checkout's root (`Dockerfile.harness.dockerignore` sends only the
+installers and that script):
+
+```bash
+docker build -f resources_servers/officeenv/sandbox/Dockerfile.harness --target pi \
+  -t officeenv-sandbox:documents-pi .
+```
+
+The targets are `pi`, `codex`, `openclaw`, `opencode` and `terminus-2` (Terminus 2 runs its agent
+on Gym's host and needs only `tmux` in the sandbox). The versions are the adapters' configured
+ones (`PI_VERSION`, `CODEX_VERSION`, `OPENCLAW_VERSION` and `OPENCODE_VERSION` override them), and
+the runtime folders follow the adapters at this Gym revision: rebuild when an adapter changes.
+Check a built image without a network, where the adapter's installer must find the runtime and
+the harness must start:
+
+```bash
+docker run --rm --network none -v "$PWD:/gym:ro" officeenv-sandbox:documents-pi \
+  bash /gym/resources_servers/officeenv/sandbox/harness_runtime.sh pi /gym/responses_api_agents
+```
+
+A run names its harness's image in `sandbox_config.image`, with `provides: [documents, office]`.
+An Environment Server binds one harness to one resources server, so in a mix of harnesses each
+harness gets its own OfficeEnv server with its own image. Hermes, Stirrup and Claude Code also
+reuse a runtime they find in the sandbox, but name its folder after their agent server's own
+install (the Hermes commit, Stirrup's version, Claude Code's binary digest), so they have no target
+yet; mini-SWE and Kilo Code install at every session start, whatever the image holds. Pi, Codex,
+OpenClaw and OpenCode keep their runtime under `/tmp`, which a provider that mounts a fresh `/tmp`
+would hide. An image keeps only the runtime: once the installer and the harness have run, the
+script removes what they leave behind, the archives the install unpacked, npm's cache and logs
+(in `~/.npm`, or in the runtime folder for an installer that moves `HOME`, as Codex's and
+OpenClaw's do), Node's compile cache in `/tmp` and the helper links Codex makes in `~/.codex`.
+
 ### Tools, commands or endpoints
 
 The row's exposure decides how the harness reaches the apps (`SANDBOX_SURFACES`); the world,
@@ -246,9 +339,33 @@ for Pi). `/verify` adds `sandbox_commands`, `sandbox_commands_refused` and
 `sandbox_endpoint_calls`.
 
 Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
-`data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five sandbox tasks). A
+`data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its sandbox tasks, nine in 1.10.0). A
 row holds a system and a user message and the TaskSpec, and no tool list, since the harness takes
-its tools from the MCP grant.
+its tools from the MCP grant. `--exposure cli` or `--exposure api_search` writes the same tasks in
+that exposure, with a prompt that says how the apps are reached, to
+`data/sandbox_pilot_<exposure>_prepare.jsonl`; `--tool-prefix` names the MCP tools as the harness
+lists them (`company_`, Pi's, by default; `mcp__company__` for Codex).
+
+To run the commands' rows with another harness, use its config and pass `--agent` to the
+collection, for Codex CLI:
+
+```bash
+python resources_servers/officeenv/sandbox/prepare_rows.py --exposure cli
+gym env start --config resources_servers/officeenv/configs/officeenv_sandbox_codex.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml <model and host arguments as above>
+gym eval run --no-serve <the same --config and arguments> --agent codex_agent \
+  --input resources_servers/officeenv/data/sandbox_pilot_cli_prepare.jsonl --output results/codex_cli.jsonl
+```
+
+mini-SWE, OpenCode, OpenClaw and Terminus 2 run the same way with their configs and
+`--agent miniswe_sandboxed_agent`, `opencode_agent`, `openclaw_agent` or
+`terminus_2_sandboxed_agent`. Pi runs these rows with `configs/officeenv_sandbox.yaml` and
+`++single_agent_turn_legacy.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
+and `api_search` rows with its MCP transport as it is; on both, no MCP tool ends the task, so Pi
+takes `++pi_agent.responses_api_agents.pi_agent.finish_tool_names=[]` and ends when the model stops.
+Any of Gym's harnesses that borrow an episode's sandbox and run a shell can be paired the same way
+(the agent's config, `agent_server.name`, no MCP transports); what each needs in the sandbox image
+(its own runtime, when sandboxes have no internet) is the harness's.
 
 What a sandbox reads of this server names a company's API, never the environment behind it or
 Gym: the variables above, the `/v1/...` routes, the workspace's `README.md`, the answers and
@@ -269,8 +386,8 @@ A sandbox can reach this server, so sandbox mode guards it:
   from this node and from `trusted_networks` (CIDR, empty by default), and others as routes that
   do not exist (404); no generated docs (`/openapi.json`, `/docs`) are served. Sandboxes keep the
   MCP endpoint, the file API and their surface's routes (`/v1/cli`, `/v1/<app>/<op>`), whose
-  tokens name their episode. When Gym's other servers call
-  this one from other nodes, list their network in `trusted_networks`;
+  tokens name their episode. When Gym's other servers call this one from other nodes, list their
+  network in `trusted_networks`;
 - session cookies and MCP tokens are signed with a secret drawn when the server starts
   (`get_session_secret`), not with Gym's default key, which anyone can derive from the server's
   name, so code in a sandbox cannot sign a token for another episode or for more tools. The secret
@@ -324,8 +441,9 @@ command.
 
 Known limits: Pi installs Node and its own package in every sandbox at session start (network
 access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
-validated here; OpenCode's sandbox sessions refuse MCP tool grants, so Pi is the harness these
-episodes run. What a sandbox still reads of Gym:
+validated here. Pi, Codex and Hermes take MCP tool grants in sandbox sessions; OpenCode and Claude
+Code refuse them, so they run only the commands' rows. Codex installs Node and its package, and
+mini-SWE its Python packages, in each sandbox at session start. What a sandbox still reads of Gym:
 
 - the policy's URL, which Gym's agents hand the harness with Gym's own path names:
   `/ng-rollout/<id>` from rollout correlation (`ROLLOUT_PATH_PREFIX`), `/training-token-capture`
@@ -335,7 +453,21 @@ episodes run. What a sandbox still reads of Gym:
   findings; making the two path names configurable is a further core change;
 - Pi's own names: its session and runtime directories, the `NEMO_GYM_PI_*` variables its shell
   inherits, the model provider `nemo`, its supervisor's process names, and a system prompt that
-  states the sandbox clock's date. Changing those is Pi agent work.
+  states the sandbox clock's date. Changing those is Pi agent work;
+- the other harnesses' own names, which their Gym adapters fix and the harness images keep where
+  the adapters look: the session and runtime folders of Codex (`/tmp/nemo-gym-codex-sessions/<id>`,
+  `/tmp/nemo-gym-codex-node-22.19.0-<version>`), OpenClaw (`/tmp/nemo-gym-openclaw-sessions/<id>`,
+  `/tmp/nemo-gym-openclaw-node-22.19.0-<version>`) and OpenCode
+  (`/tmp/nemo-gym-opencode-sessions/<id>`, `/tmp/nemo-gym-opencode-runtime-<version>` and its
+  `.lock`), and mini-SWE's task file and working folder (`/tmp/.nemo-gym/task.json`,
+  `/tmp/nemo-gym-miniswe-<id>`). The adapters take no other folder, so changing those is adapter
+  work;
+- the system prompts the harnesses send with every model call, which name those folders: Pi's
+  points to its documentation (three paths in its runtime folder), Codex's to its skills (five
+  paths in its session folder), OpenClaw's to its documentation, and OpenCode's to its
+  instructions file, and it gives the model's ID as `nemo_gym/dummy_model` (the provider and
+  model names OpenCode's adapter configures). Terminus 2's names none. Changing those is adapter
+  work as well.
 
 The caller check is not a network boundary: a gateway that exposes only MCP and the file API to
 sandboxes would be one.

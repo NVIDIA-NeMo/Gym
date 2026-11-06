@@ -38,3 +38,11 @@ class TaskData(BaseModel):
         description="The spec's task_id, copied to the top level by the emitter; unread by the server.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    sandbox_needs: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "What the task needs in its sandbox beyond the shell, curl and Python with pandas and openpyxl: "
+            "documents, office (app.py's TOOL_SETS). A sandboxed episode gets the first configured image that "
+            "provides them all, and a row none provides is refused (400 unsupported_needs); unread without a sandbox."
+        ),
+    )

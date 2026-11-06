@@ -1,8 +1,7 @@
-# OfficeEnv episodes for a sandboxed harness. Pi borrows each episode's sandbox (a container from
-# sandbox/Dockerfile), reaches OfficeEnv's tools over MCP, and moves file content over the episode's
-# file API (README.md in the workspace). Compose with a sandbox provider and a model server; the
-# sandbox must reach both this resources server and the model server, so bind them to an address
-# the containers can reach:
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for Pi. Pi borrows each episode's
+# sandbox (a container from sandbox/Dockerfile), reaches OfficeEnv's tools over MCP, and moves file content over the
+# episode's file API (README.md in the workspace). Compose with a sandbox provider and a model server; the sandbox
+# must reach both this resources server and the model server, so bind them to an address the containers can reach:
 #
 #   gym env start \
 #     --config resources_servers/officeenv/configs/officeenv_sandbox.yaml \
@@ -12,34 +11,20 @@
 #     ++policy_model.responses_api_models.inference_provider.host=<host address>
 #
 # Rows: data/sandbox_pilot.jsonl (sandbox/prepare_rows.py), whose prompts name the tools as Pi lists
-# them (company_<tool>).
+# them (company_<tool>). Rows in another exposure (prepare_rows.py --exposure cli|api_search) grant no
+# user_complete_task tool, so they run with ++pi_agent.responses_api_agents.pi_agent.finish_tool_names=[],
+# and commands' rows (cli) with no MCP tools at all:
+# ++single_agent_turn_legacy.environment_servers.single_agent_turn_legacy.resources_tool_transports=[].
 config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml
   - responses_api_agents/pi_agent/configs/pi_agent.yaml
   - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
 
 oe:
   resources_servers:
     officeenv:
-      entrypoint: app.py
-      domain: agent
       verified: false
-      description: OfficeEnv episodes lent to sandboxed harnesses (MCP tools, a sandbox per episode, a file API)
-      expose_tools_over_mcp: true
-      # Everything the sandbox reads names a company's API, the MCP endpoint too: Pi lists it as `company` and
-      # names its tools company_<tool> (at most 64 characters: the longest tool name is 56), and the session
-      # token goes as a standard bearer token, which tools/list requires.
-      mcp_server_name: company
-      mcp_bearer_token: true
-      sandbox_provider: sandbox
       sandbox_config:
-        image: officeenv-sandbox:pilot
-        ttl_s: 7200
-        # File content (Google Drive, Box, SharePoint, OneDrive) stays out of the model's context: a download saves
-        # the file in the workspace (/workspace/<app folder>/<file id>/<name>) and answers with its path, the content
-        # inline only for text up to this many bytes; an upload that pastes binary content or longer text is refused
-        # with the file API command. Gmail's attachments too: get_attachment saves one in the workspace, and a
-        # message attaches a workspace file by its path. null answers and takes content in full.
-        inline_file_bytes: 8192
         # How Pi names the MCP tools (`<mcp_server_name>_<tool>`), for the workspace guide
         mcp_tool_prefix: company_
 

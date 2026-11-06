@@ -19,6 +19,7 @@ import stat
 import subprocess
 import threading
 import time
+import typing
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -56,9 +57,11 @@ from resources_servers.officeenv.app import (
     SANDBOX_SURFACES,
     SEARCH_TOOLS,
     STAT_SCRIPT,
+    TOOL_SETS,
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
     OfficeEnvSandboxConfig,
+    ToolSet,
     _path_part,
     api_credentials,
     content_description,
@@ -338,8 +341,9 @@ def file_auth(server: OfficeEnvResourcesServer, session_id: str = "rs-1") -> dic
 
 
 def configured_mcp_settings() -> dict:
-    """The MCP settings configs/officeenv_sandbox.yaml gives the server."""
-    settings = yaml.safe_load(SANDBOX_CONFIG.read_text())["oe"]["resources_servers"]["officeenv"]
+    """The MCP settings the sandbox configs give the server (configs/officeenv_sandbox_episodes.yaml)."""
+    episodes = SANDBOX_CONFIG.with_name("officeenv_sandbox_episodes.yaml")
+    settings = yaml.safe_load(episodes.read_text())["oe"]["resources_servers"]["officeenv"]
     return {key: settings[key] for key in ("mcp_server_name", "mcp_bearer_token")}
 
 
@@ -624,6 +628,8 @@ def test_a_sandbox_without_the_internet_reaches_only_this_server_and_the_model_s
     monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: OPENSANDBOX_NAMED)
     with mcp_client(make_server(sandbox_config={**IMAGE, "block_internet": True})) as client:
         assert client.post("/seed_session", json=seed_body()).status_code == 200
+    guide = sandboxes.started[0].spec.files["/workspace/README.md"]
+    assert guide.endswith("The sandbox has no internet access, so nothing else can be installed.\n")
     policy = sandboxes.started[0].spec.provider_options["network_policy"]
     # this server (MCP and the file API) and the policy model; the judge on loopback is no sandbox's to reach
     assert policy == {
@@ -658,6 +664,78 @@ def test_blocking_the_internet_needs_opensandbox_a_reachable_server_and_one_poli
         OfficeEnvSandboxConfig(block_internet=True, provider_options={"network_policy": {"defaultAction": "deny"}})
     with pytest.raises(ValueError, match="host_relay"):
         OfficeEnvSandboxConfig(block_internet=True, host_relay="host.lima.internal")
+
+
+# Images and what a row needs.
+
+DOCUMENTS_IMAGE = {"image": "officeenv-sandbox:documents", "provides": ["documents", "office"]}
+
+
+def needing(needs: object, *, session_id: str = "rs-1", rollout_id: str = "r1") -> dict:
+    body = seed_body(session_id=session_id, rollout_id=rollout_id)
+    body["task_data"]["sandbox_needs"] = needs
+    return body
+
+
+def test_a_row_gets_the_first_image_with_what_it_needs_and_the_guide_names_its_tools(sandboxes) -> None:
+    server = make_server(sandbox_config={**IMAGE, "images": [DOCUMENTS_IMAGE]})
+    with mcp_client(server) as client:
+        for body in (
+            seed_body(),
+            needing(["documents"], session_id="rs-2", rollout_id="r2"),
+            needing([], session_id="rs-3", rollout_id="r3"),
+        ):
+            assert client.post("/seed_session", json=body).status_code == 200
+    plain, documents, nothing_more = sandboxes.started
+    assert [sandbox.spec.image for sandbox in sandboxes.started] == [
+        "officeenv-sandbox:pilot",
+        "officeenv-sandbox:documents",
+        "officeenv-sandbox:pilot",
+    ]
+    assert "Installed here" not in plain.spec.files["/workspace/README.md"]
+    guide = documents.spec.files["/workspace/README.md"]
+    assert (
+        "\nInstalled here:\n\n- bash, curl and Python 3.12 with pandas and openpyxl\n- python-docx, python-pptx, pypdf, "
+        "pdfplumber and reportlab for Python, and Poppler's pdftotext, pdfinfo and pdftoppm\n- LibreOffice without a "
+        "display, which converts documents (soffice --headless --convert-to pdf <file>, or docx, xlsx, pptx)"
+    ) in guide
+    assert guide.endswith("formulas as it converts it\n") and "internet" not in guide
+    assert not ENVIRONMENT_NAMES.search(guide)
+    assert set(typing.get_args(ToolSet)) == set(TOOL_SETS)
+
+
+def test_the_configured_image_serves_the_rows_that_need_what_it_provides(sandboxes) -> None:
+    with mcp_client(make_server(sandbox_config=DOCUMENTS_IMAGE)) as client:
+        assert client.post("/seed_session", json=needing(["office", "documents"])).status_code == 200
+    assert sandboxes.started[0].spec.image == "officeenv-sandbox:documents"
+
+
+def test_a_row_no_image_serves_is_refused_before_its_world_is_built(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        for needs, message in [
+            (["office"], "No configured sandbox image provides office (sandbox_config.provides and"),
+            (["documents", "scanner"], "sandbox_needs names scanner; a sandbox can provide documents, office"),
+            ("documents", "sandbox_needs lists what the task needs in its sandbox: some of documents, office"),
+        ]:
+            refused = client.post("/seed_session", json=needing(needs))
+            assert refused.status_code == 400, refused.text
+            error = refused.json()["detail"]["error"]
+            assert error["code"] == "unsupported_needs" and error["message"].startswith(message), error
+    assert sandboxes.started == [] and not server._episodes and len(server.service.store) == 0
+    with mcp_client(make_server(sandbox_config={})) as client:
+        with pytest.raises(ValueError, match="Set sandbox_config.image"):
+            client.post("/seed_session", json=seed_body())
+
+
+def test_the_guide_says_a_sandbox_without_the_internet_installs_nothing_else() -> None:
+    guide = workspace_guide(8192, ("gdrive",), offline=True)
+    assert guide.endswith(
+        "\nInstalled here:\n\n- bash, curl and Python 3.12 with pandas and openpyxl\n\n"
+        "The sandbox has no internet access, so nothing else can be installed.\n"
+    )
+    with_tools = workspace_guide(8192, ("gdrive",), tools=("office",), offline=True)
+    assert "- LibreOffice without a display" in with_tools and with_tools.endswith("nothing else can be installed.\n")
 
 
 # The file API.
@@ -1013,6 +1091,23 @@ def test_workspace_paths_take_one_segment_per_name() -> None:
     assert _path_part(long, "F1").endswith(".xlsx") and len(_path_part(long, "F1").encode()) <= 200
     answer = {"files": []}
     assert saved_download("gdrive", "list_files", {}, answer, folder="/w", limit=10, file_id="F1", name=None) is None
+
+
+def test_an_export_to_an_office_format_is_saved_under_its_extension() -> None:
+    office = "application/vnd.openxmlformats-officedocument"
+    for mime_type, extension in [
+        (f"{office}.wordprocessingml.document", ".docx"),
+        (f"{office}.spreadsheetml.sheet", ".xlsx"),
+        (f"{office}.presentationml.presentation", ".pptx"),
+    ]:
+        answer = {"mimeType": mime_type, "contentBase64": base64.b64encode(b"PK\x03\x04").decode()}
+        params = {"file_id": "F_DOC", "mime_type": mime_type}
+        saved = saved_download(
+            "gdrive", "export_file", params, answer, folder="/w/drive", limit=8192, file_id="F_DOC", name="Policy"
+        )
+        assert saved is not None
+        out, target, data = saved
+        assert target == f"/w/drive/F_DOC/Policy{extension}" and data == b"PK\x03\x04" and "content" not in out
 
 
 # Box, SharePoint and OneDrive: their file content stays out of the conversation as Drive's does.
@@ -2440,13 +2535,163 @@ def test_the_rows_name_the_company_api_as_the_sandbox_does() -> None:
         assert "attach workspace files to email by their path" in system
 
 
+def load_prepare_rows():
+    """sandbox/prepare_rows.py as a module."""
+    import importlib.util
+
+    path = Path(officeenv_app.__file__).parent / "sandbox" / "prepare_rows.py"
+    spec = importlib.util.spec_from_file_location("prepare_rows", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_row_prompts_name_the_company_api_and_how_each_surface_reaches_the_apps() -> None:
+    prepare_rows = load_prepare_rows()
+    assert (
+        prepare_rows.system_prompt()
+        == prepare_rows.SYSTEM_PROMPT
+        == json.loads(SANDBOX_ROWS.read_text().splitlines()[0])["responses_create_params"]["input"][0]["content"]
+    )  # the committed rows' prompt
+    for surface in SANDBOX_SURFACES:
+        prompt = prepare_rows.system_prompt(surface)
+        assert "/workspace/README.md" in prompt and "COMPANY_API_URL" in prompt and "COMPANY_API_TOKEN" in prompt
+        assert "in a shell without them, run `. /etc/company-api.env` first" in prompt  # Codex's shell, for one
+        assert "attach workspace files to email by their path" in prompt
+        assert not ENVIRONMENT_NAMES.search(prompt), prompt
+    assert "run `user complete-task --answer=" in prepare_rows.system_prompt("cli")
+    assert "your mcp__company__api_search tool" in prepare_rows.system_prompt("api_search", "mcp__company__")
+
+
+@pytest.mark.parametrize("surface", ["cli", "api_search"])
+def test_prepared_rows_seed_as_sandboxed_episodes_on_their_surface(sandboxes, surface: str) -> None:
+    """prepare_rows.py --exposure: every sandbox task, its prompt saying how its apps are reached, seeds as an
+    episode of that surface on the pinned OfficeEnv, with the grant and the guide of that surface."""
+    rows = load_prepare_rows().rows(surface)
+    assert {row["officeenv"]["exposure"]["mode"] for row in rows} == {surface}
+    server = make_server()
+    with mcp_client(server) as client:
+        for index, row in enumerate(rows):
+            seed = ResourcesSeedSessionRequest(
+                resources_session_id=f"rs-{index}",
+                episode_id=EpisodeId(rollout_id=f"r{index}"),
+                task_id=TaskId(taskset="oe", task_id=row["task_id"]),
+                task_data={key: value for key, value in row.items() if key != "responses_create_params"},
+            )
+            seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+            assert seeded.status_code == 200, (row["task_id"], seeded.text)
+            grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+            tools = {tool["name"] for tool in rpc(client, "tools/list", {}, grant).json()["result"]["tools"]}
+            assert tools == ({"api_search", "api_fetch"} if surface == "api_search" else set()), row["task_id"]
+            episode = server._episodes[f"rs-{index}"]
+            guide = sandboxes.started[-1].spec.files["/workspace/README.md"]
+            assert guide == workspace_guide(8192, episode.apps, surface=surface)
+
+
+def test_a_task_that_needs_document_tools_keeps_that_in_its_row(sandboxes, tmp_path) -> None:
+    """prepare_rows.py copies an example's sandbox_needs to its row, whose episode gets an image that has them."""
+    prepare_rows = load_prepare_rows()
+    (row,) = prepare_rows.rows()[:1]
+    task = {"prompt": "Write the memo.", "spec": row["officeenv"], "sandbox_needs": ["documents"]}
+    (tmp_path / "memo.json").write_text(json.dumps(task), encoding="utf-8")
+    (needing_documents,) = prepare_rows.rows(folder=tmp_path)
+    assert needing_documents["sandbox_needs"] == ["documents"]
+    assert not any("sandbox_needs" in each for each in prepare_rows.rows())  # OfficeEnv's examples need no more
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="rs-1",
+        episode_id=EpisodeId(rollout_id="r1"),
+        task_id=TaskId(taskset="oe", task_id=row["task_id"]),
+        task_data={key: value for key, value in needing_documents.items() if key != "responses_create_params"},
+    ).model_dump(mode="json")
+    with mcp_client(make_server()) as client:
+        refused = client.post("/seed_session", json=seed)
+        assert refused.status_code == 400 and refused.json()["detail"]["error"]["code"] == "unsupported_needs"
+    with mcp_client(make_server(sandbox_config={**IMAGE, "images": [DOCUMENTS_IMAGE]})) as client:
+        assert client.post("/seed_session", json=seed).status_code == 200
+    assert [sandbox.spec.image for sandbox in sandboxes.started] == ["officeenv-sandbox:documents"]
+
+
+def test_each_harness_config_binds_its_harness_to_the_shared_episodes() -> None:
+    """Pi on MCP tools, Codex, mini-SWE, OpenCode, OpenClaw and Terminus 2 on commands: each config composes the same
+    episodes (configs/officeenv_sandbox_episodes.yaml) with its harness, and no other harness."""
+    configs = SANDBOX_CONFIG.parent
+    for name, agent, transports in [
+        ("officeenv_sandbox.yaml", "pi_agent", ["mcp"]),
+        ("officeenv_sandbox_codex.yaml", "codex_agent", []),
+        ("officeenv_sandbox_miniswe.yaml", "miniswe_sandboxed_agent", []),
+        ("officeenv_sandbox_opencode.yaml", "opencode_agent", []),
+        ("officeenv_sandbox_openclaw.yaml", "openclaw_agent", []),
+        ("officeenv_sandbox_terminus_2.yaml", "terminus_2_sandboxed_agent", []),
+    ]:
+        config = yaml.safe_load((configs / name).read_text())
+        assert config["config_paths"] == [
+            "resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml",
+            f"responses_api_agents/{agent}/configs/{agent}.yaml",
+            "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
+        ], name
+        binding = config["single_agent_turn_legacy"]["environment_servers"]["single_agent_turn_legacy"]
+        assert binding["agent_server"]["name"] == agent and binding["resources_server"]["name"] == "oe", name
+        assert binding["resources_tool_transports"] == transports, name
+        assert set(config) - {"config_paths", "oe", "single_agent_turn_legacy"} == {agent}, name
+
+
+AGENTS = Path(__file__).parents[3] / "responses_api_agents"
+HARNESS_RUNTIME = Path(__file__).parents[1] / "sandbox" / "harness_runtime.sh"
+
+
+@pytest.mark.parametrize(
+    ("harness", "agent", "variable", "version_of"),
+    [
+        ("pi", "pi_agent", "PI_VERSION", "pi_version"),
+        ("codex", "codex_agent", "CODEX_VERSION", "codex_version"),
+        ("openclaw", "openclaw_agent", "OPENCLAW_VERSION", "openclaw_version"),
+        ("opencode", "opencode_agent", "OPENCODE_VERSION", "opencode_version"),
+    ],
+)
+def test_a_harness_image_holds_the_runtime_its_adapter_looks_for(
+    harness: str, agent: str, variable: str, version_of: str
+) -> None:
+    """sandbox/harness_runtime.sh puts a harness's runtime in its image at the adapter's configured version and in the
+    adapter's default runtime folder (Pi's sandbox_runtime_dir, unset, keeps it): an adapter that changes either
+    installs again at session start, which a sandbox without the internet cannot."""
+    block = HARNESS_RUNTIME.read_text().split(f"\n  {harness})\n", 1)[1].split(";;", 1)[0]
+    version = re.search(rf"version=\$\{{{variable}:-([^}}]+)\}}", block).group(1)
+    folder = re.search(r"runtime=(\S+)", block).group(1).replace("$version", f"{{self.config.{version_of}}}")
+    default = re.escape(f'f"{folder}"')
+    source = (AGENTS / agent / "app.py").read_text()
+    assert re.search(rf"runtime = (?:self\.config\.sandbox_runtime_dir or )?{default}", source)
+    if harness == "opencode":
+        runtime_module = (AGENTS / agent / "runtime.py").read_text()
+        configured = re.search(r'^OPENCODE_VERSION = "([^"]+)"', runtime_module, re.MULTILINE).group(1)
+    else:
+        settings = yaml.safe_load((AGENTS / agent / "configs" / f"{agent}.yaml").read_text())
+        configured = settings[agent]["responses_api_agents"][agent][version_of]
+    assert version == str(configured)
+
+
+@pytest.mark.parametrize("harness", ["pi", "codex", "openclaw", "opencode"])
+def test_a_harness_image_keeps_no_npm_cache_its_installer_left(harness: str) -> None:
+    """npm's cache keeps debug logs that name the runtime folder. An installer that moves HOME puts it in the runtime
+    (``npm_config_cache``, as Codex's and OpenClaw's do), any other in ~/.npm: sandbox/harness_runtime.sh removes it
+    wherever the adapter's installer puts it, once the harness has run, which leaves Node's compile cache too."""
+    script = HARNESS_RUNTIME.read_text()
+    tidy = script.split("tidy() {", 1)[1].split("\n}", 1)[0]
+    block = script.split(f"\n  {harness})\n", 1)[1].split(";;", 1)[0]
+    installer = (AGENTS / re.search(r'bash "\$agents/([^"]+)"', block).group(1)).read_text()
+    cache = re.search(r'npm_config_cache="\$runtime/([^"]+)"', installer)
+    assert (f'"$1/{cache.group(1)}"' if cache else '"${HOME:-/root}/.npm"') in tidy
+    assert "tidy" not in block and script.rindex('tidy "$runtime"') > script.rindex("esac")
+
+
 # The committed rows.
 
 
 def test_the_sandbox_rows_seed_on_the_pinned_officeenv() -> None:
-    """The rows sandbox/prepare_rows.py wrote seed as an Environment Server sends them. The workbook task
-    seeds a binary Drive file, which OfficeEnv releases up to 1.7.0 refuse."""
+    """The rows sandbox/prepare_rows.py wrote seed as an Environment Server sends them, each granting a tool that
+    reads a stored file: Drive's, Box's, SharePoint's, OneDrive's or a Gmail attachment's. The workbook task seeds a
+    binary Drive file, which OfficeEnv releases up to 1.7.0 refuse."""
     rows = [json.loads(line) for line in SANDBOX_ROWS.read_text().splitlines()]
+    downloads = {f"{app}_{op}" for app, op in CONTENT_DOWNLOADS | ATTACHMENT_DOWNLOADS}
     assert {row["task_id"] for row in rows} >= {"sandbox_vendor_spend", "sandbox_vendor_spend_xlsx"}
     with mcp_client(make_server(sandbox_provider=None)) as client:
         for index, row in enumerate(rows):
@@ -2462,4 +2707,4 @@ def test_the_sandbox_rows_seed_on_the_pinned_officeenv() -> None:
             assert seeded.status_code == 200, (row["task_id"], seeded.text)
             grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
             tools = {tool["name"] for tool in rpc(client, "tools/list", {}, grant).json()["result"]["tools"]}
-            assert {"gdrive_download_file", "user_complete_task"} <= tools, row["task_id"]
+            assert "user_complete_task" in tools and tools & downloads, row["task_id"]
