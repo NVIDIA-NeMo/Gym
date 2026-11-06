@@ -24,13 +24,16 @@ if TYPE_CHECKING:
     from nemo_gym.agents.agent_activation_types import AgentContinuationCapabilities, AgentContinuationRequirements
     from nemo_gym.agents.agent_outcome import (
         AGENT_OUTCOME_METADATA_KEY,
+        POLICY_TIMEOUT_OPERATION,
         AgentOutcome,
         AgentOutcomePolicyConfig,
         OutcomeAction,
         OutcomePolicyConfig,
+        PolicyCallFailure,
         agent_outcome_policy,
         confirmed_policy_response_timeout,
         failure_outcome_policy,
+        policy_call_failure,
     )
     from nemo_gym.agents.agent_tools import (
         restricted_network_policy,
@@ -121,6 +124,8 @@ _PUBLIC_API = {
     "OrderedOperationLedger": "utils.ordered_operations",
     "OutcomeAction": "agent_outcome",
     "OutcomePolicyConfig": "agent_outcome",
+    "POLICY_TIMEOUT_OPERATION": "agent_outcome",
+    "PolicyCallFailure": "agent_outcome",
     "ROLLOUT_STOP_METADATA_KEY": "base_responses_api_agent",
     "RUNNER_FILE": "utils.sandbox_session",
     "RolloutStopRequest": "base_responses_api_agent",
@@ -141,6 +146,7 @@ _PUBLIC_API = {
     "is_harness_termination_failure": "utils.supervisor_client",
     "lifecycle_observation": "utils.sandbox_observation",
     "parse_cleanup_receipt": "utils.supervisor_client",
+    "policy_call_failure": "agent_outcome",
     "raises_agent_failure": "testing.failure_assertions",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",

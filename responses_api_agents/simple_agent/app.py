@@ -40,8 +40,8 @@ from pydantic import (
 from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AGENT_OUTCOME_METADATA_KEY,
+    POLICY_TIMEOUT_OPERATION,
     AgentCloseSessionResponse,
-    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
@@ -50,8 +50,8 @@ from nemo_gym.agents import (
     OutcomeAction,
     OutcomePolicyConfig,
     SimpleResponsesAPIAgent,
-    confirmed_policy_response_timeout,
     failure_outcome_policy,
+    policy_call_failure,
 )
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request
@@ -65,10 +65,8 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     AGENT_RUN_ERROR,
     MODEL_POLICY_RESPONSE_TIMEOUT,
-    MODEL_REQUEST_ERROR,
     EpisodeId,
     FailureBoundary,
-    FailureHeader,
     FailureReportRow,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -79,7 +77,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseUsage,
     NgFailureEvent,
-    RequestFailureLog,
     accumulate_response_usage,
     report_for_current_request,
 )
@@ -255,70 +252,6 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
         policy["by_failure_kind"] = rules | {MODEL_POLICY_RESPONSE_TIMEOUT: action}
         value["outcome_policy"] = policy
         return value
-
-
-# The classified policy-request timeout whose outcome the legacy /run boundary selects.
-POLICY_TIMEOUT_OPERATION = "agent.policy_request"
-
-
-def _selected_model_body_failure(error: ClientResponseError) -> bool:
-    """Whether the reply's selected failure chain holds a model request that failed after successful headers.
-
-    The provider may have generated that answer, so neither a resend nor a session reply may give the model another
-    chance. An omitted, missing or cyclic chain is not proof of one; it keeps its existing handling.
-    """
-    report = FailureHeader.decode(error.headers)
-    if report is None:
-        return False
-    current, seen = report.failure_id, set()
-    while current is not None and current not in seen:
-        seen.add(current)
-        event = report.events.get(current)
-        if event is None:
-            return False
-        if (
-            event.boundary == FailureBoundary.MODEL
-            and event.failure_kind == MODEL_REQUEST_ERROR
-            and event.operation == "model_request"
-            and event.http_status is not None
-            and 200 <= event.http_status < 300
-        ):
-            return True
-        current = event.cause_id
-    return False
-
-
-def _selected_failure_unknown(error: ClientResponseError) -> bool:
-    """Whether the reply carries a failure report whose selected failure cannot be read.
-
-    An omitted or invalid report, or a selected chain with a missing or repeated event, may hide a model body
-    failure, so it gives no resend and no session reply either. A reply without a report, or with only recovered
-    observations and no selected failure, keeps its existing handling.
-    """
-    report = FailureHeader.decode(error.headers)
-    if report is None:
-        return False
-    if report.omitted:
-        return True
-    current, seen = report.failure_id, set()
-    while current is not None:
-        if current in seen or current not in report.events:
-            return True
-        seen.add(current)
-        current = report.events[current].cause_id
-    return False
-
-
-def _policy_request_timed_out(error: ClientResponseError) -> bool:
-    """Whether the policy model server's failed reply shows that its final model call timed out on every attempt.
-
-    The reply's ``failure_id`` names the model attempt the failure ended on. Only that call's attempts count, so an
-    earlier call or a recovered attempt is not taken for the final failure, and each must have timed out waiting for
-    the model's response rather than while connecting. A reply that names no model attempt, or whose report was
-    omitted, is not a known request timeout.
-    """
-    report = FailureHeader.decode(error.headers)
-    return confirmed_policy_response_timeout(report)
 
 
 def _policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
@@ -570,9 +503,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                             if (
                                 retry == self.config.max_model_retries
                                 or not is_retryable_dependency_status(error.status)
-                                or _policy_request_timed_out(error)
-                                or _selected_model_body_failure(error)
-                                or _selected_failure_unknown(error)
+                                or (classified := policy_call_failure(error)) is None
+                                or classified.timeout is not None
                             ):
                                 raise
                             LOG.warning(
@@ -591,39 +523,18 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 try:
                     model_response_json, model_server_cookies = await self._call_policy(activation, call_model)
                 except ClientResponseError as error:
-                    if _selected_model_body_failure(error) or _selected_failure_unknown(error):
+                    classified = policy_call_failure(error)
+                    if classified is None:
                         raise  # The reply's report travels on unchanged; it is not another session chance.
-                    failure = None
-                    if _policy_request_timed_out(error):
-                        report = FailureHeader.decode(error.headers)
-                        final = report.events[report.failure_id]
-                        failure = NgFailureEvent(
-                            boundary=FailureBoundary.AGENT,
-                            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-                            failure_reason="Policy model request timed out on every attempt",
-                            operation=POLICY_TIMEOUT_OPERATION,
-                            operation_id=final.operation_id,
-                        )
-                        failure.__cause__ = error
                     if not in_session:
-                        if failure is not None:
-                            raise failure from error
+                        if classified.timeout is not None:
+                            raise classified.timeout from error
                         raise
-                    # The session reply is checkpointed. Keep its selected cause in that reply, not
-                    # only in request-local observations, whose selected ID is deliberately absent.
-                    log = RequestFailureLog.current()
-                    report = (
-                        log.reply_report(failure or error) if log else report_for_current_request(failure or error)
-                    )
-                    forwarded = FailureHeader.decode(error.headers)
-                    if forwarded is not None:
-                        report = report.merged(forwarded)
-                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
                     invocation_status = "failed"
-                    invocation_error_type = reported_kind
+                    invocation_error_type = classified.outcome.failure_kind
                     model_response = NeMoGymResponse(
                         id=f"resp_{uuid4().hex}",
                         created_at=time(),
@@ -631,7 +542,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         object="response",
                         output=[],
                         status="failed",
-                        failure_report=report.model_dump(mode="json"),
+                        failure_report=classified.report.model_dump(mode="json"),
                         error={
                             "code": "server_error",
                             "message": f"Model HTTP {error.status}: {detail or error.message}",
@@ -641,10 +552,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         parallel_tool_calls=body.parallel_tool_calls,
                         metadata={
                             **(body.metadata or {}),
-                            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
-                                failure_kind=reported_kind,
-                                status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
-                            ).model_dump_json(),
+                            AGENT_OUTCOME_METADATA_KEY: classified.outcome.model_dump_json(),
                         },
                     )
                     # No successful model response means known zero aggregate usage, not invented per-call usage.

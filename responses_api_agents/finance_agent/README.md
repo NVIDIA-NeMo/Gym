@@ -73,15 +73,26 @@ Under the Environment Server, a failed model call other than a context overflow,
 | A tool reports an error type in `abort_on_tool_error_types` (v2: `RetryExhaustedError`, the SEC API or sec.gov still answering 429 or 503 after its retries) | verified, usually 0 | `unknown`, retryable failure |
 | Context overflow that `vllm_model` answers itself (its default) | verified | verified, as before |
 
+A failed reply from the model server carries that server's failure report, and the agent classifies it as
+`simple_agent` does (`policy_call_failure` in `nemo_gym.agents`). The response keeps the report, so the failure row
+takes the kind of the cause the report selects. A model call that timed out after upload on every attempt is
+`model_policy_response_timeout`, retried by default. A reply whose model request failed after its response headers
+is not answered as a session failure at all, since the provider may have generated an answer. A reply whose selected
+cause has another HTTP status than the reply fails the episode. `openai_model` answers a provider's HTTP error with a
+500 unless `propagate_upstream_http_status_codes` lists its status, so by default a provider's 503 fails the episode
+instead of being retried; list the statuses to retry there.
+
 The tool-abort row departs from upstream on purpose: `vals-ai/finance-agent-v2` ends the question with an empty answer,
 and the legacy `/run` still grades the rollout like upstream, but on the Environment Server path an SEC outage is
 retried instead of scored 0.
 
 A failure is not scored: rollout collection writes it to the failures sidecar instead of the rollouts file, and
 `--resume` dispatches a retryable one again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. So an outage no longer counts as a
-wrong answer, and the score covers fewer rollouts when episodes fail. To count these failures as 0, pass
-`+count_failure_classes_as_zero=[environment_server_failed]`. Like the legacy run, that also zeroes seed, judge and
-verify failures, which share the class.
+wrong answer, and the score covers fewer rollouts when episodes fail. A failure row's class is the kind its
+report selected, such as `model_request_error` or `model_policy_response_timeout`, and `environment_server_failed`
+otherwise. To count these failures as 0, pass
+`+count_failure_classes_as_zero=[model_request_error,model_policy_response_timeout,environment_server_failed]`. Like
+the legacy run, that also zeroes seed, judge and verify failures, which share the last class.
 
 # Licensing information
 Code: Apache 2.0

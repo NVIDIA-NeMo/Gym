@@ -3,6 +3,7 @@
 
 """Agent-reported causes, independent of environment grading and retry policy."""
 
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated
 
@@ -13,16 +14,20 @@ from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
     FAILURE_KINDS,
+    MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
 )
 from nemo_gym.core.failure_records import FailureBoundary, FailureReport, ModelFailureDetails
+from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog, report_for_current_request
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 
 
 if TYPE_CHECKING:
+    from aiohttp import ClientResponseError
+
     from nemo_gym.core.responses_api_types import NeMoGymResponse
-    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"
@@ -188,3 +193,83 @@ def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
             for event in attempts
         )
     )
+
+
+POLICY_TIMEOUT_OPERATION = "agent.policy_request"
+"""The operation of the agent failure that reports a confirmed policy-response timeout."""
+
+
+@dataclass(frozen=True)
+class PolicyCallFailure:
+    """The cause of a failed policy model call, as an agent session's failed reply reports it.
+
+    ``outcome`` goes into the reply's ``ng_agent_outcome`` metadata and ``report`` into its ``failure_report``; the
+    Environment Server lifts the cause the report selects onto the failure row when it matches the outcome.
+    ``timeout`` is the agent's own failure for a confirmed policy-response timeout, which an agent outside a session
+    raises instead of the HTTP error.
+    """
+
+    outcome: AgentOutcome
+    report: FailureReport
+    timeout: NgFailureEvent | None = None
+
+
+def policy_call_failure(error: "ClientResponseError") -> PolicyCallFailure | None:
+    """Classify the failed reply of a policy model server, or ``None`` when the agent must raise it unchanged.
+
+    ``error`` is the HTTP error ``raise_for_status`` raised, whose explicit cause is the failure the reply forwarded.
+    The reply's forwarded failure report decides. ``None`` means its selected failure chain holds a model request
+    that failed after successful headers, so the provider may have generated an answer, or that the report cannot be
+    read (it was omitted, or its header was invalid). Neither a resend nor a session reply may then give the model
+    another chance, and the reply's report travels on as it came. A reply without a report, or with only recovered
+    observations and no selected failure, is classified like any other.
+
+    A reply whose final model call timed out after upload on every attempt (``confirmed_policy_response_timeout``) is
+    a ``model_policy_response_timeout``; any other is a ``model_request_error`` with the reply's HTTP status. The
+    report holds the agent's own failure, what the current request's ``RequestFailureLog`` observed, and the
+    forwarded report, so call this while serving the request that made the model call.
+    """
+    forwarded = FailureHeader.decode(error.headers)
+    if forwarded is not None and _selected_failure_withheld(forwarded):
+        return None
+    timeout = None
+    if confirmed_policy_response_timeout(forwarded):
+        timeout = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
+            failure_reason="Policy model request timed out on every attempt",
+            operation=POLICY_TIMEOUT_OPERATION,
+            operation_id=forwarded.events[forwarded.failure_id].operation_id,
+        )
+        timeout.__cause__ = error
+    # A session reply is checkpointed, so it keeps its selected cause itself, not only in request-local observations,
+    # whose selected ID is deliberately absent.
+    log = RequestFailureLog.current()
+    report = log.reply_report(timeout or error) if log else report_for_current_request(timeout or error)
+    if forwarded is not None:
+        report = report.merged(forwarded)
+    if timeout is not None:
+        return PolicyCallFailure(AgentOutcome(failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT), report, timeout)
+    return PolicyCallFailure(AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status), report)
+
+
+def _selected_failure_withheld(report: FailureReport) -> bool:
+    """Whether ``report`` was omitted, or its selected chain holds a model request that failed after 2xx headers.
+
+    A decoded report is closed under its causes and has no cycle; an invalid header decodes as omitted.
+    """
+    if report.omitted:
+        return True
+    current = report.failure_id
+    while current is not None:
+        event = report.events[current]
+        if (
+            event.boundary == FailureBoundary.MODEL
+            and event.failure_kind == MODEL_REQUEST_ERROR
+            and event.operation == "model_request"
+            and event.http_status is not None
+            and 200 <= event.http_status < 300
+        ):
+            return True
+        current = event.cause_id
+    return False
