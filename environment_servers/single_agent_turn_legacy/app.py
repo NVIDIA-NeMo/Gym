@@ -67,8 +67,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 else self._episode_request_from_row(row)
             )
         except ValidationError as error:
-            # A row that fails the episode request model, such as a malformed agent_context, gets the typed /run's
-            # final 422 instead of a 500 that a caller retries.
+            # A row that fails the episode request model, such as a malformed agent_context, gets a terminal 422, as on
+            # the episode request route, instead of a 500 that a caller retries.
             raise RequestValidationError(error.errors(include_url=False)) from None
         response = await self.run_request(request)
         # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
