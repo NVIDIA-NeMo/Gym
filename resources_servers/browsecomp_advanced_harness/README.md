@@ -89,7 +89,7 @@ Each rollout has its own session: the provider-call metrics that `/verify` repor
 - **An agent's `/run`.** `/seed_session` takes the flat row and keys the session by the cookie. `/verify` releases the sandbox and removes the workspace, since this path sends no close. The sandbox starts with the first `bash_command`, not at the seed. A run whose agent never sends `/verify`, as `browsecomp_agent` does after a timeout or an aborted run, keeps its sandbox until the provider's `ttl_s` reclaims it or the server shuts down; Enroot ignores `ttl_s`. Sandboxed runs should use the Environment Server path, which always closes.
 
 `/close_session`, and `/verify` on the `/run` path, stop the owned sandbox before deleting its workspace and metrics.
-A failed stop leaves the session available for a retry. `/verify` of an Environment Server session releases nothing,
+A failed stop leaves the session available for a retry. `/verify` of an episode session releases nothing,
 so a re-sent verify still finds the session's metrics and its sandbox failure; its close releases them. Tool calls,
 verification, and close are serialized per session, so cleanup cannot delete files while a tool is running. Releasing
 a session drops its metrics, unless `dump_session_id_to_metrics_on_exit` keeps them for the dump at shutdown.
