@@ -59,6 +59,10 @@ agentic_mme_opencode_agent:
           # under /tmp. `opencode run` rejects every request that would ask, and a rejection ends the run with no
           # answer. The lent sandbox holds only the task images, so allow every path.
           external_directory: allow
+          # OpenCode also asks when the model repeats an identical tool call (doom loop), and the rejection makes
+          # `opencode run` exit with code 1, so the rollout fails unscored. Allow it; a step budget,
+          # not a crash, should end a loop.
+          doom_loop: allow
         compaction:
           # Automatic compaction summarizes the session and continues from the summary, in model calls that training
           # cannot join to the scored call. With it off, a run that fills the context ends with a context-limit error.
