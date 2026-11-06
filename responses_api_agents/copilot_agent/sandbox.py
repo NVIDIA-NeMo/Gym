@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import shlex
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -17,7 +17,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import FailureReport, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
@@ -96,6 +96,7 @@ class CopilotSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
+    failure_report: FailureReport = field(default_factory=FailureReport)
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
     async def read_text(self, name: str) -> str:

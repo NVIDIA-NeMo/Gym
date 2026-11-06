@@ -26,7 +26,15 @@ from nemo_gym.agents import (
     check_agent_seed_rejected,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    FailureHeader,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    RequestFailureLog,
+    TaskId,
+    failure_report_for,
+)
 from responses_api_agents.copilot_agent.app import (
     CopilotAgent,
     CopilotAgentConfig,
@@ -35,6 +43,7 @@ from responses_api_agents.copilot_agent.app import (
     parse_copilot_events,
     parse_copilot_usage,
 )
+from responses_api_agents.copilot_agent.sandbox import CopilotArtifacts
 
 
 MODULE = "responses_api_agents.copilot_agent.app"
@@ -282,6 +291,55 @@ def test_parse_events_keeps_unfinished_and_failed_tools():
     assert transcript.output[-1].output == "denied"
     assert transcript.tools["call-2"].status == "incomplete"
     assert {gap.code for gap in transcript.gaps} == {"tool_timing_unavailable"}
+
+
+@pytest.mark.parametrize("finished", [True, False])
+def test_later_turn_reasoning_stays_after_the_previous_tool_result(finished):
+    events = copilot_events()[:4] + [{"type": "assistant.reasoning", "data": {"content": "Next turn"}}]
+    if finished:
+        events += copilot_events()[4:]
+    transcript = parse_copilot_events([(0.0, event) for event in events], "inv")
+    assert [item.type for item in transcript.output] == [
+        "reasoning",
+        "function_call",
+        "function_call_output",
+        "reasoning",
+        *(["message"] if finished else []),
+    ]
+    assert transcript.output[3].summary[0].text == "Next turn"
+
+
+@pytest.mark.parametrize("marker", ["agentId", "data.agentId", "data.parentToolCallId"])
+def test_child_events_keep_references_without_changing_root_transcript(marker):
+    child_events = copilot_events()
+    for event in child_events:
+        if marker == "agentId":
+            event["agentId"] = "child"
+        else:
+            event.setdefault("data", {})[marker.split(".")[1]] = "child"
+    child_events[0]["data"]["apiCallId"] = "child-response"
+    events = [
+        {"type": "assistant.message", "data": {"content": "Root answer", "apiCallId": "root-response"}},
+        *child_events,
+        {"type": "assistant.reasoning", "data": {"content": "Root reasoning"}},
+        {"type": "result", "sessionId": "root-session", "exitCode": 0},
+    ]
+    transcript = parse_copilot_events([(0.0, event) for event in events], "inv")
+    assert [item.type for item in transcript.output] == ["reasoning", "message"]
+    assert transcript.output[0].summary[0].text == "Root reasoning"
+    assert transcript.output[1].content[0].text == "Root answer"
+    assert transcript.tools == {} and transcript.session_id == "root-session"
+    assert transcript.response_ids == ["root-response", "child-response", "chatcmpl-2"]
+
+
+def test_explicit_turn_start_detaches_reasoning_from_previous_message():
+    events = [
+        {"type": "assistant.message", "data": {"content": "Previous"}},
+        {"type": "assistant.turn_start"},
+        {"type": "assistant.reasoning", "data": {"content": "New turn"}},
+    ]
+    transcript = parse_copilot_events([(0.0, event) for event in events], "inv")
+    assert [item.type for item in transcript.output] == ["message", "reasoning"]
 
 
 @pytest.mark.parametrize(
@@ -942,6 +1000,123 @@ def test_interrupted_activation_keeps_observations(setup):
     codes = {gap.code for gap in state.observations.gaps}
     assert "agent_activation_interrupted" in codes
     assert state.observations.records[0].status == "incomplete"
+
+
+@pytest.mark.parametrize("mode", ["missing-span", "missing-count", "no-artifacts"])
+def test_interruption_retains_the_same_evidence_gaps_as_a_response(setup, mode):
+    agent, _ = setup
+
+    async def scenario():
+        state = await agent._seed_agent_session_state(seed())
+        body = NeMoGymResponseCreateParamsNonStreaming(input="Fix")
+        artifacts = CopilotArtifacts(
+            events="\n".join(json.dumps([0.0, event]) for event in copilot_events()),
+            otel=otel(chat_span("chatcmpl-1"), chat_span("chatcmpl-2", usage=None)),
+            compaction_state=False,
+        )
+        if mode == "missing-span":
+            artifacts.otel = otel(chat_span("chatcmpl-1"))
+        elif mode == "no-artifacts":
+            artifacts = CopilotArtifacts(events="")
+        state.session.cleanup = {"return_code": None, "timed_out": True, "cleanup_confirmed": True, "error": None}
+        agent._response(state, body, artifacts, [], timeout=1)
+        normal = {gap.code for gap in state.observations.gaps}
+
+        async def interrupted(**kwargs):
+            state.session.artifacts = None if mode == "no-artifacts" else artifacts
+            raise asyncio.CancelledError
+
+        state.execute = interrupted
+        with pytest.raises(asyncio.CancelledError):
+            await agent._sandbox_response(state, body, prompt="Fix")
+        return normal, {gap.code for gap in state.observations.gaps}
+
+    normal, interrupted = asyncio.run(scenario())
+    assert interrupted == normal | {"agent_activation_interrupted"}
+    assert {
+        "cached_token_usage_unavailable",
+        "reasoning_token_usage_unavailable",
+        "runtime_info_unavailable",
+        "worker_exit_code_unavailable",
+    } <= interrupted
+    assert {
+        "missing-span": "model_usage_spans_missing",
+        "missing-count": "partial_model_usage_unavailable",
+        "no-artifacts": "agent_transcript_unavailable",
+    }[mode] in interrupted
+
+
+def test_recovered_native_error_is_forwarded_on_success_retry_and_close(setup):
+    agent, sandbox = setup
+    sandbox.events.insert(4, {"type": "session.error", "data": {"errorType": "model_call", "message": "fetch failed"}})
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        assert client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).status_code == 200
+        reports = []
+        for _ in range(2):
+            response = client.post("/ng-rollout/copilot-smoke-a2/v1/responses", json={"input": "Fix"})
+            assert response.status_code == 200
+            assert response.json()["status"] == "completed" and response.json()["error"] is None
+            assert AGENT_OUTCOME_METADATA_KEY not in response.json()["metadata"]
+            reports.append(FailureHeader.decode(response.headers))
+        closed = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": seed().agent_session_id, "episode_id": seed().episode_id.model_dump()},
+        )
+        assert closed.status_code == 200
+        reports.append(FailureHeader.decode(closed.headers))
+    assert reports[0] is not None and all(report == reports[0] for report in reports)
+    assert reports[0].failure_id is None
+    (event,) = reports[0].events.values()
+    assert (event.boundary, event.operation, event.failure_reason) == ("harness", "session.error", "fetch failed")
+    assert event.failure_kind == "copilot:session_error" and event.http_status is None
+
+
+@pytest.mark.parametrize("typed_cleanup", [True, False])
+def test_connect_failure_survives_a_second_cleanup_failure(setup, typed_cleanup):
+    agent, _ = setup
+    original = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="connect failed",
+        operation="connect",
+        stage="seed",
+        event_id="original-connect-event",
+    )
+    cleanup = (
+        NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="session_release_failed",
+            failure_reason="close failed",
+            operation="aclose",
+            stage="cleanup",
+            event_id="cleanup-event",
+        )
+        if typed_cleanup
+        else RuntimeError("close failed")
+    )
+    provider = SimpleNamespace(aclose=AsyncMock(side_effect=cleanup))
+
+    async def scenario():
+        with (
+            patch(f"{MODULE}.create_provider", return_value=provider),
+            patch(f"{MODULE}.AsyncSandbox.connect", AsyncMock(side_effect=original)),
+            RequestFailureLog.capture() as log,
+        ):
+            with pytest.raises(NgFailureEvent) as caught:
+                await agent._seed_agent_session_state(seed())
+            assert caught.value is original
+            report = failure_report_for(caught.value)
+            event = report.events[report.failure_id]
+            assert (event.event_id, event.stage, event.operation) == ("original-connect-event", "seed", "connect")
+            (cleanup_event,) = log.report.events.values()
+            assert cleanup_event.stage == "cleanup" and cleanup_event.operation == "aclose"
+            if typed_cleanup:
+                assert cleanup_event.event_id == "cleanup-event"
+
+    asyncio.run(scenario())
+    provider.aclose.assert_awaited_once()
 
 
 @pytest.mark.parametrize("spans", ["", "not-json", otel()])

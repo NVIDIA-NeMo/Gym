@@ -39,9 +39,9 @@ single_agent_turn:
 
 Supply the `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox` provider as for the
 other harnesses in [the Terminal-Bench 2.1 README](../../benchmarks/terminal_bench_2_1/README.md). The
-sandbox must be able to reach the Model Server. Terminal-Bench 2.1 and SWE-bench Pro declare
-Copilot in `allowed_agents`; other pairings require `--allow-unsupported-pairing` during development
-and real-model qualification before declaration.
+sandbox must be able to reach the Model Server. Terminal-Bench 2.1 and SWE-bench Pro qualification is
+still pending, so these pairings require `--allow-unsupported-pairing` during development. Copilot is
+not yet declared in their `allowed_agents`.
 
 For SWE-bench Pro, replace the Resources config import with
 `resources_servers/swebench_pro/configs/swebench_pro.yaml`, bind the `swebench_pro` taskset to
@@ -125,7 +125,9 @@ and a random per-session `x-session-id`, which is also the invocation ID in clos
 captures; the rollout ID stays in the Model Server URL. Task text cannot contain either value, so the recorded
 output matches what the model saw, except that these two values stay masked if a tool prints Copilot's environment.
 
-Responses keep Copilot's reasoning, messages, tool calls, and tool results. Usage comes from Copilot's
+Responses keep the root agent's reasoning, messages, tool calls, and tool results. Child-agent events
+do not enter the root conversation; their model-call references and usage remain included when available.
+Usage comes from Copilot's
 OpenTelemetry chat spans, written locally to the session directory: counts are summed over successful
 model calls, and a count the provider omitted stays unknown rather than zero. Close returns the model-call
 references, harness tool timing, sandbox identity and execution outcome, and explicit observation gaps.
@@ -143,10 +145,15 @@ A provider error that Copilot reports (`session.error`) returns a failed respons
 an HTTP status becomes `model_request_error`, and an unreachable provider becomes `model_transport_error`.
 As in Copilot's own exit status, errors from sub-agents or hooks, and a model-call error followed by a
 later root assistant message, do not fail the run.
+Root session errors, including recovered model-call errors, remain in the canonical failure report
+forwarded by activation and close. These observations do not select an episode failure or request another attempt.
+Child conversations and tool observations are not projected into the root invocation; the
+`subagent_hierarchy_unavailable` gap records this limitation. Child model-call references and usage remain retained.
 The Environment Server decides grading and retries. Copilot retries 429 and 5xx responses itself before
 reporting. A timeout returns partial work as incomplete. Other runner or termination failures are execution
 errors. A deadline can interrupt a tool before Copilot reports its result. That tool remains incomplete,
 with its observed start and a timing gap; the adapter does not invent a terminal output. Such a partial
-rollout can be graded, but it does not fulfill the strict retained-artifact tool evidence checks.
+rollout can be graded. The retained-artifact checker accepts the incomplete tool and its absent output;
+other unavailable evidence, such as complete tool timing, remains an explicit gap.
 
 Response metadata includes `harness_execution: sandbox`, hostname, runner PID, and `copilot_version`.

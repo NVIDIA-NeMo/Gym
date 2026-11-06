@@ -57,6 +57,7 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_confi
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureReport,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -69,6 +70,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    RequestFailureLog,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -208,6 +212,7 @@ class CopilotTranscript:
     result: Optional[dict[str, JsonValue]] = None
     session_id: Optional[str] = None
     gaps: list[ObservationGap] = field(default_factory=list)
+    failure_report: FailureReport = field(default_factory=FailureReport)
 
 
 def parse_copilot_events(events: list[tuple[float, dict[str, JsonValue]]], invocation_id: str) -> CopilotTranscript:
@@ -221,7 +226,23 @@ def parse_copilot_events(events: list[tuple[float, dict[str, JsonValue]]], invoc
         # Copilot 1.0.103 marks sub-agent events with agentId or data.parentToolCallId.
         root = not (event.get("agentId") or data.get("agentId") or data.get("parentToolCallId"))
         if kind == "assistant.message":
-            if root and (transcript.error or {}).get("errorType") == "model_call":
+            response_id = data.get("apiCallId")
+            if isinstance(response_id, str) and response_id:
+                # Child calls still contribute usage and references, but their output is not the root transcript.
+                transcript.response_ids.append(response_id)
+        if not root:
+            continue
+        if kind in (
+            "tool.execution_start",
+            "tool.execution_complete",
+            "assistant.turn_start",
+            "assistant.turn_end",
+            "session.error",
+            "result",
+        ):
+            message_start = None
+        if kind == "assistant.message":
+            if (transcript.error or {}).get("errorType") == "model_call":
                 transcript.error = None  # Copilot recovered from the failed call.
             message_start = len(transcript.output)
             content = data.get("content")
@@ -249,9 +270,6 @@ def parse_copilot_events(events: list[tuple[float, dict[str, JsonValue]]], invoc
                         status="completed",
                     )
                 )
-            response_id = data.get("apiCallId")
-            if isinstance(response_id, str) and response_id:
-                transcript.response_ids.append(response_id)
         elif kind == "assistant.reasoning":
             text = data.get("content")
             if isinstance(text, str) and text.strip():
@@ -303,9 +321,21 @@ def parse_copilot_events(events: list[tuple[float, dict[str, JsonValue]]], invoc
                 transcript.gaps.append(ObservationGap(code="tool_timing_unavailable", detail=call_id))
             if not isinstance(success, bool):
                 transcript.gaps.append(ObservationGap(code="tool_outcome_unavailable", detail=call_id))
-        elif kind == "session.error" and root and data.get("errorType") != "hook":
+        elif kind == "session.error" and data.get("errorType") != "hook":
             # Copilot's exit status ignores sub-agent and hook errors; so does the response status.
             transcript.error = data
+            status = data.get("statusCode")
+            failure = NgFailureEvent(
+                boundary="harness",
+                failure_kind="copilot:session_error",
+                failure_reason=str(data.get("message") or "Copilot reported a session error")[:2000],
+                operation="session.error",
+                operation_id=invocation_id,
+                stage="agent",
+                http_status=status if type(status) is int and 100 <= status <= 599 else None,
+            )
+            # Retaining an observed error does not select it as the final response or episode failure.
+            transcript.failure_report.events[failure.event_id] = failure.event
         elif kind == "result":
             transcript.result = event
             session_id = event.get("sessionId")
@@ -510,7 +540,22 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             try:
                 sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
             except BaseException:
-                await provider.aclose()
+                try:
+                    await provider.aclose()
+                except BaseException as cleanup_error:
+                    LOG.exception("Copilot provider cleanup failed after connect failed")
+                    if isinstance(cleanup_error, NgFailureEvent):
+                        observe_failure(cleanup_error)
+                    else:
+                        cleanup_failure = NgFailureEvent(
+                            boundary="sandbox",
+                            failure_kind="session_release_failed",
+                            failure_reason=f"Copilot provider cleanup failed: {type(cleanup_error).__name__}",
+                            operation="aclose",
+                            stage="cleanup",
+                        )
+                        cleanup_failure.__cause__ = cleanup_error
+                        observe_failure(cleanup_failure)
                 raise
         directory = f"/tmp/nemo-gym-copilot-sessions/{uuid4().hex}"
         state = CopilotSandboxSession(
@@ -578,7 +623,11 @@ class CopilotAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop Copilot before verification, retaining a borrowed sandbox."""
         assert isinstance(state, CopilotSandboxSession)
-        await state.close(self.config.session_close_timeout_seconds)
+        try:
+            await state.close(self.config.session_close_timeout_seconds)
+        finally:
+            if (log := RequestFailureLog.current()) is not None:
+                log.add(state.failure_report)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=state.observations
@@ -698,13 +747,19 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         conversation: list[Any],
         status: Literal["completed", "failed", "incomplete", "unknown"],
         *,
+        artifacts: CopilotArtifacts | None,
         failure: BaseException | None = None,
     ) -> AgentObservationBundle:
         invocation_id = state.invocation_id
+        state.failure_report = transcript.failure_report
         # Span IDs first; events add calls whose span the exporter never wrote.
         response_ids = list(dict.fromkeys([*(usage.response_ids if usage else []), *transcript.response_ids]))
         gaps = [
-            ObservationGap(code="subagent_hierarchy_unavailable", invocation_id=invocation_id),
+            ObservationGap(
+                code="subagent_hierarchy_unavailable",
+                invocation_id=invocation_id,
+                detail="Child conversations and tool observations are not projected; model-call references are retained",
+            ),
             ObservationGap(code="compaction_observations_unavailable", invocation_id=invocation_id),
             *transcript.gaps,
         ]
@@ -728,6 +783,36 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             )
         cleanup = state.session.cleanup
         access = state.request.sandbox_access
+        missing_spans = [id_ for id_ in transcript.response_ids if usage is not None and id_ not in usage.response_ids]
+        if missing_spans:
+            gaps.append(
+                ObservationGap(
+                    code="model_usage_spans_missing",
+                    detail="Copilot wrote no OpenTelemetry span for " + ", ".join(missing_spans),
+                )
+            )
+        elif (
+            usage is not None
+            and (usage.input_tokens is None or usage.output_tokens is None)
+            and not usage.compaction_usage_unavailable
+            and not usage.compaction_state_unavailable
+            and not usage.telemetry_malformed
+        ):
+            gaps.append(
+                ObservationGap(code="partial_model_usage_unavailable", detail="a model call reported no usage")
+            )
+        for count, code in (
+            (usage.cached_tokens if usage else None, "cached_token_usage_unavailable"),
+            (usage.reasoning_tokens if usage else None, "reasoning_token_usage_unavailable"),
+        ):
+            if count is None:
+                gaps.append(ObservationGap(code=code))
+        if state.runtime_info is None:
+            gaps.append(ObservationGap(code="runtime_info_unavailable"))
+        if cleanup is None or cleanup["return_code"] is None:
+            gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
+        if artifacts is None or not artifacts.events.strip():
+            gaps.append(ObservationGap(code="agent_transcript_unavailable"))
         if cleanup is None:
             gaps.append(ObservationGap(code="sandbox_cleanup_unavailable"))
         if state.sandbox_id is None:
@@ -803,6 +888,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
                     ),
                     [*conversation, *transcript.output],
                     "incomplete",
+                    artifacts=partial,
                     failure=failure,
                 )
             except Exception:
@@ -813,8 +899,6 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             state.observations.gaps.append(
                 ObservationGap(code="agent_activation_interrupted", detail=type(failure).__name__)
             )
-            if state.runtime_info is None:
-                state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
             raise
         return self._response(state, body, artifacts, conversation, timeout=timeout)
 
@@ -902,7 +986,7 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         )
         try:
             state.observations = self._observations(
-                state, transcript, usage, [*conversation, *transcript.output], status
+                state, transcript, usage, [*conversation, *transcript.output], status, artifacts=artifacts
             )
         except Exception:
             # Observation parsing must not turn a gradable result into a failed episode.
@@ -910,36 +994,6 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source=SOURCE, gaps=[ObservationGap(code="observation_parse_failed")]
             )
-        gaps = state.observations.gaps
-        if missing_spans:
-            gaps.append(
-                ObservationGap(
-                    code="model_usage_spans_missing",
-                    detail="Copilot wrote no OpenTelemetry span for " + ", ".join(missing_spans),
-                )
-            )
-        elif (
-            usage is not None
-            and not known
-            and not usage.compaction_usage_unavailable
-            and not usage.compaction_state_unavailable
-            and not usage.telemetry_malformed
-        ):
-            gaps.append(
-                ObservationGap(code="partial_model_usage_unavailable", detail="a model call reported no usage")
-            )
-        for count, code in (
-            (usage.cached_tokens if usage else None, "cached_token_usage_unavailable"),
-            (usage.reasoning_tokens if usage else None, "reasoning_token_usage_unavailable"),
-        ):
-            if count is None:
-                gaps.append(ObservationGap(code=code))
-        if state.runtime_info is None:
-            gaps.append(ObservationGap(code="runtime_info_unavailable"))
-        if cleanup["return_code"] is None:
-            gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
-        if not artifacts.events.strip():
-            gaps.append(ObservationGap(code="agent_transcript_unavailable"))
         if execution_error:
             raise RuntimeError(f"Copilot agent failed: {execution_error}")
         if reported_error:
@@ -970,7 +1024,12 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         elif body != state.activation_request:
             raise HTTPException(409, "Copilot sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
-        return (await asyncio.shield(state.task)).model_copy(deep=True)
+        try:
+            return (await asyncio.shield(state.task)).model_copy(deep=True)
+        finally:
+            # Each waiter and close request forwards the same event IDs, even if the first caller disconnected.
+            if (log := RequestFailureLog.current()) is not None:
+                log.add(state.failure_report)
 
     async def run(self, request: Request, body: CopilotAgentRunRequest) -> BaseVerifyResponse:
         raise HTTPException(422, "Copilot has no compatibility /run; submit the episode to an Environment Server /run")
