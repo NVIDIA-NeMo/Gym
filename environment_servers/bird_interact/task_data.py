@@ -51,6 +51,7 @@ class FollowUp(BaseModel):
     query: str
     sol_sql: list[str] = Field(min_length=1)
     conditions: Conditions = Field(default_factory=Conditions)
+    test_cases: list[str] = Field(default_factory=list)
 
 
 class BirdInteractTask(BaseModel):

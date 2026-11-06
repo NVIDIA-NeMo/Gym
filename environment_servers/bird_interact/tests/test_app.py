@@ -4,10 +4,14 @@
 """BIRD-Interact episodes end to end: a scripted agent and user model, and real database sandboxes on the host."""
 
 import asyncio
+import datetime
 import importlib
 import json
+import shutil
+import subprocess
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from decimal import Decimal
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any
@@ -33,12 +37,21 @@ from environment_servers.bird_interact.app import (
     BirdInteractResponse,
     extract_sql,
 )
-from environment_servers.bird_interact.grading import grade, main, split_statements, strip_round_calls
+from environment_servers.bird_interact.grading import (
+    PostgresDatabase,
+    QueryResult,
+    SQLiteDatabase,
+    grade,
+    main,
+    split_statements,
+    strip_round_calls,
+)
 from environment_servers.bird_interact.simulator import UNANSWERABLE_REPLY, parse_action
 from environment_servers.bird_interact.task_data import BirdInteractTask
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, BaseServerConfig, ModelServerRef
 from nemo_gym.core import EpisodeId, MaterializedTask, NeMoGymResponse, TaskId
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.trajectory import AgentObservationBundle
 
 
@@ -314,13 +327,122 @@ class TestGrading:
         assert graded == {"solution_error": "The ground-truth SQL failed: no such column: nope"}
 
 
-def _bookshop(tmp_path: Path) -> Path:
+def _bookshop(tmp_path: Path) -> SQLiteDatabase:
     import sqlite3
 
     database = tmp_path / "bookshop.sqlite"
     with sqlite3.connect(database) as connection:
         connection.executescript((DATA / "example_databases/bookshop/bookshop.sql").read_text())
-    return database
+    return SQLiteDatabase(database)
+
+
+class _TypedRows:
+    """A database whose queries return fixed rows, typed as PostgreSQL's driver types them."""
+
+    def __init__(self, *results: list[tuple]) -> None:
+        self.results = list(results)
+
+    def run(self, sql: str, *, timeout_seconds: float) -> QueryResult:
+        return QueryResult(rows=self.results.pop(0))
+
+
+class TestPostgresGrading:
+    @pytest.mark.parametrize(
+        ("predicted", "solution", "passed"),
+        [
+            # Decimals round half-up to two places, where a float would round 3.145 down.
+            ((Decimal("3.145"),), (Decimal("3.15"),), True),
+            ((Decimal("1.01"),), (Decimal("1.02"),), False),
+            # A datetime compares as its date.
+            ((datetime.datetime(2024, 1, 2, 15, 30),), (datetime.date(2024, 1, 2),), True),
+            # JSON values compare with sorted keys and their numbers rounded.
+            (({"b": 1, "a": [Decimal("2.499")]},), ({"a": [Decimal("2.50")], "b": 1},), True),
+        ],
+    )
+    def test_values_are_normalized_by_the_benchmark_rules(
+        self, predicted: tuple, solution: tuple, passed: bool
+    ) -> None:
+        outcome = grade(_TypedRows([predicted], [solution]), "SELECT x", "SELECT x", ordered=False, timeout_seconds=5)
+        assert outcome.passed is passed
+
+    def test_the_runner_routes_a_postgresql_request_to_the_image_server(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        started: list[bool] = []
+        ran: list[tuple[str, str, bool]] = []
+
+        def execute(self: PostgresDatabase, sql: str, *, commit: bool, timeout_seconds: float | None) -> QueryResult:
+            ran.append((self.name, sql, commit))
+            return QueryResult(rows=[(Decimal("2.50"), datetime.date(2024, 1, 2), "x")])
+
+        monkeypatch.setattr("environment_servers.bird_interact.grading.start_postgres", lambda: started.append(True))
+        monkeypatch.setattr(PostgresDatabase, "_execute", execute)
+
+        def run(command: str, request: dict) -> dict:
+            request_path = tmp_path / f"{command}.json"
+            request_path.write_text(json.dumps(request | {"engine": "postgresql", "database": "bookshop_template"}))
+            main([command, str(request_path)])
+            return json.loads(capsys.readouterr().out)
+
+        assert run("setup", {"preprocess_sql": ["UPDATE books SET price = 1"]}) == {}
+        executed = run("execute", {"sql": "SELECT 1", "timeout_seconds": 5})
+
+        assert started == [True]
+        # The task's setup is committed; an exploratory query is rolled back.
+        assert ran == [
+            ("bookshop_template", "UPDATE books SET price = 1", True),
+            ("bookshop_template", "SELECT 1", False),
+        ]
+        assert executed["preview"] == ["(2.5, '2024-01-02', 'x')"]
+
+
+_POSTGRES = shutil.which("initdb") and shutil.which("pg_ctl")
+
+
+@pytest.mark.skipif(not _POSTGRES, reason="needs PostgreSQL's initdb and pg_ctl")
+class TestPostgresDatabase:
+    """The runner's PostgreSQL engine against a real server, started for the test as the current user."""
+
+    @pytest.fixture
+    def database(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> PostgresDatabase:
+        psycopg2 = pytest.importorskip("psycopg2")
+        data, socket = tmp_path / "data", tmp_path / "socket"
+        socket.mkdir()
+        subprocess.run(
+            ["initdb", "--auth=trust", "--username=bird", "--pgdata", data], check=True, capture_output=True
+        )
+        options = f"-c listen_addresses= -c unix_socket_directories={socket}"
+        subprocess.run(
+            ["pg_ctl", "start", "--wait", "--pgdata", data, "--log", tmp_path / "log", "--options", options],
+            check=True,
+            capture_output=True,
+        )
+        monkeypatch.setenv("PGHOST", str(socket))
+        monkeypatch.setenv("PGUSER", "bird")
+        with psycopg2.connect(dbname="postgres") as connection:
+            connection.autocommit = True
+            connection.cursor().execute("CREATE DATABASE shop_template")
+        with psycopg2.connect(dbname="shop_template") as connection, connection.cursor() as cursor:
+            cursor.execute("CREATE TABLE sales (amount numeric, sold date)")
+            cursor.execute("INSERT INTO sales VALUES (1.005, '2024-01-02'), (2.5, '2024-01-03')")
+        yield PostgresDatabase("shop_template")
+        subprocess.run(["pg_ctl", "stop", "--pgdata", data, "--mode", "immediate"], capture_output=True)
+
+    def test_a_query_that_writes_leaves_the_database_unchanged(self, database: PostgresDatabase) -> None:
+        assert database.run("DELETE FROM sales; SELECT COUNT(*) FROM sales", timeout_seconds=5).rows == [(0,)]
+        assert database.run("SELECT COUNT(*) FROM sales", timeout_seconds=5).rows == [(2,)]
+
+    def test_a_slow_query_times_out_and_an_error_is_reported(self, database: PostgresDatabase) -> None:
+        assert database.run("SELECT pg_sleep(5)", timeout_seconds=0.2).error == "Query timed out after 0.2 seconds"
+        assert "nope" in database.run("SELECT nope FROM sales", timeout_seconds=5).error
+
+    def test_grading_compares_numeric_and_date_results_by_the_benchmark_rules(
+        self, database: PostgresDatabase
+    ) -> None:
+        solution = "SELECT amount, sold FROM sales"
+        predicted = "SELECT ROUND(amount, 2), sold::timestamp FROM sales ORDER BY amount DESC"
+        assert grade(database, predicted, solution, ordered=False, timeout_seconds=5).passed
+        assert not grade(database, predicted, solution, ordered=True, timeout_seconds=5).passed
 
 
 class TestParsing:
@@ -335,6 +457,7 @@ class TestParsing:
         assert extract_sql("```sql\nSELECT 1\n```\nor rather\n```SQLite\nSELECT 2\n```") == "SELECT 2"
         assert extract_sql("Which year do you mean?") is None
         assert extract_sql("```sql\n\n```") is None
+        assert extract_sql("```postgresql\nSELECT 3\n```") == "SELECT 3"
 
 
 class TestConfig:
@@ -701,6 +824,52 @@ class TestAgentSession:
         assert client.agent_calls[0]["path"] == "/ng-rollout/bookshop_1-0/training-token-capture/v1/responses"
 
 
+class TestPostgreSQL:
+    """Lite and Full: each task's database is in the sandbox image, and the runner uses the image's server."""
+
+    def test_postgresql_needs_its_image(self) -> None:
+        with pytest.raises(ValidationError, match="benchmarks/bird_interact/Dockerfile"):
+            _server(database_engine="postgresql")
+
+    async def test_the_episode_runs_on_the_task_database_in_the_image(
+        self, sandbox_workspace: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        requests: list[tuple[str, dict]] = []
+        exec_in_sandbox = AsyncSandbox.exec
+
+        async def exec(self: AsyncSandbox, command: str, **kwargs: Any) -> SandboxExecResult:
+            # The runner needs the image's server, so this test answers for it and keeps each request.
+            argv = command.split()
+            if len(argv) != 4 or not argv[1].endswith("grading.py"):
+                return await exec_in_sandbox(self, command, **kwargs)
+            request_path = Path(argv[3])
+            requests.append((argv[2], json.loads(request_path.read_text())))
+            request_path.unlink()
+            reply = {"setup": {}, "grade": {"passed": True, "execution_error": None}}[argv[2]]
+            return SandboxExecResult(stdout=json.dumps(reply), stderr="", return_code=0)
+
+        monkeypatch.setattr(AsyncSandbox, "exec", exec)
+        server, client = _server(
+            turns=["What counts as a bestseller?", "```postgresql\nSELECT 1\n```"],
+            user=['labeled("bestsellers")', "At least 10 copies."],
+            database_engine="postgresql",
+            sandbox_config={"image": "bird-interact-postgres:lite"},
+        )
+
+        response = await _run(server)
+
+        assert response.failure is None, response.failure
+        assert (response.result.stop_reason, response.result.reward) == ("solved", 0.7)
+        assert [(command, request["engine"], request["database"]) for command, request in requests] == [
+            ("setup", "postgresql", "bookshop_template"),
+            ("grade", "postgresql", "bookshop_template"),
+        ]
+        # Nothing to upload: the database is in the image.
+        assert "source" not in requests[0][1] and not list(sandbox_workspace.rglob("bookshop.sql"))
+        system = client.agent_inputs[0]["input"][0]["content"]
+        assert "writes PostgreSQL queries" in system and "```sql fenced code block" in system
+
+
 class TestDatabaseSandbox:
     async def test_each_episode_has_its_own_sandbox_and_stops_it_when_the_episode_ends(
         self, sandbox_workspace: Path
@@ -813,6 +982,10 @@ class TestDatabaseSandbox:
         [
             ({"sol_sql": []}, "has no sol_sql"),
             ({"test_cases": ["def test_case(): pass"]}, "custom test cases"),
+            (
+                {"follow_up": {"query": "And now?", "sol_sql": ["SELECT 1"], "test_cases": ["def test_case(): pass"]}},
+                "custom test cases",
+            ),
             ({"selected_database": "missing"}, "Missing database file"),
         ],
     )
