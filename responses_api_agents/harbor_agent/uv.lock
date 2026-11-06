@@ -24,7 +24,7 @@ constraints = [
 overrides = [
     { name = "gprof2dot", marker = "sys_platform == 'never'" },
     { name = "opencv-python-headless", marker = "sys_platform == 'never'" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec", specifier = "==1.1.1" },
     { name = "pycountry", marker = "sys_platform == 'never'" },
     { name = "pynvvideocodec", marker = "sys_platform == 'never'" },
     { name = "spacy", specifier = ">=3.8.13" },
@@ -1497,6 +1497,7 @@ source = { virtual = "." }
 dependencies = [
     { name = "harbor" },
     { name = "nemo-gym", extra = ["dev", "ray", "sandbox"] },
+    { name = "pathspec" },
 ]
 
 [package.optional-dependencies]
@@ -1509,6 +1510,7 @@ requires-dist = [
     { name = "harbor", git = "https://github.com/laude-institute/harbor.git?rev=9dddd797b57ab8a0f9d6352a20fce73abbb29573" },
     { name = "nemo-gym", extras = ["dev", "ray", "sandbox"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
+    { name = "pathspec", specifier = "==1.1.1" },
 ]
 provides-extras = ["telemetry"]
 
@@ -2466,7 +2468,7 @@ dependencies = [
     { name = "ast-serialize" },
     { name = "librt", marker = "platform_python_implementation != 'PyPy'" },
     { name = "mypy-extensions" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
     { name = "typing-extensions" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/34/4e/64300736cf0a0373a27b94a91b664ee7382e36f77b0621bae6381da3e180/mypy-2.4.0.tar.gz", hash = "sha256:77bdaebd452f43fcfc4cc3ba94352a3ea537cd01e3f2d0879f48673d2ec00d6e", size = 4064425, upload-time = "2026-10-01T20:40:39.229Z" }
@@ -4250,7 +4252,7 @@ version = "0.0.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "attrs" },
-    { name = "pathspec", marker = "sys_platform == 'never'" },
+    { name = "pathspec" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/b3/e4/40998faefc72ba1ddeb640a44fba92935353525dba110488806da8339c0b/scantree-0.0.4.tar.gz", hash = "sha256:15bd5cb24483b04db2c70653604e8ea3522e98087db7e38ab8482f053984c0ac", size = 24643, upload-time = "2024-08-03T20:08:59.413Z" }
 wheels = [
