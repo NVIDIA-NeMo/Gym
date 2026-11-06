@@ -41,6 +41,7 @@ from nemo_gym.agents import (
     AgentOutcome,
     AgentSeedSessionRequest,
     check_agent_seed_rejected,
+    policy_call_failure,
     raises_agent_failure,
 )
 from nemo_gym.client import MODEL_RESPONSE_TIMEOUT_REASON, SESSION_ID_KEY, ServerClient
@@ -104,7 +105,6 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentLoopState,
     SimpleAgentRunRequest,
     SimpleAgentVerifyRequest,
-    _policy_request_timed_out,
 )
 
 
@@ -3237,6 +3237,12 @@ def _failed_reply(report: FailureReport) -> MagicMock:
     response.content.read = AsyncMock(return_value=b"Internal Server Error")
     response.raise_for_status = MagicMock(side_effect=error)
     return response
+
+
+def _policy_request_timed_out(error: ClientResponseError) -> bool:
+    """Whether the shared classification takes the failed policy reply for a confirmed response timeout."""
+    classified = policy_call_failure(error)
+    return classified is not None and classified.timeout is not None
 
 
 def _timeout_agent(**config) -> tuple[SimpleAgent, MagicMock]:

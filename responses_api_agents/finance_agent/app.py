@@ -58,6 +58,7 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
+    policy_call_failure,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
@@ -259,10 +260,13 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         The Environment Server's outcome policy decides from it: by default a 400, 413 or 422 is graded, a
         retryable status or a transport failure dispatches the episode again, and any other status fails it.
         A tool abort (``abort_on_tool_error_types``) is a dependency outage no registered kind names, so it is
-        ``unknown``, which the policy dispatches again.
+        ``unknown``, which the policy dispatches again. A model server's failed reply comes classified by
+        ``policy_call_failure``, as ``simple_agent`` classifies it.
         """
         if native_result.get("tool_abort"):
             return AgentOutcome(failure_kind="unknown")
+        if (policy_call := native_result.get("policy_call")) is not None:
+            return policy_call.outcome
         error = native_result.get("error")
         if isinstance(error, ClientResponseError) and 400 <= error.status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=error.status)
@@ -657,12 +661,22 @@ class FinanceAgent(SimpleResponsesAPIAgent):
         elif state is not None and model_failure is not None:
             # A legacy /run verifies whatever the loop returns. In a session the Environment Server decides from the
             # cause whether to grade the episode, dispatch it again or fail it, instead of scoring an outage as 0.
+            policy_call = None
+            if isinstance(model_failure, ClientResponseError):
+                policy_call = policy_call_failure(model_failure)
+                if policy_call is None:
+                    raise model_failure  # The reply's report travels on unchanged; it is not another session chance.
             last_model_response.status = "failed"
             last_model_response.error = ResponseError(
                 code="server_error",
                 message=f"Model call failed on step {step}: {type(model_failure).__name__}: {model_failure}"[:2000],
             )
-            last_model_response = self.report_outcome(last_model_response, {"error": model_failure})
+            last_model_response = self.report_outcome(
+                last_model_response, {"error": model_failure, "policy_call": policy_call}
+            )
+            if policy_call is not None:
+                # The Environment Server lifts the cause this report selects onto the failure row.
+                last_model_response.failure_report = policy_call.report.model_dump(mode="json")
         elif state is not None and abort_error_type is not None:
             # Upstream ends the question with an empty answer, and a legacy /run grades what the loop returned. An
             # abort type names an outage the model cannot cause (v2: SEC or sec.gov still answering 429/503 after

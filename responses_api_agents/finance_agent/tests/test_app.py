@@ -43,10 +43,16 @@ from nemo_gym.agents import (
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     EpisodeId,
+    FailureBoundary,
+    FailureHeader,
+    FailureReport,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
+    NgFailureEvent,
     TaskId,
+    failure_report_for,
 )
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
@@ -1023,8 +1029,13 @@ def _tool_reply(body: str, *, cookies: dict | None = None, status: int = 200) ->
     return reply
 
 
-def _model_error_reply(status: int, body: bytes = b'{"error": "upstream"}') -> MagicMock:
-    """A model server reply that fails the agent's own ``raise_for_status`` with ``status`` and ``body``."""
+def _model_error_reply(
+    status: int, body: bytes = b'{"error": "upstream"}', *, report: FailureReport | None = None
+) -> MagicMock:
+    """A model server reply that fails the agent's own ``raise_for_status`` with ``status`` and ``body``.
+
+    ``report`` is the model server's own failure report, forwarded in the reply's header as a Gym server sends it.
+    """
     url = URL("http://model/v1/responses")
     reply = MagicMock()
     reply.ok = False
@@ -1036,9 +1047,23 @@ def _model_error_reply(status: int, body: bytes = b'{"error": "upstream"}') -> M
             (),
             status=status,
             message="upstream",
+            headers=CIMultiDict(FailureHeader.encode(report)) if report is not None else None,
         )
     )
     return reply
+
+
+def _model_server_failure(http_status: int) -> FailureReport:
+    """The report a Gym model server forwards when its own model request failed with ``http_status``."""
+    return failure_report_for(
+        NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_REQUEST_ERROR,
+            failure_reason=f"Provider answered HTTP {http_status}",
+            operation="model_request",
+            http_status=http_status,
+        )
+    )
 
 
 # What openai_model answers when the provider refuses a context overflow with a 400 and the model server does not
@@ -1258,6 +1283,60 @@ class TestAgentSessions:
             "status_code": status,
         }
         assert agent_outcome_policy(response) == action
+
+    @pytest.mark.parametrize(
+        ("status", "forwarded", "failure_kind", "terminal"),
+        [
+            pytest.param(503, _model_server_failure(503), MODEL_REQUEST_ERROR, False, id="forwarded-503"),
+            pytest.param(503, None, None, False, id="no-forwarded-report"),
+            # openai_model answers a provider's 503 with a 500 unless it propagates 503 (by default it does not): the
+            # cause the reply selects does not match the reply's status, so the episode fails, as under simple_agent.
+            pytest.param(500, _model_server_failure(503), None, True, id="forwarded-cause-of-another-status"),
+        ],
+    )
+    async def test_a_forwarded_model_failure_reaches_the_failure_row(
+        self, status: int, forwarded: FailureReport | None, failure_kind: str | None, terminal: bool
+    ) -> None:
+        """The model server's forwarded report rides on the failed reply, so its cause names the failure row's kind."""
+        from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+        from nemo_gym.rollouts.rollout_collection import _episode_record
+        from tests.helpers.single_agent_turn import _environment_server, _request, _Response
+
+        agent, client = _session_client(AsyncMock())
+        agent.server_client.post = AsyncMock(return_value=_model_error_reply(status, report=forwarded))
+        _seed(client)
+        response = NeMoGymResponse.model_validate(client.post("/v1/responses", json=_INPUT).json())
+        assert response.status == "failed"
+        assert response.model_extra["failure_report"]["failure_id"] == (forwarded.failure_id if forwarded else None)
+
+        environment, dependency = _environment_server()
+        dependency.responses[2] = _Response(response.model_dump(mode="json"))
+        del dependency.responses[4]  # A failed episode is not verified.
+        result = await environment.run_request(_request())
+
+        assert result.result is None and result.failure.terminal is terminal
+        # The Environment Server finance_agent's configs run, and the typed one, give the row the same kind.
+        legacy = SingleAgentTurnLegacyEnvironmentServer(
+            config=environment.config, server_client=dependency
+        )._legacy_result(result)
+        assert legacy["_ng_failure_kind"] == failure_kind
+        assert legacy["_ng_failure_class"] == (failure_kind or "environment_server_failed")
+        assert _episode_record(result.model_dump(mode="json")).get("failure_kind") == failure_kind
+
+    def test_a_selected_model_body_failure_gets_no_session_reply(self) -> None:
+        """A provider that may have answered gets no failed reply to dispatch again; the model's report travels on."""
+        body_failure = _model_server_failure(200)
+        agent, client = _session_client(AsyncMock())
+        # As run_webserver serves it: the exception middleware answers a raised error with its failure report.
+        agent.setup_exception_middleware(client.app)
+        agent.server_client.post = AsyncMock(return_value=_model_error_reply(500, report=body_failure))
+        _seed(client)
+
+        reply = client.post("/v1/responses", json=_INPUT)
+
+        assert reply.status_code == 500
+        assert agent.server_client.post.await_count == 1
+        assert FailureHeader.decode(reply.headers).events.keys() >= body_failure.events.keys()
 
     @pytest.mark.parametrize("status", [500, 400])
     def test_context_overflow_in_a_session_is_graded_at_any_status(self, status: int) -> None:
