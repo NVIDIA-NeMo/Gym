@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+user: |-
+  Solve the following math problem. End your response with a line of the form "#### <answer>", using digits for the final numerical answer.
+
+  {question}
