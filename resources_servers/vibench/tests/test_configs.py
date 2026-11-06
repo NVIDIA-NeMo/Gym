@@ -12,12 +12,12 @@ from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 CONFIGS = PARENT_DIR / "resources_servers" / "vibench" / "configs"
 
 
-def _server_config(server_name: str) -> dict:
+def _server_config(server_name: str, config_path: str = "resources_servers/vibench/configs/vibench.yaml") -> dict:
     config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=OmegaConf.merge(
                 GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
-                {"config_paths": ["resources_servers/vibench/configs/vibench.yaml"]},
+                {"config_paths": [config_path]},
             ),
             skip_load_from_cli=True,
             skip_load_from_dotenv=True,
@@ -47,3 +47,17 @@ def test_the_docker_overlay_gives_only_the_model_server_the_host_address():
 
     assert docker["use_absolute_ip"] is True
     assert docker["absolute_ip_server_types"] == ["responses_api_models"]
+
+
+def test_the_legacy_relay_config_still_runs_vibench_agent_against_this_server():
+    config_path = "resources_servers/vibench/configs/vibench_agent.yaml"
+    agent = _server_config("vibench_opencode_agent", config_path)
+    resources = _server_config("vibench_resources_server", config_path)
+    environment = _server_config("vibench_opencode_environment_server", config_path)
+
+    assert agent["entrypoint"] == "app.py" and "build_image" in agent
+    assert agent["resources_server"]["name"] == "vibench_resources_server"
+    # The agent writes tarballs where this server reads them.
+    assert resources["artifact_dir"] == agent["artifact_dir"]
+    assert "sandbox_provider" not in resources
+    assert environment["agent_server"]["name"] == "vibench_opencode_agent"

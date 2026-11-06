@@ -139,6 +139,7 @@ class TestOpenCodeSandboxedAgent:
             "legacy /run",
             "allowed_agents",
             "sandbox_handle",
+            "vibench_agent",
             "opencode_agent/README.md",
         ):
             assert phrase in app_module.DEPRECATION_WARNING

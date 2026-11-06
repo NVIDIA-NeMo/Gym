@@ -28,6 +28,11 @@ host in a fresh compose stack, not in the box the model controlled.
     run-seed-then-evaluate.py is not used; see the comment above SEED_SCRIPT.)
   * ``close_session`` stops the sandbox if verify has not, and removes the copied app.
 
+The legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench_agent.yaml``) still works: its
+``seed_session`` gets the PRD text and asset directories and starts no sandbox, its agent builds in a sandbox of its
+own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and grades the
+same way.
+
 Sessions are process-local, so the server runs with one worker. Grading shells into a local
 Docker daemon, so this server needs Docker and ``docker-compose`` on its host.
 
@@ -70,6 +75,8 @@ from nemo_gym.sandbox import (
 from nemo_gym.server_runtime import (
     BaseMultiRewardVerifyResponse,
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
@@ -185,8 +192,9 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
 
     # Names a top-level provider block, such as the one
     # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml defines. The provider must
-    # support reattaching (serialize/connect), since the agent borrows the sandbox.
-    sandbox_provider: str
+    # support reattaching (serialize/connect), since the agent borrows the sandbox. Only sessions
+    # need it; the legacy relay path's agent starts its own sandbox.
+    sandbox_provider: Optional[str] = None
     sandbox_config: VibenchSandboxConfig = Field(default_factory=VibenchSandboxConfig)
     # Where the builder works and the PRD is staged; the image's WORKDIR.
     app_workdir: str = "/app"
@@ -212,6 +220,12 @@ class VibenchResourcesServerConfig(BaseResourcesServerConfig):
     # Keep per-test-plan output dirs (traces, screenshots, DB dumps) after grading.
     keep_evaluation_artifacts: bool = False
 
+    # Legacy relay path only: the directory vibench_agent drops built-app tarballs into, shared
+    # with this server. A verify that names a tarball outside it is a build failure.
+    artifact_dir: Optional[str] = None
+    # Delete the agent's tarball once it has been graded.
+    remove_artifact_after_grading: bool = True
+
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.UNSUPPORTED
 
 
@@ -229,8 +243,21 @@ class VibenchTaskRequest(BaseModel):
     test_assets_dir: Optional[str] = None
 
 
+class VibenchSeedSessionRequest(VibenchTaskRequest, BaseSeedSessionRequest):
+    """The legacy relay path's seed: the task row itself, from vibench_agent's /run."""
+
+
+class VibenchSeedSessionResponse(BaseSeedSessionResponse):
+    """The legacy relay path's brief. No sandbox: vibench_agent starts its own."""
+
+    prd_text: str
+    asset_paths: List[str]
+
+
 class VibenchVerifyRequest(VibenchTaskRequest, BaseVerifyRequest):
-    pass
+    # Legacy relay path only: the tarball vibench_agent wrote into artifact_dir, or None when it
+    # harvested nothing. Sessions harvest the lent sandbox instead and never send it.
+    artifact_path: Optional[str] = None
 
 
 class PlanResult(BaseModel):
@@ -247,7 +274,7 @@ class PlanResult(BaseModel):
 
 class VibenchVerifyResponse(BaseMultiRewardVerifyResponse):
     # The **body.model_dump() splat carries task fields (prd_files, test_plans,
-    # test_assets_dir) that this response does not redeclare; without this
+    # test_assets_dir, artifact_path) that this response does not redeclare; without this
     # they are silently dropped and reverify cannot reconstruct the task.
     model_config = ConfigDict(extra="allow")
 
@@ -338,6 +365,15 @@ class VibenchResourcesServer(SimpleResourcesServer):
         candidate = (self._repo_root / rel_path).resolve()
         if not candidate.is_relative_to(self._repo_root):
             raise ValueError(f"Path {rel_path!r} escapes vibench_repo_root")
+        return candidate
+
+    def _resolve_artifact(self, artifact_path: str) -> Path:
+        """Resolve an agent-supplied tarball path, refusing anything outside artifact_dir."""
+        if not self.config.artifact_dir:
+            raise ValueError("artifact_path needs artifact_dir, which only the legacy relay path sets")
+        candidate = Path(artifact_path).expanduser().resolve()
+        if not candidate.is_relative_to(Path(self.config.artifact_dir).expanduser().resolve()):
+            raise ValueError(f"Artifact {artifact_path!r} escapes artifact_dir")
         return candidate
 
     def _unpack_artifact(self, artifact: Path, dest: Path) -> None:
@@ -642,12 +678,20 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
     # ---------------------------------------------------------------- routes
 
-    async def seed_session(self, request: Request, body: ResourcesSeedSessionRequest) -> ResourcesSeedSessionResponse:
+    async def seed_session(
+        self, request: Request, body: ResourcesSeedSessionRequest | VibenchSeedSessionRequest
+    ) -> ResourcesSeedSessionResponse | VibenchSeedSessionResponse:
         """Start the build sandbox with the task's brief staged, and lend it to the agent.
 
+        A legacy relay seed (vibench_agent's /run) gets the brief only, since that agent starts its own sandbox.
         Feature artifacts concatenate their base PRDs in order, matching how ViBench's
         build-feature path presents prior context to the coding agent.
         """
+        if not isinstance(body, ResourcesSeedSessionRequest):
+            prd_text = "\n\n".join(self._resolve(prd).read_text() for prd in body.prd_files)
+            asset_paths = [str(self._resolve(d)) for d in body.asset_dirs if self._resolve(d).is_dir()]
+            return VibenchSeedSessionResponse(prd_text=prd_text, asset_paths=asset_paths)
+
         session_id = body.resources_session_id
         # The cookie is set only on success: a refusal's reply passes through the session middleware too, and must
         # not hand the caller a cookie for a session that another episode holds.
@@ -699,6 +743,8 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
     async def _start_build_sandbox(self, prd_text: str, asset_dirs: List[Path]) -> AsyncSandbox:
         """Start a build box with the PRD staged before anything runs, then upload the PRD assets."""
+        if not self.config.sandbox_provider:
+            raise ValueError("Set sandbox_provider to run ViBench sessions; see resources_servers/vibench/README.md")
         if not self.config.sandbox_config.image:
             raise ValueError(
                 "Set sandbox_config.image (or VIBENCH_BUILD_IMAGE) to ViBench's base image; see "
@@ -851,6 +897,8 @@ class VibenchResourcesServer(SimpleResourcesServer):
         )
 
     async def verify(self, request: Request, body: VibenchVerifyRequest) -> VibenchVerifyResponse:
+        if "artifact_path" in body.model_fields_set:
+            return await self._verify_artifact(body)
         session = self._sessions.get(request.session.get(SESSION_ID_KEY))
         if session is None:
             # A session that is gone (a restart, a checkpoint restore) took its sandbox with it; a 0 would read
@@ -878,13 +926,39 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 # rollouts and a large app tree takes real time to remove.
                 await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
 
+    async def _verify_artifact(self, body: VibenchVerifyRequest) -> VibenchVerifyResponse:
+        """Grade the tarball vibench_agent wrote into artifact_dir (the legacy relay path).
+
+        No tarball, or one outside artifact_dir, is a build failure, as before sessions.
+        """
+        started = time.time()
+        archive: Optional[Path] = None
+        if body.artifact_path:
+            # Resolve first and never touch the raw path: deleting an unvalidated,
+            # agent-supplied path would remove arbitrary files even when the path was
+            # rejected for reading.
+            try:
+                archive = self._resolve_artifact(body.artifact_path)
+            except ValueError:
+                print(f"Refusing the artifact of {body.app}/{body.artifact}", format_exc(), file=sys.stderr)
+
+        work_dir = Path(tempfile.mkdtemp(prefix=f"vibench-{_label(body.app, body.artifact)}-"))
+        try:
+            return await self._grade(body, archive, work_dir, started)
+        finally:
+            if archive is not None and self.config.remove_artifact_after_grading:
+                with suppress(Exception):
+                    archive.unlink(missing_ok=True)
+            if not self.config.keep_evaluation_artifacts:
+                await asyncio.to_thread(shutil.rmtree, work_dir, ignore_errors=True)
+
     async def _grade(
         self, body: VibenchVerifyRequest, archive: Optional[Path], work_dir: Path, started: float
     ) -> VibenchVerifyResponse:
         app_dir = work_dir / "app"
         build_failed = False
         if archive is None:
-            # The model left nothing to archive.
+            # The model left nothing to archive, or the legacy relay sent no usable tarball.
             build_failed = True
         else:
             try:

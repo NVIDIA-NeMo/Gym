@@ -28,6 +28,7 @@ from resources_servers.vibench.app import (
     PlanResult,
     VibenchResourcesServer,
     VibenchResourcesServerConfig,
+    VibenchSeedSessionRequest,
     VibenchVerifyRequest,
     _BuildSession,
     add_evaluation_tags,
@@ -41,8 +42,7 @@ def make_server(tmp_path: Path, **overrides) -> VibenchResourcesServer:
         entrypoint="",
         name="vibench_resources_server",
         vibench_repo_root=str(tmp_path),
-        sandbox_provider="sandbox",
-        **overrides,
+        **({"sandbox_provider": "sandbox"} | overrides),
     )
     return VibenchResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
@@ -673,6 +673,102 @@ class TestGradeOneTestPlan:
         r = await server._grade_one_test_plan(tmp_path / "app", rel, work, None)
 
         assert r.normalized_score == 0.0
+
+
+class TestLegacyRelay:
+    """vibench_agent's path: the seed returns the brief only, and verify grades a tarball in artifact_dir."""
+
+    @pytest.mark.asyncio
+    async def test_seed_returns_the_brief_and_starts_no_sandbox(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path, sandbox_provider=None, artifact_dir=str(tmp_path / "artifacts"))
+        (tmp_path / "prds/notes/prd").mkdir(parents=True)
+        (tmp_path / "prds/notes/prd/mvp.txt").write_text("Build a notes app.")
+        (tmp_path / "prds/notes/assets").mkdir()
+
+        async def no_sandbox(*args, **kwargs):
+            raise AssertionError("the legacy relay seed must not start a sandbox")
+
+        monkeypatch.setattr(server, "_start_build_sandbox", no_sandbox)
+        body = VibenchSeedSessionRequest(
+            app="notes",
+            prd_files=["prds/notes/prd/mvp.txt"],
+            test_plans=["prds/notes/tests/mvp/test1.txt"],
+            asset_dirs=["prds/notes/assets", "prds/notes/missing"],
+        )
+
+        response = await server.seed_session(_FakeRequest(), body)
+
+        assert response.prd_text == "Build a notes app."
+        assert response.asset_paths == [str((tmp_path / "prds/notes/assets").resolve())]
+        assert server._sessions == {}
+
+    @pytest.mark.asyncio
+    async def test_grades_the_tarball_and_removes_it(self, tmp_path, monkeypatch):
+        server = make_server(tmp_path, sandbox_provider=None, artifact_dir=str(tmp_path / "artifacts"))
+        archive = TestArtifactUnpacking()._tar_with(tmp_path, "package.json")
+
+        def fake_unpack(artifact: Path, dest: Path):
+            assert artifact == archive.resolve()
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "setup-environment.sh").write_text("#!/bin/bash\n")
+            (dest / "start-server.sh").write_text("#!/bin/bash\n")
+
+        async def fake_grade(app_dir, test_plan_rel, work_dir, test_assets_dir):
+            return PlanResult(
+                test_plan=Path(test_plan_rel).stem,
+                score=5,
+                full_points=10,
+                normalized_score=0.5,
+                steps_total=2,
+                steps_passed=1,
+                seeding_failed=False,
+                duration_s=1.0,
+            )
+
+        monkeypatch.setattr(server, "_unpack_artifact", fake_unpack)
+        monkeypatch.setattr(server, "_grade_one_test_plan", fake_grade)
+
+        # No live session: the tarball, not a lent sandbox, is what gets graded.
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(archive)))
+
+        assert response.reward == pytest.approx(0.5)
+        assert response.build_failed is False
+        assert response.mask_sample is not True
+        assert not archive.exists()
+
+    @pytest.mark.asyncio
+    async def test_no_tarball_is_a_build_failure_not_a_lost_session(self, tmp_path):
+        server = make_server(tmp_path, sandbox_provider=None, artifact_dir=str(tmp_path / "artifacts"))
+
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=None))
+
+        assert response.build_failed is True
+        assert response.reward == 0.0
+        assert response.mask_sample is not True
+
+    @pytest.mark.asyncio
+    async def test_rejected_artifact_path_is_not_deleted(self, tmp_path):
+        """A rejected path must not be unlinked: deleting an unvalidated, agent-supplied
+        path is arbitrary file deletion."""
+        server = make_server(tmp_path, artifact_dir=str(tmp_path / "artifacts"))
+        victim = tmp_path / "IMPORTANT_FILE"
+        victim.write_text("do not delete")
+
+        response = await server.verify(_FakeRequest(), make_verify_request(artifact_path=str(victim)))
+
+        assert response.build_failed is True
+        assert victim.exists(), "verify deleted a file outside artifact_dir"
+
+    def test_rejects_artifact_path_outside_artifact_dir(self, tmp_path):
+        server = make_server(tmp_path, artifact_dir=str(tmp_path / "artifacts"))
+        # A compromised agent must not be able to point the verifier at arbitrary host files.
+        with pytest.raises(ValueError):
+            server._resolve_artifact("/etc/passwd")
+
+    def test_rejects_any_artifact_path_without_artifact_dir(self, tmp_path):
+        server = make_server(tmp_path)
+        with pytest.raises(ValueError):
+            server._resolve_artifact(str(tmp_path / "app.tar"))
 
 
 class TestVerifyRewardAggregation:

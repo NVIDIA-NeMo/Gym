@@ -1,6 +1,7 @@
 # ViBench through an EnvironmentServer: the resources server starts the build sandbox with the PRD
 # staged and lends it, OpenCode builds the app there through an agent session, then the resources
-# server copies the app out, stops the sandbox and grades the copy in fresh compose stacks.
+# server copies the app out, stops the sandbox and grades the copy in fresh compose stacks. This is the default path;
+# configs/vibench_agent.yaml keeps the legacy relay path.
 config_paths:
   # opencode_agent's command deny-list only, not opencode_agent.yaml: OpenCode 1.17.11 places the keys of a `tools`
   # map, such as the one opencode_agent.yaml sets, before the permission map's "*" rule, and the last matching rule
@@ -61,7 +62,7 @@ vibench_resources_server:
       keep_evaluation_artifacts: ${oc.env:VIBENCH_KEEP_ARTIFACTS,false}
 
 # OpenCode builds the app in the lent sandbox, with opencode_agent's command deny-list and without the web, subagent
-# and skill tools. The other settings keep the previous vibench_agent's.
+# and skill tools. The other settings keep vibench_agent's (configs/vibench_agent.yaml).
 vibench_opencode_agent:
   _inherit_from: opencode_agent
   responses_api_agents:

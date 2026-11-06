@@ -156,13 +156,13 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-The recipe keeps the previous `vibench_agent` settings where it can: OpenCode 1.17.11, a
-5,400-second build, no subagents. Two differ. The output budget is 32,768 tokens per model call
-and the context window 229,376, so a call fits a 262,144-token served context; the previous
-recipe asked for the whole window on every call, which an OpenAI-compatible server such as vLLM
+The recipe keeps the legacy relay path's `vibench_agent` settings where it can: OpenCode 1.17.11,
+a 5,400-second build, no subagents. Two differ. The output budget is 32,768 tokens per model call
+and the context window 229,376, so a call fits a 262,144-token served context; the legacy
+recipe asks for the whole window on every call, which an OpenAI-compatible server such as vLLM
 refuses, and OpenCode then ends the build with no model call at all. OpenCode also runs with
 `opencode_agent`'s command deny-list (`configs/permissions/default.yaml`), which also denies Git
-network commands, Git history mining and `curl`/`wget` to GitHub; the previous recipe denied only
+network commands, Git history mining and `curl`/`wget` to GitHub; the legacy recipe denies only
 process killing and `rm -rf /`. The recipe loads that deny-list but not `opencode_agent.yaml`:
 OpenCode 1.17.11 places the keys of a `tools` map, such as the one that file sets, before the
 permission map's `"*"` rule, and the last matching rule wins, so with that map none of the denials
@@ -172,10 +172,31 @@ Start with `--limit 1`. A single rollout builds an app and then runs a full comp
 per test plan; wall-clock is tens of minutes and the box needs headroom for
 `max_concurrent_test_plans` simultaneous Postgres + app + Playwright stacks.
 
+## Legacy relay path
+
+`responses_api_agents/vibench_agent` still runs ViBench behind the `legacy_agent` relay, from
+`configs/vibench_agent.yaml`. That agent starts its own build sandbox from the same image, runs
+OpenCode in it with the legacy recipe above, and writes the app as a tarball into `artifact_dir`, a
+directory it shares with this server; `seed_session` hands it only the PRD text and asset
+directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
+the agent and this server on one host. With Docker, use the agent's own `configs/docker.yaml`; with
+OpenSandbox, set `sandbox_model_base_url` on the agent. See
+[its README](../../responses_api_agents/vibench_agent/README.md).
+
+```bash
+gym env start \
+    --config resources_servers/vibench/configs/vibench_agent.yaml \
+    --config responses_api_agents/vibench_agent/configs/docker.yaml \
+    --model-type openai_model
+```
+
+The two paths differ in output budget and command deny-list, so their scores are not directly
+comparable.
+
 ## Validation
 
-Run end to end on a Docker host with the previous agent, `vibench_agent`, which owned the build
-sandbox and handed the app over through a shared directory. Grading is unchanged since. All five
+Run end to end on a Docker host with the legacy relay path's agent, `vibench_agent`, which owns the
+build sandbox and hands the app over through a shared directory. Grading is unchanged since. All five
 example tasks graded, 16/16 test plans, no build or seeding failures:
 
 | app | reward | plans graded |
@@ -188,7 +209,7 @@ example tasks graded, 16/16 test plans, no build or seeding failures:
 
 Mean 0.785. The spread matters more than the mean: `wedding` well below the rest shows the
 scale is not saturated. `data/example_rollouts.jsonl` holds this run, with its task paths
-updated to the `v1/` layout and the previous agent's artifact path removed.
+updated to the `v1/` layout and `vibench_agent`'s artifact path removed.
 
 The reward tracks model capability. An earlier run with a weaker policy model scored 0.0 on
 `notes` with 0/19 steps, its app unreachable because the build produced no output, while the

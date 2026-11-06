@@ -9,8 +9,9 @@
 > otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro).
 >
 > Some setups have no session path yet and stay on this agent until they do: the SWE resources servers that
-> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`) and the HLE search presets
-> (`tool_servers`). Existing configs keep working; the agent logs a deprecation warning when it starts.
+> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`), the HLE search presets
+> (`tool_servers`), and `vibench_agent`, which extends this agent. Existing configs keep working; the agent logs a
+> deprecation warning when it starts.
 
 ```bash
 # In terminal 1
