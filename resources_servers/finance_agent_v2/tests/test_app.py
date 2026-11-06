@@ -105,7 +105,7 @@ def _mock_request(session_id: str = _TEST_SESSION_ID) -> MagicMock:
     return req
 
 
-def _typed_seed(session_id: str = _TEST_SESSION_ID, rollout_id: str = "rollout") -> ResourcesSeedSessionRequest:
+def _episode_seed(session_id: str = _TEST_SESSION_ID, rollout_id: str = "rollout") -> ResourcesSeedSessionRequest:
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(rollout_id=rollout_id, attempt=0),
@@ -596,20 +596,20 @@ class TestSession:
         server = _make_server()
         check_resources_session_contract(
             server.setup_webserver(),
-            _typed_seed("contract-session"),
+            _episode_seed("contract-session"),
             keeps_state=True,
             holds_state=lambda resources_session_id: resources_session_id in server._data_storage,
             verify_body=_make_verify_request(_make_response(), expected_answer="$391.0 billion").model_dump(
                 mode="json"
             ),
         )
-        assert not server._data_storage and not server._typed_seeds
+        assert not server._data_storage and not server._episode_seeds
 
-    def test_typed_seed_cookie_reaches_the_tools_through_routes(self) -> None:
-        """Without the session router, only the seed's own cookie bind lets the tools find the typed session."""
+    def test_episode_seed_cookie_reaches_the_tools_through_routes(self) -> None:
+        """Without the session router, only the seed's own cookie bind lets the tools find the episode session."""
         server = _make_server()
         client = TestClient(server.setup_webserver())
-        seed = _typed_seed("routed")
+        seed = _episode_seed("routed")
 
         assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 200
         # A stateful tool on the seeded session answers (the upstream prompt-format error), not 404.
@@ -618,7 +618,7 @@ class TestSession:
         assert "ERROR" in reply.json()["results"]
         # A `{}` seed with that cookie, such as a model's tool call named seed_session, cannot reset it.
         assert client.post("/seed_session", json={}).status_code == 409
-        assert "routed" in server._typed_seeds
+        assert "routed" in server._episode_seeds
 
         assert client.post("/close_session", json=_close(seed).model_dump(mode="json")).status_code == 200
         # Nor can it recreate the closed session.
@@ -633,9 +633,9 @@ class TestSession:
         assert len(server._data_storage) == 1
 
     @pytest.mark.asyncio
-    async def test_retried_typed_seed_keeps_stored_documents(self) -> None:
+    async def test_retried_episode_seed_keeps_stored_documents(self) -> None:
         server = _make_server()
-        seed = _typed_seed()
+        seed = _episode_seed()
         await server.seed_session(_mock_request(), seed)
         server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
 
@@ -645,21 +645,21 @@ class TestSession:
         assert server._data_storage[_TEST_SESSION_ID] == {"doc": "Annual Report 2024"}
 
     @pytest.mark.asyncio
-    async def test_typed_seed_for_another_episode_is_refused_without_its_cookie(self) -> None:
+    async def test_episode_seed_for_another_episode_is_refused_without_its_cookie(self) -> None:
         server = _make_server()
-        await server.seed_session(_mock_request(), _typed_seed())
+        await server.seed_session(_mock_request(), _episode_seed())
         refused = _mock_request("caller-session")
         with pytest.raises(HTTPException) as error:
-            await server.seed_session(refused, _typed_seed(rollout_id="other"))
+            await server.seed_session(refused, _episode_seed(rollout_id="other"))
         assert error.value.status_code == 409
         # The refused reply must not name the live session in its cookie.
         assert refused.session[SESSION_ID_KEY] == "caller-session"
 
     @pytest.mark.asyncio
-    async def test_legacy_seed_cannot_reset_a_typed_session(self) -> None:
-        """A `{}` seed with a typed session's cookie must not wipe its documents or restart its time budget."""
+    async def test_agent_run_seed_cannot_reset_an_episode_session(self) -> None:
+        """A `{}` seed with an episode session's cookie must not wipe its documents or restart its time budget."""
         server = _make_server()
-        await server.seed_session(_mock_request(), _typed_seed())
+        await server.seed_session(_mock_request(), _episode_seed())
         server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
         started = server._session_start_times[_TEST_SESSION_ID]
 
@@ -673,7 +673,7 @@ class TestSession:
     @pytest.mark.asyncio
     async def test_close_releases_state_and_fences_both_seed_routes(self) -> None:
         server = _make_server()
-        seed = _typed_seed()
+        seed = _episode_seed()
         await server.seed_session(_mock_request(), seed)
         server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
 
@@ -681,7 +681,7 @@ class TestSession:
 
         assert _TEST_SESSION_ID not in server._data_storage
         assert _TEST_SESSION_ID not in server._session_start_times
-        assert _TEST_SESSION_ID not in server._typed_seeds
+        assert _TEST_SESSION_ID not in server._episode_seeds
         # The legacy route must not recreate a closed session either.
         for late_seed in (seed, BaseSeedSessionRequest()):
             with pytest.raises(HTTPException) as error:
@@ -692,7 +692,7 @@ class TestSession:
     @pytest.mark.asyncio
     async def test_verify_after_close_is_masked(self) -> None:
         server = _make_server()
-        seed = _typed_seed()
+        seed = _episode_seed()
         await server.seed_session(_mock_request(), seed)
         await server.close_resources_session(_close(seed))
         response = NeMoGymResponse(
@@ -715,9 +715,9 @@ class TestSession:
     @pytest.mark.asyncio
     async def test_close_for_another_episode_is_refused(self) -> None:
         server = _make_server()
-        await server.seed_session(_mock_request(), _typed_seed())
+        await server.seed_session(_mock_request(), _episode_seed())
         with pytest.raises(HTTPException) as error:
-            await server.close_resources_session(_close(_typed_seed(rollout_id="other")))
+            await server.close_resources_session(_close(_episode_seed(rollout_id="other")))
         assert error.value.status_code == 409
         assert _TEST_SESSION_ID in server._data_storage
 
@@ -725,7 +725,7 @@ class TestSession:
     async def test_stateful_tools_on_a_closed_session_are_lost_not_recreated(self) -> None:
         server = _make_server()
         server._tools["parse_html_page"]._parse_html_page = AsyncMock(return_value="NVIDIA 10-K")
-        seed = _typed_seed()
+        seed = _episode_seed()
         await server.seed_session(_mock_request(), seed)
         await server.close_resources_session(_close(seed))
 
@@ -755,23 +755,23 @@ class TestSession:
         assert response.status_code == 404
         assert response.json()["detail"]["failure_kind"] == "session_lost"
 
-    def test_eviction_ends_the_routing_claim_and_checkpoint_tracking(self, tmp_path) -> None:
-        """An evicted session's claim must become releasable; a seed's own route keeps it open forever otherwise."""
+    def test_eviction_ends_the_ownership_and_checkpoint_tracking(self, tmp_path) -> None:
+        """An evicted session's ownership must end; a seed's own route keeps it open forever otherwise."""
         server = _make_server(session_close_retry_window_seconds=0.01)
         app = server.setup_webserver()
         key = server.get_session_middleware_key()
         # The routing a worker of a multi-worker server installs. Without the app's lifespan no socket is served.
         install_session_routing(
-            app, socket_dir=str(tmp_path), session_cookie=key, secret_key=key, **server.claimed_session_routing()
+            app, socket_dir=str(tmp_path), session_cookie=key, secret_key=key, **server.owned_session_routing()
         )
         lifetimes = app.state.nemo_gym_resources_session_lifetimes
         server._checkpoint = MagicMock()
-        abandoned = TestClient(app).post("/seed_session", json=_typed_seed("abandoned").model_dump(mode="json"))
+        abandoned = TestClient(app).post("/seed_session", json=_episode_seed("abandoned").model_dump(mode="json"))
         assert abandoned.status_code == 200
         assert lifetimes.holds("abandoned")
         server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
 
-        fresh = TestClient(app).post("/seed_session", json=_typed_seed("fresh").model_dump(mode="json"))
+        fresh = TestClient(app).post("/seed_session", json=_episode_seed("fresh").model_dump(mode="json"))
 
         assert fresh.status_code == 200
         assert "abandoned" not in server._data_storage and "fresh" in server._data_storage
@@ -783,60 +783,113 @@ class TestSession:
     @pytest.mark.asyncio
     async def test_seed_discards_sessions_older_than_ttl(self) -> None:
         server = _make_server()
-        await server.seed_session(_mock_request("abandoned"), _typed_seed("abandoned"))
+        await server.seed_session(_mock_request("abandoned"), _episode_seed("abandoned"))
         server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
 
-        await server.seed_session(_mock_request("fresh"), _typed_seed("fresh"))
+        await server.seed_session(_mock_request("fresh"), _episode_seed("fresh"))
 
         assert "abandoned" not in server._data_storage
-        assert "abandoned" not in server._typed_seeds
+        assert "abandoned" not in server._episode_seeds
         assert "fresh" in server._data_storage
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("episode_session", [True, False])
+    async def test_verify_of_a_session_that_outlived_its_ttl_is_masked_as_expired(self, episode_session: bool) -> None:
+        """Its tool calls after the eviction found no session, so the score would not measure the model."""
+        server, _ = _rubric_server({_C1: [1, 1, 1]})
+        seed = _episode_seed("abandoned")
+        await server.seed_session(_mock_request("abandoned"), seed if episode_session else BaseSeedSessionRequest())
+        server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
+        await server.seed_session(_mock_request("fresh"), _episode_seed("fresh"))
+
+        masked = await server.verify(_mock_request("abandoned"), _submitted_request(_rubric(_C1)))
+
+        assert masked.mask_sample is True
+        assert masked.failure_kind == "session_expired"
+        if episode_session:
+            # Fenced as after a close: a late seed is refused, and only the session's own episode closes it.
+            with pytest.raises(HTTPException) as error:
+                await server.seed_session(_mock_request("abandoned"), seed)
+            assert error.value.status_code == 409
+            await server.close_resources_session(_close(seed))
+
+    @pytest.mark.asyncio
+    async def test_a_new_agent_run_seed_clears_an_expired_session(self) -> None:
+        server, _ = _rubric_server({_C1: [1, 1, 1]})
+        await server.seed_session(_mock_request("abandoned"), BaseSeedSessionRequest())
+        server._session_start_times["abandoned"] -= server.config.session_ttl_seconds + 1
+        await server.seed_session(_mock_request("fresh"), _episode_seed("fresh"))
+
+        await server.seed_session(_mock_request("abandoned"), BaseSeedSessionRequest())
+        scored = await server.verify(_mock_request("abandoned"), _submitted_request(_rubric(_C1)))
+
+        assert not scored.mask_sample
+        assert scored.reward == 1.0
 
     @pytest.mark.asyncio
     async def test_seed_keeps_other_open_sessions_within_their_ttl(self) -> None:
         """Eviction discards only sessions past session_ttl_seconds; every other open rollout keeps its documents."""
         server = _make_server()
-        await server.seed_session(_mock_request("typed-live"), _typed_seed("typed-live"))
-        server._data_storage["typed-live"]["doc"] = "typed report"
+        await server.seed_session(_mock_request("episode-live"), _episode_seed("episode-live"))
+        server._data_storage["episode-live"]["doc"] = "episode report"
         await server.seed_session(_mock_request("legacy-live"), BaseSeedSessionRequest())
         server._data_storage["legacy-live"]["doc"] = "legacy report"
 
-        await server.seed_session(_mock_request("new"), _typed_seed("new", rollout_id="new"))
+        await server.seed_session(_mock_request("new"), _episode_seed("new", rollout_id="new"))
         await server.seed_session(_mock_request("new-legacy"), BaseSeedSessionRequest())
 
-        assert server._data_storage["typed-live"] == {"doc": "typed report"}
+        assert server._data_storage["episode-live"] == {"doc": "episode report"}
         assert server._data_storage["legacy-live"] == {"doc": "legacy report"}
-        assert {"typed-live", "legacy-live", "new", "new-legacy"} <= set(server._session_start_times)
-        assert "typed-live" in server._typed_seeds
+        assert {"episode-live", "legacy-live", "new", "new-legacy"} <= set(server._session_start_times)
+        assert "episode-live" in server._episode_seeds
 
     @pytest.mark.asyncio
     async def test_retired_attempt_releases_its_session(self) -> None:
         server = _make_server()
-        await server.seed_session(_mock_request(), _typed_seed())
+        await server.seed_session(_mock_request(), _episode_seed())
         server._data_storage[_TEST_SESSION_ID]["doc"] = "Annual Report 2024"
 
         await server.retire_session_state(_TEST_SESSION_ID)
 
         assert _TEST_SESSION_ID not in server._data_storage
         assert _TEST_SESSION_ID not in server._session_start_times
-        assert _TEST_SESSION_ID not in server._typed_seeds
+        assert _TEST_SESSION_ID not in server._episode_seeds
 
     @pytest.mark.asyncio
-    async def test_verify_releases_the_session(self) -> None:
+    async def test_verify_keeps_an_episode_session_until_its_close(self) -> None:
+        """The Environment Server closes its session after verify, and the close still checks the seed's episode."""
         server, _ = _rubric_server({_C1: [1, 1, 1]})
-        await server.seed_session(_mock_request(), _typed_seed())
+        seed = _episode_seed()
+        await server.seed_session(_mock_request(), seed)
+
+        res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
+
+        assert res.reward == 1.0
+        assert _TEST_SESSION_ID in server._data_storage
+        with pytest.raises(HTTPException) as error:
+            await server.close_resources_session(_close(_episode_seed(rollout_id="other")))
+        assert error.value.status_code == 409
+        await server.close_resources_session(_close(seed))
+        assert _TEST_SESSION_ID not in server._data_storage
+        assert _TEST_SESSION_ID not in server._episode_seeds
+
+    @pytest.mark.asyncio
+    async def test_verify_ends_an_agent_run_session(self) -> None:
+        """An Agent's /run never closes its session, so its verify releases it."""
+        server, _ = _rubric_server({_C1: [1, 1, 1]})
+        await server.seed_session(_mock_request(), BaseSeedSessionRequest())
 
         res = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
 
         assert res.reward == 1.0
         assert _TEST_SESSION_ID not in server._data_storage
-        assert _TEST_SESSION_ID not in server._typed_seeds
+        assert _TEST_SESSION_ID not in server._session_start_times
 
     @pytest.mark.asyncio
     async def test_resent_verify_before_close_gets_the_same_score(self) -> None:
         """A verify that ServerClient re-sends after a dropped reply is scored again, not masked as a lost session."""
         server, _ = _rubric_server({_C1: [1] * 6})
-        await server.seed_session(_mock_request(), _typed_seed())
+        await server.seed_session(_mock_request(), _episode_seed())
 
         first = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
         resent = await server.verify(_mock_request(), _submitted_request(_rubric(_C1)))
