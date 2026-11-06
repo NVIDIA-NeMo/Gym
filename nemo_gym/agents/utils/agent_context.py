@@ -22,7 +22,7 @@ def resolve_agent_context_artifact(
     """The artifact's path under ``root``, checked to stay inside it, through symlinks too, and to be a ``kind``.
 
     Raises AgentSeedRejectedError otherwise, or when the path cannot be looked up (too long, no permission), so an
-    agent that resolves its artifacts while seeding refuses the session with a final 422 instead of failing its
+    agent that resolves its artifacts while seeding refuses the session with a terminal 422 instead of failing its
     first activation. The check runs on resolved paths: a directory under ``root`` that is a symlink to other
     storage counts as outside, so configure the real directory as the root.
 

@@ -54,7 +54,7 @@ def test_a_missing_or_wrong_kind_of_artifact_refuses_the_seed(root: Path, path: 
     ids=["nul-byte", "long-name"],
 )
 def test_a_path_the_filesystem_cannot_look_up_refuses_the_seed(root: Path, path: str, reason: str) -> None:
-    """A retry would meet the same error, so the seed answers a final 422, not a 500 that is retried."""
+    """A retry would meet the same error, so the seed answers a terminal 422, not a 500 that is retried."""
     # A NUL byte cannot pass validation; an artifact built without it reaches the filesystem.
     artifact = AgentContextArtifact.model_construct(path=path)
 
