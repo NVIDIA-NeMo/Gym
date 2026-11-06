@@ -74,6 +74,30 @@ install or rebind one. The existing `--agent-type` swap and automatic benchmark-
 still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `pi_agent.responses_api_agents.pi_agent.sandbox_config`. Like `pi_sandboxed_agent`'s profile, it sets
+`network_access: model_only`, so the sandbox reaches only the model server; a search preset overrides it with
+`model_and_tools`. A restricted sandbox cannot download Pi, so supply `sandbox_runtime_dir`, or set it to `null` for
+an image prebaked at the default path.
+
+The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
+APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
+fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
+model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+
+```yaml
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports: []
+```
+
 ## Runtime and model requirements
 
 Use an exact `pi_version` (default **0.80.2**), and a Gym `model_server`.
@@ -82,16 +106,19 @@ task working directory. Without access, configure agent-owned creation as noted 
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
 only for its compatibility `/run`, not agent sessions.
 
-Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
-bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
+Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with
+bash, tar/gzip, and SHA-256 utilities; no Python is needed. Session setup uses POSIX sh to install missing Bash
 with apt-get or apk when running as root, before launching the Bash runtime installer;
-otherwise preinstall them in the image. Setup fails on either a nonzero exit or a provider error.
+otherwise preinstall it in the image. Pi runs under Gym's shared Bash harness runner and process supervisor. Setup fails on either a nonzero exit or a provider error.
 Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
 The provider must support sandbox exec and file upload/download.
 Installation needs network access to nodejs.org and npm; musl also uses unofficial-builds.nodejs.org
-and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org.
+and, for the older C++ runtime fallback, dl-cdn.alpinelinux.org. An image without that access can carry the
+runtime instead: set `sandbox_runtime_dir` to the directory `install_pi_runtime.sh` produces, copied whole
+(`node/`, `pi/` and, on older Alpine, `libstdcpp/`), and setup checks that it runs `pi_version` rather than
+installing one. A runtime that is missing or runs another version refuses the seed with HTTP 422.
 
 The Node runtime, Pi package, and private `PI_CODING_AGENT_DIR` are outside the task repository.
 Task HOME and XDG directories are preserved for tools and verification. Pi's
@@ -126,7 +153,11 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   A finish call from a reply cut off at the output limit is not run, since its arguments may be cut off, and
   the model is asked to call it again. A reply counts as cut off when the server reports `length`, or when it
   used all of its `max_tokens`, as vLLM reports `tool_calls` for a reply it parsed a tool call from. Setup
-  fails if no granted server offers a listed tool. Without usable MCP grants the setting has no effect.
+  fails if no grant left in offers a listed tool. Names are matched without the grant, so another grant's tool of
+  the same name would end the run too: as for grant names, an optional grant that offers a listed tool another grant
+  offers is left out and recorded as an `mcp_server_skipped` gap, and two required grants that offer the same listed
+  tool fail setup.
+  Without usable MCP grants the setting has no effect.
 - Responses name MCP calls `mcp__<grant name>__<tool name>`; a Resources server's `/verify` strips its own
   grant's prefix. Observations and model calls keep the names the model saw.
 - The grant's headers are readable inside the sandbox, including by the model's tools. For a Resources
@@ -164,25 +195,26 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
-The supervisor and the runner above Pi run as `gym-supervisor` and `gym-runner` (links to the
-sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
-`pkill python3` or `killall python3` does not end Pi.
+The supervisor and the runner above Pi are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end Pi.
 
-Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
+Harness execution uses `nemo_gym.agents.utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
 uploads the supervisor at activation and owns its control files and log access; the common lifecycle
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
-`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.sh`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
 Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
@@ -219,11 +251,15 @@ detail, not a separate endpoint or a setup step users must run.
 - `pi_version`: npm version to pin on install (null means latest on the local path; sandbox sessions require an exact version)
 - `resources_server`: required only for the agent's existing `/run` endpoint, not for sandbox sessions or direct `/v1/responses`
 - `sandbox_install_timeout_seconds`: sandbox runtime installation timeout (default 600)
+- `sandbox_runtime_dir`: absolute sandbox path of a preinstalled runtime to use instead of installing one
+  (default none)
+- `network_access`: egress of a sandbox the agent creates: `inherit` (default, the provider's network),
+  `model_only`, or `model_and_tools`; OpenSandbox only
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
-- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run (default none;
-  uses Pi's `terminate`, available from Pi 0.69.0)
+- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
+  grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 
 ## Results and limits
@@ -238,7 +274,14 @@ captured observations.
 Pi does not set reward or masking policy.
 
 Response metadata includes `harness_execution: sandbox`, hostname, supervisor PID, and
-the pinned Pi version. Model-call references and tool observations are returned by agent close.
+the pinned Pi version. When `timeout` stops a run that was still working and in which no call of a
+`finish_tool_names` tool had succeeded, the metadata also has `stop_reason: wall_time`, as Stirrup reports a timeout,
+so a benchmark can tell a timeout from a run that ended without a submission. A run has ended once a reply stops
+(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless it is an empty
+`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (Pi 0.80.2 then
+exits with code 1, which fails the run). A timeout while Pi waits to retry a failed model call, or while
+the provider gives up on the supervisor after the deadline, is reported the same way. Model-call references and tool
+observations are returned by agent close.
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence
 is explicitly marked as gaps.
 
@@ -311,3 +354,24 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits a created sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port.
+Under `model_and_tools`, an MCP grant at an address the sandbox cannot reach, such as loopback, refuses the seed
+with a 422, even an optional one that `inherit` would skip; a required grant under `model_only` is refused too. The policy is
+set when the sandbox is created, so a session that borrows a task sandbox rejects any value other than `inherit`,
+and a `sandbox_config.provider_options.network_policy` cannot be combined with it. A created sandbox must reach
+the model server by address (`use_absolute_ip: true`). A borrowed sandbox relies on its owner's network policy,
+and the owner never learns which endpoints the agent needs: a deny-by-default owner must allow the model server
+itself, and a profile that sets `model_only` cannot be reused for a benchmark that supplies task sandboxes.
+
+A restricted sandbox cannot download Pi, so pair it with `sandbox_runtime_dir`, or with an image that already holds
+the runtime at the default path, `/tmp/nemo-gym-pi-node-22.19.0-<pi_version>`, with its `ready` marker.
+
+Allowing the model server's host opens every Gym server bound to that address, not only the model server. With
+`model_only`, set `absolute_ip_server_types: [responses_api_models]` so that only the model server leaves loopback;
+with `model_and_tools`, also list `resources_servers` for the tool servers.
+
+The policy is only as strong as the OpenSandbox server's egress mode. In `dns` mode only name resolution is filtered,
+so a hard-coded IP bypasses the policy; `dns+nft` also enforces it at the IP layer. Use `dns+nft` for full isolation
+(see [OpenSandbox](../../fern/versions/latest/pages/infrastructure/sandbox/opensandbox.mdx#network-policy)).

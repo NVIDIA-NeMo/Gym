@@ -19,14 +19,14 @@ from unittest.mock import MagicMock
 
 from pytest import approx
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.models import ChatCompletionsConverter
 from resources_servers.iheval.app import (
     IHEvalResourcesServer,
     IHEvalResourcesServerConfig,
@@ -859,7 +859,7 @@ class TestExampleDataShape:
         assert rows_with_tool_turns, "example.jsonl must keep at least one tool-use row"
 
     def test_tool_turns_convert_to_chat_completions(self) -> None:
-        converter = ResponsesConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         for row in self._rows():
             params = converter.responses_to_chat_completion_create_params(
                 NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")
@@ -874,7 +874,7 @@ class TestExampleDataShape:
 
     def test_conversation_history_survives_conversion(self) -> None:
         """Pre-canned ``conversation_history`` turns reach the model intact."""
-        converter = ResponsesConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         multi_turn = [r for r in self._rows() if r["task"] == "multi-turn"]
         assert multi_turn, "example.jsonl must keep a multi-turn row"
         for row in multi_turn:
@@ -887,7 +887,7 @@ class TestExampleDataShape:
 
     def test_no_assistant_turn_carries_an_empty_tool_calls_array(self) -> None:
         """OpenAI rejects ``tool_calls: []``; plain history turns must omit the key."""
-        converter = ResponsesConverter(return_token_id_information=False)
+        converter = ChatCompletionsConverter(return_token_id_information=False)
         for row in self._rows():
             params = converter.responses_to_chat_completion_create_params(
                 NeMoGymResponseCreateParamsNonStreaming(**row["responses_create_params"], model="test-model")

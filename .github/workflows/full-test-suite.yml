@@ -32,10 +32,8 @@ concurrency:
 env:
   # Number of parallel shards for the full server suite. Keep in sync with the matrix below.
   NUM_SHARDS: "8"
-  # Pin uv: 0.11.21+ supports Python 3.13.14; 0.11.29 is the latest stable.
-  # 0.11.20 had a regression dropping pinned deps (fixed in 0.11.21).
-  # 
-  UV_INSTALL_URL: "https://astral.sh/uv/0.11.29/install.sh"
+  # Managed lockfiles require uv 0.13.4+, including the corrected certificate trust store.
+  UV_INSTALL_URL: "https://astral.sh/uv/0.13.4/install.sh"
 
 jobs:
   full-test-suite:
@@ -78,7 +76,8 @@ jobs:
       - name: Test
         run: |
           source .venv/bin/activate
-          PYTEST_ADDOPTS='-m "not sandbox" --cov-report= --cov-fail-under=0' ng_dev_test
+          source scripts/ci/test_worker_env.sh
+          PYTEST_ADDOPTS='-m "not sandbox" -n 4 --dist=loadfile --cov-report= --cov-fail-under=0' ng_dev_test
           pytest --cov=. --cov-append --cov-report=term-missing \
             --cov-fail-under="$(python3 scripts/ci/cov_fail_under.py)" --durations=10 -m sandbox
 
@@ -128,11 +127,18 @@ jobs:
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: |
           source .venv/bin/activate
-          ng_test_all \
+          source scripts/ci/test_worker_env.sh
+          python scripts/ci/server_test_workers.py "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}" \
             +fail_on_total_and_test_mismatch=true \
-            +delete_venvs_after_each_test=true \
-            +num_shards=${{ env.NUM_SHARDS }} \
-            +shard_index=${{ matrix.shard }}
+            +delete_venvs_after_each_test=true
+
+      - name: Upload server worker logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-server-worker-logs-${{ matrix.shard }}
+          path: results/server-workers
+          if-no-files-found: warn
 
   server-suite-result:
     name: Server suite
@@ -154,8 +160,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       NEMO_GYM_ALLOW_PRERELEASE: "true"
-      UV_INDEX_URL: "http://127.0.0.1:8888/"
-      UV_EXTRA_INDEX_URL: "https://pypi.org/simple/"
+      # Extra indexes take priority over the default index: resolve Gym from our wheel first.
+      UV_INDEX_URL: "https://pypi.org/simple/"
+      UV_EXTRA_INDEX_URL: "http://127.0.0.1:8888/"
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -177,7 +184,8 @@ jobs:
 
       - name: Build wheel and serve as local PyPI index
         run: |
-          uv build
+          # The local index is not serving yet; resolve build dependencies from PyPI.
+          env -u UV_EXTRA_INDEX_URL uv build
           mkdir -p /tmp/local-pypi/nemo-gym
           cp dist/*.whl /tmp/local-pypi/nemo-gym/
           ls /tmp/local-pypi/nemo-gym/ | sed 's|.*|<a href="&">&</a>|' > /tmp/local-pypi/nemo-gym/index.html
@@ -247,10 +255,20 @@ jobs:
           source .venv/bin/activate
           ng_init_resources_server +entrypoint=resources_servers/hello_world
           test -f resources_servers/hello_world/app.py
-          test -f resources_servers/hello_world/requirements.txt
+          test -f resources_servers/hello_world/pyproject.toml
           test -f resources_servers/hello_world/configs/hello_world.yaml
           test -d resources_servers/hello_world/tests
-          grep -q "nemo-gym" resources_servers/hello_world/requirements.txt
+          grep -q "nemo-gym" resources_servers/hello_world/pyproject.toml
+          # Scaffolding emits dependency metadata; resolve and verify the lock before setup.
+          uv lock --project resources_servers/hello_world
+          uv lock --check --project resources_servers/hello_world
+          test -f resources_servers/hello_world/uv.lock
+          # The child must use the parent wheel, not a different release from PyPI.
+          NEMO_GYM_VERSION=$(python -c "from importlib.metadata import version; print(version('nemo-gym'))")
+          uv sync --locked --project resources_servers/hello_world
+          resources_servers/hello_world/.venv/bin/python -c \
+            "import sys; from importlib.metadata import version; import nemo_gym.server_runtime; assert version('nemo-gym') == sys.argv[1]" \
+            "$NEMO_GYM_VERSION"
           echo '{"responses_create_params":{"input":[{"role":"user","content":"Hello!"}]},"expected_answer":"Mock response.","verifier_metadata":{}}' \
             > resources_servers/hello_world/data/example.jsonl
 

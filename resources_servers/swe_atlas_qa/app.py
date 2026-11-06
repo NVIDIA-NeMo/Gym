@@ -17,7 +17,18 @@ from fastapi import FastAPI, Request
 from omegaconf import ListConfig
 from pydantic import Field, PrivateAttr, SecretStr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.core import JUDGE_FAILED, VERIFIER_ERROR
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxHandle,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionResponse,
@@ -27,17 +38,16 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    lost_session_verification,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 
 
 LOG = logging.getLogger(__name__)
+
+
+class RubricsUnscoredError(RuntimeError):
+    """The upstream evaluator finished without scoring any rubric, because every judge attempt failed."""
 
 
 class SWEAtlasQAResourcesServerConfig(BaseResourcesServerConfig):
@@ -113,7 +123,12 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     yield state
             finally:
                 try:
-                    await asyncio.gather(*(self._close(handle) for handle in list(self._sandboxes.values())))
+                    results = await asyncio.gather(
+                        *(self._close(handle) for handle in list(self._sandboxes.values())), return_exceptions=True
+                    )
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
                 finally:
                     self._sessions.clear()
                     await self._provider.aclose()
@@ -268,6 +283,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     or not 0 <= results["agg_score"] <= 1
                 ):
                     raise ValueError("The upstream verifier returned inconsistent rubric counts")
+                if results["num_scored"] == 0:
+                    raise RubricsUnscoredError("The upstream verifier did not score any rubrics")
                 scores = {
                     key: results[key]
                     for key in ("reward", "agg_score", "num_rubrics", "num_scored", "num_unscored", "num_passed")
@@ -280,13 +297,11 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: SWEAtlasQAVerifyRequest) -> SWEAtlasQAVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         async with self._session_locks[session_id]:
-            session = self._sessions.pop(session_id, None)
+            session = None if session_id in self._closed_sessions else self._sessions.pop(session_id, None)
             self._closed_sessions.add(session_id)
         result: dict[str, Any] = {"reward": 0.0, "evaluation_completed": True}
         if session is None:
-            result.update(
-                mask_sample=True, evaluation_completed=False, failure_reason="Task sandbox session is missing"
-            )
+            result.update(evaluation_completed=False, **lost_session_verification("Task sandbox session is missing"))
         else:
             task_id, handle = session
             try:
@@ -308,7 +323,11 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                             await self._provider.download_file(handle, "/logs/agent/answer.txt", answer_path)
                     finally:
                         # No agent process can run while private rubric files or judge credentials are staged.
-                        await self._close(handle)
+                        try:
+                            await self._close(handle)
+                        finally:
+                            if handle.sandbox_id in self._sandboxes:
+                                self._sessions[session_id] = session
                     if answer_path.exists():
                         if answer_path.stat().st_size > self.config.max_answer_bytes:
                             raise ValueError("Agent answer exceeds the configured size limit")
@@ -324,6 +343,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     reward=0.0,
                     evaluation_completed=False,
                     mask_sample=True,
+                    failure_kind=JUDGE_FAILED if isinstance(error, RubricsUnscoredError) else VERIFIER_ERROR,
                     failure_reason=f"SWE Atlas Q&A verification failed: {type(error).__name__}",
                 )
         return SWEAtlasQAVerifyResponse.model_validate(body.model_dump() | result)

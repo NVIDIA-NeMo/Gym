@@ -13,7 +13,7 @@ from email.utils import parsedate_to_datetime
 import aiohttp
 import httpx
 
-from nemo_gym import server_utils
+from nemo_gym.client import http_client
 
 
 logger = logging.getLogger(__name__)
@@ -75,12 +75,22 @@ class _AiohttpResponseStream(httpx.AsyncByteStream):
 class GymAiohttpTransport(httpx.AsyncBaseTransport):
     """Use Gym's connection pool without transferring session ownership to an SDK."""
 
-    def __init__(self, *, verify: bool = True, proxy: httpx.Proxy | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        verify: bool = True,
+        proxy: httpx.Proxy | None = None,
+        raise_on_rate_limit: bool = False,
+    ) -> None:
+        # SDKs can discard response headers when translating a returned 429.
+        # Raising HTTPStatusError retains the response for the provider's retry policy.
+        self.raise_on_rate_limit = raise_on_rate_limit
         self.verify = verify
         self.proxy = proxy
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        """Retry buffered requests on 429 using Retry-After or exponential backoff (three retries)."""
+        """Retry buffered 429s, or raise with their response when the provider owns retries."""
+        rate_limit_retries = 0 if self.raise_on_rate_limit else _MAX_RATE_LIMIT_RETRIES
         replayable = True
         try:
             data = request.content or None
@@ -92,9 +102,9 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
             request.headers.pop("transfer-encoding", None)
 
         timeout = request.extensions.get("timeout", {})
-        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        for attempt in range(rate_limit_retries + 1):
             with _map_aiohttp_exceptions():
-                response = await server_utils.request(
+                response = await http_client.request(
                     method=request.method,
                     url=str(request.url),
                     # Only explicit rate-limit rejections are retried here. Connection
@@ -119,7 +129,7 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
                         sock_read=timeout.get("read"),
                     ),
                 )
-            if response.status != 429 or not replayable or attempt == _MAX_RATE_LIMIT_RETRIES:
+            if response.status != 429 or not replayable or attempt == rate_limit_retries:
                 break
 
             try:
@@ -132,7 +142,7 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
                 request.method,
                 request.url.host,
                 attempt + 1,
-                _MAX_RATE_LIMIT_RETRIES,
+                rate_limit_retries,
                 delay,
             )
             await asyncio.sleep(delay)
@@ -141,13 +151,20 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
             extensions = {"http_version": f"HTTP/{response.version.major}.{response.version.minor}".encode()}
             if response.reason:
                 extensions["reason_phrase"] = response.reason.encode()
-            return httpx.Response(
+            result = httpx.Response(
                 status_code=response.status,
                 headers=response.raw_headers,
                 stream=_AiohttpResponseStream(response),
                 request=request,
                 extensions=extensions,
             )
+            if self.raise_on_rate_limit and result.status_code == 429:
+                try:
+                    await result.aread()
+                finally:
+                    await result.aclose()
+                result.raise_for_status()
+            return result
         except BaseException:
             response.close()
             raise

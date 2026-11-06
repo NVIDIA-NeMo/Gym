@@ -46,24 +46,37 @@ wall-clock time, and dropping those samples would bias the histogram toward the 
 ### What `gym.rollout.completed_total` Counts
 
 One increment per rollout **attempt**: one dispatch of one row in one `gym eval run` collection
-run, recorded after the driver wrote the attempt or decided to omit it. A retry on a later
+run, recorded after the recovery store accepts the saved outcome. A retry on a later
 resume run is another attempt; an HTTP-level re-send of `/run` inside one dispatch is not.
-Coverage comes from the output files, not this counter.
+Reused cached results do not increment it. Coverage comes from the output files, not this counter.
 
 `nemo.gym.rollout.outcome` is `scored` (written to the main output, masked and forced-zero
-results included), `failed` (written to the failures sidecar), or `omitted` (a no-persist
-result written to neither, such as a `kill_shaped` failure: a Slurm SIGTERM, a dead Ray actor, or
-an out-of-memory kill). Rows drained by the dispatch budget never ran and are not counted. Every
-point carries `nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the
-agent. Attempts with a failure class also carry
-`nemo.gym.failure_class`, `nemo.gym.failure_kind` (a registered or `<server>:<kind>` namespaced
-kind, otherwise `unregistered`) and `nemo.gym.failure_type` (the exception class name). Free-text
-failure reasons never become attributes.
+results and supported unscored completions included), `failed` (a saved failure), or `omitted` (a saved
+intentional omission, including terminal skips and bare no-persist replies). A reported `kill_shaped` failure
+(a Slurm SIGTERM, a dead Ray actor, or an out-of-memory kill) is saved as a failure so it remains eligible
+for retry. The historical `scored` label does not guarantee a measured reward.
+Rows drained by the dispatch budget never ran and are not counted. Every point carries
+`nemo.gym.rollout.dispatch.name`, the environment server or, when rows name none, the agent.
+Attempts with a failure class also carry `nemo.gym.failure_class` and, when supplied,
+`nemo.gym.failure_kind` and `nemo.gym.failure_type` (the exception class name).
 
-A failed `/run` is counted as `failed` with class `agent_request_failed` only when
-`route_failures_to_sidecar` is on; otherwise it aborts the run. Only the serving collection path
-records the counter: `gym eval run --no-serve`, direct `run_examples` callers and rollout
-reverification do not.
+Older legacy producers retain their original routing class and exception type. Those two fields remain
+producer-controlled, as on main; producers should supply stable category names, not free-text error details.
+The kind label is included only when supplied: a registered or `<server>:<kind>` namespaced kind is retained,
+otherwise it is `unregistered`. A saved record's compatibility fallback does not add a kind label or replace
+a distinct routing class.
+
+Native episode failures and the legacy Environment Server adapter route by the shared kind. When that kind also
+supplies the class, both labels use the same bounded-name rule. This changes the adapter's dashboard labels:
+previously it reported `environment_server_failed` without a kind label; it now reports the shared kind like a
+native episode. Free-text kinds and reasons are never promoted to class labels. Existing legacy class/type fields
+are retained, so arbitrary producer text in those fields is not automatically bounded.
+
+Transport failures count as saved failures only when failure routing is enabled; otherwise the request error
+aborts collection. An HTTP 500 uses `agent_run_error`; an unavailable server uses `agent_request_failed`.
+Neither adds a kind label. The collector records the counter when telemetry is enabled; `gym eval run --no-serve`
+does not initialize telemetry by default. Direct `run_examples` callers, GDPVal multistage and rollout
+reverification do not record it.
 
 ### What the Reward Metrics Show
 
@@ -129,7 +142,7 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 | `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished, by `http.route` and `nemo.gym.request.phase`. |
 | `gym.server.requests.unhandled_exceptions_total` | Counter | count | Requests whose handler raised an exception that no middleware turned into a response. A handled error, such as an `HTTPException`, is a response and is counted in `gym.server.responses_total` instead. |
 | `gym.server.responses_total` | Counter | count | Responses the server started sending, by `http.response.status_code`. It does not depend on the FastAPI instrumentor, so it reports 4xx and 5xx responses in any run with metrics on. |
-| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
+| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `nemo_gym.client.http_client.request` that have not returned or raised, including retries and eligible response-body reads. |
 
 `gym.server.requests.cancelled_total` uses registered route templates such as `/work/{item_id}`, never raw paths or rollout IDs. Rollout prefixes are removed before matching a template; requests without a matching route use `<unmatched>`. The phase is `before_response_start` until the ASGI `http.response.start` message has been sent, then `response_started`. A headers-only response and an SSE keepalive both count as `response_started`; this does not imply a model token was produced. Model-call capture's `ttft_ms` supplies token timing when capture is enabled.
 
@@ -180,6 +193,39 @@ async with resources_operation(self._semaphore, operation="verify", executor="su
 | `gym.resources.operation.active` | Up/down counter | count | Operations running inside their limit. |
 
 Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
+
+### Concurrency Limit Metrics
+
+A wait duration shows that work waited, not why. These metrics show the state of each configured concurrency limit, so a dashboard can show "limit 100, active 100, queued 75" and make clear that the limit is full and work is piling up behind it.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.concurrency.limit` | Up/down counter | slots | The configured number of slots. |
+| `gym.concurrency.active` | Up/down counter | slots | Slots held right now. |
+| `gym.concurrency.available` | Up/down counter | slots | Slots free right now, `limit - active`. |
+| `gym.concurrency.queue_depth` | Up/down counter | count | Callers waiting for a slot right now. |
+| `gym.concurrency.admission_timeouts_total` | Counter | count | Waits that ran out of the limit's admission timeout. Reported only for limits that have one. |
+| `gym.concurrency.admission_cancelled_total` | Counter | count | Waits cancelled before a slot was free, for example because the caller's request was cancelled. |
+
+Every point carries `nemo.gym.concurrency.component`, `nemo.gym.concurrency.limit_name`, and, for a limit that belongs to a server, `nemo.gym.server.name`. Limits with the same attributes in one process are summed, and separate processes, such as the Uvicorn workers of one server, export their own points. These limits report today:
+
+| Component | `limit_name` | Configured by | Admission timeout |
+| --- | --- | --- | --- |
+| `rollout_driver` | `rollouts` | `num_samples_in_parallel` | None |
+| `model_server` (`openai_model` and servers built on it) | `upstream_requests` | `max_concurrent_requests` | `upstream_pool_timeout_seconds` |
+| `environment_server` | `episodes` | `max_concurrent_episodes` | `queue_timeout_seconds` |
+| `resources_server` (`math_with_judge`) | `library_verifier` | `library_verifier_max_concurrency` | None |
+
+A component without a configured limit reports no series at all, not a limit of zero. Agent servers, the other model and resources servers, and sandbox providers keep their own limits, which these metrics do not report yet. No Gym limit rejects work when it is full, so there is no rejection count.
+
+How to read them:
+
+- `active` equal to `limit` with a growing `queue_depth` means the limit is the bottleneck. Raising it helps only if the work behind it, such as the model endpoint, has capacity to spare.
+- `active` below `limit` with slow requests means the time goes elsewhere. Compare `gym.event_loop.lag_ms` and the HTTP connection-pool metrics.
+- A rising `admission_timeouts_total` means callers gave up waiting. For a model server, these are the requests that fail with "Timed out acquiring an upstream provider slot"; for an environment server, the episodes that fail at the `admission` stage.
+- For the rollout driver, `gym.driver.admission_duration_ms` gives the wait per rollout, and `gym.concurrency.queue_depth` the number waiting right now.
+
+A slot costs a few integer updates and no OpenTelemetry call. The exporter's background thread reads the totals, and they are reported whenever metrics are exported.
 
 ### Memory Metrics
 

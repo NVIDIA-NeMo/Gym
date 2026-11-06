@@ -21,8 +21,8 @@ from uuid import uuid4
 
 from openai.types.responses import ResponseInputTextParam
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -32,7 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -40,7 +40,11 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from responses_api_agents.opencode_agent.observability import append_opencode_turns
+from responses_api_agents.opencode_agent.observability import (
+    append_opencode_turns,
+    opencode_tool_outcome,
+    split_gym_reasoning,
+)
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -56,6 +60,43 @@ def _milliseconds(value: Any) -> Optional[float]:
     if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
         return None
     return float(value) / 1000
+
+
+def _empty_answer_part(parts: list[Any]) -> Optional[int]:
+    """Return the index of the text part where an assistant message keeps an empty answer, if any.
+
+    Splitting off a Gym Model Server reply's reasoning block can leave the reply with no answer text. When that reply
+    ends its message, with no tool call after it and no answer text in any other text part, the message keeps an empty
+    answer there. Otherwise a verifier that reads the last assistant message would grade an earlier turn's text. A
+    reply followed by a tool call is a tool-call turn and keeps only its reasoning.
+    """
+    index = None
+    for position, part in enumerate(parts):
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if part.get("type") == "tool":
+            index = None
+        elif part.get("type") == "text" and isinstance(text, str) and text.strip():
+            reasoning, answer = split_gym_reasoning(text)
+            if reasoning is None or answer:
+                return None
+            index = position
+    return index
+
+
+def _empty_answer_part_ids(part_rows: list[sqlite3.Row], assistant_message_ids: set[str]) -> set[str]:
+    """Return the IDs of the persisted text parts where an assistant message keeps an empty answer."""
+    rows_by_message: dict[str, list[sqlite3.Row]] = {}
+    for row in part_rows:
+        if row["message_id"] in assistant_message_ids:
+            rows_by_message.setdefault(row["message_id"], []).append(row)
+    part_ids = set()
+    for rows in rows_by_message.values():
+        index = _empty_answer_part([_load_json(row["data"]) for row in rows])
+        if index is not None:
+            part_ids.add(rows[index]["id"])
+    return part_ids
 
 
 def _parse_opencode_session(
@@ -124,6 +165,9 @@ def _parse_opencode_session(
             text = part.get("text")
             if part.get("type") in {"text", "reasoning"} and isinstance(text, str) and text.strip():
                 item_id = row["id"]
+                if part["type"] == "text" and model_ref is not None and split_gym_reasoning(text)[0] is not None:
+                    # The conversation below emits a split reply's reasoning item first.
+                    item_id = f"{row['id']}-reasoning"
             elif part.get("type") == "tool":
                 item_id = part.get("callID")
             else:
@@ -158,6 +202,13 @@ def _parse_opencode_session(
             if isinstance(parent_id, str):
                 summaries_by_parent.setdefault((session_id, parent_id), []).append(row["id"])
 
+    empty_answer_part_ids = (
+        _empty_answer_part_ids(
+            part_rows, {message_id for message_id, message in messages.items() if message.get("role") == "assistant"}
+        )
+        if model_ref is not None
+        else set()
+    )
     for row in part_rows:
         part = _load_json(row["data"])
         if not part:
@@ -186,20 +237,32 @@ def _parse_opencode_session(
 
         text = part.get("text")
         if ptype == "text" and isinstance(text, str) and text.strip():
-            if message_id in summary_text:
+            gym_reasoning = None
+            if role == "assistant" and model_ref is not None:
+                gym_reasoning, text = split_gym_reasoning(text)
+            if message_id in summary_text and text:
                 summary_text[message_id].append(text)
             if role == "user" and part.get("ignored") is not True:
                 conversation.append(NeMoGymEasyInputMessage(role="user", content=text))
             elif role == "assistant":
-                item = NeMoGymResponseOutputMessage(
-                    id=row["id"],
-                    content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
-                )
-                conversation.append(item)
-                first_item_id_by_message.setdefault((session_id, message_id), row["id"])
+                if gym_reasoning is not None:
+                    reasoning_id = f"{row['id']}-reasoning"
+                    conversation.append(
+                        NeMoGymResponseReasoningItem(
+                            id=reasoning_id, summary=[NeMoGymSummary(type="summary_text", text=gym_reasoning)]
+                        )
+                    )
+                    first_item_id_by_message.setdefault((session_id, message_id), reasoning_id)
+                if text or row["id"] in empty_answer_part_ids:
+                    item = NeMoGymResponseOutputMessage(
+                        id=row["id"],
+                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
+                    conversation.append(item)
+                    first_item_id_by_message.setdefault((session_id, message_id), row["id"])
             continue
         if ptype == "reasoning" and role == "assistant" and isinstance(text, str) and text.strip():
             conversation.append(
@@ -230,19 +293,17 @@ def _parse_opencode_session(
             conversation.append(call)
             first_item_id_by_message.setdefault((session_id, message_id), call_id)
             opencode_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if opencode_status == "completed" and opencode_time.get("compacted") is not None:
-                observed_tool_output = "[Old tool result content cleared]"
-            else:
-                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
-            if observed_tool_output is not None:
+            outcome = opencode_tool_outcome(part.get("tool"), state)
+            if outcome.output is not None:
                 result = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=call_id,
-                    output=str(observed_tool_output),
+                    output=outcome.output,
                     status=response_status,
                 )
                 conversation.append(result)
+            if outcome.gap is not None:
+                gaps.append(ObservationGap(code=outcome.gap, invocation_id=session_id, detail=observed_call_id))
 
             opencode_start = opencode_time.get("start")
             opencode_end = opencode_time.get("end")
@@ -256,26 +317,7 @@ def _parse_opencode_session(
             started_at = _milliseconds(opencode_start) if valid_interval else None
             completed_at = _milliseconds(opencode_end) if valid_interval else None
             duration_ms = float(opencode_end - opencode_start) if valid_interval else None
-            status = {
-                "completed": "completed",
-                "error": "failed",
-                "running": "incomplete",
-                "pending": "incomplete",
-            }.get(opencode_status, "unknown")
-            if opencode_status == "completed" and part.get("tool") == "bash":
-                # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the OpenCode artifact.
-                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-                exit_code = metadata.get("exit")
-                if type(exit_code) is int:
-                    status = "completed" if exit_code == 0 else "failed"
-                else:
-                    status = "unknown"
-                    gaps.append(
-                        ObservationGap(
-                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
-                        )
-                    )
+            status = outcome.status
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -287,7 +329,7 @@ def _parse_opencode_session(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if status == "failed" else None,
+                        error_type=outcome.error_type,
                     )
                 )
             else:
@@ -322,7 +364,7 @@ def _parse_opencode_session(
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = status
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(status, status)
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
@@ -421,7 +463,9 @@ def _parse_opencode_session(
         gaps.append(ObservationGap(code="agent_transcript_unavailable"))
 
     if trajectory is not None:
-        append_opencode_turns(trajectory, session_ids, message_rows, part_rows, model_ref=model_ref)
+        append_opencode_turns(
+            trajectory, session_ids, message_rows, part_rows, model_ref=model_ref, gym_reasoning=model_ref is not None
+        )
 
     return AgentObservationBundle(
         source="opencode",
@@ -430,7 +474,9 @@ def _parse_opencode_session(
     )
 
 
-def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) -> tuple[list[Any], dict[str, int]]:
+def parse_opencode_session(
+    db_path: Path, *, root_session_only: bool = False, gym_reasoning: bool = False
+) -> tuple[list[Any], dict[str, int]]:
     """Convert an OpenCode session database into the existing Gym response shape.
 
     ``root_session_only`` restricts the transcript to sessions without a
@@ -438,7 +484,10 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
     (stored with ``parent_id``), and its parts would otherwise interleave with
     the root conversation. Parts are ordered by creation time and then id,
     OpenCode's own order, because parallel tool parts can share a creation
-    millisecond.
+    millisecond. With ``gym_reasoning``, set when OpenCode calls a Gym Model
+    Server, the reasoning block that starts a reply's text is left out like
+    OpenCode's own reasoning parts, and a message whose reply was only that
+    block keeps an empty answer.
     """
     output_items: list[Any] = []
     input_tokens = 0
@@ -455,10 +504,15 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
             row["id"]: _load_json(row["data"]).get("role")
             for row in con.execute(f"select id, data from message{scope}")
         }
-        rows = con.execute(f"select message_id, data from part{scope} order by time_created, id").fetchall()
+        rows = con.execute(f"select id, message_id, data from part{scope} order by time_created, id").fetchall()
     finally:
         con.close()
 
+    empty_answer_part_ids = (
+        _empty_answer_part_ids(rows, {message_id for message_id, role in roles.items() if role == "assistant"})
+        if gym_reasoning
+        else set()
+    )
     for row in rows:
         part = _load_json(row["data"])
         ptype = part.get("type")
@@ -469,15 +523,17 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
             output_tokens += int(tokens.get("output") or 0) + int(tokens.get("reasoning") or 0)
             reasoning_tokens += int(tokens.get("reasoning") or 0)
         elif roles.get(row["message_id"]) == "assistant" and ptype == "text" and (part.get("text") or "").strip():
-            output_items.append(
-                NeMoGymResponseOutputMessage(
-                    id=f"msg-{len(output_items)}",
-                    content=[NeMoGymResponseOutputText(type="output_text", text=part["text"], annotations=[])],
-                    role="assistant",
-                    status="completed",
-                    type="message",
+            text = split_gym_reasoning(part["text"])[1] if gym_reasoning else part["text"]
+            if text or row["id"] in empty_answer_part_ids:
+                output_items.append(
+                    NeMoGymResponseOutputMessage(
+                        id=f"msg-{len(output_items)}",
+                        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                        role="assistant",
+                        status="completed",
+                        type="message",
+                    )
                 )
-            )
         elif roles.get(row["message_id"]) == "assistant" and ptype == "tool":
             state = part.get("state") or {}
             call_id = part.get("callID") or f"call-{uuid4().hex[:8]}"
@@ -517,8 +573,72 @@ def parse_opencode_session(db_path: Path, *, root_session_only: bool = False) ->
 parse_opencode_observations = _parse_opencode_session
 
 
-def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymResponseOutputItem]:
-    """Convert persisted OpenCode export messages into Gym conversation items."""
+def _assistant_part_items(
+    part: Dict[str, Any], *, gym_reasoning: bool = False, keep_empty_answer: bool = False
+) -> List[NeMoGymResponseOutputItem]:
+    """Convert one part of an exported OpenCode assistant message into Gym conversation items.
+
+    ``keep_empty_answer`` marks the part where the message keeps an empty answer (see ``_empty_answer_part``).
+    """
+    # OpenCode types its own parts, so think tags in text are the model's literal text, except the
+    # reasoning block a Gym Model Server reply starts with.
+    if part["type"] == "text":
+        items: List[NeMoGymResponseOutputItem] = []
+        reasoning, text = split_gym_reasoning(part["text"]) if gym_reasoning else (None, part["text"])
+        if reasoning is not None:
+            items.append(
+                NeMoGymResponseReasoningItem(
+                    id=f"rs_{uuid4().hex}",
+                    type="reasoning",
+                    summary=[NeMoGymSummary(type="summary_text", text=reasoning)],
+                )
+            )
+        if text or reasoning is None or keep_empty_answer:
+            items.append(
+                NeMoGymResponseOutputMessage(
+                    id=f"msg_{uuid4().hex}",
+                    role="assistant",
+                    status="completed",
+                    type="message",
+                    content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
+                )
+            )
+        return items
+    if part["type"] == "reasoning":
+        return [
+            NeMoGymResponseReasoningItem(
+                id=f"rs_{uuid4().hex}",
+                type="reasoning",
+                summary=[NeMoGymSummary(type="summary_text", text=part["text"])],
+            )
+        ]
+    if part["type"] == "tool":
+        return [
+            NeMoGymResponseFunctionToolCall(
+                arguments=json.dumps(part["state"]["input"]),
+                call_id=part["callID"],
+                name=part["tool"],
+            ),
+            NeMoGymFunctionCallOutput(
+                call_id=part["callID"],
+                # @bxyu-nvidia: Somehow the output here may be missing...
+                output=part["state"].get("output", ""),
+            ),
+        ]
+    if part["type"] in ("step-finish", "step-start", "patch"):
+        return []
+    # @bxyu-nvidia: Defensive raise in case we're missing something.
+    raise NotImplementedError(part)
+
+
+def parse_opencode_export(
+    opencode_export: Dict[str, Any], *, gym_reasoning: bool = False
+) -> List[NeMoGymResponseOutputItem]:
+    """Convert persisted OpenCode export messages into Gym conversation items.
+
+    With ``gym_reasoning``, set when OpenCode calls a Gym Model Server, the reasoning block that starts a reply's text
+    becomes a reasoning item, and a message whose reply was only that block keeps an empty answer.
+    """
     messages = []
     for message in opencode_export["messages"]:
         if message["info"]["role"] == "user":
@@ -531,46 +651,11 @@ def parse_opencode_export(opencode_export: Dict[str, Any]) -> List[NeMoGymRespon
 
             messages.append(NeMoGymEasyInputMessage(content=message_parts, role="user"))
         elif message["info"]["role"] == "assistant":
-            for part in message["parts"]:
-                # OpenCode already supplies typed parts; literal think tags are content.
-                if part["type"] == "text":
-                    messages.append(
-                        NeMoGymResponseOutputMessage(
-                            id=f"msg_{uuid4().hex}",
-                            role="assistant",
-                            status="completed",
-                            type="message",
-                            content=[NeMoGymResponseOutputText(type="output_text", text=part["text"], annotations=[])],
-                        )
-                    )
-                elif part["type"] == "reasoning":
-                    messages.append(
-                        NeMoGymResponseReasoningItem(
-                            id=f"rs_{uuid4().hex}",
-                            type="reasoning",
-                            summary=[NeMoGymSummary(type="summary_text", text=part["text"])],
-                        )
-                    )
-                elif part["type"] == "tool":
-                    messages.append(
-                        NeMoGymResponseFunctionToolCall(
-                            arguments=json.dumps(part["state"]["input"]),
-                            call_id=part["callID"],
-                            name=part["tool"],
-                        )
-                    )
-                    messages.append(
-                        NeMoGymFunctionCallOutput(
-                            call_id=part["callID"],
-                            # @bxyu-nvidia: Somehow the output here may be missing...
-                            output=part["state"].get("output", ""),
-                        )
-                    )
-                elif part["type"] in ("step-finish", "step-start", "patch"):
-                    pass
-                else:
-                    # @bxyu-nvidia: Defensive raise in case we're missing something.
-                    raise NotImplementedError(part)
+            empty_answer = _empty_answer_part(message["parts"]) if gym_reasoning else None
+            for index, part in enumerate(message["parts"]):
+                messages.extend(
+                    _assistant_part_items(part, gym_reasoning=gym_reasoning, keep_empty_answer=index == empty_answer)
+                )
         else:
             # @bxyu-nvidia: Defensive raise in case we're missing something.
             raise NotImplementedError(message)

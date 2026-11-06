@@ -6,8 +6,8 @@ from pathlib import Path
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.agent_registry import discover_agents
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.environment import discover_agents
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
@@ -71,6 +71,7 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
         ("deepswe", "deepswe"),
         ("swebench/verified", "swebench_verified"),
         ("swebench/multilingual", "swebench_multilingual"),
+        ("swebench/multimodal", "swebench_multimodal"),
         ("swebench/pro", "swebench_pro"),
         ("terminal_bench_2_1", "terminal_bench_2_1"),
     ],
