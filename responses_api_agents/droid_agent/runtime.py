@@ -41,9 +41,11 @@ PINNED_INTEGRITY = {
         "linux-arm64",
     ): "sha512-oNx51G1tWLydrpWWxdKKW98ws3g+pOKsibUkSaSq8hjOXVjyRrgsU1PHqn/a/CifdjxL2NLbBASuxwUhn5FZyw==",  # pragma: allowlist secret
 }
+# Musl tooling can put musl's loader into a glibc image, so the image counts as musl only when glibc is missing.
 PLATFORM_PROBE = (
     "uname -s && uname -m"
-    " && if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
+    " && if getconf GNU_LIBC_VERSION >/dev/null 2>&1; then echo gnu;"
+    " elif ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else echo gnu; fi"
     " && if grep -qw avx2 /proc/cpuinfo 2>/dev/null; then echo avx2; else echo baseline; fi"
 )
 _CACHE_LOCKS: dict[Path, asyncio.Lock] = {}
@@ -65,7 +67,9 @@ def package_target(probe: str) -> str:
     if system != "Linux":
         raise AgentSeedRejectedError(f"Unsupported Droid sandbox platform: {system}")
     if libc != "gnu":
-        raise AgentSeedRejectedError("Droid publishes glibc Linux builds only; the sandbox image uses musl")
+        raise AgentSeedRejectedError(
+            "Droid publishes glibc Linux builds only; the sandbox image has musl and no glibc"
+        )
     if architecture == "x86_64":
         return "linux-x64" if cpu == "avx2" else "linux-x64-baseline"
     if architecture == "aarch64":

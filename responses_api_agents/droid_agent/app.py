@@ -66,6 +66,7 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.utils import bounded_text
 from responses_api_agents.droid_agent.parsing import DroidRun, parse_events
 from responses_api_agents.droid_agent.runtime import install_sandbox_runtime
 from responses_api_agents.droid_agent.sandbox import RUNTIME_PREFIX, SESSION_ROOT, DroidSandboxSession
@@ -87,6 +88,8 @@ _BASH_BOOTSTRAP = f"""if ! command -v bash >/dev/null 2>&1; then
     fi
 fi
 """
+# Environment servers keep this many characters of a failed response's error message as the failure reason.
+_FAILURE_REASON_CHARS = 2000
 # Transport failures Droid 1.1.0 reports in its error event when a model request does not reach the server.
 _TRANSPORT_ERRORS = ("Connection error", "fetch failed", "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "timed out")
 
@@ -468,6 +471,11 @@ class DroidAgent(SimpleResponsesAPIAgent):
             object="response",
             output=run.items,
             status=status,
+            # Droid's own error message, or what ended the run without one. Droid holds no credential (its key is a
+            # placeholder), so the message is bounded, not redacted.
+            error={"code": "server_error", "message": bounded_text(run.error or reason, _FAILURE_REASON_CHARS)}
+            if status == "failed"
+            else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,

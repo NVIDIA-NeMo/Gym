@@ -278,6 +278,7 @@ async def test_activation_routes_droid_through_the_rollout_model_route(monkeypat
     assert NeMoGymResponseUsage.sum_from_list([response.usage, known]).output_tokens_details.reasoning_tokens is None
     assert "reasoning_token_usage_unavailable" in {gap.code for gap in session.observations.gaps}
     assert response.metadata == {"harness_execution": "sandbox", "agent_timeout_sec": "1800.0"}
+    assert response.error is None
 
     invocation, tool, sandbox_record = session.observations.records
     assert invocation.invocation_id == capture_key and invocation.harness_session_id == "droid-session"
@@ -313,6 +314,10 @@ async def test_outcome_follows_droid_exit_and_completion(monkeypatch, events, cl
     assert invocation.stop_reason == ("timeout" if reason == "timeout" else None)
     if status == "failed":
         assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+        # Without an error event, the environment's failure reason names what ended the run.
+        assert (response.error.code, response.error.message) == ("server_error", reason)
+    else:
+        assert response.error is None
     if events is not EVENTS:
         # Without the completion event Droid reports no usage, so none is invented.
         assert response.usage is None
@@ -320,10 +325,11 @@ async def test_outcome_follows_droid_exit_and_completion(monkeypatch, events, cl
 
 
 @pytest.mark.asyncio
-async def test_model_request_error_is_classified_for_the_environment(monkeypatch):
+@pytest.mark.parametrize("detail", ['{"status":404,"title":"Not Found"}', "x" * 5000])
+async def test_model_request_error_is_classified_for_the_environment(monkeypatch, detail):
     instance = agent(monkeypatch)
     session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
-    error = '404 {"status":404,"title":"Not Found"}'
+    error = f"404 {detail}"
     events = [EVENTS[0], {"type": "error", "source": "agent_loop", "message": error}]
     monkeypatch.setattr(
         adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
@@ -334,6 +340,13 @@ async def test_model_request_error_is_classified_for_the_environment(monkeypatch
         "failure_kind": "model_request_error",
         "status_code": 404,
     }
+    # The environment saves Droid's message as the failure reason, cut to the length it keeps.
+    message = response.error.message
+    if len(error) <= 2000:
+        assert message == error
+    else:
+        assert len(message) == 2000 and message.startswith("404 xxx") and message.endswith(" [truncated]")
+    assert session.observations.records[0].error_type == "agent_error"
 
 
 @pytest.mark.parametrize(

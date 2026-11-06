@@ -83,7 +83,8 @@ records the binary's SHA-256. Later seeds in the same sandbox reuse a runtime wh
 unchanged. A lock serializes concurrent installers. The sandbox needs no network for installation.
 
 The task image needs bash, coreutils (`sha256sum`, `timeout`), `tar` and `gzip`, and glibc: Droid
-publishes no musl build, so Alpine images are refused at seed. A root image without bash gets it
+publishes no musl build, so an image with musl and no glibc, such as Alpine, is refused at seed. A
+glibc image that also carries musl's loader is served. A root image without bash gets it
 from `apt-get`; any other image without bash is refused at seed. The image needs no Python or Node.
 Installation needs about 500 MB free under `/tmp` (the package and the unpacked binary), and the
 installed runtime keeps about 325 MB.
@@ -147,6 +148,9 @@ invocation's conversation, not in the response output, and a gap records that.
 | an `error` event, or a nonzero exit | `failed`, with `ng_agent_outcome` |
 
 Every response's metadata carries the deadline that applied, in seconds, as `agent_timeout_sec`.
+A failed response's `error.message` is Droid's error message, or what ended the run without one
+(`result_missing`, `process_exit_<code>`), cut to 2,000 characters; the Environment Server saves it
+as the failure reason.
 
 An error event that starts with an HTTP status (Droid 1.1.0 reports a failed model request as
 `404 {...}`) is classified as `model_request_error` with that status; connection failures as

@@ -5,6 +5,8 @@ import asyncio
 import base64
 import hashlib
 import json
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -74,6 +76,41 @@ def registry(monkeypatch, tmp_path):
 )
 def test_platform_probe_selects_the_matching_package(probe, target):
     assert runtime.package_target(probe) == target
+
+
+@pytest.mark.skipif(not Path("/bin/sh").exists(), reason="the platform probe is a POSIX shell script")
+@pytest.mark.parametrize(
+    "glibc,musl_loader,target",
+    [
+        (True, False, "linux-x64"),
+        # Musl tooling can add musl's loader to a glibc image; Droid still runs there.
+        (True, True, "linux-x64"),
+        (False, True, None),
+    ],
+)
+def test_platform_probe_counts_musl_only_without_glibc(tmp_path, glibc, musl_loader, target):
+    """Run the probe script itself, with stub commands standing in for the image's tools."""
+    commands = {
+        "uname": 'case "$1" in -s) echo Linux ;; -m) echo x86_64 ;; esac',
+        "getconf": "exit 0" if glibc else "exit 1",
+        "ls": "exit 0" if musl_loader else "exit 2",
+        "grep": "exit 0",
+    }
+    for name, script in commands.items():
+        (tmp_path / name).write_text(f"#!/bin/sh\n{script}\n")
+        (tmp_path / name).chmod(0o755)
+    probe = subprocess.run(
+        ["/bin/sh", "-c", runtime.PLATFORM_PROBE],
+        env={"PATH": str(tmp_path)},
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    if target is None:
+        with pytest.raises(AgentSeedRejectedError, match="musl and no glibc"):
+            runtime.package_target(probe)
+    else:
+        assert runtime.package_target(probe) == target
 
 
 @pytest.mark.parametrize(
