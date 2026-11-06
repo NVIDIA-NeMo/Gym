@@ -19,6 +19,7 @@ Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the scr
 """
 
 from nemo_gym.core.failure_kinds import (
+    ENVIRONMENT_PROTOCOL_VIOLATION,
     JUDGE_SKIPPED,
     PROVIDER_CREDENTIALS_REJECTED,
     PROVIDER_QUOTA_EXHAUSTED,
@@ -65,6 +66,9 @@ COLLECT_SCRIPT = (
     + "\n"
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
+    + "\n"
+    + "ENVIRONMENT_PROTOCOL_VIOLATION = "
+    + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
     + "\n"
     + "JUDGE_SKIPPED = "
     + repr(JUDGE_SKIPPED)
@@ -920,6 +924,7 @@ def chain_continuation_note():
         or CANCELLED_FOLLOWUP_MARKER in line
         or PROVIDER_CREDENTIALS_REJECTED in line
         or PROVIDER_QUOTA_EXHAUSTED in line
+        or ENVIRONMENT_PROTOCOL_VIOLATION in line
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
     return line[:500] if named else None
