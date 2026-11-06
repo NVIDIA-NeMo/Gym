@@ -84,6 +84,7 @@ from resources_servers.gdpval.judge_panel import (
 )
 from resources_servers.gdpval.judge_telemetry import JudgeTelemetrySink, classify_judge_error
 from resources_servers.gdpval.reference_files import download_reference_files
+from resources_servers.gdpval.s3_references import S3ReferenceCache, is_s3_uri
 from resources_servers.gdpval.scoring import SCORING_ERROR_KEY, is_permanent_judge_error
 from resources_servers.gdpval.task_data import TaskData
 from resources_servers.gdpval.task_sandbox import (
@@ -150,6 +151,8 @@ class ReferenceModelConfig(BaseModel):
     deliverables, laid out as ``<deliverables_dir>/task_<task_id>/`` (optionally
     with ``repeat_<n>/`` subdirs) containing the same files the agent would
     persist (deliverable artifacts + finish_params.json + reference_files/).
+    It may also be an ``s3://`` URI with that layout; /verify then downloads
+    only the judged task (see ``s3_references.py``).
     ``elo`` is the reference's known rating (e.g. a published Arena/AA number),
     held fixed when the eval model's MLE rating is fit.
     """
@@ -323,6 +326,8 @@ class GDPValResourcesServerConfig(BaseResourcesServerConfig):
     # renders each Office file to its <name>.pdf sidecar in the sandbox before the sandbox stops, so
     # the server needs no LibreOffice of its own and the host install and startup check are skipped.
     sandbox_libreoffice_command: Optional[List[str]] = Field(default=None, min_length=1)
+    # Where /verify caches the tasks of s3:// reference deliverables; None uses a directory under the temp dir.
+    reference_cache_dir: Optional[str] = None
 
     # How deliverable/reference files are presented to the judge:
     # - ``"native_pdf"`` (default): PDFs and (preconverted) Office docs are sent
@@ -688,6 +693,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 raise ValueError(
                     "reward_mode=comparison requires reference_deliverables_dir or reference_models to be set"
                 )
+        self._s3_references = S3ReferenceCache(
+            Path(self.config.reference_cache_dir or Path(tempfile.gettempdir()) / "gdpval-reference-cache")
+        )
         if self.config.libreoffice_command is not None:
             from resources_servers.gdpval.setup_libreoffice import ensure_libreoffice
 
@@ -697,6 +705,9 @@ class GDPValResourcesServer(SimpleResourcesServer):
             probe_dirs = [Path(persist_dir)] if persist_dir else []
             # /verify also converts reference deliverables in place.
             for ref_id, ref in self._references.items():
+                if is_s3_uri(ref.deliverables_dir):
+                    # Downloaded per task at /verify into the cache, which the server owns.
+                    continue
                 ref_dir = Path(ref.deliverables_dir)
                 if not ref_dir.is_dir():
                     raise RuntimeError(f"Reference {ref_id!r}: deliverables_dir {ref_dir} is not a directory")
@@ -1251,7 +1262,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
         # simply skipped — the eval model just isn't judged against it here.
         ref_dirs_by_id: Dict[str, List[Path]] = {}
         for ref_id, ref_cfg in active_references.items():
-            ref_task_root = persisted_layout.task_dir(ref_cfg.deliverables_dir, body.task_id)
+            ref_root = ref_cfg.deliverables_dir
+            if is_s3_uri(ref_root):
+                ref_root = await self._s3_references.local_root(ref_root, body.task_id)
+            ref_task_root = persisted_layout.task_dir(ref_root, body.task_id)
             dirs = [d for d in persisted_layout.repeat_dirs(ref_task_root) if task_attempted(str(d))]
             if dirs:
                 ref_dirs_by_id[ref_id] = dirs

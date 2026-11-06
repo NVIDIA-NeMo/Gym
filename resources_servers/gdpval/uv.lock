@@ -1160,6 +1160,7 @@ name = "gym-resources-servers-gdpval"
 version = "0.0.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "boto3" },
     { name = "cryptography" },
     { name = "httpx" },
     { name = "jinja2" },
@@ -1179,6 +1180,7 @@ telemetry = [
 
 [package.metadata]
 requires-dist = [
+    { name = "boto3" },
     { name = "cryptography", specifier = ">=42.0" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1" },
