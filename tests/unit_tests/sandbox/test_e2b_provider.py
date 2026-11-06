@@ -462,6 +462,10 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     assert inspect.signature(e2b.AsyncSandbox.pause).parameters["keep_memory"].default is True
     assert e2b.ConnectionConfig(request_timeout=7).request_timeout == 7
     inspect.signature(e2b.AsyncSandbox.get_info).bind(object(), request_timeout=30)
+    # create_snapshot/delete_snapshot also take **ApiParams; pin the parameters the provider relies on.
+    assert inspect.signature(e2b.AsyncSandbox.create_snapshot).parameters["name"].default is None
+    assert next(iter(inspect.signature(e2b.AsyncSandbox.delete_snapshot).parameters)) == "snapshot_id"
+    assert "snapshot_id" in inspect.signature(e2b.SnapshotInfo).parameters
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
@@ -1364,6 +1368,9 @@ def test_invalid_network_config_is_rejected(create: dict[str, object], message: 
         ("connection", {"request_timeout_s": float("nan")}, "connection.request_timeout_s must be >= 0"),
         ("create", {"timeout_s": 0}, "create.timeout_s must be > 0"),
         ("create", {"timeout_s": float("inf")}, "create.timeout_s must be > 0"),
+        ("create", {"idle_policy": "sometimes"}, "create.idle_policy must be one of never, pause, suspend"),
+        ("create", {"idle_timeout_s": -1}, "create.idle_timeout_s must be >= 0"),
+        ("create", {"idle_timeout_s": None}, "create.idle_timeout_s must be >= 0"),
         ("exec", {"default_timeout_s": -1}, "exec.default_timeout_s must be >= 0"),
         ("exec", {"request_timeout_s": -1}, "exec.request_timeout_s must be >= 0"),
         ("exec", {"reconnect_attempts": -1}, "exec.reconnect_attempts must be >= 0"),
@@ -1650,3 +1657,728 @@ async def test_real_sdk_status_only_reads_control_plane(
     # Only the control-plane GET: an envd health check would resume a paused sandbox.
     assert [method for method, _ in requests] == ["GET"]
     assert requests[0][1].endswith("/sandboxes/sbx-1")
+
+
+# --------------------------------------------------------------------------
+# Idle policy (create.idle_policy)
+# --------------------------------------------------------------------------
+
+
+class FakeGone(Exception):
+    """What a gateway answers (410) for a request to a sandbox that is not running."""
+
+
+class FakeRemote:
+    """Server-side state shared by every SDK object connected to one sandbox."""
+
+    def __init__(self, sandbox_id: str, ttl: object) -> None:
+        self.sandbox_id = sandbox_id
+        self.state = "running"
+        self.ttl = ttl
+        self.events: list[tuple] = []
+        self.files: dict[str, bytes] = {}
+        self.active = 0
+        self.violations: list[str] = []
+        self.pause_delay = 0.0
+        self.pause_outcomes: list[object] = []
+        self.connect_outcomes: list[object] = []
+        self.command_delay = 0.0
+        # The request timeout the SDK keeps on the connection from create or connect.
+        self.request_timeout: object = None
+
+    def require_running(self, what: str) -> None:
+        if self.state != "running":
+            raise FakeGone(f"410: {what} on a {self.state} sandbox")
+
+
+class RemoteFakeCommands:
+    def __init__(self, remote: FakeRemote) -> None:
+        self._remote = remote
+
+    async def run(self, **kwargs):
+        _reject_connection_params("Commands.run", kwargs)
+        remote = self._remote
+        remote.require_running("exec")
+        remote.active += 1
+        remote.events.append(("exec", kwargs["cmd"]))
+        try:
+            await asyncio.sleep(remote.command_delay)
+        finally:
+            remote.active -= 1
+        if remote.state != "running":
+            remote.violations.append(f"sandbox {remote.state} while {kwargs['cmd']!r} ran")
+        return FakeCommandResult(stdout=kwargs["cmd"])
+
+
+class RemoteFakeFiles:
+    def __init__(self, remote: FakeRemote) -> None:
+        self._remote = remote
+
+    async def write(self, path, data, **kwargs):
+        _reject_connection_params("Filesystem.write", kwargs)
+        self._remote.require_running("write")
+        self._remote.events.append(("write", path))
+        self._remote.files[path] = data if isinstance(data, bytes) else str(data).encode()
+
+    async def read(self, path, **kwargs):
+        _reject_connection_params("Filesystem.read", kwargs)
+        self._remote.require_running("read")
+        self._remote.events.append(("read", path))
+        return self._remote.files[path]
+
+
+class RemoteFakeSandbox:
+    """E2B SDK sandbox against a gateway: pause is synchronous, a paused sandbox
+    refuses data-plane requests, and connect resumes it and resets its TTL.
+    Snapshots live in one store that every create can start from."""
+
+    remotes: dict[str, FakeRemote] = {}
+    connection_config = types.SimpleNamespace(debug=False)
+    # Snapshot store: id -> the files of the sandbox it was taken from.
+    snapshots: dict[str, dict[str, bytes]] = {}
+    deleted_snapshots: list[str] = []
+    # Every create's kwargs, in order, and scripted outcomes for the next ones.
+    create_calls: list[dict] = []
+    create_outcomes: list[object] = []
+    create_delay = 0.0
+    snapshot_outcomes: list[object] = []
+    snapshot_delay = 0.0
+    kill_outcomes: list[object] = []
+
+    def __init__(self, remote: FakeRemote) -> None:
+        self.remote = remote
+        self.sandbox_id = remote.sandbox_id
+        self.commands = RemoteFakeCommands(remote)
+        self.files = RemoteFakeFiles(remote)
+        self.connection_config = types.SimpleNamespace(debug=False, request_timeout=remote.request_timeout)
+
+    @classmethod
+    async def create(cls, **kwargs):
+        cls.create_calls.append(kwargs)
+        await asyncio.sleep(cls.create_delay)
+        if cls.create_outcomes:
+            outcome = cls.create_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+        remote = FakeRemote(f"sbx-{len(cls.remotes) + 1}", kwargs.get("timeout"))
+        remote.request_timeout = kwargs.get("request_timeout")
+        snapshot = cls.snapshots.get(kwargs.get("template"))
+        if snapshot is not None:
+            remote.files = dict(snapshot)
+            remote.events.append(("restore", kwargs["template"]))
+        else:
+            remote.events.append(("create",))
+        cls.remotes[remote.sandbox_id] = remote
+        return cls(remote)
+
+    async def create_snapshot(self, name=None, **kwargs):
+        _reject_connection_params("Sandbox.create_snapshot", kwargs)
+        remote = self.remote
+        if remote.active:
+            remote.violations.append("snapshot while a command ran")
+        remote.require_running("snapshot")
+        remote.events.append(("snapshot",))
+        await asyncio.sleep(RemoteFakeSandbox.snapshot_delay)
+        if RemoteFakeSandbox.snapshot_outcomes:
+            outcome = RemoteFakeSandbox.snapshot_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+        snapshot_id = f"snap-{len(RemoteFakeSandbox.snapshots) + len(RemoteFakeSandbox.deleted_snapshots) + 1}"
+        RemoteFakeSandbox.snapshots[snapshot_id] = dict(remote.files)
+        return types.SimpleNamespace(snapshot_id=snapshot_id, names=[])
+
+    @classmethod
+    async def delete_snapshot(cls, snapshot_id, **kwargs) -> bool:
+        cls.deleted_snapshots.append(snapshot_id)
+        return cls.snapshots.pop(snapshot_id, None) is not None
+
+    @classmethod
+    async def connect(cls, sandbox_id, **kwargs):
+        remote = cls.remotes[sandbox_id]
+        remote.events.append(("connect", kwargs.get("timeout")))
+        if remote.connect_outcomes:
+            outcome = remote.connect_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+        if remote.state == "killed":
+            raise FakeSandboxNotFound(sandbox_id)
+        remote.state = "running"
+        remote.ttl = kwargs.get("timeout", 300)
+        remote.request_timeout = kwargs.get("request_timeout")
+        return cls(remote)
+
+    def get_host(self, port: int) -> str:
+        return f"{port}-{self.sandbox_id}.sandbox.test"
+
+    async def pause(self, **kwargs) -> bool:
+        _reject_connection_params("Sandbox.pause", kwargs)
+        remote = self.remote
+        remote.events.append(("pause",))
+        if remote.active:
+            remote.violations.append("pause while a command ran")
+        if remote.pause_outcomes:
+            outcome = remote.pause_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if outcome is False:
+                return False
+        await asyncio.sleep(remote.pause_delay)
+        was_paused = remote.state == "paused"
+        remote.state = "paused"
+        remote.events.append(("paused",))
+        return not was_paused
+
+    async def get_info(self, **kwargs):
+        _reject_connection_params("Sandbox.get_info", kwargs)
+        if self.remote.state == "killed":
+            raise FakeSandboxNotFound(self.sandbox_id)
+        return types.SimpleNamespace(state=self.remote.state)
+
+    async def kill(self, **kwargs) -> bool:
+        if RemoteFakeSandbox.kill_outcomes:
+            outcome = RemoteFakeSandbox.kill_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+        self.remote.events.append(("kill",))
+        self.remote.state = "killed"
+        return True
+
+
+@pytest.fixture
+def gateway(monkeypatch: pytest.MonkeyPatch) -> dict[str, FakeRemote]:
+    RemoteFakeSandbox.remotes = {}
+    RemoteFakeSandbox.snapshots = {}
+    RemoteFakeSandbox.deleted_snapshots = []
+    RemoteFakeSandbox.create_calls = []
+    RemoteFakeSandbox.create_outcomes = []
+    RemoteFakeSandbox.create_delay = 0.0
+    RemoteFakeSandbox.snapshot_outcomes = []
+    RemoteFakeSandbox.snapshot_delay = 0.0
+    RemoteFakeSandbox.kill_outcomes = []
+    sdk = _fake_sdk()
+    sdk.AsyncSandbox = RemoteFakeSandbox
+    monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: sdk)
+    return RemoteFakeSandbox.remotes
+
+
+def _idle_provider(idle_s: float = 0.0, **create: object) -> E2BProvider:
+    return E2BProvider(
+        create={"template": "base", "idle_policy": "pause", "idle_timeout_s": idle_s, **create},
+        exec={"background": False},
+    )
+
+
+def _kinds(remote: FakeRemote) -> list[str]:
+    return [event[0] for event in remote.events]
+
+
+class TestIdlePause:
+    async def test_default_policy_never_pauses(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = E2BProvider(create={"template": "base"}, exec={"background": False})
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "true")
+        await asyncio.sleep(0.01)
+        assert _kinds(gateway[handle.sandbox_id]) == ["create", "exec"]
+        assert provider._states == {}
+
+    async def test_create_parks_the_sandbox_until_its_first_command(
+        self, gateway: dict[str, FakeRemote], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        provider = _idle_provider()
+        with caplog.at_level("DEBUG", logger=e2b_provider.__name__):
+            handle = await provider.create(_spec(ttl_s=18000))
+            remote = gateway[handle.sandbox_id]
+            assert remote.state == "paused"
+            result = await provider.exec(handle, "echo hi")
+        assert (result.return_code, result.stdout) == (0, "echo hi")
+        assert remote.events == [
+            ("create",),
+            ("pause",),
+            ("paused",),
+            ("connect", 18000),
+            ("exec", "echo hi"),
+            ("pause",),
+            ("paused",),
+        ]
+        assert any(re.search(rf"paused {handle.sandbox_id} \(idle\) in", r.message) for r in caplog.records)
+        assert any(re.search(rf"resumed {handle.sandbox_id} \(request\) in", r.message) for r in caplog.records)
+
+    @pytest.mark.parametrize(("ttl_s", "expected"), [(None, 3600), (10.2, 11), (18000, 18000)])
+    async def test_resume_restores_the_sandbox_ttl(
+        self, gateway: dict[str, FakeRemote], ttl_s: float | None, expected: int
+    ) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec(ttl_s=ttl_s))
+        await provider.exec(handle, "true")
+        remote = gateway[handle.sandbox_id]
+        assert ("connect", expected) in remote.events
+        assert remote.ttl == expected
+
+    async def test_idle_timeout_defers_the_pause_and_a_new_request_cancels_it(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _idle_provider(idle_s=0.05)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        await asyncio.sleep(0.02)
+        await provider.exec(handle, "two")
+        assert _kinds(remote) == ["create", "exec", "exec"]
+        await asyncio.sleep(0.1)
+        assert _kinds(remote) == ["create", "exec", "exec", "pause", "paused"]
+
+    async def test_never_pauses_while_a_request_is_in_flight(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        remote.command_delay = 0.03
+        results = await asyncio.gather(*(provider.exec(handle, f"cmd{i}") for i in range(4)))
+        await asyncio.sleep(0.01)
+        assert [r.return_code for r in results] == [0] * 4
+        assert remote.violations == []
+        assert remote.state == "paused"
+
+    async def test_request_waits_out_a_pause_already_sent(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=0.01)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        remote.pause_delay = 0.1
+        await asyncio.sleep(0.03)  # the idle pause is now with the server
+        assert remote.events[-1] == ("pause",)
+        result = await provider.exec(handle, "two")
+        assert result.return_code == 0
+        assert remote.events[-4:] == [("pause",), ("paused",), ("connect", 3600), ("exec", "two")]
+        assert remote.violations == []
+
+    async def test_file_transfers_resume_first_and_pause_after(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.write_file(handle, "/tmp/x", b"data")
+        assert await provider.read_file(handle, "/tmp/x") == b"data"
+        assert _kinds(remote) == [
+            "create",
+            "pause",
+            "paused",
+            "connect",
+            "write",
+            "pause",
+            "paused",
+            "connect",
+            "read",
+            "pause",
+            "paused",
+        ]
+
+    async def test_spec_file_upload_cancels_the_post_create_pause(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=0.05)
+        sandbox = AsyncSandbox(provider, _spec(files={"/work/seed.txt": "seed"}))
+        await sandbox.start()
+        remote = next(iter(gateway.values()))
+        assert _kinds(remote) == ["create", "write"]
+        await asyncio.sleep(0.1)
+        assert remote.state == "paused"
+        await sandbox.stop()
+        assert remote.state == "killed"
+
+    async def test_failed_pause_forces_a_reconnect_before_the_next_request(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        remote.pause_outcomes = [ConnectionError("lost")]
+        await provider.exec(handle, "two")
+        assert remote.state == "running"  # the pause never reached the server
+        result = await provider.exec(handle, "three")
+        assert result.return_code == 0
+        assert remote.events[-5:] == [("pause",), ("connect", 3600), ("exec", "three"), ("pause",), ("paused",)]
+
+    async def test_refused_pause_leaves_the_sandbox_running(
+        self, gateway: dict[str, FakeRemote], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        # A 409 the SDK maps to False. AgentENV sends one during a snapshot or fork, when status reads
+        # paused although the VM runs again, so status must not count it as paused.
+        remote.pause_outcomes = [False]
+        get_info = AsyncMock(return_value=types.SimpleNamespace(state="paused"))
+        monkeypatch.setattr(RemoteFakeSandbox, "get_info", get_info)
+        await provider.exec(handle, "two")
+        assert remote.state == "running"
+        await provider.exec(handle, "three")
+        assert ("connect", 3600) not in remote.events[remote.events.index(("exec", "two")) :]
+        get_info.assert_not_awaited()
+
+    async def test_explicit_pause_raises_when_refused(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=60.0)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        remote.pause_outcomes = [False]
+        with pytest.raises(RuntimeError, match="refused pause with 409"):
+            await provider.pause(handle)
+        assert remote.state == "running"
+        assert (await provider.exec(handle, "true")).return_code == 0
+        assert not any(event[0] == "connect" for event in remote.events)
+        await provider.close(handle)
+
+    @pytest.mark.parametrize(("connection", "expected"), [({}, 90.0), ({"request_timeout_s": 12}, 12)])
+    async def test_resume_keeps_the_request_timeout(
+        self, gateway: dict[str, FakeRemote], connection: dict[str, object], expected: float
+    ) -> None:
+        provider = E2BProvider(
+            connection=connection,
+            create={"template": "base", "idle_policy": "pause", "idle_timeout_s": 0.0},
+            exec={"background": False},
+        )
+        handle = await provider.create(_spec(ready_timeout_s=90))
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        await provider.exec(handle, "two")
+        # Each resume keeps the create request timeout, unless connection.request_timeout_s is configured.
+        assert [event for event in remote.events if event[0] == "connect"] == [("connect", 3600)] * 2
+        assert remote.request_timeout == expected
+
+    async def test_resume_failure_returns_a_sandbox_error_and_the_next_request_retries(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        original = handle.raw
+        remote.connect_outcomes = [ConnectionError("gateway down")]
+        result = await provider.exec(handle, "one")
+        assert (result.return_code, result.error_type) == (125, "sandbox")
+        assert "gateway down" in result.stderr
+        assert handle.raw is original
+        result = await provider.exec(handle, "two")
+        assert result.return_code == 0
+        assert [e for e in remote.events if e[0] == "connect"] == [("connect", 3600)] * 2
+
+    async def test_explicit_pause_waits_for_requests_in_flight(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=10)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        remote.command_delay = 0.05
+        running = asyncio.create_task(provider.exec(handle, "slow"))
+        await asyncio.sleep(0.01)
+        await provider.pause(handle)
+        assert (await running).return_code == 0
+        assert _kinds(remote) == ["create", "exec", "pause", "paused"]
+        assert remote.violations == []
+
+    async def test_request_after_explicit_pause_resumes_the_sandbox(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=10)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.pause(handle)
+        assert await provider.status(handle) is SandboxStatus.PAUSED
+        assert (await provider.exec(handle, "after")).return_code == 0
+        assert _kinds(remote) == ["create", "pause", "paused", "connect", "exec"]
+        await provider.resume(handle)  # connecting to a running sandbox only extends its lifetime
+        assert remote.state == "running"
+
+    async def test_endpoint_resumes_the_sandbox_and_keeps_it_running(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = E2BProvider(
+            connection={"port_routing": "hostname"},
+            create={"template": "base", "idle_policy": "pause", "idle_timeout_s": 0.0},
+            exec={"background": False},
+        )
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        assert remote.state == "paused"
+        endpoint = await provider.endpoint(handle, 8080)
+        assert endpoint.endpoint == f"https://8080-{handle.sandbox_id}.sandbox.test"
+        await provider.exec(handle, "true")
+        await asyncio.sleep(0.01)
+        assert _kinds(remote) == ["create", "pause", "paused", "connect", "exec"]
+        assert remote.state == "running"
+
+    async def test_serialized_sandbox_stays_running(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        assert await provider.serialize_handle(handle) == {"sandbox_id": handle.sandbox_id}
+        await provider.exec(handle, "true")
+        await asyncio.sleep(0.01)
+        assert _kinds(remote) == ["create", "pause", "paused", "connect", "exec"]
+        assert remote.state == "running"
+
+    async def test_close_cancels_a_pending_pause(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=0.05)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        await provider.close(handle)
+        await asyncio.sleep(0.1)
+        assert _kinds(remote) == ["create", "exec", "kill"]
+        assert handle.raw is None
+        assert provider._states == {}
+
+    async def test_close_kills_a_paused_sandbox_without_resuming_it(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider()
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.close(handle)
+        assert _kinds(remote) == ["create", "pause", "paused", "kill"]
+
+    async def test_close_waits_out_a_pause_already_sent(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=0.01)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        remote.pause_delay = 0.05
+        await asyncio.sleep(0.03)
+        await provider.close(handle)
+        assert remote.events[-3:] == [("pause",), ("paused",), ("kill",)]
+
+    async def test_aclose_waits_for_pauses_already_sent(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _idle_provider(idle_s=0.01)
+        handle = await provider.create(_spec())
+        remote = gateway[handle.sandbox_id]
+        await provider.exec(handle, "one")
+        remote.pause_delay = 0.05
+        await asyncio.sleep(0.03)
+        await provider.aclose()
+        assert remote.events[-1] == ("paused",)
+
+
+def test_sync_sandbox_idle_pause_round_trip(gateway: dict[str, FakeRemote]) -> None:
+    with Sandbox(_idle_provider(), _spec(files={"/work/seed.txt": "seed"})) as sandbox:
+        sandbox.start()
+        assert sandbox.status() is SandboxStatus.PAUSED
+        assert sandbox.exec("cat /work/seed.txt").return_code == 0
+        assert sandbox.exec("true").return_code == 0
+        assert sandbox.status() is SandboxStatus.PAUSED
+    remote = next(iter(gateway.values()))
+    assert remote.state == "killed"
+    assert remote.violations == []
+    assert _kinds(remote).count("connect") == 3
+
+
+def _suspend_provider(idle_s: float = 0.0, *, operations: dict | None = None, **create: object) -> E2BProvider:
+    return E2BProvider(
+        connection={"api_url": "https://gateway.test", "sandbox_url": "https://gateway.test"},
+        operations=operations,
+        create={"template": "base", "idle_policy": "suspend", "idle_timeout_s": idle_s, **create},
+        exec={"background": False},
+    )
+
+
+class TestSuspend:
+    async def test_create_suspends_until_the_first_request(
+        self, gateway: dict[str, FakeRemote], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        provider = _suspend_provider()
+        with caplog.at_level("DEBUG", logger=e2b_provider.__name__):
+            handle = await provider.create(_spec())
+        assert handle.sandbox_id == "sbx-1"
+        assert gateway["sbx-1"].events == [("create",), ("snapshot",), ("kill",)]
+        assert list(RemoteFakeSandbox.snapshots) == ["snap-1"]
+        assert await provider.status(handle) is SandboxStatus.PAUSED
+        assert any(
+            re.search(r"suspended sbx-1 \(idle\) to snapshot snap-1 in", record.message) for record in caplog.records
+        )
+
+    async def test_restore_creates_from_the_snapshot_with_the_original_create_args(
+        self, gateway: dict[str, FakeRemote], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        provider = _suspend_provider(secure=False, allow_internet_access=False)
+        handle = await provider.create(_spec(ttl_s=18000, env={"FOO": "bar"}, metadata={"run": "demo"}))
+        with caplog.at_level("DEBUG", logger=e2b_provider.__name__):
+            result = await provider.exec(handle, "one")
+        assert result.return_code == 0
+        assert gateway["sbx-2"].events[:2] == [("restore", "snap-1"), ("exec", "one")]
+        kwargs = RemoteFakeSandbox.create_calls[1]
+        assert (kwargs["api_url"], kwargs["sandbox_url"], kwargs["template"]) == (
+            "https://gateway.test",
+            "https://gateway.test",
+            "snap-1",
+        )
+        assert (kwargs["timeout"], kwargs["envs"], kwargs["metadata"]["run"]) == (18000, {"FOO": "bar"}, "demo")
+        assert (kwargs["secure"], kwargs["allow_internet_access"]) == (False, False)
+        # Everything else the first create sent comes back too, including attribution metadata and lifecycle.
+        first = RemoteFakeSandbox.create_calls[0]
+        assert {key: kwargs[key] for key in e2b_provider._RESTORE_ARGS if key in first} == {
+            key: first[key] for key in e2b_provider._RESTORE_ARGS if key in first
+        }
+        assert kwargs["lifecycle"] == {"on_timeout": "kill", "auto_resume": False}
+        assert handle.sandbox_id == "sbx-1" and handle.raw.sandbox_id == "sbx-2"
+        assert any(
+            re.search(r"restored sbx-1 \(request\) as sbx-2 from snapshot snap-1 in", record.message)
+            for record in caplog.records
+        )
+        await provider.exec(handle, "two")
+        assert [remote.state for remote in gateway.values()] == ["killed", "killed", "killed"]
+
+    async def test_restore_resends_network_rules_and_lifecycle(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider(network=_NETWORK, auto_resume=True)
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "one")
+        first, restore = RemoteFakeSandbox.create_calls[:2]
+        assert restore["template"] == "snap-1"
+        assert restore["network"] == first["network"] == _NETWORK
+        assert restore["lifecycle"] == first["lifecycle"] == {"on_timeout": "pause", "auto_resume": True}
+        await provider.close(handle)
+
+    async def test_restore_creates_through_post_sandboxes_with_extension_params(
+        self, gateway: dict[str, FakeRemote], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        provider = _suspend_provider(custom_extension_params={"queue": "gym"})
+        calls: list[dict] = []
+
+        async def create_with_extension_params(e2b, kwargs):
+            calls.append(kwargs)
+            return await RemoteFakeSandbox.create(**kwargs)
+
+        monkeypatch.setattr(provider, "_create_with_extension_params", create_with_extension_params)
+        handle = await provider.create(_spec(metadata={"run": "demo"}))
+        assert (await provider.exec(handle, "one")).return_code == 0
+        # The restore goes the same way as the first create, so customExtensionParams reach the backend again.
+        assert [call["template"] for call in calls] == ["base", "snap-1"]
+        assert calls[1]["metadata"] == calls[0]["metadata"]
+        await provider.close(handle)
+
+    async def test_restore_deletes_the_snapshot_it_used_and_keeps_the_files(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        await provider.write_file(handle, "/tmp/x", b"data")
+        assert await provider.read_file(handle, "/tmp/x") == b"data"
+        assert RemoteFakeSandbox.deleted_snapshots == ["snap-1", "snap-2"]
+        assert list(RemoteFakeSandbox.snapshots) == ["snap-3"]
+
+    async def test_never_suspends_while_a_request_is_in_flight(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "warm")
+        handle.raw.remote.command_delay = 0.03
+        results = await asyncio.gather(*(provider.exec(handle, f"cmd{i}") for i in range(4)))
+        assert [r.return_code for r in results] == [0] * 4
+        assert all(remote.violations == [] for remote in gateway.values())
+
+    async def test_request_waits_out_a_suspend_already_sent(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider(idle_s=0.01)
+        handle = await provider.create(_spec())
+        await provider.exec(handle, "one")
+        RemoteFakeSandbox.snapshot_delay = 0.1
+        await asyncio.sleep(0.03)  # the idle suspend is now with the server
+        assert gateway["sbx-1"].events[-1] == ("snapshot",)
+        assert (await provider.exec(handle, "two")).return_code == 0
+        assert gateway["sbx-1"].events[-2:] == [("snapshot",), ("kill",)]
+        assert gateway["sbx-2"].events == [("restore", "snap-1"), ("exec", "two")]
+
+    async def test_failed_snapshot_keeps_the_sandbox(self, gateway: dict[str, FakeRemote]) -> None:
+        RemoteFakeSandbox.snapshot_outcomes = [ConnectionError("store down")]
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        assert gateway["sbx-1"].state == "running"
+        assert (await provider.exec(handle, "one")).return_code == 0
+        assert len(gateway) == 1
+        assert ("connect", 3600) in gateway["sbx-1"].events
+        assert gateway["sbx-1"].state == "killed"  # the next suspend worked
+
+    async def test_kill_failure_after_snapshot_kills_the_source_after_the_restore(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        RemoteFakeSandbox.kill_outcomes = [ConnectionError("lost")]
+        provider = _suspend_provider(idle_s=10, operations={"retries": 0})
+        handle = await provider.create(_spec())
+        await provider.pause(handle)
+        assert await provider.status(handle) is SandboxStatus.PAUSED
+        assert gateway["sbx-1"].state == "running"
+        assert (await provider.exec(handle, "one")).return_code == 0
+        assert gateway["sbx-1"].state == "killed"
+        assert handle.raw.sandbox_id == "sbx-2"
+
+    async def test_failed_restore_returns_a_sandbox_error_and_the_next_request_retries(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        RemoteFakeSandbox.create_outcomes = [ConnectionError("no capacity")]
+        result = await provider.exec(handle, "one")
+        assert (result.return_code, result.error_type) == (125, "sandbox")
+        assert "could not be restored" in result.stderr and "no capacity" in result.stderr
+        assert await provider.status(handle) is SandboxStatus.PAUSED
+        assert "snap-1" in RemoteFakeSandbox.snapshots
+        assert (await provider.exec(handle, "two")).return_code == 0
+        assert [call["template"] for call in RemoteFakeSandbox.create_calls] == ["base", "snap-1", "snap-1"]
+
+    async def test_explicit_pause_suspends_and_resume_restores(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider(idle_s=10)
+        handle = await provider.create(_spec())
+        await provider.pause(handle)
+        await provider.pause(handle)
+        assert list(RemoteFakeSandbox.snapshots) == ["snap-1"]
+        await provider.resume(handle)
+        assert handle.raw.sandbox_id == "sbx-2"
+        await provider.resume(handle)  # running: reconnects, no new sandbox
+        assert len(gateway) == 2 and gateway["sbx-2"].events[-1] == ("connect", 3600)
+        assert await provider.status(handle) is SandboxStatus.RUNNING
+
+    async def test_close_of_a_suspended_sandbox_deletes_its_snapshot_and_kills_nothing(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        await provider.close(handle)
+        assert RemoteFakeSandbox.deleted_snapshots == ["snap-1"]
+        assert RemoteFakeSandbox.snapshots == {}
+        assert gateway["sbx-1"].events == [("create",), ("snapshot",), ("kill",)]
+        assert handle.raw is None and provider._states == {}
+
+    async def test_close_of_a_restored_sandbox_kills_it(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider(idle_s=10)
+        handle = await provider.create(_spec())
+        await provider.pause(handle)
+        await provider.exec(handle, "one")
+        await provider.close(handle)
+        assert gateway["sbx-2"].state == "killed"
+        assert RemoteFakeSandbox.snapshots == {}
+
+    async def test_cancelled_restore_kills_what_it_created(self, gateway: dict[str, FakeRemote]) -> None:
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        RemoteFakeSandbox.create_delay = 0.05
+        request = asyncio.create_task(provider.exec(handle, "one"))
+        await asyncio.sleep(0.01)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        await provider.aclose()  # waits for the reaper
+        assert gateway["sbx-2"].state == "killed"
+        assert ("exec", "one") not in gateway["sbx-2"].events
+
+    async def test_aclose_deletes_snapshots_of_unclosed_suspended_sandboxes(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _suspend_provider()
+        await provider.create(_spec())
+        await provider.aclose()
+        assert RemoteFakeSandbox.snapshots == {}
+
+    async def test_serialize_restores_the_sandbox_and_names_the_one_now_running(
+        self, gateway: dict[str, FakeRemote]
+    ) -> None:
+        provider = _suspend_provider()
+        handle = await provider.create(_spec())
+        assert await provider.serialize_handle(handle) == {"sandbox_id": "sbx-2"}
+        await provider.exec(handle, "one")
+        await asyncio.sleep(0.01)
+        assert gateway["sbx-2"].state == "running"
+        assert gateway["sbx-2"].events == [("restore", "snap-1"), ("exec", "one")]
+
+
+def test_sync_sandbox_suspend_round_trip(gateway: dict[str, FakeRemote]) -> None:
+    with Sandbox(_suspend_provider(), _spec(files={"/work/seed.txt": "seed"})) as sandbox:
+        sandbox.start()
+        assert sandbox.status() is SandboxStatus.PAUSED
+        assert sandbox.exec("cat /work/seed.txt").return_code == 0
+    assert all(remote.state == "killed" for remote in gateway.values())
+    assert RemoteFakeSandbox.snapshots == {}
