@@ -266,26 +266,29 @@ Each episode is one agent session with one activation: the Environment Server se
 agent session that grants `remote_agent` direct HTTP access to the resources server's tools, calls `/v1/responses`
 once to run the loop, closes the agent session, then verifies and closes the resources session.
 
-`responses_api_agents/remote_agent/configs/remote_agent_single_agent_turn.yaml` adds this Environment Server to
-`remote_agent.yaml`, which keeps the `/run` path. Name your resources server in both places:
+Most environments in Gym already declare a `single_agent_turn_legacy` Environment Server. Compose `remote_agent` onto
+one with `--agent-type`, and that server runs the episodes:
+
+```bash
+gym env start --resources-server <your_env> --agent-type remote_agent \
+    ++remote_agent.responses_api_agents.remote_agent.agent_base_url=http://your-agent-host:9000
+```
+
+An environment of your own declares the server next to the agent, bound to the same resources server:
 
 ```yaml
-config_paths:
-  - responses_api_agents/remote_agent/configs/remote_agent_single_agent_turn.yaml
-
-remote_agent:
-  responses_api_agents:
-    remote_agent:
-      agent_base_url: http://your-agent-host:9000
-      resources_server:
-        type: resources_servers
-        name: my_env
-remote_agent_single_agent_turn:
+my_env_environment_server:
   environment_servers:
     single_agent_turn_legacy:
+      entrypoint: app.py
       resources_server:
         type: resources_servers
         name: my_env
+      agent_server:
+        type: responses_api_agents
+        name: remote_agent
+      resources_tool_transports:
+      - direct_http
 ```
 
 What changes on this path:

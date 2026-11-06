@@ -43,13 +43,11 @@ gym env start --resources-server <your_env> # plus this agent's config
 gym eval run --no-serve +agent_name=remote_agent +input_jsonl_fpath=... +output_jsonl_fpath=...
 ```
 
-`configs/remote_agent_single_agent_turn.yaml` runs each task through a `single_agent_turn_legacy` Environment Server
-and the agent sessions API instead: it seeds and verifies, grants this agent direct HTTP access to the resources
-server's tools, and records failures. Name the resources server there too; it must serve resources sessions.
-
-Because the agent serves agent sessions, composing `configs/remote_agent.yaml` onto a benchmark whose environment is a
-`single_agent_turn_legacy` server keeps that server instead of relaying to `/run`. The benchmark must then grant the
-agent `direct_http` in `resources_tool_transports`: the agent refuses a seed whose only required grant is MCP, and with
-no grant the service's tool requests fail.
+The agent also serves agent sessions. Composing `configs/remote_agent.yaml` onto an environment whose Environment
+Server is `single_agent_turn_legacy` (`--agent-type remote_agent`) keeps that server instead of relaying to `/run`: it
+seeds and verifies, grants this agent direct HTTP access to the resources server's tools, and records failures. The
+resources server must serve resources sessions, and the environment must grant the agent `direct_http` in
+`resources_tool_transports`: the agent refuses a seed whose only required grant is MCP, and with no grant the service's
+tool requests fail.
 
 Knobs and the full contract: see the "Drive a Remote Agent" docs page.
