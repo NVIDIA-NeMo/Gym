@@ -5,7 +5,7 @@
 
 from collections.abc import Mapping
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
 from nemo_gym.core.failure_records import EpisodeFailure
@@ -48,6 +48,12 @@ class SingleAgentTurnTaskInput(BaseModel):
         if (agent_context := task_data.pop(AGENT_CONTEXT_KEY_NAME, None)) is not None:
             task_input[AGENT_CONTEXT_KEY_NAME] = agent_context
         return task_input
+
+    @field_validator("agent_context")
+    @classmethod
+    def omit_empty_agent_context(cls, agent_context: AgentContext | None) -> AgentContext | None:
+        """An empty context is no context, so the task input dumps and digests as a row without the key."""
+        return agent_context if agent_context is not None and agent_context.fields() else None
 
 
 class SingleAgentTurnResult(BaseVerifyResponse):

@@ -50,6 +50,7 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from pydantic import BaseModel, TypeAdapter
 
 from nemo_gym.core.episode_types import is_materialized_task_row
+from nemo_gym.server_runtime.agent_context import AGENT_CONTEXT_KEY_NAME
 
 
 TASK_DATA_MODULE_NAME = "task_data"
@@ -65,7 +66,7 @@ RESERVED_ROW_KEYS = frozenset(
         # A multi-turn row's requests, one per turn beside ``task_data`` (the Harbor materializer's ``turns``).
         "turns",
         # What the agent session receives (nemo_gym.server_runtime.agent_context); the Resources Server never sees it.
-        "agent_context",
+        AGENT_CONTEXT_KEY_NAME,
         "agent_ref",
         "task_source",
         "_ng_task_index",
@@ -149,6 +150,9 @@ def normalize_task_fields(row: Dict[str, Any]) -> tuple[Dict[str, Any], List[str
         container = fields.pop(container_key, None)
         if isinstance(container, dict):
             for key, value in container.items():
+                if container_key == TASK_DATA_ROW_KEY and key == AGENT_CONTEXT_KEY_NAME:
+                    # The task input lifts agent_context out of task_data too, so it is not a task field there.
+                    continue
                 if key in fields and fields[key] != value:
                     conflicts.append(key)
                     continue
