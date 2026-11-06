@@ -1043,7 +1043,12 @@ class TestGraderFailureTyping:
             assert r.reward == 0.25 and r.timeout_rate == 0.5
 
 
-def test_a_saved_answer_can_be_graded_again():
-    from resources_servers.critpt.app import CritPtResourcesServerConfig
+@pytest.mark.asyncio
+async def test_one_saved_answer_alone_cannot_fill_a_batch_so_replay_is_not_declared():
+    assert CritPtResourcesServerConfig.REVERIFY_MODE.value == "unknown"
+    server = _make_server(_make_config(batch_size=2, verify_timeout_seconds=0.05))
 
-    assert CritPtResourcesServerConfig.REVERIFY_MODE.value == "stateless"
+    with pytest.raises(Exception) as stopped:
+        await server.verify(_make_verify_request("```python\nx=1\n```", problem_id="p1"))
+
+    assert "fewer than batch_size" in str(stopped.value)

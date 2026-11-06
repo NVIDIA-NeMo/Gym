@@ -167,7 +167,7 @@ class CritPtAgent(SimpleResponsesAPIAgent):
             )
         except NgFailureEvent as failure:
             # The grader failed, not the model: keep the answer and mask the row with the typed failure.
-            result = masked_verify_failure(verify_request_data, failure)
+            result = masked_verify_failure(verify_request_data, failure, regradable=False)
         return CritPtAgentVerifyResponse.model_validate(result)
 
 

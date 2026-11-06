@@ -99,7 +99,9 @@ async def verify_with_transport_retry(
     raise AssertionError("unreachable")  # pragma: no cover
 
 
-def masked_verify_failure(answer: dict[str, Any], failure: NgFailureEvent) -> dict[str, Any]:
+def masked_verify_failure(
+    answer: dict[str, Any], failure: NgFailureEvent, *, regradable: bool = True
+) -> dict[str, Any]:
     """``answer`` (the verify request, with the generated response) as a masked zero for a verify call that failed.
 
     Return this from ``/run`` instead of raising: the HTTP boundary would drop the generated answer, and a resume
@@ -107,10 +109,12 @@ def masked_verify_failure(answer: dict[str, Any], failure: NgFailureEvent) -> di
 
     A verifier that replied with a server error or a rate limit could not grade the answer: the row is a
     ``judge_failed`` mask, which recovery grades again from the saved answer with ``/verify`` only. A call lost in
-    transport keeps its ``agent_route_failed`` kind, which recovery selects too.
+    transport keeps its ``agent_route_failed`` kind, which recovery selects too. A verifier that cannot grade one saved
+    answer alone (``regradable=False``, a verifier that grades only full batches) keeps ``agent_route_failed`` for
+    every cause, so recovery does not claim it can settle the row.
     """
     cause = failure.__cause__
-    ungradable = isinstance(cause, ClientResponseError) and (cause.status >= 500 or cause.status == 429)
+    ungradable = regradable and isinstance(cause, ClientResponseError) and (cause.status >= 500 or cause.status == 429)
     return answer | {
         "reward": 0.0,
         "mask_sample": True,
