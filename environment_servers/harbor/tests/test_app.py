@@ -38,6 +38,7 @@ from environment_servers.harbor.tests.conftest import (
     OVERLAY_DOCKERFILE,
     SEPARATE_IN_TASK_IMAGE_TOML,
     SEPARATE_TOML,
+    SKILL_MD,
     SOLVE_SH,
     TASK_TOML,
     VERIFIER_TESTS_DOCKERFILE,
@@ -72,7 +73,7 @@ from environment_servers.harbor.verifier import (
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import failure_kinds
+from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
 from nemo_gym.data.tasks.harbor import (
     BUILT_IMAGES_FILE,
     DIGEST_KEY,
@@ -1277,7 +1278,7 @@ class TestAgentStage:
     @pytest.mark.parametrize(
         ("path", "status", "stage", "terminal"),
         [
-            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a final 422.
+            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a terminal 422.
             ("/v1/agent_sessions", 422, "agent", True),
             ("/ng-rollout/r1/v1/responses", 422, "agent", True),
             ("/v1/agent_sessions/close", 503, "cleanup", False),
@@ -2401,8 +2402,8 @@ class StubProvider:
 
 
 class TestComposeAndRouting:
-    def compose_server(self, tmp_path, monkeypatch):
-        server, task, _, _ = make_server(tmp_path, monkeypatch)
+    def compose_server(self, tmp_path, monkeypatch, *, skills=False):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, skills=skills)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
         (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
         (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
@@ -2418,7 +2419,8 @@ class TestComposeAndRouting:
         verifier = FakeSandbox()
 
         async def start_compose(task, episode_key):
-            documents.append(server._compose_document(task))
+            compose.document = server._compose_document(task)
+            documents.append(compose.document)
             return compose
 
         async def create_verifier(task, *, episode_key=None):
@@ -3316,6 +3318,56 @@ class TestComposeAndRouting:
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
 
+    async def test_a_groups_skills_reach_main_after_the_group_started_and_before_the_harness(
+        self, tmp_path, monkeypatch
+    ):
+        """The adapter starts main, runs its command and waits for its image healthcheck before the seed uploads
+        the task's skills, so in a Compose group they reach the harness session, not main's own startup."""
+        server, task, compose, _, _ = self.compose_server(tmp_path, monkeypatch, skills=True)
+        main = compose.services["main"]
+        start_compose = server._create_compose
+        uploads_at_group_start: list[int] = []
+
+        async def start_compose_recording_uploads(*args, **kwargs):
+            group = await start_compose(*args, **kwargs)
+            uploads_at_group_start.append(len(TestTaskSkills.skills_uploads(main, "/app/.skills")))
+            return group
+
+        monkeypatch.setattr(server, "_create_compose", start_compose_recording_uploads)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert uploads_at_group_start == [0]
+        (upload,) = TestTaskSkills.skills_uploads(main, "/app/.skills")
+        assert upload["user"] == "root"
+        context_write = next(c for c in main.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert main.execs.index(upload) < main.execs.index(context_write)
+        assert len(server.server_client.seed_bodies()) == 1
+
+    @pytest.mark.parametrize("compose_user,expected_user", [("nobody", "nobody"), ("1000", 1000)])
+    async def test_task_healthcheck_uses_own_compose_user_without_job_overlay(
+        self, tmp_path, monkeypatch, compose_user, expected_user
+    ):
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        path = task.path / "environment" / "docker-compose.yaml"
+        document = yaml.safe_load(path.read_text())
+        document["services"]["main"]["user"] = compose_user
+        path.write_text(yaml.safe_dump(document))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.needs_compose and server.config.compose_overlay is None
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert documents[0]["services"]["main"]["user"] == compose_user
+        checks = [record for record in compose.services["main"].execs if record["command"] == "test -f /tmp/ready"]
+        assert len(checks) == 3
+        assert all(record["user"] == expected_user for record in checks)
+        assert response.result.reward == 1.0
+        assert compose.stopped and not server._sandboxes
+
     async def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
         server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
         main = compose.services["main"]
@@ -3979,6 +4031,162 @@ def test_server_config_holds_only_deployment_settings():
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
 
 
+class TestTaskSkills:
+    """The seed uploads a task's ``environment/skills/`` to its ``skills_dir`` before the task's entrypoint runs.
+
+    Harbor expects the image to hold ``skills_dir`` already; a task that runs a prebuilt image ships its skills in
+    the build context only (SkillsBench), so the server puts them where the task says, for every harness, unless
+    the image already filled that folder.
+    """
+
+    SKILLS_TOML = TASK_TOML.replace(
+        "storage_mb = 10240\n", 'storage_mb = 10240\nskills_dir = "/root/.agents/skills"\n'
+    )
+
+    @staticmethod
+    def skills_uploads(sandbox, target: str = "/root/.agents/skills") -> list[dict]:
+        return [c for c in sandbox.execs if "tar -xzf" in c["command"] and f"-C {target}" in c["command"]]
+
+    async def test_skills_reach_skills_dir_before_anything_of_the_task_runs(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=self.SKILLS_TOML, skills=True)
+        uploads_at_seed: list[int] = []
+        uploads_at_entrypoint: list[int] = []
+        start_entrypoint = server._start_entrypoint
+
+        async def start_entrypoint_recording_uploads(*args, **kwargs):
+            uploads_at_entrypoint.append(len(self.skills_uploads(sandbox)))
+            return await start_entrypoint(*args, **kwargs)
+
+        monkeypatch.setattr(server, "_start_entrypoint", start_entrypoint_recording_uploads)
+        post = type(server.server_client).post
+
+        async def post_recording_uploads(client, server_name, url_path, **kwargs):
+            if url_path == "/v1/agent_sessions":
+                uploads_at_seed.append(len(self.skills_uploads(sandbox)))
+            return await post(client, server_name, url_path, **kwargs)
+
+        monkeypatch.setattr(type(server.server_client), "post", post_recording_uploads)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # One archive, extracted as root into skills_dir, its skill folders opened to every user, before the task's
+        # entrypoint (and so its healthcheck) and the agent seed, as an image that copied them in would hold them.
+        (upload,) = self.skills_uploads(sandbox)
+        assert upload["user"] == "root"
+        assert "chmod" not in upload["command"]
+        (opened,) = [c for c in sandbox.execs if "chmod -R a+rX" in c["command"]]
+        assert opened["user"] == "root"
+        assert "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; true" in opened["command"]
+        assert uploads_at_entrypoint == [1]
+        assert uploads_at_seed == [1]
+        # The skill folder travels whole, without what the task digest ignores.
+        for data in sandbox.uploaded_archives:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                members = {m.name for m in tar.getmembers()}
+                if "pdf/SKILL.md" in members:
+                    names = members
+        assert names == {"pdf", "pdf/SKILL.md", "pdf/scripts", "pdf/scripts/extract.py"}
+        assert uploaded_file(sandbox, "SKILL.md") == [SKILL_MD.encode()]
+
+    async def test_a_relative_skills_dir_is_read_from_the_working_directory(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("storage_mb = 10240\n", 'storage_mb = 10240\nskills_dir = ".skills"\n')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(self.skills_uploads(sandbox, "/app/.skills")) == 1
+        # The harness reads the path the skills went to, absolute as Harbor asks for it.
+        context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert '"skills_dir": "/app/.skills"' in context_write["command"]
+
+    @pytest.mark.parametrize(
+        "probe,uploaded,opened",
+        [
+            pytest.param(1, False, None, id="filled-by-the-image"),
+            pytest.param(0, True, "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; true", id="empty"),
+            pytest.param(
+                2,
+                True,
+                "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; chmod a+rX -- /root/.agents/skills 2>/dev/null; true",
+                id="missing",
+            ),
+        ],
+    )
+    async def test_an_image_that_filled_skills_dir_keeps_it_and_only_a_new_folder_is_opened(
+        self, tmp_path, monkeypatch, probe, uploaded, opened
+    ):
+        class Probed(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "ls -A /root/.agents/skills" in command:
+                    self.execs.append({"command": command, "cwd": cwd, "env": env, "user": user, "seen": None})
+                    return SandboxExecResult(stdout="", stderr="", return_code=probe)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = Probed()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox, toml=self.SKILLS_TOML, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(self.skills_uploads(sandbox)) == int(uploaded)
+        assert [c["command"] for c in sandbox.execs if "chmod -R a+rX" in c["command"]] == ([opened] if opened else [])
+        # The harness is told where the skills are either way.
+        assert any("/tmp/.nemo-gym/task.json" in c["command"] for c in sandbox.execs)
+
+    @pytest.mark.parametrize("skills_dir", ["/", ".", "./", "/app", "/app/skills/..", "~/.skills", "$HOME/skills"])
+    async def test_a_skills_dir_the_upload_would_open_too_widely_is_refused(self, tmp_path, monkeypatch, skills_dir):
+        """The upload opens what it writes to every user: ``/`` or the working directory would open far more than
+        the skills, and the server cannot place a path only a shell resolves."""
+        toml = TASK_TOML.replace("storage_mb = 10240\n", f'storage_mb = 10240\nskills_dir = "{skills_dir}"\n')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert f"skills_dir {skills_dir!r} names no folder" in response.failure.failure_reason
+        assert uploaded_file(sandbox, "SKILL.md") == [] and server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_a_task_without_skills_dir_uploads_nothing(self, tmp_path, monkeypatch):
+        """Skills in the build context alone are the Dockerfile's to copy; nothing names a place for them."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert uploaded_file(sandbox, "SKILL.md") == []
+
+    async def test_a_skills_dir_the_image_provides_is_left_as_built(self, tmp_path, monkeypatch):
+        """Without ``environment/skills/`` there is nothing to upload; the harness still reads task.json."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=self.SKILLS_TOML)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert self.skills_uploads(sandbox) == []
+        assert any("/tmp/.nemo-gym/task.json" in c["command"] for c in sandbox.execs)
+
+    async def test_a_sandbox_that_cannot_take_the_skills_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        class RefusesSkills(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "-C /root/.agents/skills" in command:
+                    self.execs.append({"command": command, "cwd": cwd, "env": env, "user": user, "seen": None})
+                    return _fails("tar: /root/.agents/skills: Cannot mkdir: No space left on device")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = RefusesSkills()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox, toml=self.SKILLS_TOML, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "No space left on device" in response.failure.failure_reason
+        assert server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
+
+
 class TestSeedGuards:
     """Defects from the first cluster run: requests above limits, and a create the ready timeout did not bound."""
 
@@ -4579,7 +4787,8 @@ class TestGeneralization:
             async def start(self, spec):
                 starts.append(spec.image)
                 if len(starts) <= len(failures):
-                    raise SandboxCreateError(failures[len(starts) - 1])
+                    failure = failures[len(starts) - 1]
+                    raise failure if isinstance(failure, BaseException) else SandboxCreateError(failure)
 
             def __getattr__(self, name):
                 return getattr(sandbox, name)
@@ -4600,6 +4809,30 @@ class TestGeneralization:
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
+        assert not server._sandboxes
+
+    @pytest.mark.parametrize("message, failures", [("ErrImagePull", 1), ("ErrImagePull", 3), ("quota exceeded", 1)])
+    async def test_shared_sandbox_failure_preserves_pull_retry_policy(self, tmp_path, monkeypatch, message, failures):
+        cause = RuntimeError(message)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_request_failed",
+            operation="create",
+            failure_reason="Sandbox create failed",
+        )
+        error.__cause__ = cause
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, [error] * failures)
+        with RequestFailureLog.capture() as log:
+            response = await run_episode(server, task)
+        if message == "ErrImagePull" and failures == 1:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0
+            assert starts == ["ubuntu:24.04"] * 2
+            assert log.report.events[error.event_id].foreign_error.exception_type == "RuntimeError"
+        else:
+            assert response.failure is not None
+            assert len(starts) == failures
+        assert error.__cause__ is cause
         assert not server._sandboxes
 
     async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):
@@ -4706,6 +4939,7 @@ class TestGeneralization:
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = False
 
             async def start(self):
@@ -4808,6 +5042,7 @@ class TestGeneralization:
             ):
                 groups.append(self)
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = 0
 
             async def start(self):

@@ -69,14 +69,19 @@ Native episode failures preserve the producer's `failure_kind`, including an uns
 The terminal flag, stage, and partial-response diagnostics are retained. Nonterminal failures can retry the whole episode.
 Judge-only recovery re-judges a saved answer without regenerating it: at the end of a run, before the policy work of a resumed run and again at its end, and
 through `gym eval resubmit --recover` when only judge failures remain (a judge-only CPU job for a run that served its own
-model). Built-in `judge_failsafe` results retain their saved answers without a reward;
+model).
+Saved judge failures with complete responses support judge-only recovery through `--settle-into-source`.
+Built-in `judge_failsafe` results retain their saved answers without a reward;
 the collector accepts their two known legacy judge markers while rejecting other reserved result keys.
 
 Malformed replies become terminal `environment_protocol_violation` failures when routing is enabled; running the whole task again
 cannot fix an invalid response format. A reply from a different execution attempt remains retryable because a transport
 retry can return a stale response. With failure routing disabled (the default), invalid replies stop collection;
 `+route_failures_to_sidecar=true` records them and lets independent tasks continue. Fix the producer before retrying
-a task whose response violates the contract. Environment replies establish delivery; gateway/throttling errors
+a task whose response violates the contract. When an Environment Server's first
+`environment_protocol_violation_stop_after` results (3 by default; all of them when it serves fewer; 0 turns it off)
+are all such replies, collection stops the run with a typed `environment_protocol_violation` stop (exit 76, no chaining):
+the server or the benchmark pairing is wrong, so a retry cannot help; fix it and submit again. Environment replies establish delivery; gateway/throttling errors
 (429, 502, 503, 504) leave delivery uncertain because they do not prove the Environment Server received the request.
 
 ## Attempts and completion coverage
@@ -138,17 +143,20 @@ Gym writes `<output_stem>_coverage.json` with an exact inventory:
 | `expected` | Number of logical rollouts in the materialized inputs. |
 | `successful` | Rollouts with a completed result, including wrong answers and completed masked results. |
 | `measured` | Completed results with a numeric reward whose producer did not set `mask_sample`, including valid reward-zero results. |
-| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. These remain saved and reusable on resume, except a result masked by an evaluation-side failure kind (see `masked_retryable`). |
+| `masked` | Completed results with a numeric reward whose producer set `mask_sample`. A failure record whose producer set `mask_sample` is counted in `failed_masked`, never here. These remain saved and reusable on resume, except a result masked by an evaluation-side failure kind (see `masked_retryable`). |
 | `masked_retryable` | Completed results whose producer reported an evaluation-side failure kind (for example a lost session or a failed provider) and that resume runs again within the attempt cap. They count as one failed attempt and are not settled. |
 | `unscored` | Completed results without a numeric reward, including those also marked `mask_sample`. |
 | `failed` | Rollouts whose selected attempt reported a no-result failure. |
 | `failed_final` / `failed_not_final` | Selected failures with no retry available (terminal or budget exhausted), versus selected failures still eligible for retry. |
 | `final_zeros` | Failed rollouts settled as final zeros: a terminal failure counted as zero. They count as complete and are still failures for health. |
+| `counted_zeros_in_successful` / `counted_zero_kinds` | Of `successful`: scored results the policy settled as the model's zero (a failure counted as zero, for example a sandbox out-of-memory), and their failure kinds. They are not in `final_zeros` and not failures, so the completion arithmetic is unchanged. |
+| `failed_masked` | Of `failed`: selected failure records whose producer set `mask_sample` (a judge or verifier outage, for example). They are excluded from the score, not counted as zeros. |
 | `failed_by_class` | Selected failure counts by failure class; excludes omissions. |
 | `intentionally_omitted` | Explicit producer omissions, including terminal `skipped` outcomes. |
 | `not_started` | Rollouts with no reserved execution. |
 | `missing` | Rollouts whose newest reserved execution has no saved outcome. |
 | `retryable` | Rollouts eligible for another attempt under the active retry policy. Aggregate reports expose this per shard. |
+| `open` | Rollouts with no final result: `masked_retryable` plus `failed_not_final` plus `not_started` plus `missing`. A chain that stops with `open` above zero reports it as an incomplete run; final failures (terminal, at their attempt cap, or `stopped_not_retried`) are not open, even when they are not settled. The recovery gate's `unsettled` count is wider: it also includes those final failures. |
 | `outcomes_recorded` | All outcomes saved during this collector invocation, including interruptions. |
 | `progress_outcomes_recorded` | Saved successes, omissions, terminal failures or counted failures; distinguishes productive continuation from infrastructure-only retries. |
 | `stopped_not_retried` | Failed rollouts that are neither final nor at their attempt cap and that resume still does not run again (a kept answer or a judge failure left to recovery, or an unclassified execution). |
@@ -160,6 +168,8 @@ The existing `successful` field remains the completed-result total. The measurem
 ```text
 successful = measured + masked + unscored
 expected = measured + masked + unscored + failed + intentionally_omitted + not_started + missing
+failed = failed_final + failed_not_final        # failed_masked and final_zeros are each a subset of failed
+open = masked_retryable + failed_not_final + not_started + missing
 ```
 
 Counts describe the selected attempt for each logical rollout. Older attempts cannot count again or change whether
@@ -339,21 +349,28 @@ diagnostic evidence only: it is neither a scored response nor an eligible saved 
 For a legacy `judge_failed` or `judge_invalid` result that includes the actual generated response, the sidecar preserves it outside
 the canonical failure record, without a reward. Diagnostic token and trajectory evidence is retained too.
 Evaluation resume restarts unfinished tasks from their inputs. To reuse a saved answer instead,
-`gym eval reverify --judge-failed-only` can read a manifest-backed run into a **separate output** when every
-saved outcome is still selected by its recovery history. It carries successful rows through unchanged and
-retries only saved judge failures that contain an answer; it does not update the source run's recovery state.
-Writing back into an established run or selecting failed answers from superseded history remains deferred to
-[the judge-only recovery follow-up](https://github.com/NVIDIA-NeMo/Gym/pull/3879).
-Ordinary reverification has the same separate-output and selected-source requirements. For ordinary re-scoring
-of a history containing older attempts, `gym eval aggregate` can export a selected-result projection.
-That projection contains completed answers, not failed answers for `--judge-failed-only` recovery.
+`gym eval reverify --judge-failed-only --settle-into-source` can settle selected saved judge failures into the
+original manifest-backed run, using a separate output for working results. It retains the original attempt identity
+and admits each re-judgment against the saved failure budget before dispatch.
+
+Ordinary `gym eval reverify` reads the selected completed answers directly from the run's history, including after
+retries or judge settlement, and writes new scores into a separate output. A later failure or interrupted attempt
+hides an earlier success. The new output records `_ng_reverification_source_run_id` as provenance and supports
+`--resume`; it does not alter the source run's outcomes, reservations or retry budget.
+Cached scores and failure-budget entries bind to the source run, selected attempt, and a hash of the saved answer.
+Resume refuses changed or missing bindings before judging or appending, and asks for a fresh output path.
+Older re-scoring outputs without these bindings need a fresh output too; legacy JSONL cache behavior is unchanged.
+A grade-only settlement that retains the same attempt and answer leaves its separate cached re-score valid.
+Malformed completed verifier replies stop an ordinary managed-source re-scoring pass before the invalid reply is
+saved. Scores already written remain saved; correct the verifier before resuming unfinished rows. HTTP and connection
+errors also stop the pass; explicitly marked failures retain the existing failure-output handling.
 
 Aggregation resolves source file symlinks before locating their companion history, and deduplicates aliases of the
 same rollout file. Readers also accept older runs whose companions exist only beside the alias, when neither location
 has a manifest or journal. Competing companion sets remain an error. Rollout collection and its resume require companions
 beside the resolved output: back up and move an older run's files together before writing it. Legacy reverification
 `--resume` and `--append` may keep an unambiguous set of companions beside the alias; they do not split or migrate it.
-Health selection and reverification history protections also apply through aliases. Reverification protects
+Health and reverification use the same selected attempts through aliases. Reverification protects
 a manifest- or journal-backed source run's supporting files and main output, even when the supplied source is its
 `_failures` sidecar. Protection includes aliases and the `unsafe_` output prefix. For a merged output
 symlink, aggregation replaces the target file and preserves the symlink. It refuses to replace an input or an established
@@ -389,7 +406,10 @@ Both paths must use the same controller rules:
 
 The following incomplete-run exit codes apply when `require_complete=true`, which `gym eval submit` enables by
 default. Local `gym eval run` and standalone collection default to `require_complete=false` and can return **0** with
-partial results; use `+require_complete=true` to require completion.
+partial results; use `+require_complete=true` to require completion. With completion required and aggregation enabled, the
+built-in collector saves a rejected incomplete run's rollouts, failures and coverage but writes no
+`rollouts_aggregate_metrics.json` and exports no score. It writes the aggregate when a resume completes the run.
+Custom collection drivers can differ: GDPVal multistage keeps its stage-aware aggregate before checking completion.
 
 With completion required, the CLI exits with **75** if the evaluation is incomplete, tasks remain eligible for resume,
 and this invocation made progress. Saved successes, omissions, terminal failures and counted failures establish progress.
