@@ -17,6 +17,7 @@ from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     EpisodeId,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -25,7 +26,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    agent_route_failure,
+    failure_report_for,
 )
+from nemo_gym.core.failure_records import SandboxFailureDetails
 from nemo_gym.trajectory import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
@@ -130,10 +135,72 @@ async def test_sandbox_environment_raises_on_structured_sandbox_failures_only():
         return results[command]
 
     environment = NeMoGymSandboxEnvironment(SimpleNamespace(exec=sandbox_exec), logs_dir=None, session_id="s")
-    with pytest.raises(app_module.SandboxLostError, match=r"sandbox exec failed: sandbox \(exit 125\)"):
+    with pytest.raises(NgFailureEvent) as lost:
         await environment.exec("lost")
+    assert (lost.value.boundary, lost.value.failure_kind) == (FailureBoundary.SANDBOX, "provider_unavailable")
+    assert lost.value.details.provider_status_reason == "sandbox"
+    # The sentinel exit code of a result without a process is not a reported command exit.
+    assert lost.value.details.exit_code is None
     assert (await environment.exec("slow")).return_code == 124
     assert (await environment.exec("failed")).return_code == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exit_code", [1, 2, 126, 127, 137])
+async def test_sandbox_environment_keeps_every_command_exit_as_a_result(exit_code):
+    """A responding sandbox's nonzero exit (127 for a missing stty, for example) is the task's state, not a provider fact."""
+
+    async def sandbox_exec(command, **kwargs):
+        return SimpleNamespace(stdout="", stderr="stty: command not found", return_code=exit_code, error_type=None)
+
+    environment = NeMoGymSandboxEnvironment(SimpleNamespace(exec=sandbox_exec), logs_dir=None, session_id="s")
+    assert (await environment.exec("stty -a")).return_code == exit_code
+    assert await environment.is_dir("/x") is False
+
+
+@pytest.mark.asyncio
+async def test_sandbox_environment_forwards_a_provider_event_unchanged():
+    event = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_credentials_rejected",
+        failure_reason="Sandbox provider refused the credentials (HTTP 401)",
+        http_status=401,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1"),
+        operation="sandbox.exec",
+    )
+
+    async def sandbox_exec(command, **kwargs):
+        raise event
+
+    environment = NeMoGymSandboxEnvironment(SimpleNamespace(exec=sandbox_exec), logs_dir=None, session_id="s")
+    with pytest.raises(NgFailureEvent) as raised:
+        await environment.exec("pwd")
+    assert raised.value is event
+
+
+@pytest.mark.asyncio
+async def test_sandbox_environment_reports_a_raised_transport_error_as_a_provider_event_with_its_cause():
+    cause = ConnectionResetError("sandbox connection dropped")
+
+    async def sandbox_exec(command, **kwargs):
+        raise cause
+
+    environment = NeMoGymSandboxEnvironment(SimpleNamespace(exec=sandbox_exec), logs_dir=None, session_id="s")
+    with pytest.raises(NgFailureEvent) as raised:
+        await environment.exec("pwd")
+    assert (raised.value.boundary, raised.value.failure_kind) == (FailureBoundary.SANDBOX, "provider_unavailable")
+    assert raised.value.__cause__ is cause
+    assert "ConnectionResetError" in raised.value.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_sandbox_environment_leaves_cancellation_alone():
+    async def sandbox_exec(command, **kwargs):
+        raise asyncio.CancelledError
+
+    environment = NeMoGymSandboxEnvironment(SimpleNamespace(exec=sandbox_exec), logs_dir=None, session_id="s")
+    with pytest.raises(asyncio.CancelledError):
+        await environment.exec("pwd")
 
 
 @pytest.mark.asyncio
@@ -661,7 +728,7 @@ class TestNativeSessions:
         monkeypatch.setattr(app_module, "resolve_provider_config", lambda ref, cfg: {"opensandbox": {}})
         monkeypatch.setattr(app_module, "create_provider", lambda config: MagicMock())
         monkeypatch.setattr(app_module.AsyncSandbox, "connect", connect)
-        return agent, TestClient(agent.setup_webserver()), sandbox, connect
+        return agent, TestClient(agent.setup_webserver(), raise_server_exceptions=False), sandbox, connect
 
     def test_seed_connects_to_borrowed_sandbox(self, monkeypatch):
         agent, client, sandbox, connect = self._client(monkeypatch)
@@ -797,7 +864,7 @@ class TestNativeSessions:
             source="terminus2",
             records=[
                 app_module.AgentInvocation(
-                    invocation_id="terminus2_x", status="failed", duration_ms=1.0, error_type="SandboxLostError"
+                    invocation_id="terminus2_x", status="failed", duration_ms=1.0, error_type="NgFailureEvent"
                 )
             ],
         )
@@ -807,19 +874,17 @@ class TestNativeSessions:
 
         async def failing_execute(request, body, sandbox, task_id=None):
             identities.append(task_id)
-            raise app_module.Terminus2InfrastructureError(
-                503,
-                detail="sandbox lost: gone",
-                metrics={"ng_agent_observations": bundle, "ng_trajectory": trajectory},
+            raise _route_failure(
+                _provider_event(), metrics={"ng_agent_observations": bundle, "ng_trajectory": trajectory}
             )
 
         monkeypatch.setattr(agent, "_execute", failing_execute)
         assert client.post("/v1/agent_sessions", json=_seed_body()).status_code == 200
         turn = client.post("/v1/responses", json={"input": [{"role": "user", "content": "do it"}]})
-        assert turn.status_code == 503
-        assert turn.json() == {"detail": "sandbox lost: gone"}  # the body carries only the detail, never the metrics
+        assert turn.status_code == 500
+        assert "metrics" not in turn.text  # the body never carries the harness metrics
         # A retry of the same request replays the refusal; it does not start a second run.
-        assert client.post("/v1/responses", json={"input": [{"role": "user", "content": "do it"}]}).status_code == 503
+        assert client.post("/v1/responses", json={"input": [{"role": "user", "content": "do it"}]}).status_code == 500
         close = client.post(
             "/v1/agent_sessions/close",
             json={"agent_session_id": "ag-1", "episode_id": {"rollout_id": "r1", "attempt": 0}},
@@ -1032,13 +1097,16 @@ class TestHarnessOutcomes:
             agent.kwargs["llm"]._client = DeadClient()
             await agent.kwargs["llm"].call("prompt")
 
-        with pytest.raises(app_module.Terminus2InfrastructureError) as excinfo:
+        with pytest.raises(NgFailureEvent) as excinfo:
             await _execute_with_harness(monkeypatch, run)
-        assert excinfo.value.status_code == 502
-        assert "model unreachable" in excinfo.value.detail
-        assert "Cannot connect to host" in excinfo.value.detail
-        assert excinfo.value.metrics["terminus2_completed"] is False
-        assert "ModelUnreachableError: ClientConnectionError" in excinfo.value.metrics["error"]
+        route = excinfo.value
+        assert (route.boundary, route.failure_kind) == (FailureBoundary.AGENT, "agent_route_failed")
+        failure = route.__cause__
+        assert (failure.boundary, failure.failure_kind) == (FailureBoundary.MODEL, "model_transport_error")
+        assert "Cannot connect to host" in failure.failure_reason
+        assert isinstance(failure.__cause__, app_module.ModelUnreachableError)
+        assert route.metrics["terminus2_completed"] is False
+        assert "ModelUnreachableError: ClientConnectionError" in route.metrics["error"]
 
     @pytest.mark.asyncio
     async def test_model_client_retries_are_bounded(self, monkeypatch):
@@ -1076,7 +1144,7 @@ class TestHarnessOutcomes:
 
         started = perf_counter()
         try:
-            with pytest.raises(app_module.Terminus2InfrastructureError) as excinfo:
+            with pytest.raises(NgFailureEvent) as excinfo:
                 # A 30 s task budget: unbounded retries would run into it and report the agent's own "timeout".
                 await _execute_with_harness(monkeypatch, run, config=_harness_config(sandbox_timeout=30))
         finally:
@@ -1084,15 +1152,14 @@ class TestHarnessOutcomes:
             monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
         elapsed = perf_counter() - started
 
-        # Two connection retries half a second apart, then ModelUnreachableError: a 502, not a verified timeout.
+        # Two connection retries half a second apart, then a model failure event: not a verified timeout.
         assert elapsed < 10, elapsed
-        assert excinfo.value.status_code == 502
-        assert "model unreachable" in excinfo.value.detail
+        assert excinfo.value.__cause__.failure_kind == "model_transport_error"
         assert "ClientConnectorError" in excinfo.value.metrics["error"]
         assert "TimeoutError" not in excinfo.value.metrics["error"]
 
     @pytest.mark.asyncio
-    async def test_structured_sandbox_failure_is_a_503_before_any_model_call(self, monkeypatch):
+    async def test_structured_sandbox_failure_is_a_provider_event_before_any_model_call(self, monkeypatch):
         """OpenSandbox reports a dead sandbox as `error_type="sandbox"` on the tmux liveness check."""
         model_calls = []
 
@@ -1105,15 +1172,15 @@ class TestHarnessOutcomes:
             await environment.exec("tmux has-session")
             model_calls.append(await agent.kwargs["llm"].call("prompt"))
 
-        with pytest.raises(app_module.Terminus2InfrastructureError) as excinfo:
+        with pytest.raises(NgFailureEvent) as excinfo:
             await _execute_with_harness(monkeypatch, run, sandbox_exec=sandbox_exec)
-        assert excinfo.value.status_code == 503
-        assert "sandbox lost" in excinfo.value.detail
-        assert "sandbox exec failed: sandbox (exit 125)" in excinfo.value.detail
+        failure = excinfo.value.__cause__
+        assert (failure.boundary, failure.failure_kind) == (FailureBoundary.SANDBOX, "provider_unavailable")
+        assert failure.details.provider_status_reason == "sandbox"
         assert model_calls == [] and excinfo.value.metrics["model_call_times"] == []
 
     @pytest.mark.asyncio
-    async def test_sandbox_lost_is_a_503(self, monkeypatch):
+    async def test_sandbox_lost_is_a_provider_event_with_its_cause(self, monkeypatch):
         async def sandbox_exec(command, **kwargs):
             if command == "tmux send-keys":
                 raise ConnectionResetError("sandbox connection dropped")
@@ -1122,23 +1189,62 @@ class TestHarnessOutcomes:
         async def run(agent, instruction, environment, context):
             await environment.exec("tmux send-keys")
 
-        with pytest.raises(app_module.Terminus2InfrastructureError) as excinfo:
+        with pytest.raises(NgFailureEvent) as excinfo:
             await _execute_with_harness(monkeypatch, run, sandbox_exec=sandbox_exec)
-        assert excinfo.value.status_code == 503
-        assert "sandbox lost" in excinfo.value.detail
-        assert "ConnectionResetError: sandbox connection dropped" in excinfo.value.detail
+        failure = excinfo.value.__cause__
+        assert (failure.boundary, failure.failure_kind) == (FailureBoundary.SANDBOX, "provider_unavailable")
+        assert isinstance(failure.__cause__, ConnectionResetError)
+        assert "ConnectionResetError" in failure.failure_reason
 
     @pytest.mark.asyncio
-    async def test_cancelled_run_is_a_503(self, monkeypatch):
+    async def test_provider_event_keeps_its_identity_across_the_agent_route(self, monkeypatch):
+        provider_event = _provider_event()
+
+        async def sandbox_exec(command, **kwargs):
+            if command == "pwd":
+                raise provider_event
+            return SimpleNamespace(stdout="", stderr="", return_code=0)
+
+        async def run(agent, instruction, environment, context):
+            await environment.exec("pwd")
+
+        with pytest.raises(NgFailureEvent) as excinfo:
+            await _execute_with_harness(monkeypatch, run, sandbox_exec=sandbox_exec)
+        assert excinfo.value.__cause__ is provider_event
+        report = failure_report_for(excinfo.value)
+        kept = report.events[provider_event.event_id]
+        assert (kept.failure_kind, kept.http_status, kept.operation) == ("provider_unavailable", 503, "sandbox.exec")
+        assert kept.details == provider_event.details
+        assert report.events[report.failure_id].cause_id == provider_event.event_id
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exit_code", [1, 127, 137])
+    async def test_ordinary_command_exit_stays_a_verified_outcome(self, monkeypatch, exit_code):
+        """A missing stty (127) on a responding sandbox is not a provider failure: the run is still verified."""
+
+        async def sandbox_exec(command, **kwargs):
+            return SimpleNamespace(stdout="", stderr="stty: command not found", return_code=exit_code)
+
+        async def run(agent, instruction, environment, context):
+            result = await environment.exec("stty -a")
+            raise RuntimeError(f"Could not clear pending terminal input before Ctrl-C: exit {result.return_code}")
+
+        _, _, (response, _) = await _execute_with_harness(monkeypatch, run, sandbox_exec=sandbox_exec)
+        assert response.metadata["terminus2_outcome"] == "failed"
+        assert response.metadata["terminus2_error_type"] == "RuntimeError"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_run_is_a_cancelled_event(self, monkeypatch):
         import asyncio
 
         async def run(agent, instruction, environment, context):
             raise asyncio.CancelledError
 
-        with pytest.raises(app_module.Terminus2InfrastructureError) as excinfo:
+        with pytest.raises(NgFailureEvent) as excinfo:
             await _execute_with_harness(monkeypatch, run)
-        assert excinfo.value.status_code == 503
-        assert "cancelled" in excinfo.value.detail
+        failure = excinfo.value.__cause__
+        assert (failure.boundary, failure.failure_kind) == (FailureBoundary.AGENT, "cancelled")
+        assert isinstance(failure.__cause__, asyncio.CancelledError)
         assert excinfo.value.metrics["terminus2_completed"] is False
 
     @pytest.mark.asyncio
@@ -1209,17 +1315,36 @@ class TestHarnessOutcomes:
         agent.server_client.post = AsyncMock(return_value=seed)
 
         async def failing_execute(request, body, used_sandbox):
-            raise app_module.Terminus2InfrastructureError(503, detail="sandbox lost: gone", metrics={})
+            raise _route_failure(_provider_event(), metrics={})
 
         monkeypatch.setattr(agent, "_execute", failing_execute)
         request = SimpleNamespace(cookies={}, session={app_module.SESSION_ID_KEY: "session-1"})
         body = Terminus2AgentRunRequest(responses_create_params={"input": "solve this"})
-        with pytest.raises(app_module.Terminus2InfrastructureError):
+        with pytest.raises(NgFailureEvent):
             await agent.run(request, body)
         sandbox.stop.assert_awaited_once()
         assert "session-1" not in agent._session_sandboxes
         # Verification never ran: only the seed call reached the resources server.
         assert agent.server_client.post.await_count == 1
+
+
+def _provider_event():
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="Sandbox command did not run to completion",
+        http_status=503,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1", provider_status_reason="sandbox"),
+        operation="sandbox.exec",
+        stage="agent",
+    )
+
+
+def _route_failure(cause, *, metrics):
+    route = agent_route_failure(cause, operation="agent.run", stage="agent")
+    route.__cause__ = cause
+    route.metrics = metrics
+    return route
 
 
 def _response_error(status, message):

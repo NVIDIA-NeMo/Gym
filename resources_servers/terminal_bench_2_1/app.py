@@ -113,6 +113,17 @@ class _VerifierInfraError(RuntimeError):
     """The sandbox could not run the verifier; there is no verdict on the model."""
 
 
+def _verifier_failure_reason(cause: BaseException) -> str:
+    """A concise reason for a masked verifier failure; the exception itself stays attached as the event's cause."""
+    if isinstance(cause, NgFailureEvent):
+        detail = cause.failure_reason
+    elif isinstance(cause, _VerifierInfraError):
+        detail = str(cause)
+    else:
+        detail = type(cause).__name__
+    return bounded_text(f"Verifier sandbox error: {detail}", _MAX_FAILURE_REASON_CHARS)
+
+
 class _VerifierDirError(RuntimeError):
     """/logs/verifier or an upload directory could not be created: the task state the model left behind."""
 
@@ -525,7 +536,9 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             target_fpath = f"{target_dirpath}/{file}"
             mkdir_result = await sandbox.exec(f"mkdir -p {Path(target_fpath).parent}")
             if getattr(mkdir_result, "error_type", None) is not None:
-                raise _VerifierInfraError(f"Could not prepare upload directory: {mkdir_result}")
+                raise _VerifierInfraError(
+                    f"Could not prepare upload directory: sandbox error {mkdir_result.error_type}"
+                )
             if mkdir_result.return_code != 0:
                 raise _VerifierDirError(f"Could not prepare upload directory: {mkdir_result}")
 
@@ -628,13 +641,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         start_time = time()
         # An infrastructure failure leaves no verdict on the model: mask the sample instead of scoring it 0.
         # Only the model's own failures (verifier dir broken, test.sh timeout, no or invalid reward.txt) score 0.
-        failure_reason: str | None = None
+        failure_cause: BaseException | None = None
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             # Test scripts write rewards here even if their test runner fails to start.
             setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
             if getattr(setup_result, "error_type", None) is not None:
-                raise _VerifierInfraError(f"mkdir /logs/verifier failed: {setup_result.error_type}")
+                raise _VerifierInfraError(f"mkdir /logs/verifier failed: sandbox error {setup_result.error_type}")
             if setup_result.return_code != 0:
                 raise _VerifierDirError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
             # A raised TimeoutError is ambiguous (a status poll can time out too): only a result reporting
@@ -655,7 +668,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             print(f"Hit exception running TerminalBench 2.1 tests: {format_exc()}", file=stderr)
             eval_result = None
             test_output = ""
-            failure_reason = f"Verifier sandbox error: {type(exc).__name__}: {exc}"
+            failure_cause = exc
         verification_time_taken = time() - start_time
 
         if self.config.debug:
@@ -669,9 +682,10 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                     try:
                         await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
                     except Exception as download_exc:
-                        # Only a sandbox that confirms reward.txt is absent makes this a failed grade.
-                        if await self._reward_file_exists(eval_sandbox):
-                            failure_reason = f"Verifier sandbox error: reward download failed: {download_exc!r}"
+                        # A typed failure is an observed fact; any other one is a failed grade only when the
+                        # sandbox itself confirms that reward.txt is absent.
+                        if isinstance(download_exc, NgFailureEvent) or await self._reward_file_exists(eval_sandbox):
+                            failure_cause = download_exc
                         raise
                     # Providers such as Docker can replace the destination file during download.
                     reward = float(Path(temp_file.name).read_text())
@@ -681,18 +695,21 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
                 if self.config.debug:
                     print(f"Hit an exception downloading and converting reward: {format_exc()}", file=stderr)
 
-        if failure_reason is not None:
-            failure_reason = bounded_text(failure_reason, _MAX_FAILURE_REASON_CHARS)
-            observe_failure(
-                NgFailureEvent(
-                    boundary=FailureBoundary.RESOURCES_SERVER,
-                    failure_kind=VERIFIER_ERROR,
-                    failure_reason=failure_reason,
-                    operation="verify",
-                    operation_id=current_verifier_invocation_id() or body.task_name,
-                    stage="verification",
-                )
+        failure_reason: str | None = None
+        if failure_cause is not None:
+            failure_reason = _verifier_failure_reason(failure_cause)
+            failure = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=failure_reason,
+                operation="verify",
+                operation_id=current_verifier_invocation_id() or body.task_name,
+                stage="verification",
+                exception_type=type(failure_cause).__name__,
             )
+            # The caught exception is the cause: a provider event keeps its id, kind, status and details.
+            failure.__cause__ = failure_cause
+            observe_failure(failure)
             evaluation_completed = False
             reward = 0.0
 

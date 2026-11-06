@@ -14,7 +14,9 @@ from fastapi import Request
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse, NgFailureEvent, RequestFailureLog
+from nemo_gym.core.failure_records import SandboxFailureDetails
+from nemo_gym.core.failure_transport import FailureHeader
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
     GOLDEN_PATCH_SOLVE_SH_PATCHES,
@@ -544,3 +546,85 @@ async def test_upload_directory_failure_is_scored_only_when_the_task_caused_it(
     assert result.mask_sample is masked
     assert result.failure_kind == ("verifier_error" if masked else None)
     assert result.reward == 0.0 and result.evaluation_completed is False
+
+
+def _provider_event() -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="Sandbox command did not run to completion",
+        http_status=503,
+        details=SandboxFailureDetails(provider="p", sandbox_id="s-1", provider_status_reason="sandbox"),
+        operation="sandbox.exec",
+        stage="verification",
+    )
+
+
+async def _verify_with_failure_log(server, request, tmp_path: Path):
+    with RequestFailureLog.capture() as log:
+        result = await server.verify(request, _verify_request(tmp_path))
+    return result, log.reply_report(None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing", ["upload", "mkdir", "test_run", "download"])
+async def test_provider_event_at_verify_is_retained_as_the_cause_of_the_verifier_event(
+    tmp_path: Path, failing: str
+) -> None:
+    provider_event = _provider_event()
+
+    async def execute(command, **kwargs):
+        if failing == "mkdir" and command.startswith("mkdir"):
+            raise provider_event
+        if failing == "test_run" and "test.sh" in command:
+            raise provider_event
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute, provider_event if failing == "download" else None)
+    if failing == "upload":
+        server._upload_folder.side_effect = provider_event
+
+    sandbox = server._session_id_to_sandbox["s"]
+    result, report = await _verify_with_failure_log(server, request, tmp_path)
+
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+    assert result.reward == 0.0 and result.evaluation_completed is False
+    # The report survives the reply header with the provider event's own identity and the cause link.
+    sent = FailureHeader.decode(FailureHeader.encode(report))
+    [verifier] = [event for event in sent.events.values() if event.failure_kind == "verifier_error"]
+    assert verifier.cause_id == provider_event.event_id
+    provider = sent.events[provider_event.event_id]
+    assert (provider.failure_kind, provider.http_status) == ("provider_unavailable", 503)
+    assert provider.details == provider_event.details
+    assert provider.boundary == "sandbox"
+    # A typed provider failure needs no probe to decide that the grade is missing.
+    assert not [c for c in sandbox.exec.await_args_list if c.args[0].startswith("test -f")]
+
+
+@pytest.mark.asyncio
+async def test_verifier_side_exception_is_a_verifier_error_with_its_cause_and_a_concise_reason(tmp_path: Path) -> None:
+    server, request = _infra_server(tmp_path, lambda command, **kwargs: _ok())
+    server._upload_folder.side_effect = ValueError("tests/ is unreadable: token=abc123")
+
+    result, report = await _verify_with_failure_log(server, request, tmp_path)
+
+    assert result.mask_sample is True and result.failure_kind == "verifier_error"
+    assert "abc123" not in result.failure_reason
+    [verifier] = report.events.values()
+    assert verifier.failure_kind == "verifier_error" and verifier.exception_type == "ValueError"
+    assert verifier.foreign_error.exception_type == "ValueError"
+    assert "abc123" not in verifier.failure_reason
+
+
+@pytest.mark.asyncio
+async def test_structured_sandbox_error_reason_carries_the_error_type_only(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            return SimpleNamespace(stdout="secret", stderr="secret", return_code=125, error_type="sandbox")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    result, report = await _verify_with_failure_log(server, request, tmp_path)
+    assert result.mask_sample is True and "sandbox" in result.failure_reason and "secret" not in result.failure_reason
+    [verifier] = report.events.values()
+    assert verifier.cause_id is None and verifier.exception_type == "_VerifierInfraError"

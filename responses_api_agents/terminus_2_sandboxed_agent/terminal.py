@@ -55,10 +55,6 @@ class TerminusXMLParser(TerminusXMLPlainParser):
         return result
 
 
-class SandboxLostError(RuntimeError):
-    """The sandbox could not run a terminal control command, which is not the agent's doing."""
-
-
 class ShellExitedError(RuntimeError):
     """The interactive shell exited before its command batch finished."""
 
@@ -70,14 +66,12 @@ class TerminusTmuxSession(TmuxSession):
             f"tmux set-option -w -t {shlex.quote(self._session_name)} remain-on-exit on", user=self._user
         )
         if result.return_code != 0:
-            raise SandboxLostError(f"Could not preserve exited terminal output: {result.stderr}")
+            raise RuntimeError(f"Could not preserve exited terminal output: {result.stderr}")
 
     async def is_session_alive(self) -> bool:
         if not await super().is_session_alive():
             # Harbor treats False as normal agent completion. A missing session
-            # is a terminal failure, not a model completion declaration. The model can destroy its own
-            # session (tmux kill-server), so this is not proof that the sandbox is lost; the sandbox
-            # adapter raises SandboxLostError for transport and provider failures.
+            # is a terminal failure, not a model completion declaration.
             raise RuntimeError("The terminal session disappeared before the agent completed")
         return True
 
@@ -108,7 +102,7 @@ class TerminusTmuxSession(TmuxSession):
             f"tmux respawn-pane -t {target} && tmux pipe-pane -t {target} {append_log}", user=self._user
         )
         if result.return_code != 0:
-            raise SandboxLostError(f"Could not replace the exited terminal shell: {result.stderr}")
+            raise RuntimeError(f"Could not replace the exited terminal shell: {result.stderr}")
         self._previous_buffer = None
         fresh_output = await super().get_incremental_output()
         # Keep this notice at the end so output truncation retains it.
@@ -168,9 +162,7 @@ echo 'Pending terminal input did not become quiet within 5 seconds' >&2
 exit 1"""
         result = await self.environment.exec(f"bash -c {shlex.quote(script)}", user=self._user)
         if result.return_code != 0:
-            # A job that keeps flooding its input queue is the agent's doing; any other failure is the sandbox's.
-            error = SandboxLostError if "did not become quiet" not in (result.stderr or "") else RuntimeError
-            raise error(f"Could not clear pending terminal input before Ctrl-C: {result.stderr}")
+            raise RuntimeError(f"Could not clear pending terminal input before Ctrl-C: {result.stderr}")
 
     async def _find_new_content(self, current_buffer: str) -> str | None:
         if self._previous_buffer is not None and current_buffer == self._previous_buffer:
