@@ -243,7 +243,7 @@ gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
   +gdp_pdf_sandbox_image=gdp-pdf-tools \
   ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
   +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
-  +policy_model_name=MODEL --split benchmark --num-repeats 3 \
+  +policy_model_name=MODEL --split benchmark --num-repeats 5 \
   --output results/gdp-pdf-opencode.jsonl
 ```
 
