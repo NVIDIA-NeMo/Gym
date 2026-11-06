@@ -12,6 +12,7 @@ from typing import Any, Protocol
 from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
+    completion_replay_items,
     output_item_fingerprint,
     output_validation_item,
 )
@@ -349,7 +350,7 @@ class _BaseExternalCaptureHandler(ABC):
             replay=(
                 summarize_replay(
                     replay_context(
-                        list(context.request_items or []) + list(response_items),
+                        list(context.request_items or []) + completion_replay_items(served_payload),
                         render_digest=admission.request_replay.render_digest,
                     )
                 )

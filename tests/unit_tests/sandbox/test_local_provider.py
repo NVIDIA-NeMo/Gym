@@ -278,3 +278,18 @@ async def test_registered_provider_drives_the_public_sandbox_api(tmp_path: Path)
     assert await sandbox.status() is SandboxStatus.RUNNING
     await sandbox.stop()
     assert not workspace.exists()
+
+
+@pytest.mark.parametrize("absolute_cwd", [False, True])
+async def test_exec_uses_requested_sandbox_work_directory(tmp_path: Path, absolute_cwd: bool) -> None:
+    provider = LocalProvider(workspace_root=str(tmp_path))
+    handle = await provider.create(SandboxSpec())
+    work = handle.raw["workspace"] / "work"
+    work.mkdir()
+    (work / "marker.txt").write_text("sandbox runner directory")
+    try:
+        result = await provider.exec(handle, "cat marker.txt", cwd=str(work) if absolute_cwd else "work")
+        assert result.return_code == 0, result.stderr
+        assert result.stdout == "sandbox runner directory"
+    finally:
+        await provider.close(handle)
