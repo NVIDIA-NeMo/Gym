@@ -198,12 +198,6 @@ for `session_close_retry_window_seconds`. A tool call for a closed session gets
 404 with `failure_kind: session_lost`, and a `/verify` for one returns a masked
 sample with reward 0.
 
-The deprecated cookie seed sent by an agent's own `/run` keeps the session ID and stops any previous sandbox before
-resetting the run. A failed stop preserves the sandbox for retry; the first tool call after a successful reseed
-starts a fresh sandbox. After the resources session's `/verify`, a tool call on that cookie gets 404 with
-`failure_kind: session_lost` until the cookie is seeded again. A cookie seed for a session that has closed is
-refused with 409 for `session_close_retry_window_seconds`.
-
 **Statefulness (replay model).** The sandbox runs one-shot commands, not a live
 Python kernel. Statefulness across calls within a session is emulated by
 replaying every prior **known-good** cell — with its stdout/stderr suppressed —
