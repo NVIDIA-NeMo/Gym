@@ -28,10 +28,15 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.verification.judge import (
+        JUDGE_FAILURES,
         JudgeError,
+        JudgeGrading,
         call_judge,
+        is_judge_failure,
         judge_failsafe,
+        judge_provider_stopped,
         normalize_math_judge_verdict,
+        record_parsed_judge_verdict,
         reraise_judge_errors,
     )
     from nemo_gym.verification.sandbox_verification import (
@@ -50,16 +55,21 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "JUDGE_FAILURES": "judge",
     "JudgeError": "judge",
+    "JudgeGrading": "judge",
     "RUNNER_FILE": "sandbox_verification",
     "SandboxVerificationConfig": "sandbox_verification",
     "SandboxVerificationError": "sandbox_verification",
     "VerifierFixture": "verifier_fixture",
     "call_judge": "judge",
     "exercise_verifier_fixture": "verifier_fixture",
+    "is_judge_failure": "judge",
     "judge_failsafe": "judge",
+    "judge_provider_stopped": "judge",
     "load_verifier_fixture": "verifier_fixture",
     "normalize_math_judge_verdict": "judge",
+    "record_parsed_judge_verdict": "judge",
     "reraise_judge_errors": "judge",
     "run_verification_sandbox": "sandbox_verification",
 }

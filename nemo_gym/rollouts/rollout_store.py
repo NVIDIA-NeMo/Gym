@@ -19,8 +19,11 @@ collection and reporting. Results and sidecars contain outcomes; the manifest ow
 execution numbers. There is no dispatch journal or second outcome commit.
 """
 
+import hashlib
 import logging
 import os
+import time
+import uuid
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -32,34 +35,47 @@ from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.core.failure_kinds import ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollouts.rollout_records import (
+    REJUDGE_OPERATION_ID_KEY,
+    REJUDGED_FAILURE_ID_KEY,
+    REJUDGED_OBSERVATIONS_KEY,
+    RESULT_PREDECESSOR_PREFIX,
     RUN_ID_KEY,
     RolloutRecord,
     RolloutRecords,
     _indexed_records,
     coverage_path_for,
     is_interruption_failure,
+    is_rejudgment_failure_of,
+    is_rejudgment_of,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
     prepare_append,
     read_records,
+    rejudge_predecessor_id,
+    rejudgment_admission_closed_by,
     resolve_rollout_owner,
     resolve_rollout_path,
 )
 from nemo_gym.rollouts.rollout_recovery import (
+    PendingRejudge,
     RunManifest,
     _get_max_rollout_attempts,
     atomic_write_json,
     manifest_path_for,
     record_resubmit_offset,
+    saved_failure_classification,
     validate_resume,
 )
 from nemo_gym.telemetry.observer import driver_metrics
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
+    attempt_extension_path_for,
     failures_path_for,
+    rerun_masked_journal_path_for,
     resubmit_offset_path_for,
 )
 
@@ -101,6 +117,21 @@ def raw_outcomes_are_selected(path: Path, *, artifacts: tuple[Path, ...] | None 
     }
     raw = {(record.path, record.offset) for artifact in paths for record, _ in _indexed_records(artifact)}
     return raw == selected
+
+
+# What a re-judgment decides itself, so a settled row never takes it from the row it settles: the grade and its
+# validity, the mask and the failure that explain a missing grade, and the verifier's own observations.
+_REJUDGE_GRADING_KEYS = frozenset(
+    {
+        "reward",
+        "mask_sample",
+        "evaluation_completed",
+        "failure_kind",
+        "failure_reason",
+        "ng_verifier_invocations",
+    }
+)
+_REJUDGE_DROPPED_PREFIXES = ("_ng_failure", "_ng_rejudge")
 
 
 class RolloutStore:
@@ -214,6 +245,17 @@ class RolloutStore:
                 manifest.write(manifest_path)
             elif manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
+            charges = state.allocation_end_charges()
+            if charges:
+                # Saved before a resubmit resets the budget, so a resubmit gives these identities a fresh one. A
+                # separate writer, so the charges count neither as outcomes nor as progress of this allocation.
+                with cls(output, state) as charging:
+                    for row in charges:
+                        charging.record_outcome(row, sync=True)
+                print(
+                    f"Charged {len(charges)} attempt(s) to rollouts in flight at a second or later allocation end "
+                    f"({ROLLOUT_ALLOCATION_ENDED}). Failures: {failures_path_for(output)}."
+                )
             if resubmit:
                 # Validate before resetting anything, and repair an interrupted
                 # final write before counting physical sidecar lines.
@@ -226,7 +268,7 @@ class RolloutStore:
 
         materialize_started = perf_counter()
         rows, manifest = prepare_inputs()
-        state = RolloutRecords(manifest, rows)
+        state = RolloutRecords(manifest, rows, classification=saved_failure_classification(output))
         with materialized.open("wb") as file:
             for row in rows:
                 file.write(orjson.dumps(row) + b"\n")
@@ -237,6 +279,10 @@ class RolloutStore:
             output,
             failures_path_for(output),
             resubmit_offset_path_for(output),
+            # An attempt extension an explicit recovery recorded for the run this one replaces.
+            attempt_extension_path_for(output),
+            # Its approvals to run masked results again name attempts this run numbers from 0 again.
+            rerun_masked_journal_path_for(output),
             journal_path_for(output),
             coverage_path_for(output),
             aggregate_metrics_path_for(output),
@@ -253,12 +299,18 @@ class RolloutStore:
 
     @classmethod
     def read(
-        cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
+        cls,
+        output: Path,
+        *,
+        import_legacy: bool = True,
+        retry_terminal_timeouts: bool = False,
+        skip_keys: frozenset[str] = frozenset(),
     ) -> "RolloutStore | None":
         """Read selected outcomes without modifying files or acquiring a writer lock.
 
         Managed runs use their saved timeout policy. ``retry_terminal_timeouts``
-        applies only to legacy artifacts without a manifest.
+        applies only to legacy artifacts without a manifest. ``skip_keys`` (see ``RolloutRecords.load``) is for a
+        selection that reads no trajectory: its records read back without those values.
         """
         output = resolve_rollout_path(output, read_only=True)
         path = manifest_path_for(output)
@@ -286,11 +338,181 @@ class RolloutStore:
         else:
             return None
         state = RolloutRecords.load(
-            output, manifest, import_legacy=manifest.legacy_import, outcome_limits=outcome_limits
+            output, manifest, import_legacy=manifest.legacy_import, outcome_limits=outcome_limits, skip_keys=skip_keys
         )
         if not path.exists():
             state.retry_terminal_timeouts = retry_terminal_timeouts
         return cls(output, state, read_only=True)
+
+    @classmethod
+    def open_for_rejudgment(cls, output: Path) -> "RolloutStore":
+        """Load a managed run so judge-only re-judgments can settle its judge failures; the caller holds run_lock."""
+        store = cls.read(output, import_legacy=False)
+        if store is None or store.manifest.legacy_import:
+            raise ConfigError(f"{output} is not a manifest-backed run; re-judge it into a separate output instead.")
+        return cls(store.output, store._state)
+
+    def unresolved_rejudgments(self) -> list[str]:
+        """Identities with an admitted re-judgment whose outcome is not saved: whether its judge ran is unknown."""
+        return sorted(set(self.manifest.pending_rejudge) & self._state.unresolved_dispatches)
+
+    def _write_pending(self, pending: dict) -> None:
+        manifest = self.manifest.model_copy(update={"pending_rejudge": pending})
+        manifest.write(manifest_path_for(self.output))
+        self.manifest = self._state.manifest = manifest
+
+    def admit_rejudgment(self, failure: dict) -> PendingRejudge:
+        """Durably admit a judge-only re-judgment of the selected judge failure before its judge call.
+
+        The caller holds run_lock. Only the manifest changes: the failure stays selected with its debit, and no model
+        attempt is reserved. ``failure`` may also be a selected saved result whose grading is re-verified from its
+        saved answer: a failed re-verification of it saves nothing, so it spends no failure attempt and needs none.
+        """
+        key = self._state._key(failure)
+        current = self._state.payloads.get(key)
+        if current is None or self._state.latest.get(key[0]) != key[1] or current.record.read() != failure:
+            raise ConfigError(f"Rollout attempt {key!r}: the bound judge failure is no longer the selected outcome.")
+        if key[0] in self.manifest.pending_rejudge:
+            raise ConfigError(f"Rollout {key[0]!r} already has an admitted re-judgment whose outcome is unknown.")
+        predecessor_id = rejudge_predecessor_id(failure)
+        if predecessor_id is None:
+            raise ConfigError(f"Rollout attempt {key!r}: the bound failure has no failure id.")
+        cap = self.manifest.max_rollout_attempts
+        if failure.get("_ng_failure_class") is not None and (cap is None or self._state.failure_count(key[0]) >= cap):
+            raise ConfigError(f"Rollout {key[0]!r} has no saved failure attempt left for a re-judgment.")
+        pending = PendingRejudge(
+            operation_id=uuid.uuid4().hex,
+            predecessor_failure_id=predecessor_id,
+            predecessor_sha256=hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest(),
+            admitted_at=time.time(),
+        )
+        self._write_pending(self.manifest.pending_rejudge | {key[0]: pending})
+        return pending
+
+    def close_rejudgment(self, identity: str, operation_id: str) -> None:
+        """Close an admission once the selected outcome carries its operation id (the outcome is already fsynced)."""
+        pending = self.manifest.pending_rejudge.get(identity)
+        latest = self._state.payloads.get((identity, self._state.latest.get(identity)))
+        if pending is None or pending.operation_id != operation_id:
+            raise ConfigError(f"Rollout {identity!r} has no admitted re-judgment {operation_id!r}.")
+        outcome = latest.record.read() if latest is not None else {}
+        if not rejudgment_admission_closed_by(pending, outcome, identity, failures_path_for(self.output), self.output):
+            raise ConfigError(
+                f"Rollout {identity!r}: no saved outcome matches admitted re-judgment {operation_id!r} "
+                "(operation, predecessor id or hash, identity, attempt or admission time differ)."
+            )
+        self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
+        self._state.unresolved_dispatches.discard(identity)
+
+    def withdraw_rejudgment(self, identity: str, operation_id: str, *, unsaved_judge_failure: bool = False) -> None:
+        """Withdraw the admission of a saved result's re-verification that answered without a grade.
+
+        The verifier answered, so its outcome is known; nothing is saved and the saved result stays selected as it
+        was. Only a saved-result admission can be withdrawn: a judge failure's re-judgment saves its failed outcome.
+        With ``unsaved_judge_failure`` the caller saves no outcome for this judge failure's re-judgment (its verifier
+        answered without a grade or a judge failure, or its pass raised before it answered), so its admission is
+        withdrawn too: the failure stays selected, and a later pass judges its saved answer again.
+        """
+        pending = self.manifest.pending_rejudge.get(identity)
+        if (
+            pending is None
+            or pending.operation_id != operation_id
+            or not (unsaved_judge_failure or pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX))
+        ):
+            raise ConfigError(f"Rollout {identity!r} has no admitted saved-result re-verification {operation_id!r}.")
+        latest = self._state.payloads.get((identity, self._state.latest.get(identity)))
+        if latest is None or rejudge_predecessor_id(latest.record.read()) != pending.predecessor_failure_id:
+            raise ConfigError(f"Rollout {identity!r}: its re-verified saved result is no longer the selected outcome.")
+        self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
+        self._state.unresolved_dispatches.discard(identity)
+
+    def check_rejudgment(self, failure: dict, result: dict) -> dict | None:
+        """Return the row that would settle ``failure`` (None when already saved); raise when it cannot settle it."""
+        key = self._state._key(failure)
+        current = self._state.payloads.get(key)
+        if current is None or self._state.latest.get(key[0]) != key[1]:
+            raise ConfigError(f"Rollout attempt {key!r} is not the selected outcome of this run.")
+        for name in (RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME, REJUDGED_FAILURE_ID_KEY):
+            expected = rejudge_predecessor_id(failure) if name == REJUDGED_FAILURE_ID_KEY else failure.get(name)
+            if result.get(name) != expected:
+                raise ConfigError(
+                    f"Rollout attempt {key!r}: re-judged result has {name}={result.get(name)!r}, not {expected!r}."
+                )
+        # The saved row's evidence (timing, tokens, captures, fields its agent and server wrote) stays on the settled
+        # row; only what the re-judgment itself decides, its grading and the failure it replaces, is left behind.
+        carried = {
+            k: v
+            for k, v in failure.items()
+            if k not in result and k not in _REJUDGE_GRADING_KEYS and not k.startswith(_REJUDGE_DROPPED_PREFIXES)
+        }
+        settled = carried | result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
+        if "ng_trajectory" in failure:
+            from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, VerifierInvocation
+
+            # The complete predecessor remains authoritative in the nested observations above.
+            # The selected view retains policy lineage but must describe the newly observed verifier.
+            try:
+                prior = TrajectoryRecord.model_validate(failure["ng_trajectory"])
+                actual = [
+                    VerifierInvocation.model_validate(item) for item in result.get("ng_verifier_invocations", [])
+                ]
+                ids = [item.invocation_id for item in actual]
+                old_ids = {item.invocation_id for item in prior.verifier_invocations}
+                if not actual or len(ids) != len(set(ids)) or old_ids.intersection(ids):
+                    raise ValueError("missing or reused verifier invocation")
+                if not result.get("_ng_failure_class") and any(item.status != "completed" for item in actual):
+                    raise ValueError("successful rejudge lacks completed verifier evidence")
+                prior_judge_calls = {
+                    ref.model_call_id for item in prior.verifier_invocations for ref in item.model_calls
+                }
+                selected = prior.model_dump(mode="json")
+                selected["verifier_invocations"] = [item.model_dump(mode="json") for item in actual]
+                selected["model_calls"] = [
+                    call for call in selected["model_calls"] if call.get("model_call_id") not in prior_judge_calls
+                ]
+                settled["ng_trajectory"] = TrajectoryRecord.model_validate(selected).model_dump(mode="json")
+                settled["_ng_rejudge_verifier_invocation_ids"] = ids
+            except (TypeError, ValueError) as error:
+                raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
+        saved = current.record.read()
+        if saved == settled:
+            return None  # already saved: no new write, judge call or attempt
+        pending = self.manifest.pending_rejudge.get(key[0])
+        if (
+            pending is None
+            or result.get(REJUDGE_OPERATION_ID_KEY) != pending.operation_id
+            or result.get("_ng_rejudge_admitted_at") != pending.admitted_at
+            or pending.predecessor_failure_id != rejudge_predecessor_id(failure)
+            or hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest()
+            != pending.predecessor_sha256
+        ):
+            raise ConfigError(f"Rollout attempt {key!r}: no matching admitted re-judgment for this result.")
+        cap = self.manifest.max_rollout_attempts
+        if failure.get("_ng_failure_class") is not None and (cap is None or self._state.failure_count(key[0]) >= cap):
+            raise ConfigError(f"Rollout attempt {key!r}: the saved failure cap does not admit another re-judgment.")
+        if (
+            saved != failure
+            or logical_rollout_id(settled) != key[0]
+            or not (is_rejudgment_of(failure, settled) or is_rejudgment_failure_of(failure, settled))
+        ):
+            raise ConfigError(
+                f"Rollout attempt {key!r}: the re-judged result does not settle the saved judge failure "
+                "(stale failure, other identity, changed answer, or no scored result)."
+            )
+        return settled
+
+    def record_rejudgment(self, failure: dict, result: dict) -> bool:
+        """Settle the selected judge failure ``failure`` with its re-judged ``result`` for the same attempt.
+
+        The result keeps the failure's run, rollout and attempt identity and its saved answer, so no model attempt is
+        added and the failure stays in the sidecar with its debit. Returns False when that settlement is already saved.
+        """
+        self._require_open()
+        settled = self.check_rejudgment(failure, result)
+        if settled is None:
+            return False
+        self.record_outcome(settled, sync=True)
+        return True
 
     def __enter__(self) -> "RolloutStore":
         if self._read_only or self._files is not None:
@@ -437,7 +659,8 @@ class RolloutStore:
         saved_cap = self.manifest.max_rollout_attempts
         if max_attempts is not None and saved_cap is not None and max_attempts != saved_cap:
             raise ConfigError(f"This run's saved retry cap is {saved_cap}, not {max_attempts}.")
-        max_attempts = saved_cap or max_attempts or _get_max_rollout_attempts()
+        # An explicit recovery may record more attempts for every rollout (`--extend-attempts`), never fewer.
+        max_attempts = (saved_cap or max_attempts or _get_max_rollout_attempts()) + self._state.attempt_extension
         if retry_terminal_timeouts is not None:
             if not self._read_only and retry_terminal_timeouts != self.manifest.retry_terminal_timeouts:
                 manifest = self.manifest.model_copy(update={"retry_terminal_timeouts": retry_terminal_timeouts})
@@ -449,6 +672,12 @@ class RolloutStore:
             print(
                 f"Retry budget exhausted for {exhausted} rollout(s) at the cap of {max_attempts} counted failures. "
                 f"They will not be dispatched with this cap. Failures: {failures_path_for(self.output)}."
+            )
+        stopped = self._state.stopped_count(max_attempts)
+        if stopped:
+            print(
+                f"{stopped} failed rollout(s) are not run again: a kept answer or a judge failure is left to "
+                f"verification recovery, an unclassified execution to recovery. Failures: {failures_path_for(self.output)}."
             )
         rows = [dict(row, **{RUN_ID_KEY: self.manifest.run_id}) for row in self._state.pending(max_attempts)]
         elapsed = {}
@@ -514,6 +743,28 @@ class RolloutStore:
     def coverage(self) -> dict:
         return self._state.coverage()
 
+    @property
+    def attempt_extension(self) -> int:
+        """Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`)."""
+        return self._state.attempt_extension
+
+    @property
+    def attempt_cap(self) -> int:
+        """Every rollout's attempt cap: the saved ``max_rollout_attempts`` plus the recorded extension."""
+        return self._state.attempt_cap
+
+    def rerun_approved_identities(self) -> set[str]:
+        """The logical rollouts whose selected result is a masked one an operator approved to run again
+        (`--rerun-masked-without-artifact`): each counts one failed attempt and a later attempt supersedes it."""
+        return self._state.rerun_approved_identities()
+
+    def replayable_identities(self) -> set[str]:
+        """The logical rollouts this Store would run again under some attempt cap: its replay rule without the cap.
+
+        A recovery that asks for more attempts reads which exhausted rollouts the extension would make pending.
+        """
+        return {logical_rollout_id(row) for row in self._state.pending(1 << 62)}
+
     def write_coverage(self, **reporting: int) -> None:
         atomic_write_json(
             coverage_path_for(self.output),
@@ -522,5 +773,6 @@ class RolloutStore:
             | {
                 "outcomes_recorded": self.outcomes_recorded,
                 "progress_outcomes_recorded": self.progress_outcomes_recorded,
+                "allocation_id": os.environ.get("SLURM_JOB_ID"),
             },
         )

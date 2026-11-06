@@ -151,10 +151,10 @@ as incomplete, never removed from the denominator. Keep the original artifacts
 and record the verifier commit alongside both scores.
 
 Preparation and composition regressions are collected by the normal core CI
-suite from `tests/unit_tests/test_indic_gpqa_diamond.py`:
+suite from `tests/unit_tests/benchmarks/test_indic_gpqa_diamond.py`:
 
 ```bash
-pytest tests/unit_tests/test_indic_gpqa_diamond.py
+pytest tests/unit_tests/benchmarks/test_indic_gpqa_diamond.py
 ```
 
 ## Prepare data

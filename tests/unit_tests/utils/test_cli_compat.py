@@ -23,7 +23,12 @@ import pytest
 # (old_module, old_name, new_module, new_name) for each relocated symbol.
 MOVED_SYMBOLS = [
     ("nemo_gym.benchmarks", "list_benchmarks", "nemo_gym.cli.eval", "list_benchmarks"),
-    ("nemo_gym.benchmarks", "PrepareBenchmarkConfig", "nemo_gym.cli.eval", "PrepareBenchmarkConfig"),
+    (
+        "nemo_gym.benchmarks",
+        "PrepareBenchmarkConfig",
+        "nemo_gym.environment.benchmark_preparation",
+        "PrepareBenchmarkConfig",
+    ),
     ("nemo_gym.benchmarks", "prepare_benchmark", "nemo_gym.cli.eval", "prepare_benchmark"),
     (
         "nemo_gym.dataset_orchestrator",
@@ -73,8 +78,6 @@ MOVED_SYMBOLS = [
     ("nemo_gym.cli", "VersionConfig", "nemo_gym.cli.general", "VersionConfig"),
     ("nemo_gym.cli", "version", "nemo_gym.cli.general", "version"),
     ("nemo_gym.cli", "GlobalConfigDictParserConfig", "nemo_gym.config.global_config", "GlobalConfigDictParserConfig"),
-    ("nemo_gym.cli_setup_command", "run_command", "nemo_gym.orchestration.server_venv", "run_command"),
-    ("nemo_gym.cli_setup_command", "setup_env_command", "nemo_gym.orchestration.server_venv", "setup_env_command"),
 ]
 
 

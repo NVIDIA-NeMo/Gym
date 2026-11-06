@@ -40,7 +40,7 @@ from omegaconf import OmegaConf
 from pydantic import JsonValue
 
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models._checkpoint import PolicyModelParticipant
 from nemo_gym.server_runtime._checkpoint import coordination
 from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, RestoredAgentSession

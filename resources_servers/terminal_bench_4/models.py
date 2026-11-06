@@ -18,6 +18,8 @@ class AgentTermination(BaseModel):
     reason: Literal["completed", "timeout", "nonzero_exit", "killed", "cancelled", "infrastructure_error"]
     exit_code: int | None = None
     detail: str | None = None
+    # The registered kind of a setup failure the server typed (rejected sandbox credentials), if any.
+    failure_kind: str | None = None
     artifacts: list[str] = Field(default_factory=list)
 
 
@@ -72,7 +74,7 @@ class TerminalBench4RunRequest(BaseRunRequest):
 
 
 class TaskIdentity(BaseModel):
-    """The pinned package a task row names; Environment Server seeds carry it in ``task_data``."""
+    """The pinned package a task row names; episode seeds carry it in ``task_data``."""
 
     task_name: str
     task_ref: str
@@ -80,7 +82,7 @@ class TaskIdentity(BaseModel):
 
 
 class ResourcesSessionVerifyRequest(BaseVerifyRequest, TaskIdentity):
-    """Environment Server verification: the task row plus the agent's response.
+    """Episode session verification: the task row plus the agent's response.
 
     The resources-session cookie, not a field, names the episode. The agent has already been
     closed, so the request carries no termination; it is derived from ``response.status``.
@@ -103,6 +105,8 @@ class SeedSessionResponse(SessionRequest):
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
     instruction: str = ""
     user: str | int | None = None
+    # The task's agent timeout; 8 h per task is the official Terminal-Bench 4.0 agent budget (TB 4.0 release notes,
+    # "Calibrating resources").
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
     skills_dir: str | None = None

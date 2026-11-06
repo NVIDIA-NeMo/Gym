@@ -138,7 +138,7 @@ async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(
     """The same correlation key the endpoint spans carry, so a rollout's sandbox time is filterable
     by attribute and not only through the parent chain. The sandbox API learns it through the
     provider Gym's telemetry setup registers, not by importing rollout correlation."""
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.episode_context import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start()
@@ -161,7 +161,7 @@ async def test_sandbox_spans_have_no_rollout_id_outside_a_rollout(
         if span.name.startswith("gym.sandbox."):
             names.add(span.name)
             assert "nemo.gym.rollout.id" not in span.attributes
-    assert names == {"gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
+    assert names == {"gym.sandbox.request", "gym.sandbox.start", "gym.sandbox.exec", "gym.sandbox.stop"}
 
 
 class _FailingProvider(_StubProvider):
@@ -189,7 +189,7 @@ async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(
     """Correlation is attached before the awaited work, so a failed start or exec is still filterable."""
     from opentelemetry.trace import StatusCode
 
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.episode_context import rollout_context
     from nemo_gym.sandbox.api import AsyncSandbox
     from nemo_gym.sandbox.providers.base import SandboxSpec
 
@@ -495,7 +495,7 @@ def test_lens_imports_are_function_local_outside_the_fallback_resolver():
 
 async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorded_spans, started_sandbox):
     """The sandbox package on its own knows nothing about rollouts."""
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.episode_context import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start()
@@ -508,7 +508,7 @@ async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorde
 async def test_explicit_span_attributes_win_over_the_provider(
     recorded_spans, started_sandbox, rollout_attributes_registered
 ):
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core.episode_context import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start(span_attributes={"nemo.gym.rollout.id": "explicit", "extra": "x"})
@@ -655,7 +655,18 @@ def _install_recording_post(monkeypatch):
 
     sent = []
 
-    async def post(server_name, url_path, json):
+    async def post(
+        server_name,
+        url_path,
+        json,
+        *,
+        _resend_after_disconnect=True,
+        _max_num_tries,
+        _retry_other_errors,
+        _on_transport_failure,
+    ):
+        # One bounded resend of a connection lost before any reply; every other failure is raised at once.
+        assert (_resend_after_disconnect, _max_num_tries, _retry_other_errors) == (True, 2, False)
         headers: dict = {}
         inject_trace_context(headers)
         sent.append(
