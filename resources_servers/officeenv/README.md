@@ -160,29 +160,85 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    the harness as `SandboxAccess`. Seeding the episode again lends the same sandbox;
    verification stops it (or `/close_session`, when verification did not), and so does shutting
    the server down;
-2. moves file content between the workspace and Google Drive without passing it through the
-   model: the sandbox gets `OFFICEENV_API_URL` and `OFFICEENV_API_TOKEN`, and `OFFICEENV.md` in
-   the workspace documents the file API (`GET`/`PUT /officeenv/files/{app}/{file_id}`,
-   `POST /officeenv/files?app=&name=&parent=&mime_type=`). Text and binary files (an XLSX
-   workbook, say) move byte for byte; uploads are limited to 20 MB;
-3. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
+2. moves file content between the workspace and the file apps (Google Drive, Box, SharePoint,
+   OneDrive) without passing it through the model: the sandbox gets `COMPANY_API_URL` and
+   `COMPANY_API_TOKEN`, and `README.md` in the workspace documents the file API for the
+   episode's file apps (`GET`/`PUT /v1/files/{app}/{file_id}`,
+   `POST /v1/files?app=&name=&parent=&mime_type=`). Files and folders are named by id: the server
+   reads what an app's op also wants (SharePoint's library, folder and name) from the world.
+   SharePoint uploads need a folder (`parent`); `mime_type` is Drive's. Text and binary files (an
+   XLSX workbook, say) move byte for byte; uploads are limited to 20 MB; an app's error comes back
+   under its own HTTP status (a missing file is 404, a name Box already holds 409);
+3. keeps their content out of the conversation on the apps' own tools too
+   (`sandbox_config.inline_file_bytes`, 8192 by default):
+   - a download (Drive's `download_file`, `export_file` and `get_revision`, Box's
+     `get_file_content`, SharePoint's `get_item_content`, OneDrive's `get_content` and
+     `get_version_content`) saves the file in the workspace at `<folder>/<file id>/<name>`
+     (`drive/`, `box/`, `sharepoint/`, `onedrive/`; a Drive revision under
+     `revisions/<version>/`, a Box or OneDrive version under `versions/<version>/`, an export with
+     its type's extension), mode 644, and answers with `savedTo` and `savedBytes`. The answer
+     carries the content as well only for a text file of at most `inline_file_bytes` bytes; a
+     longer text gets its first 2,000 characters as `preview`, a binary file nothing but its path;
+   - the uploads (Drive's `create_file` and `update_file`, Box's `upload_file` and
+     `upload_file_version`, SharePoint's `upload_content`, OneDrive's `upload_file`) refuse binary
+     content, and text over `inline_file_bytes` bytes, pasted into the call
+     (`upload_from_workspace`), with the file API command that sends the file instead;
+   - Gmail's attachments move through the workspace too, since Gmail has no file API:
+     `get_attachment` saves one at `gmail/<message id>/<attachment id>/<name>` and answers as the
+     downloads above, and an attachment of `send_message`, `create_draft` or `update_draft` may
+     name a workspace file by its path (`{"path": "/workspace/totals.xlsx", "filename"?,
+     "mimeType"?}`; a relative path is in the workspace), or as a bare string that writes a path
+     or names a file the workspace holds. The server reads that file from the sandbox before the
+     call runs and the call carries its bytes. Each path is checked in the sandbox first (`stat`,
+     which follows no final link): only a regular file of at most 20 MB is downloaded, nothing
+     when a message names more than 20 files or more than 25 MB together, and the copy is checked
+     again, since `docker cp` copies a link as a link, which the server would read on its own
+     host. A download that fails attaches nothing. Pasted binary content, and text over `inline_file_bytes` bytes, are
+     refused (`upload_from_workspace`), and so is an attachment that names a file without its
+     content (`attach_from_workspace`), each with the attachment that names the workspace file;
+   - these tools are described as they behave here, in place of OfficeEnv's words
+     (`contentBase64`, `content_base64`), and so are the uploads' `content` and
+     `content_base64` parameters and Gmail's `attachments`; `README.md` says the same.
+     `/verify` reports `sandbox_files_saved`, `sandbox_bytes_saved`,
+     `sandbox_uploads_refused`, `sandbox_files_attached` and `sandbox_bytes_attached`, over all
+     five apps.
+
+   The file API, short text, calls without content and episodes without a sandbox are unchanged;
+   `inline_file_bytes: null` restores full answers. The server wraps the episode's OfficeEnv
+   session for this (`ContentInWorkspace`), so OfficeEnv itself is unchanged. A model that pulls a
+   workbook through the tool reads its bytes as base64 on every later request, and one that copies
+   file content by hand gets it wrong: in earlier pilots, models did both;
+4. ends when Pi's run ends: `finish_tool_names: [user_complete_task]`, its timeout, or the model
    stopping. `/verify` first closes the episode's tools and file API and stops its sandbox, then
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
 
-The instance name (`oe`) is the grant name Pi prefixes to each tool, so it stays short (the
-longest tool name is 56 characters). Rows come from OfficeEnv's sandbox example tasks:
-`sandbox/prepare_rows.py` writes `data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five
-sandbox tasks). A row holds a system and a user message and the TaskSpec, and no tool
-list, since the harness takes its tools from the MCP grant.
+Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
+`data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five sandbox tasks). A
+row holds a system and a user message and the TaskSpec, and no tool list, since the harness takes
+its tools from the MCP grant.
+
+What a sandbox reads of this server names a company's API, never the environment behind it or
+Gym: the variables above, the `/v1/...` routes, the workspace's `README.md`, the answers and
+errors of every route a sandbox reaches, and the session cookie that answers set (`sid_<hash>`,
+`get_session_cookie_name`). The config's `mcp_server_name: company` and `mcp_bearer_token: true`
+make the MCP endpoint an ordinary one too: Pi lists it as `company` and names its tools
+`company_<tool>` (at most 64 characters; the longest tool name is 56), the session token goes as
+a standard bearer token, and `tools/list` without it lists nothing. `sandbox/prepare_rows.py`'s
+system prompt names the tools the same way. On OpenSandbox, whose exec daemon keeps each command's
+output in the sandbox, `configs/officeenv_opensandbox.yaml` has the provider's post-create probe
+print `ready` (`sandbox.opensandbox.probe`) instead of its default marker, which names Gym. What a
+sandbox still reads of Gym comes from outside this server: the policy's URL and Pi's own files and
+environment (see Known limits).
 
 A sandbox can reach this server, so sandbox mode guards it:
 
 - seeding, closing, verification, `GET /officeenv/apps` and the tool routes answer only callers
-  from this node and from `trusted_networks` (CIDR, empty by default) and refuse others with 403.
-  Sandboxes keep the MCP endpoint and the file API, whose tokens name their episode. When Gym's
-  other servers call this one from other nodes, list their network in `trusted_networks`;
+  from this node and from `trusted_networks` (CIDR, empty by default), and others as routes that
+  do not exist (404); no generated docs (`/openapi.json`, `/docs`) are served. Sandboxes keep the
+  MCP endpoint and the file API, whose tokens name their episode. When Gym's other servers call
+  this one from other nodes, list their network in `trusted_networks`;
 - session cookies and MCP tokens are signed with a secret drawn when the server starts
   (`get_session_secret`), not with Gym's default key, which anyone can derive from the server's
   name, so code in a sandbox cannot sign a token for another episode or for more tools. The secret
@@ -236,9 +292,21 @@ command.
 
 Known limits: Pi installs Node and its own package in every sandbox at session start (network
 access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
-validated here; the file API serves Google Drive only; OpenCode's sandbox sessions refuse MCP
-tool grants, so Pi is the harness these episodes run. The caller check is not a network boundary:
-a gateway that exposes only MCP and the file API to sandboxes would be one.
+validated here; OpenCode's sandbox sessions refuse MCP tool grants, so Pi is the harness these
+episodes run. What a sandbox still reads of Gym:
+
+- the policy's URL, which Gym's agents hand the harness with Gym's own path names:
+  `/ng-rollout/<id>` from rollout correlation (`ROLLOUT_PATH_PREFIX`), `/training-token-capture`
+  with token capture (`TOKEN_CAPTURE_PATH_SEGMENT`), and `/ng-trace/<traceparent>` while traces
+  export. Pi writes it into its `models.json` in the sandbox, where a model can read it (it is not
+  in Pi's environment or process arguments). The test of what a sandbox reads lists it among its
+  findings; making the two path names configurable is a further core change;
+- Pi's own names: its session and runtime directories, the `NEMO_GYM_PI_*` variables its shell
+  inherits, the model provider `nemo`, its supervisor's process names, and a system prompt that
+  states the sandbox clock's date. Changing those is Pi agent work.
+
+The caller check is not a network boundary: a gateway that exposes only MCP and the file API to
+sandboxes would be one.
 
 ## Verification
 
