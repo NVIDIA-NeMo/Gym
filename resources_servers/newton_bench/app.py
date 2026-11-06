@@ -281,7 +281,12 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
     def _require_metadata(self, session_id: Optional[str]) -> Dict[str, Any]:
         """The metadata of the session a tool call names, or a 404 if it was never seeded or has already ended."""
         metadata = self.session_metadata.get(session_id)
-        if not metadata:
+        if (
+            session_id is None
+            or not metadata
+            or self.session_is_closed(session_id)
+            or self.session_is_verified(session_id)
+        ):
             raise ResourcesSessionLostError(
                 "Session not initialized or already ended. Please call seed_session first.",
                 failure_kind=self._lost_failure_kind(session_id),
@@ -310,7 +315,7 @@ class NewtonBenchResourcesServer(SimpleResourcesServer):
 
             # One start per session at a time, so concurrent first calls share a worker.
             async with self.session_lock(sid):
-                if self.session_metadata.get(sid) is not metadata:
+                if self._require_metadata(sid) is not metadata:
                     raise ResourcesSessionLostError("The session ended before its Python worker could start.")
                 if sid not in self._sessions:
                     # Keep the thread's result reachable even if this request is cancelled before publication.

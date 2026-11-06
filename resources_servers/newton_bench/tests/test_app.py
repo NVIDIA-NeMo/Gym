@@ -1709,6 +1709,46 @@ def test_verify_retry_reuses_evaluation_and_refuses_a_changed_answer() -> None:
         assert client.post("/verify", json=body).json()["mask_sample"] is True
 
 
+def test_failed_verify_cleanup_preserves_grade_and_cached_evaluation_until_close() -> None:
+    server = _session_server()
+    body = _final_law_verify_body()
+    evaluator = MagicMock()
+    evaluator.evaluate_law.return_value = {"symbolic_equivalent": True, "rmsle": 0.0}
+    handle = MagicMock()
+    handle.is_closed = False
+    handle.exec.return_value = ("", "", "1")
+    handle.close.side_effect = RuntimeError("worker still alive")
+    with (
+        TestClient(server.setup_webserver(), raise_server_exceptions=False) as client,
+        patch("resources_servers.newton_bench.app._load_module", return_value={"core": evaluator}),
+    ):
+        assert client.post("/seed_session", json=_typed_seed()).status_code == 200
+        server._sessions["resources-session"] = handle
+        for _ in range(2):
+            verified = client.post("/verify", json=body)
+            assert verified.status_code == 200
+            assert verified.json()["reward"] == 1.0 and not verified.json()["mask_sample"]
+        evaluator.evaluate_law.assert_called_once()
+        assert handle.close.call_count == 2
+        assert server._sessions["resources-session"] is handle
+        assert server.session_is_verified("resources-session")
+        python = client.post("/execute_python", json={"code": "1"})
+        experiment = client.post("/run_experiment_m0_gravity", json={"mass1": 1.0, "mass2": 1.0, "distance": 1.0})
+        for response in (python, experiment):
+            assert response.status_code == 404
+            assert response.json()["detail"]["failure_kind"] == "session_lost"
+        handle.exec.assert_not_called()
+        evaluator.run_experiment_for_module.assert_not_called()
+        assert server._sessions["resources-session"] is handle
+        assert client.post("/close_session", json=_typed_close()).status_code == 500
+        assert server._sessions["resources-session"] is handle
+        handle.close.side_effect = None
+        assert client.post("/close_session", json=_typed_close()).status_code == 200
+        assert handle.close.call_count == 4
+        assert server._sessions == {} and server.session_metadata == {}
+        assert server._session_episodes == {} and server.session_is_closed("resources-session")
+
+
 @mark.parametrize("typed", [False, True])
 def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
     from omegaconf import DictConfig
@@ -1851,6 +1891,42 @@ async def test_close_queued_before_tool_prevents_worker_allocation() -> None:
     factory.assert_not_called()
     assert not result.success
     assert server._sessions == {} and server._starting_sessions == {}
+
+
+@mark.asyncio
+async def test_verify_queued_before_tool_refuses_execution_when_worker_cleanup_fails() -> None:
+    server = _session_server()
+    sid = "verify-before-tool"
+    request = MagicMock(spec=Request)
+    request.session = {SESSION_ID_KEY: sid}
+    seed = ResourcesSeedSessionRequest.model_validate(_typed_seed(sid))
+    await server.seed_session(request, seed)
+    handle = MagicMock()
+    handle.is_closed = False
+    handle.exec.return_value = ("", "", "1")
+    handle.close.side_effect = RuntimeError("worker still alive")
+    server._sessions[sid] = handle
+    try:
+        async with server.session_lock(sid):
+            verifying = asyncio.create_task(
+                server.verify(request, NewtonBenchVerifyRequest.model_validate(VERIFY_BODY))
+            )
+            await asyncio.sleep(0)
+            executing = asyncio.create_task(server.execute_python(request, ExecutePythonRequest(code="1")))
+            await asyncio.sleep(0)
+        verified = await verifying
+        result = await executing
+        assert not verified.mask_sample
+        assert not result.success
+        handle.exec.assert_not_called()
+        assert server._sessions[sid] is handle
+        assert server.session_is_verified(sid)
+    finally:
+        handle.close.side_effect = None
+        await server.close_resources_session(
+            ResourcesCloseSessionRequest(resources_session_id=sid, episode_id=seed.episode_id)
+        )
+    assert server._sessions == {} and server.session_metadata == {}
 
 
 @mark.asyncio
