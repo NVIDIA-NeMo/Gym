@@ -21,7 +21,7 @@ from nemo_gym.core import (
     sdk_error_details,
 )
 from nemo_gym.server_runtime import SimpleResourcesServer, lost_session_verification
-from nemo_gym.utils.exception_inspection import bounded_text
+from nemo_gym.utils import bounded_text
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
     OSWorldCloseResponse,

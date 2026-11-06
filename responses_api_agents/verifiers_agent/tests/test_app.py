@@ -1048,6 +1048,15 @@ class TestRolloutErrorFact:
         event = FailureReportRow.report(body).events[body["_ng_failure_id"]]
         assert event.http_status == 429 and event.boundary == "model"
 
+    @pytest.mark.parametrize("status", [429, 408, 425])
+    def test_a_retryable_status_row_is_rerun_by_recovery_on_its_recorded_retry_action(self, status: int) -> None:
+        body = self._run(self._ended_on_model_error(status), call_errors=[self._http_error(status)])
+
+        assert body["mask_sample"] is True and body["failure_outcome_action"] == "retry"
+        # The recorded decision is honored; the attribution is not changed to satisfy the classifier.
+        assert body["failure_kind"] == "model_request_error"
+        assert masked_infrastructure_kind(body) == "model_request_error"
+
     def test_a_call_that_got_no_reply_is_a_transport_failure_without_a_status(self) -> None:
         timeout = openai.APITimeoutError(request=httpx.Request("POST", "http://policy:8000/v1/chat/completions"))
         body = self._run(self._ended_on_model_error(), call_errors=[timeout])

@@ -44,7 +44,9 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    PROVIDER_IO_TIMEOUT,
     FailureBoundary,
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
@@ -52,9 +54,11 @@ from nemo_gym.core import (
     StageOutcomePolicyConfig,
     agent_route_failure,
     choose_stage_outcome,
+    failure_report_for,
     observe_failure,
+    sdk_error_details,
 )
-from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN, PROVIDER_IO_TIMEOUT, PROVIDER_REQUEST_FAILED
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN, PROVIDER_REQUEST_FAILED
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -290,6 +294,7 @@ class PiSandboxedAgent(PiAgent):
                 "failure_outcome_attribution": decision.attribution,
                 "failure_kind": provider_failure.failure_kind,
                 "failure_reason": provider_failure.failure_reason,
+                **FailureReportRow.fields(failure_report_for(failure)),
             }
             output, usage = parse_pi_events("")
             return output, usage, self.config.model, []
@@ -376,6 +381,8 @@ class PiSandboxedAgent(PiAgent):
             reason="Sandbox exec request timed out; remote outcome is unknown" if timed_out else None,
             provider_status_reason=code if isinstance(code, str) and code else None,
             http_status=error_to_http_status(error),
+            # The exception text may carry request or response content; record its type and status only.
+            foreign_error=sdk_error_details(error, message=""),
             cause=error,
             **cls._sandbox_facts(sandbox),
         )
@@ -463,15 +470,19 @@ class PiSandboxedAgent(PiAgent):
                 payload = body.model_dump(mode="json") | {"response": episode.response.model_dump(mode="json")}
                 root = Path(execution["pi_results_dir"])
                 (root / "generation.json").write_text(json.dumps(payload | metadata))
-                result = await verify_agent_response(
-                    self.server_client,
-                    self.config.resources_server,
-                    body,
-                    episode.response,
-                    cookies,
-                    force_zero_reward=failed
-                    and (self.config.execution_failure_reward_zero or "failure_outcome_action" in execution),
-                )
+                if "failure_outcome_action" in execution:
+                    # The agent-stage policy already counted this failure as a zero. Apply it here: a second grading
+                    # call on an empty answer could be masked or unavailable and would revoke the decision.
+                    result = payload | {"reward": 0.0, "mask_sample": False}
+                else:
+                    result = await verify_agent_response(
+                        self.server_client,
+                        self.config.resources_server,
+                        body,
+                        episode.response,
+                        cookies,
+                        force_zero_reward=failed and self.config.execution_failure_reward_zero,
+                    )
                 return PiSandboxedAgentVerifyResponse.model_validate(
                     result
                     | metadata
