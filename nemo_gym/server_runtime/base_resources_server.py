@@ -568,6 +568,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     Implement the three state hooks to inherit seed, close and checkpoint retirement, and use ``verifying``
     around scoring to release after verification. Servers without state hooks keep their permissive seed and
     no-op close. Existing custom protocol overrides remain registered unchanged.
+
+    Session state, locks, fences and verification receipts live in the worker process. With several workers,
+    session routing keeps a session's requests on the worker that owns it, so a hook server needs no
+    ``num_workers: 1``.
     """
 
     config: BaseResourcesServerConfig
@@ -634,8 +638,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         The base releases the preceding cookie run first and does not initialize again on a successful typed
         retry. On any exception, including cancellation, it calls ``release_session_state`` before re-raising.
-        Make partial allocations reachable by release before another await; a failed cleanup remains owned
-        and is retried before another initialization. No separate pending-resource table is required.
+        Make partial allocations reachable by release before another await. A cleanup that fails or is itself
+        cancelled stays owned and is retried by the next seed or close of the session, before another initialization;
+        a seed that returns an error is not tracked by checkpoint retirement. No separate pending-resource table
+        is required.
         """
 
     async def release_session_state(self, session_id: str) -> None:
@@ -645,7 +651,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         scoring raises), and by close and retirement. Unknown and already released IDs must succeed. Raise on
         failure and retain resource references needed to retry; the base retains ownership until success.
 
-        Tool handlers are not implicitly locked: use ``session_lock`` or await their in-flight work here.
+        The base holds ``session_lock`` when it calls this hook, and the lock is not reentrant: do not take it here.
+        Tool handlers are not locked by the base: they take ``session_lock`` themselves, or this hook awaits their
+        in-flight work.
         Sessions abandoned before verify/close have no automatic expiry; providers should enforce a TTL.
         """
 
@@ -734,8 +742,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         Mask ``verification.is_lost`` before scoring. Otherwise use live state or ``retained`` and call
         ``retain`` with compact evidence. On exit, including a scoring exception, release resources and move
         ownership into a retry record. Failed release is observed without replacing the score or scoring error,
-        and keeps ownership and evidence for a later verify/close/retire. Cancellation still propagates.
-        Successful retries do not extend the record's window. Close always invalidates it. A retry with no
+        and keeps ownership and evidence for a later verify/close/retire. Cancellation still propagates: a request
+        cancelled by its caller's disconnect does not finish its release, so the pending record keeps ownership and
+        the next verify retry, close or retirement releases the session (the provider's TTL does if none comes).
+        A close that arrives meanwhile waits for the lock, and is cancelled without side effects if its caller gives up.
+        Successful retries do not extend the record's window; a record whose cleanup is pending has no deadline until
+        the cleanup succeeds. Close always invalidates it. A retry with no
         explicitly retained evidence is lost; pending cleanup is still attempted when it returns that mask.
 
         ``allow_missing`` is for request-scored verifiers that intentionally accept unseeded calls. It never
@@ -804,7 +816,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             # Includes cancellation: a published partial handle must remain reachable until release succeeds.
             try:
                 await self.release_session_state(session_id)
-            except BaseException:
+            except Exception:
                 logger.warning(
                     "Failed to release a partially initialized resources session %s", session_id, exc_info=True
                 )
@@ -1056,8 +1068,17 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         task data returns 422. Construction or cleanup failures remain retryable server errors.
 
         A served override declares ``request: Request`` before ``body`` and delegates to this method with
-        ``super().seed_session(body, request=request)``. The conformance checker exercises close ownership to
-        catch an override that bypasses the binding. Stateless ``seed_session(body)`` remains supported.
+        ``super().seed_session(body, request=request)``. To accept a cookie seed that is more permissive than
+        ``seed_request_model``, it declares ``body: ResourcesSeedSessionRequest | Annotated[CookieModel,
+        BeforeValidator(reject_partial_typed_seed)]``; without the validator a malformed typed seed is accepted as
+        a cookie seed. The conformance checker exercises close ownership to catch an override that bypasses the
+        binding. Stateless ``seed_session(body)`` remains supported.
+
+        A server that overrides this method instead of implementing the hooks refuses a seed that no retry can make
+        succeed with ``ResourcesSeedRejectedError`` (422, input that fails validation) or
+        ``ResourcesSessionConflictError`` (409, an ID bound to another episode or task, or a closed session), never a
+        plain exception (HTTP 500), which the Environment Server retries by dispatching the whole episode again. A
+        failure a retry may fix, such as an unavailable sandbox provider, stays a 5xx.
         """
         if not self._manages_session_state():
             if isinstance(body, ResourcesSeedSessionRequest):
@@ -1084,6 +1105,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                     or session_id in self._pending_verifications
                 ):
                     await self.release_session_state(session_id)
+                    # Nothing is left to release, so the finished run's receipt expires with its window
+                    # instead of pinning ownership as pending cleanup if the replacement fails to initialize.
+                    if (pending := self._pending_verifications.pop(session_id, None)) is not None:
+                        self._verification_receipts.setdefault(
+                            session_id, (monotonic() + self.config.session_close_retry_window_seconds, pending)
+                        )
                 self._cookie_sessions.add(session_id)
                 self._initializing_sessions[session_id] = None
                 await self._initialize_session(session_id, body)
@@ -1129,6 +1156,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         initialized, verified or already closed state. Release failure retains ownership and resource references
         so the owner can retry. A close also drops verification payloads; only its episode fence remains.
         Stateless servers acknowledge the request without retaining state.
+
+        A server that overrides this method instead of implementing the hooks must succeed when the session is
+        already closed or was never seeded; keep a later seed from creating it again for
+        ``session_close_retry_window_seconds`` (``ResourcesSessionFences``); release by ``resources_session_id`` even
+        when the request carries no session cookie; and raise when releasing fails, so the caller can retry.
+        ``check_resources_session_contract`` checks these rules from a server's tests.
         """
         if not self._manages_session_state():
             return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
