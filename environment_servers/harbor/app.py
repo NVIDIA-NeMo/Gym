@@ -405,15 +405,21 @@ class HarborEnvironmentServerConfig(BaseEnvironmentServerConfig):
     compose_overlay: HarborComposeOverlay | None = None
 
 
-def min_reward_failure(rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None) -> str | None:
+def min_reward_failure(
+    rewards: dict[str, float] | None, min_reward: float | dict[str, float] | None, *, reward_key: str | None = None
+) -> str | None:
     """Why a turn misses its step's ``min_reward``, or ``None`` when it passes or sets none.
 
     As in Harbor, a number gates the ``reward`` key, a mapping gates each key it names, and a key the
-    rewards lack (or a turn without a verifier result) counts as negative infinity.
+    rewards lack (or a turn without a verifier result) counts as negative infinity. A dataset's ``reward_key``
+    names the score, so a number gates that key instead.
     """
     if min_reward is None:
         return None
-    thresholds = {"reward": float(min_reward)} if isinstance(min_reward, (int, float)) else min_reward
+    if isinstance(min_reward, (int, float)):
+        thresholds = {reward_key or "reward": float(min_reward)}
+    else:
+        thresholds = min_reward
     for key, threshold in thresholds.items():
         actual = (rewards or {}).get(key, float("-inf"))
         if actual < threshold:
@@ -1570,7 +1576,10 @@ class HarborEnvironmentServer(
             if (
                 result.mask_sample
                 or result.verifier_rewards is None
-                or min_reward_failure(result.verifier_rewards, turn.config.min_reward) is not None
+                or min_reward_failure(
+                    result.verifier_rewards, turn.config.min_reward, reward_key=task.config.verifier.reward_key
+                )
+                is not None
             ):
                 stopped_after = turn.name if len(results) < len(task.turns) else None
                 break

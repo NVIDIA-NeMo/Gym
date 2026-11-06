@@ -192,13 +192,16 @@ def verifier_timed_out(result: SandboxExecResult, exit_record: tuple[int, int | 
     return elapsed is None or elapsed >= budget
 
 
-def select_reward(rewards: dict[str, float]) -> float | None:
+def select_reward(rewards: dict[str, float], *, key: str | None = None) -> float | None:
     """The score a parsed reward file gives: the ``reward`` key when present, else the sum of every key.
 
     Gym's reading of ``reward.json``: a ``reward`` key is the score and the other keys are metrics; without
     one every key is a component of the reward (:func:`reward_components`), which is their sum. One key
     without ``reward`` is Harbor's own rule too. ``None`` when the components do not sum to a finite number.
+    ``key`` is the dataset's ``reward_key``: that key alone is the score, and ``None`` when the file lacks it.
     """
+    if key is not None:
+        return rewards.get(key)
     if "reward" in rewards:
         return rewards["reward"]
     try:
@@ -208,13 +211,13 @@ def select_reward(rewards: dict[str, float]) -> float | None:
     return total if math.isfinite(total) else None
 
 
-def reward_components(rewards: dict[str, float]) -> dict[str, float] | None:
+def reward_components(rewards: dict[str, float], *, key: str | None = None) -> dict[str, float] | None:
     """The keys that sum to the reward, or ``None`` when the file names the reward itself.
 
-    With a ``reward`` key the other keys are metrics, not parts of the score, so there are no components to
-    name; without one every key is a component and :func:`select_reward` is their sum.
+    With a ``reward`` key, or a dataset ``reward_key``, the other keys are metrics, not parts of the score, so
+    there are no components to name; without one every key is a component and :func:`select_reward` is their sum.
     """
-    if "reward" in rewards:
+    if key is not None or "reward" in rewards:
         return None
     return dict(rewards)
 
@@ -437,6 +440,8 @@ class VerifierSettings:
     collect: list[Any] = field(default_factory=list)
     # The task's `[verifier].network_mode` (a step's over it), reported as `verifier_network`.
     network_mode: str | None = None
+    # The task's `[verifier].reward_key` from dataset.toml; a step has none of its own.
+    reward_key: str | None = None
 
 
 class HarborVerificationMixin:
@@ -1085,6 +1090,7 @@ class HarborVerificationMixin:
                 user=verifier.user,
                 collect=verifier.collect,
                 network_mode=verifier.network_mode,
+                reward_key=verifier.reward_key,
             )
         # A step's tests/ (and a multi-step task's top-level tests/) may be absent; a single-turn task's tests/ is
         # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
@@ -1202,16 +1208,20 @@ class HarborVerificationMixin:
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
-        reward = select_reward(rewards)
+        reward = select_reward(rewards, key=settings.reward_key)
         if reward is None:
-            # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
-            # invalid reward file.
-            reason = (
-                f"reward.json keys {sorted(rewards)} do not sum to a finite reward; tail: {_stdout_tail(logs_dir)}"
-            )
-            return self._measured(0.0, INVALID_REWARD_KIND, reason) | extras
+            if settings.reward_key is not None:
+                # reward.txt reads as a `reward` key, so a task that writes it lands here too.
+                reason = (
+                    f"no {settings.reward_key!r} key (the dataset's reward_key) in the reward file: {sorted(rewards)}"
+                )
+            else:
+                # Finite components whose sum overflows: a reward file no trainer can use, measured like any other
+                # invalid reward file.
+                reason = f"reward.json keys {sorted(rewards)} do not sum to a finite reward"
+            return self._measured(0.0, INVALID_REWARD_KIND, f"{reason}; tail: {_stdout_tail(logs_dir)}") | extras
         outcome = {"reward": reward, "verifier_rewards": rewards}
-        components = summing_components(reward, reward_components(rewards))
+        components = summing_components(reward, reward_components(rewards, key=settings.reward_key))
         if components is not None:
             outcome["reward_components"] = components
         return outcome | extras
@@ -1385,4 +1395,5 @@ class HarborVerificationMixin:
             user=step.user if step.user is not None else task.config.verifier.user,
             collect=[*task.config.verifier.collect, *step.collect],
             network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
+            reward_key=task.config.verifier.reward_key,
         )

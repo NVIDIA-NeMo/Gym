@@ -77,6 +77,9 @@ num_repeats = 1
 timeout_multiplier = 1.0
 # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments. GPUs never scale.
 resource_multiplier = 1.0
+# The reward.json key that is the score; the other keys stay metrics and a file without it is an invalid reward.
+# Unset, a `reward` key is the score, else the keys are summed. `[gym.tasks."<id>".verifier] reward_key` overrides it.
+# reward_key = "overall"
 
 # Per-task overrides, keyed by the task folder name. `env` merges over the task's own; every other field
 # replaces the task's value. Harbor's legacy spellings (`memory = "4G"`, `allow_internet = false`) are accepted
