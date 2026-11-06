@@ -312,6 +312,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
             "agent_module": agent_module,
             "agent_class": agent_class,
             "agent_config_class": agent_config_class,
+            "token_id_capture": self._token_id_capture_enabled(),
         }
         return script, runner_config, f"{self.config.sandbox_python} runner.py"
 

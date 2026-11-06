@@ -6,11 +6,32 @@
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
 from nemo_gym.models.token_capture.records import response_to_output_items, strip_token_fields
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.models.token_capture.staging.records import CompletionStatus, OutputValidationItem
+
+
+def completion_replay_items(response: dict[str, Any]) -> list[dict]:
+    """Represent served Messages content exactly as its next converted request.
+
+    Messages ingress resolves source continuity after the shared Anthropic
+    converter. Reuse that converter for the echoed assistant turn as well;
+    generic response evidence uses a different text/tool block representation.
+    """
+    if response.get("type") == "message" and response.get("role") == "assistant":
+        params = AnthropicConverter().anthropic_request_to_responses(
+            {
+                "model": response.get("model", ""),
+                "max_tokens": 1,
+                "messages": [{"role": "assistant", "content": response.get("content") or []}],
+            }
+        )
+        assert isinstance(params.input, list)
+        return [item.model_dump(mode="json") for item in params.input]
+    return response_to_output_items(response)
 
 
 def completion_items(response: dict[str, Any]) -> list[dict]:

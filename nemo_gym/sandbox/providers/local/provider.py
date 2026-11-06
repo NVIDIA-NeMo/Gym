@@ -102,13 +102,16 @@ class LocalProvider:
         if user is not None:
             raise ValueError("The local sandbox provider cannot run commands as another user")
         inst = handle.raw
+        exec_cwd = Path(cwd) if cwd else inst["workspace"]
+        if cwd and not exec_cwd.is_absolute():
+            exec_cwd = inst["workspace"] / exec_cwd
         timeout = timeout_s if timeout_s is not None else self._default_timeout_s
         async with self._semaphore:
             process = await asyncio.create_subprocess_exec(
                 self._shell,
                 "-c",
                 command,
-                cwd=str(cwd or inst["workspace"]),
+                cwd=str(exec_cwd),
                 env={**os.environ, **inst["env"], **(env or {})},
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,

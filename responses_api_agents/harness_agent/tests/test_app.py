@@ -618,7 +618,8 @@ def test_gym_tar_built_on_init():
         assert agent._gym_tar == "/tmp/fake.tar.gz"
 
 
-def test_runner_marker_survives_redirected_stdout(tmp_path):
+@pytest.mark.parametrize("capture", [False, True])
+def test_runner_marker_survives_redirected_stdout(tmp_path, capture):
     root = Path(__file__).resolve().parents[3]
     mount = tmp_path / "gym_mount"
     mount.mkdir()
@@ -627,13 +628,19 @@ def test_runner_marker_survives_redirected_stdout(tmp_path):
         "import io, sys\nfrom types import SimpleNamespace\n"
         "Config = SimpleNamespace\n"
         "class Agent:\n"
-        "    def __init__(self, **kwargs): pass\n"
+        "    def __init__(self, **kwargs):\n"
+        f"        assert bool(kwargs['server_client'].global_config_dict.get('token_id_capture')) == {capture!r}\n"
         "    async def responses(self, request, params):\n"
         "        sys.stdout = io.StringIO()\n"
         "        return SimpleNamespace(model_dump_json=lambda: '{}')\n"
     )
     for name, body in {
-        "runner_config.json": {"agent_module": "stub_agent", "agent_class": "Agent", "agent_config_class": "Config"},
+        "runner_config.json": {
+            "agent_module": "stub_agent",
+            "agent_class": "Agent",
+            "agent_config_class": "Config",
+            "token_id_capture": capture,
+        },
         "agent_config.json": {},
         "request.json": {"input": "hello"},
     }.items():
@@ -646,15 +653,21 @@ def test_runner_marker_survives_redirected_stdout(tmp_path):
     assert json.loads((tmp_path / "response.json").read_text()) == {}
 
 
-def test_runner_config_carries_agent_symbols():
+@pytest.mark.parametrize("capture", [False, True])
+def test_runner_config_carries_agent_symbols(capture):
     agent = _make_agent(
         agent="opencode",
         sandbox_python="/deps/bin/python3",
     )
+    agent.server_client.global_config_dict = {
+        "token_id_capture": {"enabled": capture, "all_agents": True, "control_auth_token": "not-for-the-runner"}
+    }
     script, runner_config, cmd = agent._runner()
     assert runner_config["agent_module"] == "responses_api_agents.opencode_agent.app"
     assert runner_config["agent_class"] == "OpenCodeAgent"
     assert runner_config["agent_config_class"] == "OpenCodeAgentConfig"
+    assert runner_config["token_id_capture"] is capture
+    assert "not-for-the-runner" not in json.dumps(runner_config)
     assert "runner_config.json" in script
     compile(script, "<agent_runner>", "exec")
     assert cmd == "/deps/bin/python3 runner.py"
