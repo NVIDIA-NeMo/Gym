@@ -648,14 +648,20 @@ async def test_search_asks_tavily_for_twenty_results_and_returns_at_most_twenty(
         make_server(max_results=21)
 
 
-async def test_rejected_key_fails_over_and_provider_bodies_stay_private(server, monkeypatch):
-    bad = http_response(401, {"detail": "secret-key-details"})
+@pytest.mark.parametrize("status, backoff", [(401, []), (429, [(1,)])])
+async def test_rejected_key_fails_over_and_provider_bodies_stay_private(server, monkeypatch, status, backoff):
+    """A rejected key (401) moves to the next key at once, a transient failure (429) after a backoff; every
+    response is released, whatever its status."""
+    bad = http_response(status, {"detail": "secret-key-details"})
     good = http_response(200, {"results": []})
     post = AsyncMock(side_effect=[bad, good])
     monkeypatch.setattr(module, "request", post)
     monkeypatch.setattr(module, "sleep", AsyncMock())
     assert (await search(server, "spin structures")).text == "No results."
     assert [c.kwargs["headers"]["authorization"] for c in post.await_args_list] == ["Bearer key-one", "Bearer key-two"]
+    assert [c.args for c in module.sleep.await_args_list] == backoff
+    bad.release.assert_called_once()
+    good.release.assert_called_once()
     bad.json.assert_not_awaited()
     post.reset_mock(side_effect=True)
     post.return_value = http_response(400, {"detail": "secret-key-details"})
