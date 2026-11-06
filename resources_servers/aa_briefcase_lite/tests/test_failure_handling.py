@@ -93,3 +93,49 @@ async def test_binary_results_survive_a_failed_reference_in_all_mode(make_server
     assert not row.get("mask_sample")
     assert row["rubric_passed"] == 2
     assert row["reward"] == pytest.approx(0.5)
+
+
+async def test_a_conversion_failure_masks_the_row_as_a_verifier_error(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="binary")
+    server.config = server.config.model_copy(update={"preconvert_office_to_pdf": True})
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app.preconvert_dir_async",
+        AsyncMock(return_value=(0, 1, ["report.docx: soffice exited 1"])),
+    )
+    server._aa_checks = [{**c, "taskdoer_output_file": "report.docx"} for c in server._aa_checks]
+
+    row = await _verify(server, tmp_path, {"report.docx": "not really a document"})
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert "conversion failed" in row["failure_reason"]
+
+
+async def test_an_office_file_without_a_render_masks_the_row_as_a_verifier_error(make_server, tmp_path: Path) -> None:
+    server = make_server(reward_mode="binary")
+    server._aa_checks = [{**c, "taskdoer_output_file": "report.docx"} for c in server._aa_checks]
+
+    row = await _verify(server, tmp_path, {"report.docx": "not really a document"})
+
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert "filename-only stub" in row["failure_reason"]
+
+
+async def test_a_task_without_checks_masks_the_row_as_a_verifier_error(make_server, tmp_path: Path) -> None:
+    server = make_server(reward_mode="binary")
+    server._aa_checks = []
+
+    row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert row["failure_kind"] == "verifier_error"
+    assert row["mask_sample"] is True
+
+
+def test_pairwise_mode_without_references_is_refused_at_startup(make_server) -> None:
+    server = make_server(reward_mode="pairwise", pairwise_references={}, pairwise_reference_ids=[])
+
+    with pytest.raises(ValueError, match="at least one pairwise reference"):
+        server._require_pairwise_references()

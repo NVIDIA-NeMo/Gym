@@ -31,6 +31,13 @@ from openai import AsyncOpenAI, DefaultAsyncHttpxClient, DefaultHttpxClient, Ope
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.core import (
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.server_runtime import BaseVerifyResponse, SimpleResourcesServer
 from nemo_gym.verification import JUDGE_FAILURES, is_judge_failure, reraise_judge_errors
 from resources_servers.gdpval import persisted_layout
@@ -69,6 +76,11 @@ SANDBOX_WORKDIR = "/home/user"
 SOURCE_DIRECTORIES = ("shared", "week")
 
 logger = logging.getLogger(__name__)
+
+
+class AAEvaluationFault(RuntimeError):
+    """The evaluation could not stage, convert or read what it grades; the model is not at fault."""
+
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
@@ -264,7 +276,7 @@ def _requested_filenames(checks: list[dict[str, Any]]) -> list[str]:
             if not name:
                 continue
             if Path(name).name != name or name in {".", ".."}:
-                raise ValueError(f"invalid taskdoer_output_file entry: {name!r}")
+                raise AAEvaluationFault(f"invalid taskdoer_output_file entry: {name!r}")
             names.add(name)
     return sorted(names)
 
@@ -324,7 +336,7 @@ def _stage_submission(
             continue
         render = _existing_render(candidate)
         if render is None:
-            raise RuntimeError(
+            raise AAEvaluationFault(
                 f"{candidate.name} has no PDF render beside it and Office-to-PDF conversion is "
                 "off, so the judge would receive a filename-only stub. Place a render next to "
                 "the deliverable, or set preconvert_office_to_pdf=true on a host with LibreOffice."
@@ -382,6 +394,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         self._aa_binary_system = (root / "prompts" / "judge_system.txt").read_text(encoding="utf-8")
         self._aa_binary_user = (root / "prompts" / "judge_user.txt").read_text(encoding="utf-8")
         self._require_office_rendering()
+        self._require_pairwise_references()
         super().model_post_init(context)
 
     @property
@@ -410,6 +423,10 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 "preconvert_office_to_pdf=false."
             )
 
+    def _require_pairwise_references(self) -> None:
+        if self.config.reward_mode in {"pairwise", "all"} and not self._resolved_references():
+            raise ValueError("pairwise mode requires at least one pairwise reference")
+
     def _checks_for_task(self, task_id: str, scoring_type: str) -> list[dict[str, Any]]:
         checks = [
             check
@@ -417,15 +434,15 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             if check.get("task_id") == task_id and check.get("scoring_type") == scoring_type
         ]
         if not checks:
-            raise ValueError(f"no {scoring_type} checks found for AA-Briefcase-Lite task {task_id!r}")
+            raise AAEvaluationFault(f"no {scoring_type} checks found for AA-Briefcase-Lite task {task_id!r}")
         return checks
 
     def _task_markdown(self, task_id: str) -> str:
         if not re.fullmatch(r"w\d+_t\d+", task_id):
-            raise ValueError(f"invalid AA-Briefcase-Lite task id: {task_id!r}")
+            raise AAEvaluationFault(f"invalid AA-Briefcase-Lite task id: {task_id!r}")
         path = self._aa_dataset_root / "tasks" / f"{task_id}.md"
         if not path.is_file():
-            raise FileNotFoundError(f"task markdown not found: {path}")
+            raise AAEvaluationFault(f"task markdown not found: {path}")
         return path.read_text(encoding="utf-8")
 
     async def _preconvert(self, stage: Path) -> None:
@@ -433,7 +450,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             return
         _ok, failed, errors = await preconvert_dir_async(stage, self.config.preconvert_max_concurrent)
         if failed:
-            raise RuntimeError(f"AA artifact Office-to-PDF conversion failed: {errors}")
+            raise AAEvaluationFault(f"AA artifact Office-to-PDF conversion failed: {errors}")
 
     async def _section(self, stage: Path, judge: ResolvedJudge, missing: list[str]) -> list[dict[str, Any]]:
         blocks = await asyncio.to_thread(
@@ -824,6 +841,33 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         body, masked = await resolve_deliverables(self, request, body)
         if masked is not None:
             return AABriefcaseLiteVerifyResponse(**body.model_dump(), verify_mode=self.config.reward_mode, **masked)
+        try:
+            return await self._grade(body)
+        except AAEvaluationFault as fault:
+            # The verifier failed, not the model: the row keeps its deliverable and is masked, and a
+            # reverify can grade it once the cause is fixed.
+            logger.error("AA-Briefcase-Lite task %s could not be graded: %s", body.task_id, fault)
+            event = NgFailureEvent(
+                boundary=FailureBoundary.RESOURCES_SERVER,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=str(fault)[:2000],
+                operation="verify",
+                operation_id=current_verifier_invocation_id(),
+                stage="verification",
+                exception_type=type(fault).__name__,
+            )
+            event.__cause__ = fault
+            observe_failure(event)
+            return AABriefcaseLiteVerifyResponse(
+                **body.model_dump(),
+                verify_mode=self.config.reward_mode,
+                reward=0.0,
+                mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
+                failure_reason=str(fault)[:2000],
+            )
+
+    async def _grade(self, body: AABriefcaseLiteVerifyRequest) -> AABriefcaseLiteVerifyResponse:
         task_markdown = self._task_markdown(body.task_id)
         binary_checks = self._checks_for_task(body.task_id, "binary")
         pairwise_checks = self._checks_for_task(body.task_id, "pairwise")
@@ -855,8 +899,6 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                         modalities=modalities,
                         label="submitted artifact",
                     )
-                if not self._resolved_references():
-                    raise ValueError("pairwise mode requires at least one pairwise reference")
                 pairwise_reward, pairwise_results, wins, losses, ties, pairwise_invalid = await self._verify_pairwise(
                     body,
                     task_markdown,
