@@ -123,12 +123,16 @@ def _strip_trajectory_images(trajectory: TrajectoryRecord) -> TrajectoryRecord:
 
 
 class LabbenchVLMAgentContext(BaseModel):
-    """The ``agent_context`` a labbench2 task carries: its media directory and its subtask tag."""
+    """The ``agent_context`` a labbench2 task carries: its media directory and its subtask tag.
+
+    The tag is required: it picks text or image media for protocolqa2 under ``media_mode=text``, so a row without it
+    would reach the model with a different prompt than on /run.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     media: AgentContextArtifact
-    tag: str = ""
+    tag: str
 
 
 @dataclass

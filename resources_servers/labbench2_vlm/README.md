@@ -41,9 +41,14 @@ sending the request to the model. Other tags always keep image rendering even if
 Under an agent session (`single_agent_turn` or `single_agent_turn_legacy`), the agent reads the same
 media from the row's `agent_context` instead: `artifacts.media` is the media directory and `values.tag`
 the subtask tag. It resolves the directory at seed, embeds the media in the session's episode, and refuses a
-session whose row has no `agent_context` or whose media directory is missing (HTTP 422), so a session
-never runs without its images. Images are removed from the session's observations and trajectory when
-`strip_images_from_output` is on.
+session whose row has no `agent_context`, no `values.tag`, or no media directory (HTTP 422), so a session
+never runs without its images or with another prompt than `/run`. Images are removed from the session's
+observations and trajectory when `strip_images_from_output` is on.
+
+A session resolves the media directory through symlinks and refuses one that leaves `media_base_dir`. When the
+media lives on other storage behind a symlink, point `media_base_dir` at the real directory the media paths are
+relative to: with `data/media -> /shared/labbench2/media`, set `media_base_dir: /shared/labbench2`. Otherwise
+every session is refused while `/run` still works.
 
 Use `media_mode=image` (default) for all-VLM runs. Use `+media_mode=text` when you
 want protocol rows as extracted text (including mixed splits); `run.sh` passes

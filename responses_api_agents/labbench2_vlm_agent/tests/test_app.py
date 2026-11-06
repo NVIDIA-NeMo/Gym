@@ -156,6 +156,68 @@ def test_an_agent_session_without_its_media_is_refused(session_agent, media_path
     server_client.post.assert_not_awaited()
 
 
+def test_an_agent_session_without_the_tasks_tag_is_refused(session_agent) -> None:
+    """The tag picks text or images for protocolqa2, so without it the model could get another prompt than /run."""
+    agent, server_client = session_agent
+    seed = _seed("figs/1").model_copy(update={"agent_context": AgentContext(artifacts={"media": {"path": "figs/1"}})})
+
+    seeded = TestClient(agent.setup_webserver()).post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+
+    assert seeded.status_code == 422
+    assert seeded.json()["detail"] == "agent_context does not satisfy LabbenchVLMAgentContext: tag: Field required"
+    server_client.post.assert_not_awaited()
+
+
+_EXAMPLE_JSONL = Path(__file__).parents[3] / "resources_servers/labbench2_vlm/data/example.jsonl"
+# The committed example rows by tag, with their media under the agent's default media_base_dir.
+_EXAMPLE_ROWS = {
+    row["verifier_metadata"]["tag"]: row for row in map(json.loads, _EXAMPLE_JSONL.read_text().splitlines())
+}
+
+
+def _recording_agent(media_mode: str) -> tuple[LabbenchVLMAgent, list[dict]]:
+    """An agent whose model calls are recorded; the Resources Server accepts every seed and verify."""
+    model_requests = []
+
+    async def post(**kwargs) -> MagicMock:
+        body = kwargs["json"]
+        body = body.model_dump(mode="json") if hasattr(body, "model_dump") else body
+        if kwargs["url_path"].endswith("/v1/responses"):
+            model_requests.append(body)
+            return _model_reply(f"resp-{len(model_requests)}")
+        reply = MagicMock(status=200, cookies={}, ok=True)
+        reply.read = AsyncMock(return_value=json.dumps(body | {"reward": 1.0}))
+        return reply
+
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {}
+    server_client.post = AsyncMock(side_effect=post)
+    return LabbenchVLMAgent(config=_agent_config(media_mode=media_mode), server_client=server_client), model_requests
+
+
+@pytest.mark.parametrize(
+    ("tag", "media_mode", "blocks"),
+    [
+        ("protocolqa2", "text", ["input_text", "input_text"]),
+        ("protocolqa2", "image", ["input_image", "input_text"]),
+        ("figqa2-img", "text", ["input_image", "input_text"]),
+    ],
+)
+def test_an_agent_session_sends_the_model_the_same_request_as_run(tag: str, media_mode: str, blocks: list) -> None:
+    row = _EXAMPLE_ROWS[tag]
+    run_agent, run_requests = _recording_agent(media_mode)
+    assert TestClient(run_agent.setup_webserver()).post("/run", json=row).status_code == 200
+
+    session_agent, session_requests = _recording_agent(media_mode)
+    client = TestClient(session_agent.setup_webserver())
+    seed = _seed(None).model_copy(update={"agent_context": AgentContext.model_validate(row["agent_context"])})
+    assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+    assert client.post("/ng-rollout/rollout/v1/responses", json=row["responses_create_params"]).status_code == 200
+
+    assert session_requests == run_requests
+    assert [block["type"] for block in session_requests[0]["input"][0]["content"]][-2:] == blocks
+
+
 def test_effective_media_mode_text_only_for_protocolqa2() -> None:
     assert _effective_media_mode("image", {"tag": "protocolqa2"}) == "image"
     assert _effective_media_mode("text", {"tag": "protocolqa2"}) == "text"
