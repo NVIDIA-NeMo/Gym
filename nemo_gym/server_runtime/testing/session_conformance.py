@@ -36,6 +36,7 @@ def check_resources_session_contract(
     ``seed`` must use a ``resources_session_id`` the app has not seen. With ``keeps_state``:
 
     - a seed that names the open session's ID with another episode is refused with 409;
+    - a close of the open session that names another episode is refused with 409 and releases nothing;
     - a close of the closed session that names another episode is refused with 409;
     - a seed that arrives after its session closed, or after a close for an ID that was never seeded, is refused
       with 409 while the session is fenced (``session_close_retry_window_seconds``). A server that keeps
