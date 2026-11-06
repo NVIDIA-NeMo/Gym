@@ -5839,7 +5839,7 @@ def gate_summary_from_collected(
     judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
     task["warnings"] = (
         task["warnings"]
-        + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
+        + [f"rollout quality {judged} the configured criterion: {rollout_reasons}"]
         + health_check_facts(collected.quality)
         + ([f"health gate within the bounded failure policy: {trial_reason}"] if trial_passed else [])
         + [task["health_verdict"]]
