@@ -31,7 +31,7 @@ shared_run_warmup_env_vars:
 run:
   env:
     _copy: shared_run_warmup_env_vars
-    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-prefill-dp4tp1-decode
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-expertmetrics
     SBATCH_TIMELIMIT: "01:30:00"
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
