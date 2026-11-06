@@ -127,7 +127,7 @@ when using `opencode_sessions.yaml`:
 visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
-      network_access: all
+      network_access: inherit
       opencode_config:
         tools:
           webfetch: true
@@ -135,7 +135,7 @@ visual_agent:
 ```
 
 Configure each tool independently; omitted tools default to disabled. The example
-enables WebFetch only when `network_access: all` is also explicitly selected. The adapter derives the corresponding permissions from
+enables WebFetch only when `network_access: inherit` is also explicitly selected. The adapter derives the corresponding permissions from
 these two tool settings. On the local compatibility path, use the configured
 agent name (`visual_opencode` in the
 example recipes) instead of `visual_agent`. Use separate agent configurations
@@ -148,8 +148,8 @@ service; it is independent of the model provider and requires outbound access.
 The flag is explicitly off when WebSearch is disabled.
 
 The Agent-X [OpenCode pairing](../../benchmarks/opencode_multimodal_benchmarks/agentx/opencode.yaml)
-enables WebSearch with `network_access: websearch`; WebFetch stays disabled.
-Other benchmark pairings default to `network_access: none`.
+enables WebSearch with `network_access: model_and_websearch`; WebFetch stays disabled.
+Other benchmark pairings default to `network_access: model_only`.
 
 This is a tool-permission setting, not a network firewall: Bash and Python can
 still make network requests if the sandbox permits them. Use sandbox network
@@ -159,10 +159,10 @@ can give that wildcard precedence over specific denies.
 
 ## Enforced network access and per-sample tools
 
-Set `network_access` to `none`, `websearch`, or `all` to control harness and tool
-network access. The default is `none` for both training and evaluation. Choose `all` explicitly
-to retain unrestricted sandbox networking.
-Restricted modes keep the configured model API reachable; `websearch` also permits
+Set `network_access` to `model_only`, `model_and_websearch`, or `inherit` to control harness and tool
+network access. The default is `model_only` for both training and evaluation.
+`inherit` preserves the sandbox’s existing network policy without granting extra access.
+Restricted modes keep the configured model API reachable; `model_and_websearch` also permits
 OpenCode's Exa service. These controls apply to owned Linux sandbox sessions and
 the local Bubblewrap training path. They require nested Linux namespaces.
 

@@ -17,8 +17,12 @@ from nemo_gym.agents import (
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
+    SandboxNetworkAccess,
+    restrict_sandbox_network,
 )
 from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputItem
+from nemo_gym.sandbox import SandboxProvider, SandboxSpec
+from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.media import stage_inputs
@@ -36,8 +40,34 @@ class MultimodalSessionMixin:
 
     session_state_type: ClassVar[type[OpenCodeSandboxSession]] = MultimodalSandboxSession
 
+    def _sandbox_network_access(self) -> SandboxNetworkAccess:
+        return {"model_only": "model_only", "model_and_websearch": "model_and_tools", "inherit": "inherit"}[
+            self.config.network_access
+        ]
+
+    def _restrict_owned_sandbox_network(
+        self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
+    ) -> SandboxSpec:
+        # Native web tools use Exa, not the episode's MCP grants. Restricted
+        # profiles cannot serve required MCP tools on arbitrary origins.
+        if self.config.network_access != "inherit" and any(
+            isinstance(access, MCPToolAccess) and access.required for access in self.effective_tool_accesses(body)
+        ):
+            raise AgentSeedRejectedError("Restricted multimodal networking does not allow required MCP tool grants")
+        if provider.name == "opensandbox":
+            return restrict_sandbox_network(
+                spec,
+                network_access=self._sandbox_network_access(),
+                provider=provider,
+                model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                tool_urls=["https://mcp.exa.ai"] if self.config.network_access == "model_and_websearch" else (),
+            )
+        # Enroot and local providers have no OpenSandbox egress API. Their
+        # harness launch uses the namespace/proxy boundary below instead.
+        return spec
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
-        if self.config.network_access != "all" and body.sandbox_access is not None:
+        if self.config.network_access != "inherit" and body.sandbox_access is not None:
             raise AgentSeedRejectedError("Restricted networking requires an owned sandbox")
         if body.continuation is not None:
             raise AgentSeedRejectedError("Multimodal sessions accept one initial task, not continuation inputs")
@@ -118,7 +148,7 @@ class MultimodalSessionMixin:
         assert isinstance(state, MultimodalSandboxSession)
         network_access = self._network_access_for_request(body)
         allowed_tools = self._tools_for_request(body)
-        if network_access != "all" and state.request.sandbox_access is not None:
+        if network_access != "inherit" and state.request.sandbox_access is not None:
             raise HTTPException(422, "Restricted networking requires an owned sandbox")
         with TemporaryDirectory(prefix="gym-visual-session-") as temporary:
             directory = Path(temporary)
@@ -179,8 +209,7 @@ class MultimodalSessionMixin:
             )
             payload["env"]["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
             payload["env"].update(runner._web_tool_environment())
-            if allowed_tools is not None:
-                payload["env"]["OPENCODE_ENABLE_EXA"] = "1" if "websearch" in allowed_tools else "0"
+            payload["env"]["OPENCODE_ENABLE_EXA"] = "1" if config.get("tools", {}).get("websearch", False) else "0"
             payload["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(runner.config.max_output_tokens)
             payload["env"]["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(
                 self.config.command_exec_timeout * 1000
@@ -188,7 +217,7 @@ class MultimodalSessionMixin:
             payload["command"].extend(
                 ["--model", runner._effective_model(), "--agent", "build", "--file", *image_paths, "--"]
             )
-            if network_access != "all":
+            if network_access != "inherit":
                 network_runner = f"{state.session.session_dir}/network_runner.py"
                 await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), network_runner)
                 payload["command"] = [

@@ -44,7 +44,18 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     if harness == "simple":
         return {"installation": "builtin"}
     if use_agent_sessions and harness not in ("hermes", "opencode_multimodal"):
-        return {"installation": "agent_session"}
+        runtime = {"installation": "agent_session"}
+        if harness == "nooa":
+            adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
+            runtime.update(
+                pyproject_sha256=digest_file(adapter / "pyproject.toml"),
+                lock_sha256=digest_file(adapter / "uv.lock"),
+                bootstrap_sha256=digest_file(adapter / "sandbox_runtime.py"),
+                sandbox_ownership="resources",
+                execution_mode="sandboxed",
+                observer_sha256=digest_file(Path(__file__).with_name("nooa_observer.py")),
+            )
+        return runtime
     if harness == "opencode_multimodal":
         harness = "opencode"
     if harness == "hermes":
@@ -128,7 +139,20 @@ def _config(
         profile_agent.update(agent)
         agent = profile_agent
         agent.update(entrypoint="eval.py", workspace_root=str(directory / "workspace"), timeout=timeout)
-    if use_agent_sessions and harness != "simple":
+    if harness == "nooa":
+        agent.pop("model")
+        agent.pop("concurrency")
+        from .nooa import observer_module_name
+
+        agent.update(
+            nooa={
+                **defaults["nooa"],
+                "execution_mode": "sandboxed",
+                "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
+            }
+        )
+        agent["sandbox_runner_timeout_seconds"] = timeout
+    if use_agent_sessions and harness not in ("simple", "nooa"):
         # The verifier only reads retained output, so the agent can own this local sandbox.
         agent.update(sandbox_provider="probe_sandbox", sandbox_config={"workdir": str(directory / "workspace")})
     if harness == "simple":
@@ -194,7 +218,7 @@ def _config(
             "responses_api_models": {"probe": {**server(ports["judge_model"]), "name": "judge_model"}}
         }
     if use_agent_sessions and harness != "simple":
-        config["probe_sandbox"] = {"local": {"concurrency": 1}}
+        config["probe_sandbox"] = {("conformance_local" if harness == "nooa" else "local"): {"concurrency": 1}}
     return config
 
 
@@ -217,14 +241,19 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-    probe = probe_cls(
-        scenario,
-        directory,
-        sandbox_workspace_root=directory / "workspace"
-        if harness == "opencode_multimodal" and not use_agent_sessions
-        else None,
-    )
+    if harness == "nooa":
+        from .nooa import BorrowedSandboxProbe
+
+        probe = BorrowedSandboxProbe(scenario, directory)
+    else:
+        probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
+        probe = probe_cls(
+            scenario,
+            directory,
+            sandbox_workspace_root=directory / "workspace"
+            if harness == "opencode_multimodal" and not use_agent_sessions
+            else None,
+        )
     probe.save()
     tasks = []
     servers = []

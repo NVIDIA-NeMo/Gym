@@ -14,7 +14,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from nemo_gym.agents import Body
 from nemo_gym.client import get_response_json, raise_for_status
@@ -50,6 +50,12 @@ from responses_api_agents.opencode_multimodal_agent.sessions import MultimodalSa
 
 
 ROOT = Path(__file__).parent
+NetworkAccess = Literal["inherit", "model_only", "model_and_websearch"]
+_NETWORK_ALIASES = {"all": "inherit", "none": "model_only", "websearch": "model_and_websearch"}
+
+
+def normalize_network_access(value: str) -> str:
+    return _NETWORK_ALIASES.get(value, value)
 
 
 class OpenCodeImageConfig(BaseModel):
@@ -81,7 +87,7 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     # unsandboxed local harness tests; a unique cwd does not isolate /tmp.
     sandbox: EvalSandboxConfig | None = None
     # Harness egress is restricted by default; the model API remains reachable.
-    network_access: Literal["all", "none", "websearch"] = "none"
+    network_access: NetworkAccess = "model_only"
     # Optional run allowlist; request metadata may select a subset. None retains native tools.
     allowed_tools: list[str] | None = None
     max_source_pixels: int = Field(default=150_000_000, gt=0)
@@ -99,6 +105,11 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
             "mcqa_simple_agent": "mcqa",
         }
     )
+
+    @field_validator("network_access", mode="before")
+    @classmethod
+    def normalize_network_alias(cls, value: Any) -> Any:
+        return normalize_network_access(value) if isinstance(value, str) else value
 
     @model_validator(mode="after")
     def validate_episode_config(self) -> "OpenCodeMultimodalAgentConfig":
@@ -150,14 +161,13 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
 
     config: OpenCodeMultimodalAgentConfig
 
-    def _network_access_for_request(
-        self, body: NeMoGymResponseCreateParamsNonStreaming
-    ) -> Literal["all", "none", "websearch"]:
+    def _network_access_for_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> NetworkAccess:
         """Select a dataset policy without exceeding the run's configured access."""
         selected = (body.metadata or {}).get("network_access", self.config.network_access)
-        levels = {"none": 0, "websearch": 1, "all": 2}
+        selected = normalize_network_access(selected)
+        levels = {"model_only": 0, "model_and_websearch": 1, "inherit": 2}
         if selected not in levels:
-            raise HTTPException(422, "metadata.network_access must be none, websearch or all")
+            raise HTTPException(422, "metadata.network_access must be model_only, model_and_websearch or inherit")
         if levels[selected] > levels[self.config.network_access]:
             raise HTTPException(422, "Sample network_access exceeds the configured run policy")
         return selected
@@ -194,7 +204,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         ):
             raise HTTPException(422, "Sample requests a tool disabled in the run configuration")
         mode = self._network_access_for_request(body)
-        if ("webfetch" in selected and mode != "all") or ("websearch" in selected and mode == "none"):
+        if ("webfetch" in selected and mode != "inherit") or ("websearch" in selected and mode == "model_only"):
             raise HTTPException(422, "Sample tools exceed its network policy")
         if "task" in selected and not self.config.subagents_enabled:
             raise HTTPException(422, "Subagents are disabled in the run configuration")
@@ -313,18 +323,36 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         )
         return config
 
+    def _restricted_websearch_enabled(self) -> bool:
+        overrides = self.config.opencode_config
+        return (
+            self.config.network_access == "model_and_websearch"
+            and overrides.get("tools", {}).get("websearch") is not False
+            and overrides.get("permission", {}).get("websearch") != "deny"
+            and (self.config.allowed_tools is None or "websearch" in self.config.allowed_tools)
+        )
+
     def _write_opencode_config(self, work_dir: Path, rollout_id: str | None = None) -> None:
         super()._write_opencode_config(work_dir, rollout_id)
-        if self.config.network_access != "all":
+        if self.config.network_access != "inherit":
             path = work_dir / "opencode.json"
             config = json.loads(path.read_text())
-            enabled = self.config.network_access == "websearch"
+            enabled = self._restricted_websearch_enabled()
             config.setdefault("tools", {}).update(webfetch=False, websearch=enabled)
             permissions = [config.setdefault("permission", {})]
             permissions.extend(agent.setdefault("permission", {}) for agent in config.get("agent", {}).values())
             for permission in permissions:
                 permission.pop("*", None)
-                permission.update(webfetch="deny", websearch="allow" if enabled else "deny")
+                permission.update(
+                    webfetch="deny",
+                    websearch="allow" if enabled else "deny",
+                )
+            for name, agent in config.get("agent", {}).items():
+                disabled = (
+                    self.config.opencode_config.get("agent", {}).get(name, {}).get("permission", {}).get("websearch")
+                    == "deny"
+                )
+                agent["permission"]["websearch"] = "allow" if enabled and not disabled else "deny"
             path.write_text(json.dumps(config, indent=2))
         if self.config.allowed_tools is not None:
             path = work_dir / "opencode.json"
@@ -362,9 +390,9 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     def _env(self, data_home: str, rollout_id: str | None = None) -> dict[str, str]:
         env = super()._env(data_home, rollout_id)
         env.update(self._web_tool_environment())
-        if self.config.network_access != "all":
-            env["OPENCODE_ENABLE_EXA"] = "1" if self.config.network_access == "websearch" else "0"
-        if self.config.allowed_tools is not None:
+        if self.config.network_access != "inherit":
+            env["OPENCODE_ENABLE_EXA"] = "1" if self._restricted_websearch_enabled() else "0"
+        if self.config.network_access == "inherit" and self.config.allowed_tools is not None:
             env["OPENCODE_ENABLE_EXA"] = "1" if "websearch" in self.config.allowed_tools else "0"
         # Supported stock flags, not a separate runtime/provider.
         env["OPENCODE_EXPERIMENTAL_BASH_DEFAULT_TIMEOUT_MS"] = str(self.config.command_exec_timeout * 1000)
@@ -379,7 +407,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
 
     def _prepare_command(self, command: list[str], project_dir: Path, env: dict[str, str]) -> list[str]:
         if self.config.sandbox is None:
-            if self.config.network_access != "all":
+            if self.config.network_access != "inherit":
                 raise ValueError("Restricted local networking requires the filesystem sandbox")
             return super()._prepare_command(command, project_dir, env)
         # The native runner constructs --file arguments from freshly staged inputs.
@@ -400,7 +428,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         executable = Path(executable_path).resolve()
         mapped[0] = "/agent-bin/opencode"
         launch = sandbox_command(self.config.sandbox, project_dir, executable, env, mapped)
-        if self.config.network_access == "all":
+        if self.config.network_access == "inherit":
             return launch
         config = json.loads((project_dir / "opencode.json").read_text())
         return [

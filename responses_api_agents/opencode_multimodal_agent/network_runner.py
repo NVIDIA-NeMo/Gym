@@ -141,7 +141,7 @@ async def run_child(command: list[str], env: dict[str, str] | None = None) -> in
 
 
 async def run(args: argparse.Namespace) -> int:
-    if args.mode == "all":
+    if args.mode == "inherit":
         os.execvp(args.command[0], args.command)
     if args.inside:
         loopback_up()
@@ -157,7 +157,9 @@ async def run(args: argparse.Namespace) -> int:
         env["NO_PROXY"] = env["no_proxy"] = ""
         # Pin the stock search provider; no arbitrary pages are reachable through the proxy.
         env["OPENCODE_WEBSEARCH_PROVIDER"] = "exa"
-        env["OPENCODE_ENABLE_EXA"] = "1" if args.mode == "websearch" else "0"
+        env["OPENCODE_ENABLE_EXA"] = (
+            os.environ.get("OPENCODE_ENABLE_EXA", "1") if args.mode == "model_and_websearch" else "0"
+        )
         env["OPENCODE_ENABLE_PARALLEL"] = "0"
         if args.bubblewrap:
             # Bubblewrap clears the inherited environment; forward only this wrapper's network settings.
@@ -179,7 +181,7 @@ async def run(args: argparse.Namespace) -> int:
         async with server:
             return await run_child(args.command, env)
     allowed = {origin(args.model_url)}
-    if args.mode == "websearch":
+    if args.mode == "model_and_websearch":
         allowed.add(SEARCH_ORIGIN)
     # /tmp keeps Unix socket addresses below Linux's length limit.
     with tempfile.TemporaryDirectory(prefix="gym-net-") as directory:
@@ -213,17 +215,20 @@ async def run(args: argparse.Namespace) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("none", "websearch", "all"), required=True)
+    parser.add_argument(
+        "--mode", choices=("model_only", "model_and_websearch", "inherit", "none", "websearch", "all"), required=True
+    )
     parser.add_argument("--model-url")
     parser.add_argument("--inside", help=argparse.SUPPRESS)
     parser.add_argument("--bubblewrap", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("command", nargs=argparse.REMAINDER)
     args = parser.parse_args()
+    args.mode = {"none": "model_only", "websearch": "model_and_websearch", "all": "inherit"}.get(args.mode, args.mode)
     if args.command[:1] == ["--"]:
         args.command.pop(0)
     if not args.command:
         parser.error("A command is required")
-    if args.mode != "all" and not args.inside and not args.model_url:
+    if args.mode != "inherit" and not args.inside and not args.model_url:
         config = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or Path("opencode.json").read_text())
         args.model_url = config["provider"]["nemo"]["options"]["baseURL"]
     return asyncio.run(run(args))

@@ -190,7 +190,7 @@ def test_seed_task_never_receives_golden_or_hidden_verification_files(consumer):
         assert sandboxes[0].initial_files == {}
 
 
-# --- additional coverage: the real _create_sandbox, grading-attempt cleanup, legacy seed vs typed session ----------
+# --- additional coverage: the real _create_sandbox, grading-attempt cleanup, agent-run seed vs episode session
 
 
 def _use_real_create_sandbox(consumer, monkeypatch):
@@ -216,7 +216,7 @@ def _use_real_create_sandbox(consumer, monkeypatch):
     return module, fixtures, server, created
 
 
-def test_a_typed_episode_stops_every_sandbox_the_real_create_sandbox_started(consumer, monkeypatch):
+def test_an_episode_session_stops_every_sandbox_the_real_create_sandbox_started(consumer, monkeypatch):
     _, fixtures, server, created = _use_real_create_sandbox(consumer, monkeypatch)
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=fixtures._seed().model_dump(mode="json"))
@@ -309,17 +309,17 @@ def test_a_failed_stop_of_an_inconclusive_attempt_keeps_the_handle_and_close_ret
 
 
 @pytest.mark.parametrize("closed_first", [False, True], ids=["open", "closed"])
-async def test_a_legacy_seed_cannot_replace_a_typed_session(consumer, closed_first):
+async def test_an_agent_run_seed_cannot_replace_an_episode_session(consumer, closed_first):
     module, fixtures, server, sandboxes, _ = consumer
-    legacy_type = module.SWEGymSeedSessionRequest if module is swe_app else module.R2EGymSeedSessionRequest
-    typed = fixtures._seed()
-    request = Request({"type": "http", "session": {SESSION_ID_KEY: typed.resources_session_id}})
-    await server.seed_session(request, typed)
+    agent_run_type = module.SWEGymSeedSessionRequest if module is swe_app else module.R2EGymSeedSessionRequest
+    episode_seed = fixtures._seed()
+    request = Request({"type": "http", "session": {SESSION_ID_KEY: episode_seed.resources_session_id}})
+    await server.seed_session(request, episode_seed)
     if closed_first:
         await server.close_resources_session(request, close_request(fixtures))
-        request.session[SESSION_ID_KEY] = typed.resources_session_id  # the close dropped the cookie key
-    with pytest.raises(ResourcesSessionConflictError, match="legacy seed"):
-        await server.seed_session(request, legacy_type.model_validate(fixtures._ROW))
+        request.session[SESSION_ID_KEY] = episode_seed.resources_session_id  # the close dropped the cookie key
+    with pytest.raises(ResourcesSessionConflictError, match="agent-run seed"):
+        await server.seed_session(request, agent_run_type.model_validate(fixtures._ROW))
     assert len(sandboxes) == 1
     await server.shutdown()
 
@@ -345,7 +345,7 @@ def test_a_failed_task_stop_after_capture_still_grades_a_session_seeded_through_
     assert sandboxes[0].stop.await_count == 2 and not server._session_id_to_sandbox
 
 
-def test_a_failed_task_stop_after_capture_keeps_a_typed_session_retryable_on_the_saved_patch(consumer):
+def test_a_failed_task_stop_after_capture_keeps_an_episode_session_retryable_on_the_saved_patch(consumer):
     module, fixtures, server, sandboxes, _ = consumer
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=fixtures._seed().model_dump(mode="json")).status_code == 200
@@ -363,7 +363,7 @@ def test_a_failed_task_stop_after_capture_keeps_a_typed_session_retryable_on_the
 
 async def test_a_session_seeded_through_run_keeps_its_start_error_when_the_cleanup_stop_fails(consumer, monkeypatch):
     module, fixtures, server, sandboxes, _ = consumer
-    legacy_type, _ = _request_types(module)
+    agent_run_type, _ = _request_types(module)
     session_id = "cookie-session"
 
     async def start_then_fail(self, session_id, body):
@@ -376,7 +376,7 @@ async def test_a_session_seeded_through_run_keeps_its_start_error_when_the_clean
     monkeypatch.setattr(type(server), "_start_task_sandbox", start_then_fail)
     request = Request({"type": "http", "session": {SESSION_ID_KEY: session_id}})
     with pytest.raises(RuntimeError, match="image start failed"):
-        await server.seed_session(request, legacy_type.model_validate(fixtures._ROW))
+        await server.seed_session(request, agent_run_type.model_validate(fixtures._ROW))
     assert server._session_id_to_sandbox[session_id] is sandboxes[0], "the failed stop keeps the handle"
     await server.shutdown()
     assert sandboxes[0].stop.await_count == 2 and not server._session_id_to_sandbox
@@ -401,9 +401,9 @@ async def test_an_interrupted_grading_after_a_failed_extraction_grades_the_same_
         return graded
 
     monkeypatch.setattr(module, "run_verification", grade_once_interrupted)
-    typed = fixtures._seed()
-    request = Request({"type": "http", "session": {SESSION_ID_KEY: typed.resources_session_id}})
-    await server.seed_session(request, typed)
+    episode_seed = fixtures._seed()
+    request = Request({"type": "http", "session": {SESSION_ID_KEY: episode_seed.resources_session_id}})
+    await server.seed_session(request, episode_seed)
     body = verify_type.model_validate(fixtures._VERIFY)
 
     interrupted = asyncio.create_task(server.verify(request, body))

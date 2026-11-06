@@ -53,9 +53,11 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
     verification_failure_fields,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -83,6 +85,7 @@ from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
     SandboxExecResult,
+    SandboxProvider,
     SandboxSpec,
     create_provider,
     resolve_provider_config,
@@ -350,6 +353,15 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Used only when Resources does not supply a borrowed sandbox.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox OpenCode creates: `model_only` allows only the model server's host, "
+            "`model_and_tools` also each MCP grant's host. A restricted sandbox cannot download OpenCode, so set "
+            "`sandbox_executable_path` (or use an image with the runtime already at the cache path). A borrowed task "
+            "sandbox keeps its owner's network, so a session that borrows one rejects any other value than `inherit`."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     capture_failure_artifacts: bool = False
     report_agent_sandbox_oom: bool = False
@@ -919,6 +931,30 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Stage adapter-specific inputs before the shared supervised launch."""
 
+    def _sandbox_network_access(self) -> SandboxNetworkAccess:
+        """Provider policy selected by this adapter; subclasses may translate their policy names."""
+        return self.config.network_access
+
+    def _restrict_owned_sandbox_network(
+        self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
+    ) -> SandboxSpec:
+        return restrict_sandbox_network(
+            spec,
+            network_access=self._sandbox_network_access(),
+            provider=provider,
+            model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+            tool_urls=[
+                str(access.connection.url)
+                for access in self.effective_tool_accesses(body)
+                if isinstance(access, MCPToolAccess)
+            ],
+            required_tool_urls=[
+                str(access.connection.url)
+                for access in self.effective_tool_accesses(body)
+                if isinstance(access, MCPToolAccess) and access.required
+            ],
+        )
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -933,6 +969,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenCode requires direct SandboxAccess")
+            if self._sandbox_network_access() != "inherit":
+                raise AgentSeedRejectedError(
+                    "OpenCode network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir = body.sandbox_access.workdir
             provider_ref = body.sandbox_access.connection.provider_config_ref
         if not isinstance(workdir, str):
@@ -1001,6 +1041,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         plugin_dependencies = self._pinned_file("plugin_dependencies")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
+            try:
+                spec = self._restrict_owned_sandbox_network(spec, provider, body)
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -1278,7 +1323,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _check_sandbox_setup(command: str, result: SandboxExecResult, *, pinned: str | None = None) -> None:
-        """Raise on a failed setup step; a ``pinned`` file that fails its checks refuses the seed (a final 422)."""
+        """Raise on a failed setup step; a ``pinned`` file that fails its checks refuses the seed (a terminal 422)."""
         if pinned is not None and result.return_code == _INPUT_REJECTED and result.error_type is None:
             raise AgentSeedRejectedError(format_error_message(f"Pinned {pinned} rejected", stderr=result.stderr or ""))
         if result.return_code != 0 or result.error_type is not None:

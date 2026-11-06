@@ -107,6 +107,9 @@ def install_runtime(harness: str) -> None:
     if harness == "opencode_multimodal":
         # The sandbox setup installs the native executable.
         return
+    if harness == "nooa":
+        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
+        return
     if harness in ("hermes", "stirrup", "simple", "openclaw"):
         # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
         return

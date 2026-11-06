@@ -54,7 +54,7 @@ def visual_setup(opencode_setup, tmp_path):
             | {
                 "model": "vision-model",
                 # This fixture supplies a borrowed fake sandbox, with no namespace support.
-                "network_access": "all",
+                "network_access": "inherit",
                 "system_prompt": "Inspect carefully.",
                 "tool_rewards": None,
             }
@@ -248,3 +248,47 @@ def test_visual_session_releases_only_its_owned_sandbox(visual_setup, owned):
         assert again.json() == closed.json()
     (sandbox.stop if owned else sandbox.disconnect).assert_awaited_once()
     (sandbox.disconnect if owned else sandbox.stop).assert_not_awaited()
+
+
+@pytest.mark.parametrize("mode", ["model_only", "model_and_websearch", "inherit"])
+@pytest.mark.parametrize("websearch", [False, True])
+def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearch):
+    from unittest.mock import AsyncMock, patch
+
+    original, sandbox = visual_setup
+    agent = OpenCodeMultimodalEvalAgent(
+        config=OpenCodeMultimodalEvalConfig.model_validate(
+            original.config.model_dump() | {"entrypoint": "eval.py", "final_answer_reserve": None}
+        ),
+        server_client=original.server_client,
+    )
+    agent.config.network_access = mode
+    agent.config.opencode_config["tools"] = {"websearch": websearch, "webfetch": False}
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
+    sandbox.expected_workdir = "/agent-workspace"
+    sandbox.start = AsyncMock()
+    request = seed()
+    request.sandbox_access = None
+    request.tool_accesses = []
+    with (
+        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
+        patch("responses_api_agents.opencode_agent.app.resolve_provider_config"),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request_body())
+        assert response.status_code == 200, response.text
+        payload = sandbox.params()
+        enabled = websearch and mode != "model_only"
+        assert payload["env"]["OPENCODE_ENABLE_EXA"] == ("1" if enabled else "0")
+        policy = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert policy["tools"]["websearch"] is enabled
+        assert policy["permission"]["websearch"] == ("allow" if enabled else "deny")
+        if mode != "inherit":
+            assert payload["command"][2:4] == ["--mode", mode]
+        assert (
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
+            == 200
+        )

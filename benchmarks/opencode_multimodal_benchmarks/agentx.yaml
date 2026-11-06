@@ -13,7 +13,7 @@ visual_opencode:
   responses_api_agents:
     opencode_multimodal_agent:
       entrypoint: eval.py
-      network_access: websearch
+      network_access: model_and_websearch
       opencode_config:
         tools:
           webfetch: false
