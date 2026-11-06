@@ -50,6 +50,7 @@ def test_unverified_coverage_is_unverified_with_the_reason_in_warnings():
     assert task["status"] == "UNVERIFIED"
     assert task["errors"] == []
     [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    health += " " + ((task["evaluation_health"] or {}).get("detail") or "")
     assert health.startswith("response/trial health unknown") and "trial: UNOBSERVED 10 of 100" in health
     assert task["health_verdict"].startswith("evaluation health: UNVERIFIED")
 
@@ -137,7 +138,7 @@ def test_status_precedence_of_a_complete_noop(summary_valid, health_passed, scor
 
 
 def _exit_code(monkeypatch, gate_task: dict, **flags) -> int:
-    outcome = SimpleNamespace(ok=True, gate_task=gate_task, model_dump_json=lambda **kw: "{}")
+    outcome = SimpleNamespace(ok=True, gate_task=gate_task, operator_verdict=None, model_dump_json=lambda **kw: "{}")
     monkeypatch.setattr(submit, "recover", lambda *a, **kw: outcome)
     monkeypatch.setattr(submit, "inspect_recovery", lambda *a, **kw: outcome)
     try:

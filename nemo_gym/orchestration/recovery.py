@@ -75,6 +75,7 @@ from nemo_gym.core.failure_kinds import (
     INVALID_OUTPUT_BUDGET,
     INVALID_REQUEST_PARAMETER,
     JUDGE_FAILED,
+    JUDGE_FAILURE_KINDS,
     JUDGE_SKIPPED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
@@ -435,6 +436,8 @@ class RecoveryOutcome(BaseModel):
     # The acceptance gate task entry (status, expected/scored samples, score, errors, warnings); None without evidence.
     # Its status is RUNNING, PLANNED, RESUMING, FAILED, UNVERIFIED or SUCCESS (``gate_task_summary``).
     gate_task: dict[str, Any] | None = None
+    # The one verdict an operator acts on (``operator_verdict``): state, reason and action; set by the CLI.
+    operator_verdict: dict[str, str] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
     # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
@@ -5778,16 +5781,23 @@ def gate_summary_from_collected(
         policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model,
         classification=decision_classification(decision),
     )
+    cause = None
     if trial_passed is None and decision.complete:
+        # The warning names the cause in one sentence; the full reason and the trial boundary stay in the JSON.
+        cause = unverified_cause(decision, collected, evaluation, trial_reason)
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
+        if evaluation is not None:
+            evaluation = {**evaluation, "detail": trial_reason}
     task = gate_task_summary(
         decision,
         score=collected.score,
         summary_valid=summary_valid,
         summary_reasons=summary_reasons,
         health_passed=trial_passed,
-        health_reasons=[] if trial_passed else [trial_reason],
+        health_reasons=[] if trial_passed else [cause["reason"] if cause else trial_reason],
     )
+    task["unverified_cause"] = cause
+    task["rollout_quality"] = rollout_quality_facts(collected.quality)
     task["criteria"] = criteria.report(classification=decision_classification(decision))
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
@@ -5863,6 +5873,250 @@ def gate_summary_from_collected(
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     return task
+
+
+def _rejudged_after_judge_failure(
+    decision: RecoveryDecision, collected: CollectedEvidence
+) -> tuple[set[Identity], Counter]:
+    """The scored identities with a saved judge failure (their answer was judged again), and the HTTP statuses of it."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    found: set[Identity] = set()
+    statuses: Counter = Counter()
+    for row in collected.failures or []:
+        kind, status = _policy_evidence(row)
+        identity = _identity(row)
+        if identity in scored and kind in JUDGE_FAILURE_KINDS:
+            if identity not in found and status is not None:
+                statuses[status] += 1
+            found.add(identity)
+    return found, statuses
+
+
+def unverified_cause(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence,
+    evaluation: Mapping[str, Any] | None,
+    trial_reason: str,
+) -> dict[str, str]:
+    """What made a complete run's health UNVERIFIED, as ``{"kind", "reason"}``: one cause-first sentence with counts.
+
+    ``kind`` is ``judge_rejudged``, ``grading_unobserved``, ``unclassified_failures``, ``recovered_not_joined`` or
+    ``zero_rewards_unprovable``. The last has no cause beyond the missing proof, so the operator verdict treats it as
+    unknown. The full reason of the trial gate stays in ``evaluation_health.detail``.
+    """
+    trials = trial_population(_health_view(decision))
+    counts = trial_counts(decision, collected) or {}
+    rejudged, statuses = _rejudged_after_judge_failure(decision, collected)
+    unrecorded = counts.get("unobserved") or max(trials - counts.get("verifier_recorded", 0), 0)
+    if rejudged and trial_reason.startswith(("trial: UNOBSERVED", "trial: UNVERIFIED, known failures")):
+        why = ", ".join(f"{status} from the judge model server" for status in sorted(statuses)) or "judge failed"
+        reason = f"{len(rejudged)} of {trials} rows were re-judged after a judge failure ({why})"
+        if unrecorded:
+            reason += f"; {unrecorded} rows have no recorded grading"
+        return {"kind": "judge_rejudged", "reason": reason}
+    if trial_reason.startswith("trial: UNOBSERVED"):
+        return {
+            "kind": "grading_unobserved",
+            "reason": f"{counts.get('unobserved', 0)} of {trials} rows have no recorded grading (the verifier saved "
+            "no grading operation or record)",
+        }
+    if "have unknown classification" in trial_reason:
+        unknown = ((evaluation or {}).get("unknown") or {}).get("count")
+        return {
+            "kind": "unclassified_failures",
+            "reason": f"{unknown} of {trials} trial failures have an unknown cause",
+        }
+    if (
+        trial_reason.startswith("trial: UNVERIFIED, recovered attempts not joined")
+        or "counters are malformed" in trial_reason
+    ):
+        return {
+            "kind": "recovered_not_joined",
+            "reason": "recovered attempt errors cannot be tied to a completed call of a scored trial",
+        }
+    return {
+        "kind": "zero_rewards_unprovable",
+        "reason": f"failures recorded only as zero rewards cannot be ruled out over {trials} rows",
+    }
+
+
+def rollout_quality_facts(quality: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """The rollout-quality signals of ``quality_summary.json`` the operator verdict reads: verdict counts and the
+    nonzero issue counts. A signal, never a gate; None when the summary has neither."""
+    if not isinstance(quality, Mapping):
+        return None
+    verdicts, issues = quality.get("verdicts"), quality.get("issues")
+    verdicts = {k: v for k, v in verdicts.items() if type(v) is int} if isinstance(verdicts, dict) else None
+    issues = {k: v for k, v in issues.items() if type(v) is int and v} if isinstance(issues, dict) else None
+    return {"verdicts": verdicts, "issues": issues} if verdicts is not None or issues is not None else None
+
+
+_RECOVER = "`gym eval resubmit --recover`"
+_SUBMIT_AGAIN = "`gym eval submit` again"
+_STOP_CAUSES = (
+    ("provider_credentials_rejected", "the provider credentials"),
+    ("driver_install_failed", "the driver install (ref, network or image)"),
+    ("server_spinup_timeout", "the server start-up configuration"),
+    ("collection_resume_refused", "the configuration that differs from the saved run"),
+)
+_UNVERIFIED_PRODUCERS = {
+    "judge_rejudged": "the judge model server or its credentials",
+    "grading_unobserved": "the verifier that saves no grading record",
+    "unclassified_failures": "the producer of the unclassified failures",
+    "recovered_not_joined": "the producer that records recovered attempts",
+}
+_OPEN_STATES = (
+    IdentityState.JUDGE_RECOVERABLE,
+    IdentityState.RETRYABLE,
+    IdentityState.MISSING,
+    IdentityState.EXHAUSTED,
+    IdentityState.TERMINAL,
+    IdentityState.MASKED,
+    IdentityState.UNKNOWN,
+)
+
+
+def _verdict(state: str, reason: str, action: str) -> dict[str, str]:
+    return {"state": state, "reason": reason, "action": action}
+
+
+def _flagged_everything(
+    gate_task: Mapping[str, Any], decision: RecoveryDecision, expected: int
+) -> tuple[str, str, int] | None:
+    """``(what, check, flagged)`` when rollout quality flags every rollout, else None."""
+    issues = ((gate_task.get("rollout_quality") or {}).get("issues")) or {}
+    tasks = len({identity[0] for identities in decision.identities.values() for identity in identities})
+    if expected and issues.get("rollout_ended_on_failed_model_call", 0) >= expected:
+        return "every rollout ended on a failed model call", "rollout_ended_on_failed_model_call", expected
+    if tasks and issues.get("task_no_successful_model_calls", 0) >= tasks:
+        return "no task had a successful model call", "task_no_successful_model_calls", expected
+    return None
+
+
+def operator_verdict(gate_task: Mapping[str, Any] | None, decision: RecoveryDecision | None) -> dict[str, str]:
+    """The one verdict an operator acts on, derived from the gate and the decision only.
+
+    ``state`` is ``accept`` (gate SUCCESS, coverage complete, run health PASS, decision noop), ``needs_action`` (a
+    STOP, FAILED, incomplete coverage, failed run health, or UNVERIFIED with a known cause) or ``unknown`` (UNVERIFIED
+    without a known cause, a live job, or evidence missing). ``reason`` is one sentence naming the dominant cause with
+    counts; ``action`` is the one thing to do. Rollout quality never changes the state: an accepted run whose every
+    rollout is flagged says so in its reason and points at the quality read.
+    """
+    if gate_task is None or decision is None:
+        return _verdict("unknown", "no evidence was collected", "inspect again once the reader runs")
+    status, errors = gate_task.get("status"), gate_task.get("errors") or []
+    counts = decision.counts
+    expected = gate_task.get("expected_samples") or decision.expected
+    if status in ("RUNNING", "RESUMING") or decision.scheduler_live:
+        return _verdict(
+            "unknown", "a job of the run is live, so the result is not final", "wait for it to end, then inspect again"
+        )
+    if decision.action == RecoveryAction.UNKNOWN:
+        return _verdict("unknown", f"nothing was decided: {decision.reason}", "inspect again once the reader runs")
+    open_text = ", ".join(f"{counts[s]} {s.value}" for s in _OPEN_STATES if counts.get(s))
+    if decision.action == RecoveryAction.FRESH_RESTART:
+        return _verdict("needs_action", f"the run saved no task inventory ({decision.reason})", _SUBMIT_AGAIN)
+    if decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
+        settled = expected - sum(counts.get(s, 0) for s in _OPEN_STATES)
+        return _verdict(
+            "needs_action",
+            f"{settled} of {expected} rollouts are settled; {open_text or 'recovery work'} remain",
+            f"{_RECOVER} now",
+        )
+    if decision.action == RecoveryAction.STOP:
+        if PROVIDER_QUOTA_EXHAUSTED in decision.reason:
+            resets = quota_reset_text(decision.reason)
+            wait = f"wait until {resets}" if resets else "wait until the provider quota resets (no time recorded)"
+            waiting = counts.get(IdentityState.TERMINAL, 0)
+            return _verdict(
+                "needs_action",
+                f"{waiting} of {expected} saved answers wait on the grading provider quota",
+                f"{wait} then {_RECOVER} (quota)",
+            )
+        thing = next((name for token, name in _STOP_CAUSES if token in decision.reason), None)
+        if thing is None:
+            kinds = Counter(
+                e.failure_kind for e in decision.evidence if e.failure_kind and e.state != IdentityState.SCORED
+            )
+            thing = (
+                f"the producer of the {kinds.most_common(1)[0][0]} failures"
+                if kinds
+                else "the cause the inspect names"
+            )
+        return _verdict(
+            "needs_action",
+            f"recovery stopped with {open_text or 'no way to continue'}: {decision.reason[:160]}",
+            f"fix {thing} then {_SUBMIT_AGAIN}",
+        )
+    if status == "FAILED" or errors:
+        health = gate_task.get("evaluation_health") or {}
+        if decision.complete and any(str(e).startswith("score unavailable") for e in errors):
+            return _verdict("unknown", "no score was read", "inspect again with --score-agent and --score-key")
+        if health.get("status") == "FAIL":
+            faults = health.get("evaluation") or {}
+            kinds = ", ".join(f"{k} {v}" for k, v in (faults.get("kinds") or {}).items())
+            return _verdict(
+                "needs_action",
+                f"{faults.get('count')} of {expected} trials failed on the evaluation side ({kinds})",
+                f"fix the failing infrastructure then {_SUBMIT_AGAIN}",
+            )
+        return _verdict(
+            "needs_action",
+            str(errors[0])[:200] if errors else "the gate failed",
+            f"fix the configuration or producer the first error names then {_SUBMIT_AGAIN}",
+        )
+    if not decision.complete or decision.action != RecoveryAction.NOOP:
+        return _verdict(
+            "needs_action", f"coverage is incomplete: {open_text or 'rollouts are unsettled'}", f"{_RECOVER} now"
+        )
+    if status == "UNVERIFIED":
+        cause = gate_task.get("unverified_cause")
+        if decision.unverified:
+            skipped = counts.get(IdentityState.SKIPPED, 0)
+            return _verdict(
+                "needs_action",
+                f"{skipped} of {expected} rows were not verified (verification skipped by configuration)",
+                f"enable verification then {_SUBMIT_AGAIN}",
+            )
+        if cause and cause.get("kind") in _UNVERIFIED_PRODUCERS:
+            return _verdict(
+                "needs_action",
+                f"unverified: {cause['reason']}",
+                f"fix {_UNVERIFIED_PRODUCERS[cause['kind']]} then {_SUBMIT_AGAIN}",
+            )
+        known = (cause or {}).get("reason") or "summary validity or run health is unknown"
+        return _verdict(
+            "unknown",
+            f"unverified without a known cause: {known}",
+            "report the run as unverified; no operator action is known",
+        )
+    if status != "SUCCESS" or (gate_task.get("evaluation_health") or {}).get("status") != "PASS":
+        return _verdict("unknown", "the gate states no SUCCESS with run health PASS", "inspect again")
+    if flagged := _flagged_everything(gate_task, decision, expected):
+        what, check, count = flagged
+        return _verdict(
+            "accept",
+            f"accepted by contract; {what}: check the served configuration",
+            f"read rollout quality: {count} of {expected} rollouts flagged {check}",
+        )
+    omitted = gate_task.get("omitted_samples") or 0
+    reason = (
+        f"{gate_task.get('scored_samples', 0)} of {expected} rollouts scored"
+        + (f", {omitted} omitted by an accepted stage" if omitted else "")
+        + ", run health PASS, nothing to recover"
+    )
+    return _verdict("accept", reason, "none")
+
+
+def with_operator_verdict(outcome: RecoveryOutcome) -> RecoveryOutcome:
+    """The outcome with ``operator_verdict`` set on it and, when there is a gate, inside ``gate_task``."""
+    verdict = operator_verdict(outcome.gate_task, outcome.decision)
+    gate_task = {**outcome.gate_task, "operator_verdict": verdict} if outcome.gate_task is not None else None
+    return outcome.model_copy(update={"gate_task": gate_task, "operator_verdict": verdict})
+
+
+def operator_verdict_line(verdict: Mapping[str, str]) -> str:
+    return f"operator verdict: {verdict['state']}: {verdict['reason']}; action: {verdict['action']}"
 
 
 def judge_job_note(job: Mapping[str, Any]) -> str:

@@ -40,6 +40,7 @@ from nemo_gym.orchestration.recovery import (
     gate_summary_from_collected,
     gate_task_summary,
     mlflow_tracking_required,
+    with_operator_verdict,
 )
 from nemo_gym.utils.decorators import experimental
 
@@ -173,7 +174,7 @@ def recover(
         acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
         acknowledge_reason=acknowledge_reason,
     )
-    return outcome.model_copy(update={"reader_token": reader_token()})
+    return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
 
 
 def inspect_recovery(
@@ -236,7 +237,7 @@ def inspect_recovery(
         acknowledge_failed_judge_jobs=acknowledge_failed_judge_jobs,
         acknowledge_reason=acknowledge_reason,
     )
-    return outcome.model_copy(update={"reader_token": reader_token()})
+    return with_operator_verdict(outcome).model_copy(update={"reader_token": reader_token()})
 
 
 def _spinup_timeout_raise(seconds: int | None, reason: str | None) -> dict[str, Any]:
