@@ -101,6 +101,26 @@ def image_data_url(image: Image.Image) -> str:
     return "data:image/png;base64," + base64.b64encode(stream.getvalue()).decode("ascii")
 
 
+# Same cap as the input images (benchmarks/agentic_mme/prepare.py and the reference harness).
+MAX_MODEL_IMAGE_PIXELS = 2048 * 2048
+
+
+def model_image_url(image: Image.Image) -> str:
+    """Encode a tool result for the model: at most 2048x2048 pixels, as the smaller of PNG and JPEG
+    (quality 95). Hosted endpoints reject requests over a byte limit, and every call resends every
+    image. Each image is encoded once and the same bytes are resent, so the request prefix never
+    changes; the workspace keeps the lossless image for later operations."""
+    if image.width * image.height > MAX_MODEL_IMAGE_PIXELS:
+        scale = math.sqrt(MAX_MODEL_IMAGE_PIXELS / (image.width * image.height))
+        size = (max(1, int(image.width * scale)), max(1, int(image.height * scale)))
+        image = image.resize(size, Image.Resampling.LANCZOS)
+    png, jpeg = BytesIO(), BytesIO()
+    image.save(png, format="PNG")
+    image.convert("RGB").save(jpeg, format="JPEG", quality=95)
+    mime, stream = ("jpeg", jpeg) if jpeg.tell() < png.tell() else ("png", png)
+    return f"data:image/{mime};base64," + base64.b64encode(stream.getvalue()).decode("ascii")
+
+
 class ImageWorkspace:
     """Per-episode image indices; no model-controlled filesystem or URL access."""
 
@@ -240,5 +260,5 @@ class ImageWorkspace:
             "new_image_index": index,
             "label": args.label,
             "size": list(out.size),
-            "image_url": image_data_url(self.images[index]),
+            "image_url": model_image_url(self.images[index]),
         }

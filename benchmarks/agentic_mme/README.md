@@ -29,8 +29,9 @@ retrieval).
   `verifier_metadata`.
 - **Tools:** 14 image tools (crop, rotate, flip, resize, enhance, grayscale, autocontrast, blur, sharpen, denoise,
   edge_detect, invert, equalize, threshold). Each successful operation appends an image the model sees in its next
-  turn. Retrieval (google_search, google_lens_search, fetch_webpage) is off in `config.yaml` and enabled by the
-  `retrieval_*.yaml` overlays, which need provider keys.
+  turn, capped at 2048×2048 pixels like the inputs and sent as the smaller of PNG and JPEG (quality 95), so long
+  episodes stay under hosted endpoints' request-size limits. Retrieval (google_search, google_lens_search,
+  fetch_webpage) is off in `config.yaml` and enabled by the `retrieval_*.yaml` overlays, which need provider keys.
 - **Prompting:** prompts are prepared (`prompt_source: prepared`); the harness appends tool results and new images
   to the history and never rewrites earlier turns.
 

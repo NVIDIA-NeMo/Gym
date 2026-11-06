@@ -8,7 +8,14 @@ import numpy as np
 import pytest
 from PIL import Image, ImageFilter, ImageOps
 
-from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema, image_data_url
+from responses_api_agents.agentic_mme_agent.tools import (
+    IMAGE_TOOLS,
+    MAX_MODEL_IMAGE_PIXELS,
+    ImageWorkspace,
+    function_schema,
+    image_data_url,
+    model_image_url,
+)
 
 
 @pytest.fixture
@@ -127,3 +134,33 @@ def test_pixel_budget(workspace) -> None:
     workspace.max_total_pixels = workspace.total_pixels
     with pytest.raises(ValueError, match="budget"):
         workspace.apply("invert", {"image_index": 0})
+
+
+def decode(url: str) -> Image.Image:
+    return Image.open(BytesIO(base64.b64decode(url.split(",", 1)[1])))
+
+
+def test_model_image_is_capped_and_workspace_stays_lossless() -> None:
+    workspace = ImageWorkspace()
+    rng = np.random.default_rng(0)
+    workspace.add(Image.fromarray(rng.integers(0, 256, (1500, 1500, 3), dtype=np.uint8)))
+    result = workspace.apply("crop", {"image_index": 0, "bbox_2d": [0, 0, 1000, 1000], "zoom_scale": 2})
+    sent = decode(result["image_url"])
+    assert result["size"] == [3000, 3000] and workspace.get(1).size == (3000, 3000)
+    assert sent.width * sent.height <= MAX_MODEL_IMAGE_PIXELS and abs(sent.width - sent.height) <= 1
+    assert sent.width >= 2047
+
+
+@pytest.mark.parametrize(
+    ("image", "mime"),
+    [
+        (Image.fromarray(np.random.default_rng(1).integers(0, 256, (400, 400, 3), dtype=np.uint8)), "jpeg"),
+        (Image.new("RGB", (400, 400), "white"), "png"),
+    ],
+    ids=["photo_like", "flat"],
+)
+def test_model_image_uses_the_smaller_encoding(image, mime) -> None:
+    url = model_image_url(image)
+    assert url.startswith(f"data:image/{mime};base64,")
+    assert decode(url).size == image.size
+    assert model_image_url(image) == url  # deterministic: resending the same image keeps the prefix
