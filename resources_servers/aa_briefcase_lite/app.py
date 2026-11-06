@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.server_runtime import BaseVerifyResponse, SimpleResourcesServer
+from nemo_gym.verification import JUDGE_FAILURES, is_judge_failure, reraise_judge_errors
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -66,6 +67,8 @@ from resources_servers.gdpval.task_sandbox import collect_deliverables
 SANDBOX_WORKDIR = "/home/user"
 # The read-only input directories of AA's protocol, under the working directory.
 SOURCE_DIRECTORIES = ("shared", "week")
+
+logger = logging.getLogger(__name__)
 
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
@@ -583,7 +586,10 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                 cache_key = (filenames, selected.name)
                 if cache_key not in section_cache:
                     section_cache[cache_key] = await self._section(stage, selected, missing)
-                parsed, raw = await self._binary_call(selected, task_markdown, check, section_cache[cache_key])
+                # A failed judge call masks the row as judge_failed and keeps the saved deliverable.
+                parsed, raw = await reraise_judge_errors(
+                    self._binary_call(selected, task_markdown, check, section_cache[cache_key])
+                )
                 result: dict[str, Any] = {
                     "check_id": check["check_id"],
                     "check_type": check["check_type"],
@@ -630,6 +636,76 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             )
         return output
 
+    async def _judge_matchup(
+        self,
+        body: AABriefcaseLiteVerifyRequest,
+        task_markdown: str,
+        checks: list[dict[str, Any]],
+        reference_id: str,
+        reference: AABriefcaseReference,
+        matchup_judges: list[ResolvedJudge],
+        eval_stage: Path,
+        eval_missing: list[str],
+        ref_stage: Path,
+        ref_missing: list[str],
+    ) -> tuple[list[dict[str, Any]], int, int, int, int]:
+        """Judge every pairwise criterion of one reference; a judge failure raises and drops the reference."""
+        eval_sections: dict[str, list[dict[str, Any]]] = {}
+        ref_sections: dict[str, list[dict[str, Any]]] = {}
+        for judge in matchup_judges:
+            eval_sections[judge.name] = await self._section(eval_stage, judge, eval_missing)
+            ref_sections[judge.name] = await self._section(ref_stage, judge, ref_missing)
+        judges = self._pairwise_judges(matchup_judges)
+        sections_by_judge = {
+            judge.name: {
+                "refs": [],
+                "submission_a": eval_sections[judge.name],
+                "submission_b": ref_sections[judge.name],
+            }
+            for judge in judges
+        }
+        results: list[dict[str, Any]] = []
+        wins = losses = ties = invalid = 0
+        for check in checks:
+            rng = make_rng(
+                self.config.judge_sampling_seed,
+                body.task_id,
+                check["check_id"],
+                reference_id,
+                "pairwise",
+            )
+            result = await reraise_judge_errors(
+                asyncio.to_thread(
+                    run_trials,
+                    judges=judges,
+                    task_prompt=_pairwise_task_prompt(task_markdown, check),
+                    refs=[],
+                    submission_a=eval_sections[judges[0].name],
+                    submission_b=ref_sections[judges[0].name],
+                    sections_by_judge=sections_by_judge,
+                    num_trials=self.config.pairwise_num_trials,
+                    # The SDK owns transport retries, matching the binary caller.
+                    request_attempts=1,
+                    invalid_response_retries=2,
+                    return_raw_responses=self.config.persist_raw_judge_responses,
+                    rng=rng,
+                )
+            )
+            wins += int(result["win_count_a"])
+            losses += int(result["win_count_b"])
+            ties += int(result["tie_count"])
+            invalid += int(result["invalid_count"])
+            results.append(
+                {
+                    "check_id": check["check_id"],
+                    "check_type": check["check_type"],
+                    "reference_id": reference_id,
+                    "excluded_judges": sorted(reference.exclude_judges),
+                    **result,
+                }
+            )
+        return results, wins, losses, ties, invalid
+
     async def _verify_pairwise(
         self,
         body: AABriefcaseLiteVerifyRequest,
@@ -643,6 +719,8 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         filenames = _requested_filenames(checks)
         results: list[dict[str, Any]] = []
         wins = losses = ties = invalid = 0
+        attempted = 0
+        failed: dict[str, BaseException] = {}
         for reference_id, reference in self._resolved_references().items():
             ref_source = self._reference_source(reference_id, reference, body.task_id)
             if not ref_source.is_dir():
@@ -665,60 +743,44 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
                     modalities=modalities,
                     label=f"eval/reference {reference_id} artifacts",
                 )
-            eval_sections: dict[str, list[dict[str, Any]]] = {}
-            ref_sections: dict[str, list[dict[str, Any]]] = {}
-            for judge in matchup_judges:
-                eval_sections[judge.name] = await self._section(eval_stage, judge, eval_missing)
-                ref_sections[judge.name] = await self._section(ref_stage, judge, ref_missing)
-            judges = self._pairwise_judges(matchup_judges)
-            sections_by_judge = {
-                judge.name: {
-                    "refs": [],
-                    "submission_a": eval_sections[judge.name],
-                    "submission_b": ref_sections[judge.name],
-                }
-                for judge in judges
-            }
-            for check in checks:
-                rng = make_rng(
-                    self.config.judge_sampling_seed,
-                    body.task_id,
-                    check["check_id"],
+            attempted += 1
+            try:
+                matchup = await self._judge_matchup(
+                    body,
+                    task_markdown,
+                    checks,
                     reference_id,
-                    "pairwise",
+                    reference,
+                    matchup_judges,
+                    eval_stage,
+                    eval_missing,
+                    ref_stage,
+                    ref_missing,
                 )
-                result = await asyncio.to_thread(
-                    run_trials,
-                    judges=judges,
-                    task_prompt=_pairwise_task_prompt(task_markdown, check),
-                    refs=[],
-                    submission_a=eval_sections[judges[0].name],
-                    submission_b=ref_sections[judges[0].name],
-                    sections_by_judge=sections_by_judge,
-                    num_trials=self.config.pairwise_num_trials,
-                    # The SDK owns transport retries, matching the binary caller.
-                    request_attempts=1,
-                    invalid_response_retries=2,
-                    return_raw_responses=self.config.persist_raw_judge_responses,
-                    rng=rng,
+            except JUDGE_FAILURES as error:
+                if not is_judge_failure(error):
+                    raise
+                # Like GDPVal's matchups, one reference whose judging failed does not fail the others.
+                failed[reference_id] = error
+                logger.warning(
+                    "AA-Briefcase-Lite task %s: judging against reference %s failed: %s",
+                    body.task_id,
+                    reference_id,
+                    error,
                 )
-                check_wins = int(result["win_count_a"])
-                check_losses = int(result["win_count_b"])
-                check_ties = int(result["tie_count"])
-                check_invalid = int(result["invalid_count"])
-                wins += check_wins
-                losses += check_losses
-                ties += check_ties
-                invalid += check_invalid
                 results.append(
-                    {
-                        "check_id": check["check_id"],
-                        "check_type": check["check_type"],
-                        "reference_id": reference_id,
-                        "excluded_judges": sorted(reference.exclude_judges),
-                        **result,
-                    }
+                    {**_skipped_reference(reference_id, reference, "judge_failed"), "error": str(error)[:500]}
                 )
+                continue
+            matchup_results, matchup_wins, matchup_losses, matchup_ties, matchup_invalid = matchup
+            results.extend(matchup_results)
+            wins += matchup_wins
+            losses += matchup_losses
+            ties += matchup_ties
+            invalid += matchup_invalid
+        if attempted and len(failed) == attempted:
+            # Nothing was judged, so the task has no pairwise score; the last failure masks the row.
+            raise list(failed.values())[-1]
         judged = wins + losses + ties
         reward = (wins + 0.5 * ties) / judged if judged else 0.0
         return reward, results, wins, losses, ties, invalid
