@@ -81,10 +81,7 @@ agentic_mme_opencode_agent:
 agentic_mme_environment_server:
   environment_servers:
     single_agent_turn_legacy:
-      # opencode_agent names no resources server, so the environment server names the one that lends the sandbox.
-      resources_server:
-        type: resources_servers
-        name: agentic_mme
+      # resources_server comes from resources_servers/agentic_mme/configs/agentic_mme.yaml.
       agent_server:
         type: responses_api_agents
         name: agentic_mme_opencode_agent
