@@ -47,13 +47,15 @@ uniform `num_repeats` across problems (which `gym eval run --no-serve` enforces)
 
 Real runs send full batches of 70 real submissions only; a smoke run never calls AA (see below).
 
-- **Quota or key errors stop the batch.** AA answers HTTP 429 when the quota is exhausted and 401 or 403
+- **Quota or key errors stop the run.** AA answers HTTP 429 when the quota is exhausted and 401 or 403
   when the key is rejected or its account is not approved. Retrying cannot help, so every row of the
-  batch comes back masked and unverified (no accuracy), keeps its saved answer and is not regenerated:
-  `provider_quota_exhausted` for 429, with the reset time from `Retry-After` in the reason
-  (`AA quota exhausted, resets at <UTC time>; grade with replay or resubmit after the reset`), and
-  `provider_credentials_rejected` for 401/403. Grade the saved answers with replay after the reset, or
-  resubmit with an approved key.
+  batch fails like a judge failure: it lands in the failures file with its saved answer kept, typed
+  `provider_quota_exhausted` (429; the reason carries the reset time from `Retry-After`: `AA quota
+  exhausted, resets at <UTC time>; grade with replay or resubmit after the reset`) or
+  `provider_credentials_rejected` (401/403). The run stops with that kind and does not retry. Before the
+  reset, a recovery decision on that state is STOP; after it, `gym eval resubmit --recover` grades the
+  saved answers again with no model calls. With a rejected key, fix the key (or get the account approved)
+  first. `replay` grades the cached submissions the same way.
 - **Partial grader errors are tolerated.** If AA reports `judge_error_count <= max_judge_errors` (server
   config, default `3`: the benchmark PIC's v1 value, about 5% of a 70 batch, to be tuned empirically), the batch
   is accepted and its accuracy is rescaled to the graded items:

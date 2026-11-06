@@ -109,25 +109,26 @@ def grader_failed(cause_type):
 
 
 async def verify_pair(server) -> list:
-    """Verify two rollouts that fill a batch of two; the results are the masked rows of a terminal AA error."""
+    """Verify two rollouts that fill a batch of two, through judge_failsafe; the rows are what the collector sees."""
     fence = "```"
-    return list(
-        await asyncio.gather(
-            server.verify(_make_verify_request(fence + "python" + chr(10) + "a=1" + chr(10) + fence, problem_id="p1")),
-            server.verify(_make_verify_request(fence + "python" + chr(10) + "b=2" + chr(10) + fence, problem_id="p2")),
-        )
-    )
+    bodies = [
+        _make_verify_request(fence + "python" + chr(10) + "a=1" + chr(10) + fence, problem_id="p1"),
+        _make_verify_request(fence + "python" + chr(10) + "b=2" + chr(10) + fence, problem_id="p2"),
+    ]
+    responses = await asyncio.gather(*(judge_failsafe(server.verify)(body=b) for b in bodies))
+    return [json.loads(r.body) for r in responses]
 
 
-def assert_terminal_stop(results: list, kind: str) -> str:
-    """Every row is masked and unverified (no accuracy) with ``kind``; returns the shared reason."""
-    assert len(results) == 2
-    for r in results:
-        assert r.mask_sample is True and r.reward == 0.0
-        assert r.accuracy is None and r.timeout_rate is None
-        assert r.failure_kind == kind
-    assert results[0].failure_reason == results[1].failure_reason
-    return results[0].failure_reason
+def assert_terminal_stop(rows: list, kind: str) -> str:
+    """Every row is a judge-class failure row of ``kind``: masked, no score, saved answer kept. Returns the reason."""
+    assert len(rows) == 2
+    for row in rows:
+        assert row["mask_sample"] is True and row["reward"] == 0.0
+        assert row["failure_kind"] == kind and row["_ng_failure_class"] == "judge_failed"
+        assert "accuracy" not in row
+        assert "a=1" in json.dumps(row["response"]) or "b=2" in json.dumps(row["response"])
+    assert rows[0]["failure_reason"] == rows[1]["failure_reason"]
+    return rows[0]["failure_reason"]
 
 
 NOW = 1_000_000.0
@@ -856,10 +857,10 @@ class TestTerminalAaErrors:
         server = _make_server(_make_config(batch_size=2, api_key=["k0"], api_max_retries=1))
         mock_request, patches = _mock_api_sequence([{"status": 500, "body": "boom"}])
         try:
-            with grader_failed(RuntimeError):
-                await verify_pair(server)
+            rows = await verify_pair(server)
         finally:
             _stop_patches(patches)
+        assert {row["failure_kind"] for row in rows} == {"judge_failed"}
 
 
 class TestPartialGraderErrors:

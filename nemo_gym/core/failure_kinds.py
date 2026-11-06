@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import datetime, timezone
 from typing import Literal
 
 
@@ -107,7 +108,7 @@ VERIFIER_ERROR = "verifier_error"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 PROVIDER_OOM_KILLED = "provider_oom_killed"
-# The provider answered HTTP 401 or 403: the sandbox credentials were refused.
+# The provider answered HTTP 401 or 403: the credentials were refused (a sandbox provider's, or the grading API's).
 PROVIDER_CREDENTIALS_REJECTED = "provider_credentials_rejected"
 
 # --- resources session ------------------------------------------------------------------ #
@@ -272,6 +273,24 @@ def is_evaluation_side(name: str) -> bool:
 def is_gate_derived(name: str) -> bool:
     """Whether ``name`` is a class the acceptance gate derives from saved rows (``GATE_DERIVED_KINDS``)."""
     return name in GATE_DERIVED_KINDS
+
+
+QUOTA_RESET_REGEX = r"resets at (\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC)"
+_QUOTA_RESET_PATTERN = re.compile(QUOTA_RESET_REGEX)
+
+
+def quota_reset_text(reason: object) -> str | None:
+    """The UTC time a ``provider_quota_exhausted`` reason names (``resets at YYYY-MM-DD HH:MM UTC``), else None."""
+    match = _QUOTA_RESET_PATTERN.search(reason) if isinstance(reason, str) else None
+    return match.group(1) if match else None
+
+
+def quota_reset_unix(reason: object) -> float | None:
+    """``quota_reset_text`` as a unix time, else None."""
+    text = quota_reset_text(reason)
+    if text is None:
+        return None
+    return datetime.strptime(text, "%Y-%m-%d %H:%M UTC").replace(tzinfo=timezone.utc).timestamp()
 
 
 def is_registered(name: str) -> bool:

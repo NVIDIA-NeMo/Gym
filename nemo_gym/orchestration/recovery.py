@@ -44,6 +44,7 @@ reports a run as complete while an identity is terminal, missing or unknown.
 import hashlib
 import math
 import os
+import time
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import StrEnum
@@ -82,6 +83,8 @@ from nemo_gym.core.failure_kinds import (
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
     NON_POLICY_MODEL_REJECTION,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
     ROLLOUT_ALLOCATION_ENDED,
     SERVER_FAULT_KINDS,
     SERVER_START_FAILED,
@@ -90,6 +93,8 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
     is_server_status,
+    quota_reset_text,
+    quota_reset_unix,
 )
 from nemo_gym.core.failure_records import FailureBoundary
 from nemo_gym.core.failure_transport import FailureReportRow
@@ -689,12 +694,42 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
     return has_saved_generation({"response": answer, **stage})
 
 
+def _quota_reset_text(row: Mapping[str, Any]) -> str | None:
+    """The reset time a quota-stopped row names: the collected fact, else its reason (a live run's row)."""
+    collected = row.get("_ng_quota_resets_at")
+    return (
+        collected
+        if isinstance(collected, str)
+        else (quota_reset_text(row.get("failure_reason")) or quota_reset_text(row.get("_ng_failure_message")))
+    )
+
+
+def _quota_wait_reason(row: Mapping[str, Any]) -> str | None:
+    text = _quota_reset_text(row)
+    return f"resets at {text}" if text else None
+
+
+def _quota_reset_unix(row: Mapping[str, Any]) -> float | None:
+    return quota_reset_unix("resets at " + text) if (text := _quota_reset_text(row)) else None
+
+
+def _now() -> float:
+    return time.time()
+
+
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
     """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
     ungraded; any other action would run the policy again, so it stops."""
     if row.get(TERMINAL) is True:
         return IdentityState.TERMINAL
     kind, status = _policy_evidence(row)
+    if kind in (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED):
+        # The grading provider refused until the operator acts (its quota resets, its key is fixed). The saved answer
+        # is graded again, never regenerated; before a quota's named reset time nothing can be graded, so it stops.
+        if not _saved_answer(row):
+            return IdentityState.UNKNOWN
+        reset = _quota_reset_unix(row) if kind == PROVIDER_QUOTA_EXHAUSTED else None
+        return IdentityState.TERMINAL if reset is not None and _now() < reset else IdentityState.JUDGE_RECOVERABLE
     action = choose_action(failure_kind=kind or JUDGE_FAILED, http_status=status, config=policy)
     if action == OutcomeAction.VERIFY:
         return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
@@ -1072,11 +1107,15 @@ def decide_recovery(
                 )
                 continue
             state = _judge_state(row, policy) if judge else IdentityState.SCORED
-            policy_stopped |= judge and state == IdentityState.TERMINAL
+            quota_wait = (
+                judge and state == IdentityState.TERMINAL and row.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            )
+            policy_stopped |= judge and state == IdentityState.TERMINAL and not quota_wait
             evidence.append(
                 IdentityEvidence(
                     identity=identity,
                     state=state,
+                    reason=_quota_wait_reason(row) if quota_wait else None,
                     failure_kind=row.get("failure_kind") if judge else None,
                     failure_id=row.get(FAILURE_ID) if isinstance(row.get(FAILURE_ID), str) else None,
                     events=_events(row),
@@ -1164,10 +1203,12 @@ def decide_recovery(
             else (last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts)
         )
         spent = fact.attempts if fact else len(rows)
+        quota_wait = False
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
-            policy_stopped |= state == IdentityState.TERMINAL
+            quota_wait = state == IdentityState.TERMINAL and last.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED
+            policy_stopped |= state == IdentityState.TERMINAL and not quota_wait
         elif is_answered_agent_deadline(last):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
             # Collection's metrics score it only when its producer marked it a counted zero.
@@ -1239,7 +1280,7 @@ def decide_recovery(
                 attempts=spent,
                 max_attempts=cap,
                 events=_events(last),
-                reason=reason if state == IdentityState.UNKNOWN else None,
+                reason=reason if state == IdentityState.UNKNOWN else _quota_wait_reason(last) if quota_wait else None,
                 unscored=unscored,
             )
         )
@@ -1379,6 +1420,20 @@ def decide_recovery(
                 "re-judge the saved answers with `gym eval reverify --judge-failed-only`",
             )
         if counts.get(IdentityState.TERMINAL):
+            waiting = [
+                item
+                for item in evidence
+                if item.state == IdentityState.TERMINAL and item.failure_kind == PROVIDER_QUOTA_EXHAUSTED
+            ]
+            if len(waiting) == counts[IdentityState.TERMINAL]:
+                resets = sorted({text for item in waiting if (text := quota_reset_text(item.reason))})
+                return decision(
+                    RecoveryAction.STOP,
+                    f"{len(waiting)} saved answer(s) wait on the grading provider's quota "
+                    f"({PROVIDER_QUOTA_EXHAUSTED}), which {'resets at ' + resets[-1] if resets else 'has no known reset'}"
+                    "; nothing can be graded before then. After the reset continue with gym eval resubmit --recover "
+                    "(re-judges the saved answers, no model calls)",
+                )
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.TERMINAL]} terminal unscored failure(s) need an "

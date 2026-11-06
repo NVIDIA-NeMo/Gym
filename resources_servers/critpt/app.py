@@ -37,7 +37,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import reraise_judge_errors
+from nemo_gym.verification import judge_provider_stopped, reraise_judge_errors
 from nemo_gym.verification.judge import judge_call_failed
 
 
@@ -460,7 +460,9 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     len(submissions_snapshot),
                     self.config.cache_dir,
                 )
-                future.set_result({"_not_graded": PROVIDER_QUOTA_EXHAUSTED, "_reason": _quota_reason(e, time.time())})
+                future.set_result(
+                    {"_provider_stop": PROVIDER_QUOTA_EXHAUSTED, "_reason": _quota_reason(e, time.time())}
+                )
             except CritPtAccessDenied as e:
                 LOG.error(
                     "CritPt AA REFUSED ACCESS on all %d configured key(s) (HTTP 403). None of the "
@@ -475,15 +477,21 @@ class CritPtResourcesServer(SimpleResourcesServer):
                     len(submissions_snapshot),
                     self.config.cache_dir,
                 )
-                future.set_result({"_not_graded": PROVIDER_CREDENTIALS_REJECTED, "_reason": _access_reason(e)})
+                future.set_result({"_provider_stop": PROVIDER_CREDENTIALS_REJECTED, "_reason": _access_reason(e)})
             except Exception as e:
                 LOG.exception("CritPt AA API call failed; failing all %d waiters: %s", len(submissions_snapshot), e)
                 future.set_exception(e)
 
-        # A quota or key error is terminal: the row comes back masked and unverified (see `_not_graded` below), typed
-        # with a registered kind that keeps its saved answer and is never regenerated. Any other failed AA call (4xx/5xx, timeouts) is a grader failure, not a
+        # A quota or key error is terminal: it stops the run and keeps the saved answer for a later re-judge (see
+        # `_provider_stop` below). Any other failed AA call (4xx/5xx, timeouts) is a grader failure, not a
         # model failure: type it as judge_failed so judge_failsafe masks the row and it is judged again.
         result = await reraise_judge_errors(self._await_batch(future, body.problem_id))
+        if "_provider_stop" in result:
+            # Typed like a judge failure, so the row keeps its saved answer in the failures sidecar and recovery
+            # grades it again after the operator acts; the kind stops the run and the chain meanwhile.
+            raise judge_provider_stopped(
+                result["_reason"], failure_kind=result["_provider_stop"], operation="critpt.grade"
+            )
         if "_not_graded" in result:
             LOG.warning("CritPt verify: %s not graded (%s)", body.problem_id, result["_not_graded"])
             return CritPtVerifyResponse(
