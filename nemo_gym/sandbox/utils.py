@@ -16,8 +16,13 @@
 
 import tempfile
 from pathlib import Path
+from typing import Protocol
 
-from nemo_gym.sandbox.api import AsyncSandbox
+
+class _SandboxFileTransfer(Protocol):
+    async def upload(self, local_path: Path | str, remote_path: str) -> None: ...
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None: ...
 
 
 # Parallelism caps for CPU-limited sandboxes, each set by cpu_cap_env() to the
@@ -53,7 +58,7 @@ CPU_CAP_ENV_VARS: tuple[str, ...] = (
 )
 
 
-async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
+async def upload_text(sandbox: _SandboxFileTransfer, *, path: str, text: str) -> None:
     """Upload UTF-8 text through file transfer without shell interpolation."""
     with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
         source = Path(directory) / "payload"
@@ -61,7 +66,7 @@ async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
         await sandbox.upload(source, path)
 
 
-async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
+async def read_text(sandbox: _SandboxFileTransfer, *, path: str) -> str:
     """Download UTF-8 text, replacing invalid bytes in partial process output."""
     with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
         destination = Path(directory) / "payload"

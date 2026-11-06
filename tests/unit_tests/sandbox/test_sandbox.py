@@ -603,13 +603,15 @@ async def _assert_async_sandbox_requires_spec_and_reports_unknown_status() -> No
 
 
 def test_plugin_distributions_names_each_distribution_once(monkeypatch) -> None:
+    from nemo_gym.config import provider_metadata
+
     eps = [
         SimpleNamespace(name="a", dist=SimpleNamespace(name="plugin-b")),
         SimpleNamespace(name="b", dist=SimpleNamespace(name="plugin-b")),
         SimpleNamespace(name="c", dist=SimpleNamespace(name="plugin-a")),
         SimpleNamespace(name="d", dist=None),
     ]
-    monkeypatch.setattr(provider_registry, "entry_points", lambda group: eps)
+    monkeypatch.setattr(provider_metadata, "entry_points", lambda group: eps)
     assert provider_registry.plugin_distributions() == ["plugin-a", "plugin-b"]
 
 

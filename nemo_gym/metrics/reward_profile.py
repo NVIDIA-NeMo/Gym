@@ -35,13 +35,8 @@ if TYPE_CHECKING:
     from wandb import Histogram
 
 from nemo_gym.config.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
-from nemo_gym.config.global_config import (
-    AGENT_REF_KEY_NAME,
-    ROLLOUT_INDEX_KEY_NAME,
-    TASK_INDEX_KEY_NAME,
-    rollout_run_key,
-    rollout_run_labels,
-)
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.config.rollout_keys import rollout_run_key, rollout_run_labels
 from nemo_gym.metrics.metrics_config import (
     ACROSS_REPEATS_MARKER,
     COMPLETION_TOKEN_METRIC_NAMES,

@@ -14,89 +14,6 @@
 
 """Public sandbox API for NeMo Gym."""
 
-from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
-from nemo_gym.sandbox.config import (
-    resolve_provider_config,
-    resolve_provider_metadata,
-    resolve_provider_volume_sources,
-)
-from nemo_gym.sandbox.providers import (
-    ConnectableProvider,
-    ExecResult,
-    SandboxCreateError,
-    SandboxCreateVerificationError,
-    SandboxEndpoint,
-    SandboxExecResult,
-    SandboxHandle,
-    SandboxProvider,
-    SandboxPtyError,
-    SandboxPtySession,
-    SandboxPtySpec,
-    SandboxResources,
-    SandboxSidecarSpec,
-    SandboxSpec,
-    SandboxStatus,
-    SupportsSandboxEndpoint,
-    SupportsSandboxNetwork,
-    SupportsSandboxPauseResume,
-    SupportsSandboxPortForwarding,
-    SupportsSandboxPty,
-    SupportsSandboxPtyAttach,
-    SupportsSandboxRuntimeRequirements,
-    SupportsSandboxSharedStorage,
-    SupportsSandboxSidecars,
-    clamp_resource_requests,
-    create_provider,
-    get_provider_class,
-    list_providers,
-    register_provider,
-)
-from nemo_gym.sandbox.utils import rewrite_image
-
-
-__all__ = [
-    "Sandbox",
-    "AsyncSandbox",
-    "AsyncSandboxCompose",
-    "AsyncSandboxSidecar",
-    "ConnectableProvider",
-    "ExecResult",
-    "SandboxCreateError",
-    "SandboxCreateVerificationError",
-    "SandboxEndpoint",
-    "SandboxExecResult",
-    "SandboxHandle",
-    "SandboxProvider",
-    "SandboxPty",
-    "SandboxPtyError",
-    "SandboxPtySession",
-    "SandboxPtySpec",
-    "SandboxResources",
-    "SandboxSidecarSpec",
-    "SandboxSpec",
-    "SandboxStatus",
-    "SupportsSandboxEndpoint",
-    "SupportsSandboxNetwork",
-    "SupportsSandboxPauseResume",
-    "SupportsSandboxPortForwarding",
-    "SupportsSandboxRuntimeRequirements",
-    "SupportsSandboxSharedStorage",
-    "SupportsSandboxSidecars",
-    "SupportsSandboxPty",
-    "SupportsSandboxPtyAttach",
-    "create_provider",
-    "get_provider_class",
-    "list_providers",
-    "register_provider",
-    "resolve_provider_config",
-    "resolve_provider_metadata",
-    "resolve_provider_volume_sources",
-    "rewrite_image",
-    "clamp_resource_requests",
-]
-
-# Public API
 from typing import TYPE_CHECKING
 
 from nemo_gym._public_api import lazy_exports
@@ -104,7 +21,8 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-    from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY
+    from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY, AsyncSandboxCompose
+    from nemo_gym.sandbox.api import AsyncSandbox, AsyncSandboxSidecar, Sandbox, SandboxPty
     from nemo_gym.sandbox.compose_config import (
         adapt_non_root_sidecars,
         deployment_platform,
@@ -114,12 +32,51 @@ if TYPE_CHECKING:
         sandbox_platform,
     )
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
-    from nemo_gym.sandbox.config import SandboxConfig
+    from nemo_gym.sandbox.config import (
+        SandboxConfig,
+        resolve_provider_config,
+        resolve_provider_metadata,
+        resolve_provider_volume_sources,
+    )
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
-    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
+    from nemo_gym.sandbox.providers.base import (
+        ORPHAN_REAP_TIMEOUT_S,
+        ConnectableProvider,
+        ExecResult,
+        SandboxCreateError,
+        SandboxCreateVerificationError,
+        SandboxEndpoint,
+        SandboxExecResult,
+        SandboxHandle,
+        SandboxProvider,
+        SandboxPtyError,
+        SandboxPtySession,
+        SandboxPtySpec,
+        SandboxResources,
+        SandboxSidecarSpec,
+        SandboxSpec,
+        SandboxStatus,
+        SupportsSandboxEndpoint,
+        SupportsSandboxNetwork,
+        SupportsSandboxPauseResume,
+        SupportsSandboxPortForwarding,
+        SupportsSandboxPty,
+        SupportsSandboxPtyAttach,
+        SupportsSandboxRuntimeRequirements,
+        SupportsSandboxSharedStorage,
+        SupportsSandboxSidecars,
+        clamp_resource_requests,
+        sandbox_credentials_rejected,
+    )
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
+    from nemo_gym.sandbox.providers.registry import (
+        create_provider,
+        get_provider_class,
+        list_providers,
+        register_provider,
+    )
     from nemo_gym.sandbox.transfer import (
         TRANSFER_USER,
         SandboxProbeError,
@@ -133,38 +90,74 @@ if TYPE_CHECKING:
         upload_dir,
         upload_path,
     )
-    from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env, read_text, upload_text
+    from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env, read_text, rewrite_image, upload_text
 
 
-# What code outside the library, such as servers, imports from this package. Each name's submodule loads
-# on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "PLACEMENT_GROUP_KEY": "adapters.docker_compose",
     "ApptainerProvider": "providers.apptainer.provider",
+    "AsyncSandbox": "api",
+    "AsyncSandboxCompose": "adapters.docker_compose",
+    "AsyncSandboxSidecar": "api",
     "CPU_CAP_ENV_VARS": "utils",
+    "ConnectableProvider": "providers.base",
     "DirectSandboxConnection": "access",
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
+    "ExecResult": "providers.base",
     "LocalProvider": "providers.local.provider",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
+    "PLACEMENT_GROUP_KEY": "adapters.docker_compose",
+    "Sandbox": "api",
     "SandboxAccess": "access",
     "SandboxConfig": "config",
+    "SandboxCreateError": "providers.base",
+    "SandboxCreateVerificationError": "providers.base",
+    "SandboxEndpoint": "providers.base",
+    "SandboxExecResult": "providers.base",
+    "SandboxHandle": "providers.base",
     "SandboxProbeError": "transfer",
+    "SandboxProvider": "providers.base",
+    "SandboxPty": "api",
+    "SandboxPtyError": "providers.base",
+    "SandboxPtySession": "providers.base",
+    "SandboxPtySpec": "providers.base",
+    "SandboxResources": "providers.base",
+    "SandboxSidecarSpec": "providers.base",
+    "SandboxSpec": "providers.base",
+    "SandboxStatus": "providers.base",
     "SandboxTransferError": "transfer",
     "SandboxUnavailableError": "transfer",
+    "SupportsSandboxEndpoint": "providers.base",
+    "SupportsSandboxNetwork": "providers.base",
+    "SupportsSandboxPauseResume": "providers.base",
+    "SupportsSandboxPortForwarding": "providers.base",
+    "SupportsSandboxPty": "providers.base",
+    "SupportsSandboxPtyAttach": "providers.base",
+    "SupportsSandboxRuntimeRequirements": "providers.base",
+    "SupportsSandboxSharedStorage": "providers.base",
+    "SupportsSandboxSidecars": "providers.base",
     "TRANSFER_USER": "transfer",
     "adapt_non_root_sidecars": "compose_config",
+    "clamp_resource_requests": "providers.base",
     "cpu_cap_env": "utils",
+    "create_provider": "providers.registry",
     "deployment_platform": "compose_config",
     "document_volume_sources": "compose_config",
     "download_dir": "transfer",
     "download_path": "transfer",
     "exec_as_root": "transfer",
+    "get_provider_class": "providers.registry",
+    "list_providers": "providers.registry",
     "opensandbox_shm_labels": "compose_config",
     "read_text": "utils",
+    "register_provider": "providers.registry",
     "remote_kind": "transfer",
     "resolve_compose": "compose_config",
+    "resolve_provider_config": "config",
+    "resolve_provider_metadata": "config",
+    "resolve_provider_volume_sources": "config",
+    "rewrite_image": "utils",
     "sandbox_credentials_rejected": "providers.base",
     "sandbox_platform": "compose_config",
     "service_gpus": "compose_fields",
@@ -175,4 +168,4 @@ _PUBLIC_API = {
     "upload_text": "utils",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
-__all__ = sorted({*__all__, *_PUBLIC_API})
+__all__ = sorted(_PUBLIC_API)
