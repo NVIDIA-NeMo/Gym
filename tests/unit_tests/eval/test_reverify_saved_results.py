@@ -338,6 +338,22 @@ async def test_an_ungraded_result_is_reverified_and_one_with_a_grading_artifact_
     assert rewards == [0.5, 1.0] and len(verifier["posted"]) == 1
 
 
+async def test_a_result_whose_unobserved_judge_recorded_no_grading_is_not_graded_again(tmp_path, verifier) -> None:
+    """A verifier that asked a model without observing its grading records none however often it is asked again, so
+    the pass leaves its result as saved: no second judge call and no second row for the rollout."""
+    judged = ungraded(0)
+    judged["ng_trajectory"]["verifier_invocations"][0]["model_calls"] = [{"model_call_id": "judge-0"}]
+    output = _run(tmp_path, [judged, ungraded(1)])
+    before = output.read_bytes()
+
+    assert len(due_judge_failures(output)) == 1  # only the row whose verifier asked no model
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+    rows = [json.loads(line) for line in output.read_bytes().splitlines()]
+    assert len(rows) == 3 and len({logical_rollout_id(row) for row in rows}) == 2
+    assert output.read_bytes().startswith(before) and len(verifier["posted"]) == 1
+    assert due_judge_failures(output) == []
+
+
 async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_was(tmp_path, verifier) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
     before = output.read_bytes()

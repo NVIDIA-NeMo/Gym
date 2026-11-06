@@ -5885,7 +5885,9 @@ def _verify_transport_failure(row: Mapping[str, Any]) -> bool:
 def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
     """Whether the row's verifier invocations were observed but recorded no grading: no grading operation, no
     verifier grading record, no saved grading artifact (``grading_artifact``) and no model-failure rule
-    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected."""
+    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected, and
+    nor is one whose verifier asked a model: a judge it does not observe (``observe_llm_judge_grading``) records no
+    grading however often it is asked again."""
     observed = row.get("ng_trial_observations")
     verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
     if not isinstance(verifiers, list) or not verifiers:
@@ -5895,6 +5897,8 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
         for verifier in verifiers
     ):
         return False
+    if any(verifier.get("model_calls") for verifier in verifiers):
+        return False  # it asked a model that its verifier does not observe grading; verifying again records no more
     return grading_artifact(row) is None and not _model_failure(row)
 
 
