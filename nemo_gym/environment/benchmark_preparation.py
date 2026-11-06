@@ -33,6 +33,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.core.failure_kinds import ENVIRONMENT_PREPARE_FAILED
 from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.eval.eval_plan import EvalPlan, PlanBenchmark, PlanGym, build_eval_plan
 from nemo_gym.orchestration.jobs import installed_gym_commit
@@ -72,6 +73,23 @@ class PrepareBenchmarkConfig(BaseNeMoGymCLIConfig):
     )
 
 
+class PreparationFailedError(RuntimeError):
+    """A benchmark's data preparation failed in its own code or environment.
+
+    Not resumable: the CLI exits with ``stop_exit_code`` (76) and records the kind for the guard of a job chain's
+    next segment, which would fail the same way.
+    """
+
+    stop_exit_code = 76
+    failure_kind = ENVIRONMENT_PREPARE_FAILED
+
+    def __init__(self, module: str, action: str, reason: str) -> None:
+        super().__init__(
+            f"EVAL STOPPED: data preparation failed for {module} ({action}: {reason}); another attempt cannot "
+            "succeed until the preparation is fixed. Fix it, then continue with gym eval resubmit --recover."
+        )
+
+
 def _multiprocess_benchmark_prepare_fn(args):
     benchmark_config: BenchmarkConfig
     prepare_module_path: str
@@ -94,7 +112,12 @@ def _multiprocess_benchmark_prepare_fn(args):
     from nemo_gym.cli._prepare_worker import load_preparer
 
     module = load_preparer(prepare_module_path)
-    output_fpath = module.prepare(**prepare_script_args)
+    try:
+        output_fpath = module.prepare(**prepare_script_args)
+    except ConfigError:
+        raise
+    except Exception as exc:
+        raise PreparationFailedError(prepare_module_path, "prepare", f"{type(exc).__name__}: {exc}") from exc
     expected_output_fpath = Path(benchmark_config.dataset.jsonl_fpath).absolute()
     if output_fpath.absolute() != expected_output_fpath:
         raise ConfigError(
@@ -186,32 +209,35 @@ def _run_isolated_prepare(
         )
         serialized_args = OmegaConf.to_container(args, resolve=True) if OmegaConf.is_config(args) else args
         options.write_text(json.dumps(serialized_args, default=_prepare_json_default))
-        subprocess.run(
-            [
-                str(python),
-                str(worker),
-                "--root",
-                str(root.absolute()),
-                "--module",
-                module,
-                "--action",
-                action,
-                "--expected",
-                str(expected.absolute()),
-                "--args-file",
-                str(options),
-                "--result",
-                str(result),
-            ],
-            check=True,
-            env=os.environ
-            | {
-                NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
-                "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
-                "VIRTUAL_ENV": str(python.parent.parent),
-                "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
-            },
-        )
+        try:
+            subprocess.run(
+                [
+                    str(python),
+                    str(worker),
+                    "--root",
+                    str(root.absolute()),
+                    "--module",
+                    module,
+                    "--action",
+                    action,
+                    "--expected",
+                    str(expected.absolute()),
+                    "--args-file",
+                    str(options),
+                    "--result",
+                    str(result),
+                ],
+                check=True,
+                env=os.environ
+                | {
+                    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME: json.dumps(serialized_config, default=_prepare_json_default),
+                    "NEMO_GYM_PREPARE_VENV": str(python.parent.parent),
+                    "VIRTUAL_ENV": str(python.parent.parent),
+                    "PATH": str(python.parent) + os.pathsep + os.environ.get("PATH", ""),
+                },
+            )
+        except subprocess.CalledProcessError as exc:
+            raise PreparationFailedError(module, action, f"exit status {exc.returncode}") from exc
         return json.loads(result.read_text())
 
 

@@ -172,6 +172,9 @@ COHORT_INCOMPLETE = "cohort_incomplete"
 SERVER_SPINUP_TIMEOUT = "server_spinup_timeout"
 # The driver step of an orchestrated job could not install Gym (the uv installer, the checkout or the package install).
 DRIVER_INSTALL_FAILED = "driver_install_failed"
+# A benchmark's data preparation (its script, its dependencies or its isolated environment) failed; the next
+# segment would fail the same way, so a job chain stops instead of retrying it.
+ENVIRONMENT_PREPARE_FAILED = "environment_prepare_failed"
 # Collection refused to resume saved rollouts whose input and configuration identity does not verify.
 COLLECTION_RESUME_REFUSED = "collection_resume_refused"
 # A rollout was in flight when its allocation ended (a walltime cut, a preemption, a node failure or a driver that
@@ -243,6 +246,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         COHORT_INCOMPLETE,
         SERVER_SPINUP_TIMEOUT,
         DRIVER_INSTALL_FAILED,
+        ENVIRONMENT_PREPARE_FAILED,
         COLLECTION_RESUME_REFUSED,
         ROLLOUT_ALLOCATION_ENDED,
         AGENT_ROUTE_FAILED,
