@@ -29,7 +29,6 @@ import logging
 import os
 import re
 import time
-from collections.abc import Iterable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -179,26 +178,9 @@ class CaptureStore:
         return any(self._root.glob(pattern))
 
     def clear_all_pending(self, rollout_id: str) -> None:
-        self.clear_all_pending_for([rollout_id])
-
-    def clear_all_pending_for(self, rollout_ids: Iterable[str]) -> None:
-        """Remove every pending marker of these rollouts with a single directory listing.
-
-        A resume clears thousands of rollouts at once; one glob per rollout is a full listing each
-        time, which on a network filesystem turns the clearing step into hours. The marker name is
-        ``<rollout_id>.<token>.capture.pending`` with a dot-free token, so the rollout id is
-        everything before the last dot of the stem.
-        """
-        wanted = {_validate_rollout_id(rollout_id) for rollout_id in rollout_ids}
-        if not wanted:
-            return
-        with os.scandir(self._root) as entries:
-            markers = [entry.name for entry in entries if entry.name.endswith(_PENDING_SUFFIX)]
-        for name in markers:
-            stem = name[: -len(_PENDING_SUFFIX)]
-            rollout_id, _, _token = stem.rpartition(".")
-            if rollout_id in wanted:
-                (self._root / name).unlink(missing_ok=True)
+        pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
+        for marker in self._root.glob(pattern):
+            marker.unlink(missing_ok=True)
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
