@@ -17,10 +17,12 @@ from resources_servers.officeqa.verifiers.officeqa_pro_task import OfficeQAProTa
 
 
 DATASET_ID = "databricks/officeqa"
-DATASET_REVISION = "763a8366abf2a3605c381d53586d844dc60fa756"
-CSV_SHA256 = "367ed0435864628c5aa8bc2379ae63804e33cb13db1a18b34afa4333b835738c"
-CORPUS_SHA256 = "35e1d125f73ab8ae0a3e22c4fe3f3c8c968f6f9f1783a220583da4b94cf93237"
-DOCUMENT_MANIFEST_SHA256 = "23337a310d4b1a75c36126096800b0c52687b93127e6118f0756bdd5e6ac19fb"
+DATASET_REVISION = "763a8366abf2a3605c381d53586d844dc60fa756"  # pragma: allowlist secret
+CSV_SHA256 = "367ed0435864628c5aa8bc2379ae63804e33cb13db1a18b34afa4333b835738c"  # pragma: allowlist secret
+CORPUS_SHA256 = "35e1d125f73ab8ae0a3e22c4fe3f3c8c968f6f9f1783a220583da4b94cf93237"  # pragma: allowlist secret
+DOCUMENT_MANIFEST_SHA256 = (
+    "23337a310d4b1a75c36126096800b0c52687b93127e6118f0756bdd5e6ac19fb"  # pragma: allowlist secret
+)
 HERE = Path(__file__).resolve().parent
 
 

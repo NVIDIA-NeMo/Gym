@@ -8,7 +8,7 @@ officeqa_document_image: null
 officeqa_documents_host_root: null
 officeqa_document_prefix: null
 # SHA-256 of the pinned corpus's sorted JSON mapping of PDF filenames to byte sizes.
-officeqa_document_manifest_sha256: 23337a310d4b1a75c36126096800b0c52687b93127e6118f0756bdd5e6ac19fb
+officeqa_document_manifest_sha256: 23337a310d4b1a75c36126096800b0c52687b93127e6118f0756bdd5e6ac19fb  # pragma: allowlist secret
 # Supply the architecture-specific SHA-256 printed by Containerfile.opencode.
 officeqa_opencode_binary_sha256: null
 # model_only blocks external data access; inherit uses the provider's network policy.
