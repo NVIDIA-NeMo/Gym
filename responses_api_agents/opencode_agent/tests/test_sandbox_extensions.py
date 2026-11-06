@@ -192,6 +192,9 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
     assert config["provider"]["nemo_gym"]["models"]["dummy_model"] == {
         "interleaved": {"field": "reasoning_content"},
         "limit": {"context": 32000, "input": 32000, "output": 4096},
+        # Sessions always declare image input, so OpenCode passes on prompt and read-tool images.
+        "attachment": True,
+        "modalities": {"input": ["text", "image"], "output": ["text"]},
     }
     assert set(config) == {"model", "small_model", "enabled_providers", "autoupdate", "share", "provider", "plugin"}
     assert config["plugin"] == [Path(f"{directory}/task_environment.mjs").as_uri()]
