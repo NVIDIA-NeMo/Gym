@@ -310,6 +310,16 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
+    if result.error_type is not None or result.return_code is None:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=f"verification command did not finish: {result.error_type}",
+        )
+
     if result.return_code == 97:
         return VerificationResult(
             completed=False,
@@ -339,6 +349,19 @@ async def run_verification(
             test_output=output,
             error=f"parse failure ({inputs.test_framework}): {exc}",
         )
+    # Shell exit 126/127 means the test entrypoint could not execute. Other nonzero
+    # exits (assertions, compilation failures, collection errors) remain task failures.
+    # Keep parsed test verdicts authoritative even if a later command fails.
+    if not statuses and result.return_code in (126, 127):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=True,
+            test_results=None,
+            test_output=output,
+            error=f"test command unavailable or not executable (exit={result.return_code}): {inputs.test_command}",
+        )
+
     report = grade(statuses or {}, inputs.fail_to_pass, inputs.pass_to_pass, inputs.test_framework)
     test_patch_failed = TEST_PATCH_FAILED in output
     return VerificationResult(

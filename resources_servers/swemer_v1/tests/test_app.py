@@ -325,8 +325,8 @@ class TestDropTestPatchFiles:
 
 
 class _FakeSandbox:
-    def __init__(self, stdout: str, return_code: int = 0) -> None:
-        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code)
+    def __init__(self, stdout: str, return_code: int = 0, error_type: str | None = None) -> None:
+        self._result = SimpleNamespace(stdout=stdout, stderr="", return_code=return_code, error_type=error_type)
         self.commands: list[str] = []
 
     async def exec(self, command: str, timeout_s=None):
@@ -335,6 +335,40 @@ class _FakeSandbox:
 
 
 class TestRunVerification:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("exit_code", [126, 127])
+    async def test_unavailable_runner_is_incomplete(self, exit_code: int) -> None:
+        log = f"{TEST_OUTPUT_BEGIN}\nbash: go: command not found\n{TEST_OUTPUT_END}\n"
+        result = await run_verification(sandbox=_FakeSandbox(log, return_code=exit_code), inputs=_inputs())
+        assert not result.completed and not result.resolved
+        assert "test command unavailable" in result.error
+
+    @pytest.mark.asyncio
+    async def test_compilation_failure_remains_a_completed_failure(self) -> None:
+        log = f"{TEST_OUTPUT_BEGIN}\nFAIL pkg [build failed]\n{TEST_OUTPUT_END}\n"
+        result = await run_verification(
+            sandbox=_FakeSandbox(log, return_code=1),
+            inputs=_inputs(test_framework="go", test_command="go test ./..."),
+        )
+        assert result.completed and not result.resolved
+
+    @pytest.mark.asyncio
+    async def test_assertion_failure_remains_a_completed_failure(self) -> None:
+        log = f'{TEST_OUTPUT_BEGIN}\n{{"Action":"fail","Test":"TestOne","Package":"pkg"}}\n{TEST_OUTPUT_END}\n'
+        result = await run_verification(
+            sandbox=_FakeSandbox(log, return_code=1),
+            inputs=_inputs(test_framework="go", test_command="go test ./...", fail_to_pass=["pkg::TestOne"]),
+        )
+        assert result.completed and not result.resolved
+        assert result.test_results["tests_observed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_provider_timeout_is_incomplete(self) -> None:
+        result = await run_verification(
+            sandbox=_FakeSandbox("", return_code=None, error_type="timeout"), inputs=_inputs()
+        )
+        assert not result.completed and "did not finish" in result.error
+
     @pytest.mark.asyncio
     async def test_grades_a_passing_run(self) -> None:
         # go has no result file, so this exercises the plain stdout path end to end through the
