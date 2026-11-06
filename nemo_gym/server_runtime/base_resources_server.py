@@ -51,11 +51,14 @@ if TYPE_CHECKING:
 from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core.episode_types import EpisodeId, TaskId
-from nemo_gym.core.failure_kinds import SESSION_LOST, validate_failure_kind
+from nemo_gym.core.failure_kinds import SESSION_LOST, SESSION_RELEASE_FAILED, validate_failure_kind
+from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.failure_transport import observe_failure
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
@@ -521,24 +524,28 @@ class ResourcesVerification:
     A verifier masks ``is_lost`` with ``lost_session_verification``. Otherwise it scores live state when
     ``is_live`` or uses ``retained`` on a retry. Call ``retain`` before an awaited judge or before releasing
     anything needed by a retry. Payloads belong to the verifier; snapshot mutable state rather than retaining
-    a reference to a live table. A payload of ``None`` supports verifiers that score only the request.
+    a reference to a live table. Call ``retain(None)`` explicitly for a verifier that scores only the request.
+    Omitting ``retain`` makes a subsequent retry lost, rather than silently grading without its evidence.
     """
 
     is_live: bool
     is_lost: bool
     retained: object | None = None
+    _retained: bool = field(default=False, repr=False)
 
     def retain(self, payload: object | None) -> None:
         """Save compact evidence for retries after the context releases the live resources."""
         if self.is_lost:
             raise RuntimeError("Cannot retain verification evidence for a lost resources session")
         self.retained = payload
+        self._retained = True
 
 
 @dataclass
 class _VerificationReceipt:
     identity: tuple[EpisodeId, TaskId] | None
     payload: object | None
+    retained: bool
 
 
 class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleServer):
@@ -655,8 +662,18 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         return record[1] if record is not None else None
 
     def session_is_verified(self, session_id: str) -> bool:
-        """Whether verification evidence is retained, including a verification whose cleanup must retry."""
+        """Whether a verification attempt is retained, including one whose cleanup must retry.
+
+        The attempt may lack retry evidence; ``verifying`` then reports it as lost rather than scoring again.
+        """
         return self._verification_receipt(session_id) is not None
+
+    def session_release_pending(self, session_id: str) -> bool:
+        """Whether verification left resources that close or retirement must still release.
+
+        A successful score does not end checkpoint or worker ownership while its cleanup is pending.
+        """
+        return session_id in self._pending_verifications
 
     def session_identity(self, session_id: str) -> tuple[EpisodeId, TaskId] | None:
         """Return active, partially initialized, or retained verification ownership for this ID."""
@@ -702,8 +719,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
 
         Mask ``verification.is_lost`` before scoring. Otherwise use live state or ``retained`` and call
         ``retain`` with compact evidence. On exit, including a scoring exception, release resources and move
-        ownership into a retry record. Failed release keeps both ownership and staged evidence for a later
-        verify/close/retire; successful retries do not extend the record's window. Close always invalidates it.
+        ownership into a retry record. Failed release is observed without replacing the score or scoring error,
+        and keeps ownership and evidence for a later verify/close/retire. Cancellation still propagates.
+        Successful retries do not extend the record's window. Close always invalidates it. A retry with no
+        explicitly retained evidence is lost; pending cleanup is still attempted when it returns that mask.
 
         ``allow_missing`` is for request-scored verifiers that intentionally accept unseeded calls. It never
         permits verification of a closed session. The caller still masks any environment-specific state loss.
@@ -718,35 +737,51 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             lost = (
                 self.session_is_closed(session_id)
                 or session_id in self._initializing_sessions
+                or (receipt is not None and not receipt.retained)
                 or (not live and receipt is None and not allow_missing)
             )
-            verification = ResourcesVerification(live, lost, receipt.payload if receipt is not None else None)
-            if lost:
+            verification = ResourcesVerification(
+                live, lost, receipt.payload if receipt is not None else None, receipt.retained if receipt else False
+            )
+            if lost and not self.session_release_pending(session_id):
                 yield verification
                 return
             identity = self.session_identity(session_id)
             try:
                 yield verification
             finally:
-                pending = _VerificationReceipt(identity, verification.retained)
+                pending = _VerificationReceipt(identity, verification.retained, verification._retained)
                 self._pending_verifications[session_id] = pending
-                await self.release_session_state(session_id)
-                self._session_episodes.pop(session_id, None)
-                self._initializing_sessions.pop(session_id, None)
-                self._cookie_sessions.discard(session_id)
-                self._pending_verifications.pop(session_id, None)
-                # Another session may have expired this record while the judge awaited. A successful retry
-                # must not resurrect it with a fresh window when it finishes.
-                now = monotonic()
-                deadline = (
-                    retry_deadline
-                    if retry_deadline is not None
-                    else now + self.config.session_close_retry_window_seconds
-                )
-                if deadline > now:
-                    self._verification_receipts[session_id] = (deadline, pending)
+                try:
+                    await self.release_session_state(session_id)
+                except Exception as error:
+                    failure = NgFailureEvent(
+                        boundary=FailureBoundary.RESOURCES_SERVER,
+                        failure_kind=SESSION_RELEASE_FAILED,
+                        failure_reason="Resources session cleanup after verification failed",
+                        operation="verify.cleanup",
+                        stage="cleanup",
+                    )
+                    failure.__cause__ = error
+                    observe_failure(failure)
+                    logger.warning("Failed to release verified resources session %s", session_id, exc_info=True)
                 else:
-                    self._verification_receipts.pop(session_id, None)
+                    self._session_episodes.pop(session_id, None)
+                    self._initializing_sessions.pop(session_id, None)
+                    self._cookie_sessions.discard(session_id)
+                    self._pending_verifications.pop(session_id, None)
+                    # Another session may have expired this record while the judge awaited. A successful retry
+                    # must not resurrect it with a fresh window when it finishes.
+                    now = monotonic()
+                    deadline = (
+                        retry_deadline
+                        if retry_deadline is not None
+                        else now + self.config.session_close_retry_window_seconds
+                    )
+                    if deadline > now:
+                        self._verification_receipts[session_id] = (deadline, pending)
+                    else:
+                        self._verification_receipts.pop(session_id, None)
 
     async def _initialize_session(self, session_id: str, body: BaseSeedSessionRequest) -> None:
         try:
@@ -778,6 +813,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             "session_starts": tuple(self.checkpoint_session_starts),
             "session_ends": ("/verify",),
             "close_follows_header": CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+            "session_release_pending": self.session_release_pending,
         }
 
     def setup_webserver(self) -> FastAPI:
@@ -866,7 +902,12 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_step_type=self.checkpoint_verify)
+        participant = ResourcesParticipant(
+            self,
+            self.checkpoint_mode,
+            verify_step_type=self.checkpoint_verify,
+            session_release_pending=self.session_release_pending,
+        )
         self._checkpoint = participant
         install_server_participant(
             app,
