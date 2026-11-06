@@ -4,15 +4,19 @@
 
 Layout (no external tooling; `python -m responses_api_agents.agentic_mme_agent.search_cache <root>` rebuilds the index):
 
-    <root>/search/<ab>/<cd>/<sha256(norm query)>.json  {"query","norm","provider","results": Serper-shaped dict, ...}
-    <root>/lens/<ab>/<cd>/<sha256(pixel key)>.json      {"image_key","provider","results", ...}
-    <root>/browse/<ab>/<cd>/<sha256(norm url)>.json     {"url","norm","provider","content", ...}
+    <root>/search/<ab>/<cd>/<sha256(provider|gl|hl|norm query)>.json  {"query","norm","provider","gl","hl","results", ...}
+    <root>/lens/<ab>/<cd>/<sha256(provider|pixel key)>.json            {"image_key","provider","results", ...}
+    <root>/browse/<ab>/<cd>/<sha256(provider|norm url)>.json           {"url","norm","provider","content", ...}
     <root>/index/master.db                              FTS5 over every cached query norm (read-only here)
     <root>/index/search_norms_<host>_<pid>.txt          this process's new norms (merged by rebuild_index)
 
 Lookups: search = exact norm, then fuzzy (token_sort_ratio >= threshold over FTS5 candidates, see
 sqlite_fuzzy_index.py) unless the candidate's numbers differ from the query's (2010 vs 2020);
-lens = sha256 of the decoded RGB pixels + size; browse = normalised URL. Files are content-addressed
+lens = sha256 of the decoded RGB pixels + size; browse = normalised URL. Every key includes the
+provider (and, for search, gl/hl), so a run never gets another provider's or another locale's
+results under its own provider's name. Entries written before keys carried the provider (keyed
+by the bare norm / pixels / URL) are still served when their stored provider (and gl/hl; missing
+counts as us/en) matches. Files are content-addressed
 and written atomically (temp + os.replace), so many processes on many nodes can share one root.
 Only provider responses are stored, never model-written text.
 """
@@ -74,6 +78,14 @@ def _makedirs_shared(path: str) -> None:
         os.chmod(directory, _DIR_MODE)
 
 
+# Locale a legacy search entry is taken to have when it did not record one (the tool defaults).
+_SCOPE_DEFAULTS = {"gl": "us", "hl": "en"}
+
+
+def _scoped_key(key: str, scope: dict[str, str]) -> str:
+    return "|".join([*(scope[k] for k in sorted(scope)), key])
+
+
 def _numbers(norm: str) -> set[str]:
     return set(_NUM_RE.findall(norm))
 
@@ -99,6 +111,17 @@ class SearchCache:
         except (OSError, ValueError):
             return None
 
+    def _read_scoped(self, kind: str, key: str, scope: dict[str, str]) -> dict[str, Any] | None:
+        """The entry for key under this provider (and locale); falls back to an entry written before keys
+        carried the scope, only when its stored scope matches."""
+        entry = self._read(kind, _scoped_key(key, scope))
+        if entry is not None:
+            return entry
+        legacy = self._read(kind, key)
+        if legacy and all(legacy.get(k, _SCOPE_DEFAULTS.get(k)) == v for k, v in scope.items()):
+            return legacy
+        return None
+
     def _write(self, kind: str, key: str, payload: dict[str, Any]) -> None:
         if not self.write:
             return
@@ -117,20 +140,24 @@ class SearchCache:
                 os.remove(tmp)
 
     # ---- search -------------------------------------------------------------------------------
-    def get_search(self, query: str) -> tuple[dict[str, Any] | None, str, str | None]:
+    def get_search(
+        self, query: str, provider: str, gl: str = "us", hl: str = "en"
+    ) -> tuple[dict[str, Any] | None, str, str | None]:
         """(Serper-shaped results, "exact" | "fuzzy" | "miss", the cached query a fuzzy hit answers).
 
-        A fuzzy hit answers a different, similar query; callers must show that query to the model.
+        Only entries from this provider and locale count. A fuzzy hit answers a different, similar
+        query; callers must show that query to the model.
         """
+        scope = {"provider": provider, "gl": gl, "hl": hl}
         norm = normalize_query(query)
-        entry = self._read("search", norm)
+        entry = self._read_scoped("search", norm, scope)
         if entry and isinstance(entry.get("results"), dict):
             return entry["results"], "exact", None
         if self.fuzzy is not None and norm:
             match = self.fuzzy.lookup(norm)
             # A near-identical query about another year / quantity is a different question.
             if match and _numbers(match) == _numbers(norm):
-                entry = self._read("search", match)
+                entry = self._read_scoped("search", match, scope)
                 if entry and isinstance(entry.get("results"), dict):
                     return entry["results"], "fuzzy", entry.get("query") or match
         return None, "miss", None
@@ -141,7 +168,7 @@ class SearchCache:
             return
         self._write(
             "search",
-            norm,
+            _scoped_key(norm, {"provider": provider, "gl": gl, "hl": hl}),
             {
                 "query": query,
                 "norm": norm,
@@ -161,15 +188,15 @@ class SearchCache:
                 os.chmod(self._shard, _FILE_MODE)
 
     # ---- lens / browse ------------------------------------------------------------------------
-    def get_lens(self, image: Image.Image) -> dict[str, Any] | None:
-        entry = self._read("lens", pixel_key(image))
+    def get_lens(self, image: Image.Image, provider: str) -> dict[str, Any] | None:
+        entry = self._read_scoped("lens", pixel_key(image), {"provider": provider})
         return entry["results"] if entry and isinstance(entry.get("results"), dict) else None
 
     def put_lens(self, image: Image.Image, results: dict[str, Any], provider: str) -> None:
         key = pixel_key(image)
         self._write(
             "lens",
-            key,
+            _scoped_key(key, {"provider": provider}),
             {
                 "image_key": key,
                 "provider": provider,
@@ -179,15 +206,15 @@ class SearchCache:
             },
         )
 
-    def get_browse(self, url: str) -> str | None:
-        entry = self._read("browse", normalize_url(url))
+    def get_browse(self, url: str, provider: str) -> str | None:
+        entry = self._read_scoped("browse", normalize_url(url), {"provider": provider})
         return entry.get("content") if entry and isinstance(entry.get("content"), str) else None
 
     def put_browse(self, url: str, content: str, provider: str = "jina") -> None:
         norm = normalize_url(url)
         self._write(
             "browse",
-            norm,
+            _scoped_key(norm, {"provider": provider}),
             {
                 "url": url,
                 "norm": norm,

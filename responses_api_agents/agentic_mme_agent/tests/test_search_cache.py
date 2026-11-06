@@ -24,19 +24,19 @@ def test_exact_fuzzy_and_number_guard(tmp_path) -> None:
     _seed(tmp_path, "Eiffel Tower height in meters 2010", {"organic": [{"title": "2010"}]})
     build_master_db(master_db_path(str(tmp_path)), [normalize_query("Eiffel Tower height in meters 2010")])
     cache = SearchCache(str(tmp_path), fuzzy_threshold=0.8)
-    assert cache.get_search("eiffel tower height in meters 2010")[1] == "exact"
-    assert cache.get_search("height in meters of the Eiffel Tower 2010")[1] == "fuzzy"
+    assert cache.get_search("eiffel tower height in meters 2010", "serpapi")[1] == "exact"
+    assert cache.get_search("height in meters of the Eiffel Tower 2010", "serpapi")[1] == "fuzzy"
     # same words, different year: not the same question
-    assert cache.get_search("Eiffel Tower height in meters 2020") == (None, "miss", None)
+    assert cache.get_search("Eiffel Tower height in meters 2020", "serpapi") == (None, "miss", None)
 
 
 def test_fuzzy_matching_is_off_by_default(tmp_path) -> None:
     _seed(tmp_path, "capital of austria", {"organic": [{"title": "Vienna"}]})
     build_master_db(master_db_path(str(tmp_path)), ["capital of austria"])
-    assert SearchCache(str(tmp_path)).get_search("capital of australia") == (None, "miss", None)
+    assert SearchCache(str(tmp_path)).get_search("capital of australia", "serpapi") == (None, "miss", None)
     assert RetrievalConfig().cache_fuzzy_threshold == 0
     # Opting in, the same near miss becomes a hit for the other question.
-    assert SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("capital of australia")[1:] == (
+    assert SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("capital of australia", "serpapi")[1:] == (
         "fuzzy",
         "capital of austria",
     )
@@ -54,7 +54,13 @@ async def test_fuzzy_hit_shows_the_model_which_query_it_answers(tmp_path, monkey
     monkeypatch.setattr(retrieval, "http_payload", no_network)
     workspace = ImageWorkspace()
     workspace.add(Image.new("RGB", (4, 4), "red"))
-    config = RetrievalConfig(mode="live", serper_api_key="s", cache_root=str(tmp_path), cache_fuzzy_threshold=0.8)
+    config = RetrievalConfig(
+        mode="live",
+        search_provider="serpapi",
+        serpapi_api_key="s",
+        cache_root=str(tmp_path),
+        cache_fuzzy_threshold=0.8,
+    )
     out = await Retrieval(config).call("google_search", {"query": "capital of australia"}, workspace)
     assert out["cache"] == "fuzzy" and out["matched_query"] == "capital of austria"
     exact = await Retrieval(config).call("google_search", {"query": "Capital of Austria"}, workspace)
@@ -107,9 +113,15 @@ def test_rebuild_index_makes_new_entries_fuzzy_matchable(tmp_path) -> None:
     from responses_api_agents.agentic_mme_agent.search_cache import rebuild_index
 
     _seed(tmp_path, "tallest building in Paris 2024", {"organic": []})
-    assert SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("in Paris tallest building 2024")[1] == "miss"
+    assert (
+        SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("in Paris tallest building 2024", "serpapi")[1]
+        == "miss"
+    )
     assert rebuild_index(str(tmp_path)) == 1
-    assert SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("in Paris tallest building 2024")[1] == "fuzzy"
+    assert (
+        SearchCache(str(tmp_path), fuzzy_threshold=0.8).get_search("in Paris tallest building 2024", "serpapi")[1]
+        == "fuzzy"
+    )
 
 
 def test_this_process_entries_are_fuzzy_matchable_before_any_rebuild(tmp_path) -> None:
@@ -120,7 +132,7 @@ def test_this_process_entries_are_fuzzy_matchable_before_any_rebuild(tmp_path) -
         "tallest building in Paris 2024", {"organic": [{"title": "Tour Montparnasse"}]}, "exa", "us", "en"
     )
     assert not os.path.exists(master_db_path(str(tmp_path)))
-    results, kind, matched = cache.get_search("in Paris tallest building 2024")
+    results, kind, matched = cache.get_search("in Paris tallest building 2024", "exa")
     assert kind == "fuzzy" and matched == "tallest building in Paris 2024"
     assert results["organic"][0]["title"] == "Tour Montparnasse"
     shards = list((tmp_path / "index").glob("search_norms_*.txt"))
@@ -167,6 +179,46 @@ def test_unwritable_cache_never_fails_the_caller(tmp_path) -> None:
     os.chmod(tmp_path / "search", 0o500)
     try:
         _seed(tmp_path, "read only cache", {"organic": []})  # must not raise
-        assert SearchCache(str(tmp_path), fuzzy_threshold=0).get_search("read only cache") == (None, "miss", None)
+        assert SearchCache(str(tmp_path), fuzzy_threshold=0).get_search("read only cache", "serpapi") == (
+            None,
+            "miss",
+            None,
+        )
     finally:
         os.chmod(tmp_path / "search", 0o700)
+
+
+def test_entries_are_scoped_to_provider_and_locale(tmp_path) -> None:
+    cache = SearchCache(str(tmp_path))
+    cache.put_search("capital of australia", {"organic": [{"title": "Tavily"}]}, "tavily", "us", "en")
+    cache.put_search("capital of australia", {"organic": [{"title": "SerpAPI"}]}, "serpapi", "us", "en")
+    assert cache.get_search("capital of australia", "tavily")[0]["organic"][0]["title"] == "Tavily"
+    assert cache.get_search("capital of australia", "serpapi")[0]["organic"][0]["title"] == "SerpAPI"
+    assert cache.get_search("capital of australia", "serper") == (None, "miss", None)
+    assert cache.get_search("capital of australia", "serpapi", "us", "de") == (None, "miss", None)
+    image = Image.new("RGB", (4, 4), "red")
+    cache.put_lens(image, {"organic": []}, "serpapi")
+    assert cache.get_lens(image, "serpapi") == {"organic": []} and cache.get_lens(image, "serper") is None
+    cache.put_browse("https://a.example/p", "exa text", "exa")
+    assert (
+        cache.get_browse("https://a.example/p/", "exa") == "exa text"
+        and cache.get_browse("https://a.example/p", "jina") is None
+    )
+
+
+def test_entries_written_before_scoped_keys_still_serve_their_own_provider(tmp_path) -> None:
+    cache = SearchCache(str(tmp_path))
+    # The old layout: keyed by the bare norm / pixels / URL, with the provider stored in the entry.
+    cache._write(
+        "search",
+        "capital of australia",
+        {"norm": "capital of australia", "provider": "serpapi", "results": {"organic": []}},
+    )
+    cache._write("browse", "https://a.example/p", {"provider": "jina", "content": "old page"})
+    assert cache.get_search("capital of australia", "serpapi")[1] == "exact"  # gl/hl missing: us/en
+    assert cache.get_search("capital of australia", "tavily")[1] == "miss"
+    assert cache.get_search("capital of australia", "serpapi", "de", "de")[1] == "miss"
+    assert (
+        cache.get_browse("https://a.example/p", "jina") == "old page"
+        and cache.get_browse("https://a.example/p", "exa") is None
+    )

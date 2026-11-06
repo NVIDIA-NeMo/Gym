@@ -439,14 +439,14 @@ class Retrieval:
         out["context"] = lens_text(raw) if out["tool"] == "google_lens_search" else search_text(raw)
         return out
 
-    @staticmethod
-    def _cache_lookup(cache, args, workspace: ImageWorkspace) -> tuple[Any, str, str | None]:
+    def _cache_lookup(self, cache, args, workspace: ImageWorkspace) -> tuple[Any, str, str | None]:
+        # Only this run's providers (and, for search, locale) count: another provider's entry is a miss.
         if isinstance(args, SearchArgs):
-            return cache.get_search(args.query)
+            return cache.get_search(args.query, self.config.search_provider, args.gl, args.hl)
         if isinstance(args, LensArgs):
-            hit = cache.get_lens(workspace.get(args.image_index))
+            hit = cache.get_lens(workspace.get(args.image_index), self.config.lens_provider_resolved())
         else:
-            hit = cache.get_browse(args.url)
+            hit = cache.get_browse(args.url, self.config.fetch_provider)
         return hit, "exact" if hit is not None else "miss", None
 
     def _cache_store(self, cache, args, workspace: ImageWorkspace, out: dict[str, Any]) -> None:
