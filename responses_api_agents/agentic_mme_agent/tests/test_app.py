@@ -434,8 +434,9 @@ async def test_failed_model_call_without_status_goes_to_failures_sidecar(failing
         (500, b"internal server error"),
         (503, b"service unavailable"),
         (400, b'{"error": "unsupported parameter"}'),
+        (400, b'{"error": "At most 1 image(s) may be provided in one prompt."}'),
     ],
-    ids=["auth", "rate_limit", "server_error", "unavailable", "other_400"],
+    ids=["auth", "rate_limit", "server_error", "unavailable", "other_400", "serving_image_limit"],
 )
 async def test_refused_model_call_outside_the_model_goes_to_failures_sidecar(status, error_body) -> None:
     refused = FakeResponse(b"", {})
@@ -452,6 +453,24 @@ async def test_refused_model_call_outside_the_model_goes_to_failures_sidecar(sta
     agent.server_client.post.side_effect = post_or_refuse
     with pytest.raises(PolicyRequestError, match=f"HTTP {status}"):
         await agent.run(request(), body())
+
+
+@pytest.mark.asyncio
+async def test_image_limit_is_a_tool_error_and_the_model_still_answers() -> None:
+    agent, seen = make_agent(
+        [response(output=[call(call_id="a")]), response(output=[call(call_id="b")]), response("<answer>red</answer>")],
+        max_images_per_request=2,
+    )
+    result = await agent.run(request(), body())
+    assert result.reward == 1 and result.successful_tool_calls == 1 and result.tool_error_count == 1
+    assert result.tool_trace[1]["output"]["error"].startswith("image limit reached")
+    images = [
+        part
+        for item in seen[-1]["input"]
+        for part in (item.get("content") or [])
+        if isinstance(part, dict) and part.get("type") == "input_image"
+    ]
+    assert len(images) == 2
 
 
 @pytest.mark.asyncio

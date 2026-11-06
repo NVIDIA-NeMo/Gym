@@ -130,6 +130,14 @@ def test_input_access_restricted(url) -> None:
         ImageWorkspace().load(url)
 
 
+def test_image_limit_refuses_the_next_image(workspace) -> None:
+    workspace.max_images = len(workspace.images) + 1
+    workspace.apply("invert", {"image_index": 0})
+    with pytest.raises(ValueError, match="image limit reached: a model request holds at most"):
+        workspace.apply("invert", {"image_index": 0})
+    assert len(workspace.images) == workspace.max_images
+
+
 def test_pixel_budget(workspace) -> None:
     workspace.max_total_pixels = workspace.total_pixels
     with pytest.raises(ValueError, match="budget"):

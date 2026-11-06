@@ -124,13 +124,22 @@ def model_image_url(image: Image.Image) -> str:
 class ImageWorkspace:
     """Per-episode image indices; no model-controlled filesystem or URL access."""
 
-    def __init__(self, *, max_pixels: int = 16_000_000, max_total_pixels: int = 64_000_000) -> None:
+    def __init__(
+        self, *, max_pixels: int = 16_000_000, max_total_pixels: int = 64_000_000, max_images: int | None = None
+    ) -> None:
         self.images: list[Image.Image] = []
         self.max_pixels = max_pixels
         self.max_total_pixels = max_total_pixels
+        # Every image goes into every later model request, so this caps the images per request.
+        self.max_images = max_images
         self.total_pixels = 0
 
     def check_size(self, width: int, height: int) -> None:
+        if self.max_images is not None and len(self.images) >= self.max_images:
+            raise ValueError(
+                f"image limit reached: a model request holds at most {self.max_images} images; "
+                "answer with the images you have"
+            )
         pixels = width * height
         if min(width, height) < 1 or pixels > self.max_pixels:
             raise ValueError("image dimensions exceed the configured per-image limit")

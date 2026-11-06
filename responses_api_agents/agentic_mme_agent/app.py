@@ -30,12 +30,13 @@ from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorks
 
 
 # Refusals that measure the policy: its own tool images and history outgrew the context or the
-# request limits. The episode ends unanswered and scores 0.
+# request limits. The episode ends unanswered and scores 0. vLLM's "At most N image(s) may be
+# provided in one prompt" is not one of them: it is a serving limit (limit_mm_per_prompt), so it
+# raises like any other configuration error; max_images_per_request keeps episodes within it.
 _CONTEXT_LIMIT_MARKERS = (
     "context_length_exceeded",
     "maximum context length",
     "request_too_large",
-    "image(s) may be provided",
 )
 
 
@@ -61,6 +62,11 @@ class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     max_concurrent_rollouts: int = Field(default=8, ge=1)
     max_image_pixels: int = Field(default=16_000_000, ge=1)
     max_total_image_pixels: int = Field(default=64_000_000, ge=1)
+    # Images per model request (input images plus tool images; every image stays in every later
+    # request). None (the default) sets no limit. Set it to the serving engine's per-prompt image
+    # limit (vLLM limit_mm_per_prompt.image): an image tool call past it returns a tool error, so the
+    # model answers with the images it has instead of the request being refused.
+    max_images_per_request: int | None = Field(default=None, ge=1)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 
 
@@ -96,7 +102,9 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
     ) -> tuple[NeMoGymResponse, list[dict[str, Any]], Any, str | None]:
         async with self._rollouts:
             workspace = ImageWorkspace(
-                max_pixels=self.config.max_image_pixels, max_total_pixels=self.config.max_total_image_pixels
+                max_pixels=self.config.max_image_pixels,
+                max_total_pixels=self.config.max_total_image_pixels,
+                max_images=self.config.max_images_per_request,
             )
             return await self._episode_with_workspace(params, cookies, replay, workspace, model_url_path)
 

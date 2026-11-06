@@ -58,6 +58,11 @@ retrieval).
 - **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the
   episode ends when the model answers without a tool call or when a model call is refused. Set both to restore the
   component default of 15.
+- **Images per request:** every image stays in every later model request. `max_images_per_request` is off by
+  default; with a serving engine that limits images per prompt (vLLM `limit_mm_per_prompt.image`), set it to that
+  limit, or serve with a limit of at least the input images plus `max_tool_calls`. An image tool call past the limit
+  returns a tool error and the model answers with the images it has. A request the engine refuses for its image
+  limit is a configuration error and goes to the failures sidecar, not a scored 0.
 - **Sampling:** taken from the run (`responses_create_params`); the agent sets no temperature. One repeat by default.
 
 ## Prepare and run
