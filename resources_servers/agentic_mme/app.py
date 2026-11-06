@@ -22,7 +22,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import VerifierFixture
-from nemo_gym.verification.judge import JudgeError, call_judge
+from nemo_gym.verification.judge import call_judge
 from resources_servers.agentic_mme.verifier_fixture import create_server
 
 
@@ -215,19 +215,15 @@ class AgenticMMEServer(SimpleResourcesServer):
         result.string_match_reward = float(matches_answer(result.extracted_answer, golden))
         result.reward = result.string_match_reward
         if self.config.judge_model_server is not None and result.extracted_answer:
-            try:
-                judged = await self.judge(
-                    question_text(body.responses_create_params),
-                    str(golden.value),
-                    result.extracted_answer,
-                    final_text,
-                    tolerance=golden.tolerance if golden.match_type == "numeric" else 0.0,
-                )
-            except JudgeError as exc:
-                result.reward = 0.0
-                result.failure_reason = "judge_error"
-                result.judge_reason = str(exc)[:500]
-                return result
+            # A failed judge call raises JudgeError; the judge_failsafe wrapper around /verify turns it
+            # into a masked judge_failed row in the failures sidecar, regraded later, not a wrong answer.
+            judged = await self.judge(
+                question_text(body.responses_create_params),
+                str(golden.value),
+                result.extracted_answer,
+                final_text,
+                tolerance=golden.tolerance if golden.match_type == "numeric" else 0.0,
+            )
             result.judge_verdict = judged["verdict"]
             result.judge_reason = judged["reason"]
             result.reward = float(judged["verdict"] == "equivalent")

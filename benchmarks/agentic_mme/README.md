@@ -42,10 +42,16 @@ retrieval).
   question text, the gold answer, the numeric tolerance when the task has one, and the model's final text, not
   the images. The released evaluator's string match (`exact` / `contains` / `numeric`, with the same
   tolerance) is reported alongside as `string_match_reward`.
-- **Answers:** only the terminal assistant message counts. A truncated response or a model-call failure (HTTP error,
-  timeout, unparseable response) scores 0 and is recorded in `failure_reason` / `policy_error`; no rollout is dropped.
+- **Answers:** only the terminal assistant message counts. A response cut off at the output-token limit, or a model
+  call refused because the context or request size is exceeded, measures the policy: it scores 0 and is recorded in
+  `failure_reason` / `policy_error`.
+- **Infrastructure failures are not scored.** A failed policy call for any other reason (auth, rate limit, server
+  error, timeout, lost connection, unreadable reply) raises out of `/run`, and a failed judge call is masked by
+  `judge_failsafe`. Both go to the failures sidecar (`agent_run_error` / `judge_failed`) and are retried or regraded
+  on resume. To keep a fixed denominator, count what still fails as 0 in the metrics with
+  `count_failure_classes_as_zero`.
 - **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the
-  episode ends when the model answers without a tool call or when a model call fails. Set both to restore the
+  episode ends when the model answers without a tool call or when a model call is refused. Set both to restore the
   component default of 15.
 - **Sampling:** taken from the run (`responses_create_params`); the agent sets no temperature. One repeat by default.
 

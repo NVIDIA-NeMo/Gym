@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -180,16 +181,21 @@ async def test_judge_decides_reward(judged_server, monkeypatch, verdict, reward)
 
 
 @pytest.mark.asyncio
-async def test_judge_error_scores_zero(judged_server, monkeypatch) -> None:
-    from nemo_gym.verification.judge import JudgeError
+async def test_judge_error_goes_to_failures_sidecar(judged_server, monkeypatch) -> None:
+    from nemo_gym.verification.judge import JudgeError, judge_failsafe
 
     async def failing_call_judge(*args, **kwargs):
         raise JudgeError("judge down")
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", failing_call_judge)
-    result = await judged_server.verify(judged_request("<answer>44.6 million</answer>"))
-    assert result.reward == 0.0 and result.failure_reason == "judge_error"
-    assert result.string_match_reward == 1.0
+    request = judged_request("<answer>44.6 million</answer>")
+    with pytest.raises(JudgeError):
+        await judged_server.verify(request)
+    # The base server wraps /verify in judge_failsafe: the row is masked and kept for regrading.
+    routed = json.loads((await judge_failsafe(judged_server.verify)(body=request)).body)
+    assert routed["reward"] == 0.0 and routed["mask_sample"] is True
+    assert routed["failure_kind"] == "judge_failed" and routed["_ng_failure_class"] == "judge_failed"
+    assert routed["response"]["output"][0]["content"][0]["text"] == "<answer>44.6 million</answer>"
 
 
 @pytest.mark.asyncio

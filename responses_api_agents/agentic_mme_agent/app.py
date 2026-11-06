@@ -29,11 +29,33 @@ from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Re
 from responses_api_agents.agentic_mme_agent.tools import IMAGE_TOOLS, ImageWorkspace, function_schema
 
 
+# Refusals that measure the policy: its own tool images and history outgrew the context or the
+# request limits. The episode ends unanswered and scores 0.
+_CONTEXT_LIMIT_MARKERS = (
+    "context_length_exceeded",
+    "maximum context length",
+    "request_too_large",
+    "image(s) may be provided",
+)
+
+
+def is_context_limit(status: int, body: str) -> bool:
+    """A 400/413 that names a context or request-size limit."""
+    text = body.lower()
+    return status in (400, 413) and any(marker in text for marker in _CONTEXT_LIMIT_MARKERS)
+
+
+class PolicyRequestError(RuntimeError):
+    """A policy call failed for a reason outside the model (auth, rate limit, server error, timeout,
+    lost connection, unreadable reply). Raised out of /run so rollout collection records the task in
+    the failures sidecar and retries it, instead of scoring the model 0."""
+
+
 class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef
     model_server: ModelServerRef
     # None removes the limit: the episode then ends when the model answers without a tool call,
-    # or when the model call fails (e.g. the context is full), recorded as policy_error.
+    # or when the model's context or request limit refuses the call, recorded as policy_error.
     max_rounds: int | None = Field(default=15, ge=1, le=100)
     max_tool_calls: int | None = Field(default=15, ge=0, le=100)
     max_concurrent_rollouts: int = Field(default=8, ge=1)
@@ -110,6 +132,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         attempts = 0
         finished = False
         policy_error = None
+        infrastructure_error = False
         generated = None
         # No forced final-answer call: every model call sees the same tools and tool_choice, so each
         # call's prompt extends the previous one (NeMo RL token capture links a rollout's calls by
@@ -135,14 +158,15 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     error_body = (await response.read()).decode(errors="replace")
             except (TimeoutError, ClientError, ValueError) as exc:
                 # The call failed without an HTTP status (connection lost, timeout after the client's
-                # retries, a body that is not JSON or not a Response): it ends the episode like a refusal,
-                # so the rollout scores 0 instead of escaping run() into the failures sidecar.
+                # retries, a body that is not JSON or not a Response): infrastructure, not the model.
                 policy_error = f"{type(exc).__name__}: {str(exc)[:1000]}"
+                infrastructure_error = True
                 break
             if not response.ok:
-                # A refused model call (e.g. an endpoint's request-size limit once many tool images
-                # accumulate) ends this episode unanswered instead of failing the whole collection.
+                # A context or request-size refusal (many tool images accumulated) ends the episode
+                # unanswered; any other status (401, 429, 5xx) is infrastructure.
                 policy_error = f"HTTP {response.status}: {error_body[:1000]}"
+                infrastructure_error = not is_context_limit(response.status, error_body)
                 break
             cookies = response.cookies
             generated = reply
@@ -230,7 +254,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             result = NeMoGymResponse.model_validate(
                 result.model_dump() | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
             )
-        return result, trace, cookies, policy_error
+        return result, trace, cookies, policy_error, infrastructure_error
 
     async def responses(
         self,
@@ -238,7 +262,7 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        result, _, cookies, _ = await self._episode(
+        result, _, cookies, _, _ = await self._episode(
             body, request.cookies, model_url_path=self.url_path_for_request("/v1/responses", request)
         )
         for name, value in (cookies or {}).items():
@@ -246,12 +270,14 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
         return result
 
     async def run(self, request: Request, body: AgenticMMERunRequest) -> AgenticMMEVerifyResponse:
-        result, trace, _, policy_error = await self._episode(
+        result, trace, _, policy_error, infrastructure_error = await self._episode(
             body.responses_create_params,
             request.cookies,
             body.retrieval_replay,
             model_url_path=self.url_path_for_run("/v1/responses", body),
         )
+        if infrastructure_error:
+            raise PolicyRequestError(policy_error)
         verification = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/verify",

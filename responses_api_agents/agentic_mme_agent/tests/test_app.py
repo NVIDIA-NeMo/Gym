@@ -12,7 +12,12 @@ from PIL import Image
 from nemo_gym.server_runtime.base_server import ServerClient
 from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
 from resources_servers.agentic_mme.tests.test_app import response
-from responses_api_agents.agentic_mme_agent.app import AgenticMMEAgent, AgenticMMEAgentConfig, AgenticMMERunRequest
+from responses_api_agents.agentic_mme_agent.app import (
+    AgenticMMEAgent,
+    AgenticMMEAgentConfig,
+    AgenticMMERunRequest,
+    PolicyRequestError,
+)
 from responses_api_agents.agentic_mme_agent.retrieval import Retrieval
 from responses_api_agents.agentic_mme_agent.tools import image_data_url
 
@@ -358,9 +363,9 @@ class UnreadableResponse(FakeResponse):
     ],
     ids=["timeout", "connection", "payload", "not_json", "not_a_response"],
 )
-async def test_failed_model_call_without_status_scores_zero(failing_call, failure) -> None:
-    # A policy call that fails before giving an HTTP status still ends the episode as a
-    # policy_error scored 0, instead of raising out of run() into the failures sidecar.
+async def test_failed_model_call_without_status_goes_to_failures_sidecar(failing_call, failure) -> None:
+    # A policy call that fails before giving an HTTP status is infrastructure: run() raises, so
+    # rollout collection records the task in the failures sidecar and retries it.
     agent, seen = make_agent([response(output=[call()]), response("red")])
     post = agent.server_client.post.side_effect
     model_calls = 0
@@ -376,9 +381,38 @@ async def test_failed_model_call_without_status_scores_zero(failing_call, failur
         return await post(**kwargs)
 
     agent.server_client.post.side_effect = post_or_fail
-    result = await agent.run(request(), body())
-    assert result.reward == 0 and result.failure_reason == "policy_error"
-    assert result.policy_error and result.tool_call_count == failing_call
+    with pytest.raises(PolicyRequestError):
+        await agent.run(request(), body())
+    assert not any(c.kwargs["url_path"] == "/verify" for c in agent.server_client.post.call_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "error_body"),
+    [
+        (401, b'{"error": "invalid api key"}'),
+        (429, b'{"error": "rate limit exceeded"}'),
+        (500, b"internal server error"),
+        (503, b"service unavailable"),
+        (400, b'{"error": "unsupported parameter"}'),
+    ],
+    ids=["auth", "rate_limit", "server_error", "unavailable", "other_400"],
+)
+async def test_refused_model_call_outside_the_model_goes_to_failures_sidecar(status, error_body) -> None:
+    refused = FakeResponse(b"", {})
+    refused.ok, refused.status = False, status
+    refused.read = AsyncMock(return_value=error_body)
+    agent, seen = make_agent([response(output=[call()])])
+    post = agent.server_client.post.side_effect
+
+    async def post_or_refuse(**kwargs):
+        if kwargs["url_path"] == "/v1/responses" and len(seen) == 1:
+            return refused
+        return await post(**kwargs)
+
+    agent.server_client.post.side_effect = post_or_refuse
+    with pytest.raises(PolicyRequestError, match=f"HTTP {status}"):
+        await agent.run(request(), body())
 
 
 @pytest.mark.asyncio
