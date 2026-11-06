@@ -56,7 +56,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode, require_checkpoint_id_keyword
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.resources import (
     MCPTokenClaims,
@@ -618,6 +618,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
+            require_checkpoint_id_keyword(self, "export_session_states")
         participant = ResourcesParticipant(self, mode, verify_step_type=self.checkpoint_verify)
         self._checkpoint = participant
         install_server_participant(
@@ -720,8 +721,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     async def release_external_state(self, kept: frozenset[str]) -> None:
         """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as sandbox snapshots.
 
-        Called while no checkpoint is open, after the controller published one and pruned old ones;
+        Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;
         an empty ``kept`` means nothing will be restored again. The default keeps nothing outside Gym.
+
+        - It holds the control lock: no prepare, commit, or restore runs meanwhile, and no checkpoint is open.
+        - It is cancelled at the release request's deadline, and the controller releases again later,
+          so it must tolerate state an earlier call already deleted and resume a deletion one left half done.
+        - Admission stays open: episodes keep running, so it must not touch what live sessions use.
+        - With several workers every worker runs it, so deleting what another worker already deleted must not fail.
+        - Keep by reference, not by age: keep whatever a checkpoint in ``kept`` refers to, and delete the rest.
         """
 
     def normalize_tool_name(self, name: str) -> str:

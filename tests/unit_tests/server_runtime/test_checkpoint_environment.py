@@ -646,3 +646,53 @@ async def test_an_expired_retire_cannot_be_exported_by_a_later_checkpoint(tmp_pa
         await controller.resume(CheckpointRequest(**request()))
         release.set()
         await task
+
+
+async def test_the_budget_an_episode_spent_is_sampled_at_export_and_charged_to_its_replacement(
+    tmp_path: Path,
+) -> None:
+    """Sampled when the commit exports the episode, so a step in flight at the cut counts in full;
+    time parked for the checkpoint does not."""
+    source = EnvironmentParticipant(mode="exported")
+    source_controller = controller_for(source)
+    episode_id = EpisodeId(rollout_id="r", attempt=1)
+    release = asyncio.Event()
+
+    async def episode() -> None:
+        async with asyncio.timeout(30) as deadline:
+            source.begin(episode_id, TASK, deadline)
+            await source.boundary(episode_id, {"next": "invoke_agent"})
+            # The boundary was recorded before the step, which then runs for a while before the checkpoint.
+            async with source.step(episode_id, "replay"):
+                await release.wait()
+
+    task = asyncio.create_task(episode())
+    await asyncio.sleep(0.3)
+    await source_controller.prepare(CheckpointRequest(**request()))
+    [at_prepare] = source.export_records(None)
+    await asyncio.sleep(0.7)
+    await source_controller.commit(CommitRequest(**request(checkpoint_dir=str(tmp_path))))
+    [at_commit] = source.export_records(None)
+    await source_controller.resume(CheckpointRequest(**request()))
+    release.set()
+    await task
+
+    restored = EnvironmentParticipant(mode="exported")
+    controller = controller_for(restored)
+    await controller.restore(RestoreRequest(**request("r1", checkpoint_dir=str(tmp_path), episode_ids=[episode_id])))
+    await controller.resume(CheckpointRequest(**request("r1")))
+    replacement = EpisodeId(rollout_id="r", attempt=2)
+    async with asyncio.timeout(30) as deadline:
+        restored.begin(replacement, TASK, deadline)
+        charged = restored.steps.elapsed(replacement.capture_key)
+        remaining = deadline.when() - asyncio.get_running_loop().time()
+        await restored.end(replacement)
+
+    assert 0.3 <= at_prepare.elapsed_s < 1.0
+    # Frozen while parked.
+    assert at_commit.elapsed_s == at_prepare.elapsed_s
+    # The replacement has only what is left; a later checkpoint of it records the earlier spend too.
+    assert at_prepare.elapsed_s <= charged < at_prepare.elapsed_s + 0.5
+    assert remaining < 30 - at_prepare.elapsed_s + 0.01
+    # A record written before the field existed loads as nothing spent.
+    assert EpisodeRecord(episode_id=episode_id, task_digest="d", boundary=None).elapsed_s == 0.0

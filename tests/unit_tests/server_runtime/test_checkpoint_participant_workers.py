@@ -42,6 +42,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointRequest,
     CommitRequest,
     ForgetRequest,
+    ReleaseRequest,
     RestoreRequest,
     RetireRequest,
     dispatch_control,
@@ -680,6 +681,42 @@ def resources_worker(*, routed: bool) -> Callable[[], tuple[ResourcesParticipant
         return ResourcesParticipant(SessionStates(), "exported"), app
 
     return make
+
+
+class LabelledSessionStates(SessionStates):
+    """Records the checkpoint IDs its exports were for and the retention sets its releases were given."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.exported_for: list[str] = []
+        self.released: list[frozenset[str]] = []
+
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        self.exported_for.append(checkpoint_id)
+        return await super().export_session_states(session_ids, checkpoint_id=checkpoint_id)
+
+    async def release_external_state(self, kept: frozenset[str]) -> None:
+        self.released.append(kept)
+
+
+async def test_every_worker_s_export_gets_the_checkpoint_id_and_every_worker_releases(
+    socket_dir: str, tmp_path: Path
+) -> None:
+    def make() -> tuple[ResourcesParticipant, FastAPI]:
+        return ResourcesParticipant(LabelledSessionStates(), "exported"), FastAPI()
+
+    async with coordinated(socket_dir, make) as deployment:
+        for index, link in enumerate(deployment.links):
+            link.participant.hooks.states[f"s{index}"] = index
+            link.participant.seeded(f"s{index}", EpisodeId(rollout_id=f"r{index}"))
+        await commit(deployment, tmp_path / "c7", ["r0", "r1"], checkpoint_id="c7")
+        await deployment.controller.resume(CheckpointRequest(**control("c7")))
+        await deployment.controller.release(ReleaseRequest(**control("c7", kept=["c6", "c7"])))
+        hooks = [link.participant.hooks for link in deployment.links]
+
+    assert [worker.exported_for for worker in hooks] == [["c7"], ["c7"]]
+    assert [worker.released for worker in hooks] == [[frozenset({"c6", "c7"})]] * 2
+    assert sorted(record["session_id"] for record in records(tmp_path / "c7", "resources")) == ["s0", "s1"]
 
 
 async def test_sessions_of_a_single_process_server_are_claimed_by_their_holders_through_later_restores(
