@@ -1758,7 +1758,7 @@ telemetry = [
 [package.metadata]
 requires-dist = [
     { name = "litellm", specifier = ">=1.83.0,<1.103" },
-    { name = "nemo-fabric", extras = ["claude", "codex", "deepagents", "hermes-agent", "mini-swe-agent", "nooa", "openclaw", "openhands", "relay"], specifier = "==0.6.1" },
+    { name = "nemo-fabric", extras = ["claude", "codex", "deepagents", "hermes-agent", "mini-swe-agent", "nooa", "openclaw", "openhands", "relay"], specifier = ">=0.6.0,<0.7" },
     { name = "nemo-gym", extras = ["dev"], editable = "../../" },
     { name = "nemo-gym", extras = ["telemetry"], marker = "extra == 'telemetry'", editable = "../../" },
     { name = "openhands-sdk", specifier = "==1.50.0" },
