@@ -732,11 +732,20 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 if isinstance(item, NeMoGymResponseFunctionCallOutput):
                     item.output = native_outputs.get(item.call_id, item.output)
         # Some adapters' trajectories drop tool outputs or collapse the run into one step, and Relay's ATIF steps carry
-        # no reasoning. Keep the fuller record.
+        # no reasoning. Keep the fuller record. ATIF must also keep every native tool result under its call ID, since
+        # an unrelated Relay-only result would otherwise make up for a dropped one in the counts.
+        atif_outputs = {item.call_id: item.output for item in atif_items if item.type == "function_call_output"}
+        native_results_kept = all(
+            item.call_id in atif_outputs and (atif_outputs[item.call_id] or not item.output)
+            for item in native_items
+            if item.type == "function_call_output"
+        )
         atif_counts, native_counts = _record_counts(atif_items), _record_counts(native_items)
         output_items = (
             atif_items
-            if atif_items and all(atif >= native for atif, native in zip(atif_counts, native_counts))
+            if atif_items
+            and native_results_kept
+            and all(atif >= native for atif, native in zip(atif_counts, native_counts))
             else native_items
         )
         response = NeMoGymResponse(

@@ -256,7 +256,6 @@ def test_fabric_config_injects_model_workspace_mcp_and_skills(tmp_path: Path) ->
         "nemo_fabric_deepagents",
         "nemo_fabric_hermes",
         "nemo_fabric_mini_swe_agent",
-        "nemo_fabric_openclaw",
         "nemo_fabric_openhands",
     ],
 )
@@ -528,25 +527,33 @@ def test_relay_is_skipped_for_adapters_without_relay_support(tmp_path: Path) -> 
     assert "relay_atif" not in fabric_result
 
 
-def test_relay_is_skipped_when_hermes_agent_cannot_run_it(tmp_path: Path) -> None:
+@pytest.mark.parametrize("compatible", [False, True])
+def test_relay_follows_the_hermes_compatibility_check(compatible: bool, tmp_path: Path) -> None:
     agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.hermes")
     fabric = MagicMock()
     fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
     fabric.run = AsyncMock(return_value=_FakeResult())
+    check = MagicMock(
+        returncode=0 if compatible else 1, stderr="" if compatible else "Hermes Agent without Relay support"
+    )
     with (
         patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
         patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
-        patch(
-            "nemo_fabric_adapters.hermes.telemetry.validate_hermes_relay_compatibility",
-            side_effect=RuntimeError("Hermes Agent without Relay support"),
-        ),
+        patch("responses_api_agents.nemo_fabric_agent.app.subprocess.run", return_value=check) as run_check,
     ):
         _, fabric_result = asyncio.run(
             agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
         )
 
-    assert "relay" not in fabric.run.call_args.args[0].to_mapping()
-    assert "relay_atif" not in fabric_result
+    run_check.assert_called_once()
+    config = fabric.run.call_args.args[0].to_mapping()
+    if compatible:
+        assert "relay" in config["telemetry"]["providers"]
+        assert config["relay"]["observability"]["atif"]["enabled"] is True
+        assert fabric_result["relay_atif"] == []
+    else:
+        assert "relay" not in config
+        assert "relay_atif" not in fabric_result
 
 
 def test_atif_inlines_subagent_trajectories_and_skips_wrapper_steps() -> None:
@@ -638,6 +645,62 @@ def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(native_output: st
     assert response.output[0].call_id == response.output[1].call_id == "c1"
     assert response.output[1].output == native_output
     assert fabric_result["relay_atif"] == [trajectory]
+
+
+@pytest.mark.parametrize(
+    ("native_output", "atif_results", "expected"),
+    [
+        # A Relay-only result for c2 cannot stand in for the native c1 result that ATIF lacks.
+        ("kept", {"c2": "relay-only"}, {"c1": "kept"}),
+        # Nor can it hide a native c1 result that ATIF reduced to empty.
+        ("kept", {"c1": "", "c2": "relay-only"}, {"c1": "kept"}),
+        ("", {"c2": "relay-only"}, {"c1": ""}),
+        # ATIF that keeps every native result stays eligible, with its extra results.
+        ("kept", {"c1": "kept", "c2": "relay-only"}, {"c1": "kept", "c2": "relay-only"}),
+        ("", {"c1": "", "c2": ""}, {"c1": "", "c2": ""}),
+    ],
+)
+def test_relay_selection_compares_tool_results_by_call_id(
+    native_output: str, atif_results: dict[str, str], expected: dict[str, str], tmp_path: Path
+) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.mini-swe-agent")
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"tool_call_id": key, "function_name": "bash", "arguments": {}} for key in ("c1", "c2")
+                ],
+                "observation": {
+                    "results": [{"source_call_id": key, "content": text} for key, text in atif_results.items()]
+                },
+            }
+        ]
+    }
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        (relay_dir / "t.json").write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output["relay_artifacts"] = [{"kind": "atif", "path": str(relay_dir / "t.json")}]
+        result.output["messages"] = [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "bash", "args": {}}]},
+            {"role": "tool", "content": native_output},
+            {"role": "assistant", "content": "fabric answer"},
+        ]
+        return result
+
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(side_effect=run)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        response, _ = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
+
+    assert {item.call_id: item.output for item in response.output if item.type == "function_call_output"} == expected
 
 
 @pytest.mark.parametrize("native_output", ["README.txt", ""])

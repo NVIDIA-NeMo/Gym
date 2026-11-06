@@ -2,8 +2,9 @@
 
 Run interchangeable agent harnesses through [NeMo Fabric](https://github.com/NVIDIA/NeMo-Fabric) inside NeMo Gym.
 
-`configs/` has a preset per Python adapter: Claude, Codex, Deep Agents, Hermes, mini-SWE-agent, OpenClaw, and
-OpenHands. OpenClaw also needs its CLI on `PATH`: `npm install --global openclaw@2026.9.34` (Node.js 24.22.1 or later).
+`configs/` has a preset per Python adapter: Claude, Codex, Deep Agents, Hermes, mini-SWE-agent, and OpenHands. The
+OpenClaw adapter is installed but has no preset, because it also needs the OpenClaw CLI and Node.js, which this server
+does not provision (`npm install --global openclaw@2026.9.34`, Node.js 24.22.1 or later).
 
 ## Relay
 
