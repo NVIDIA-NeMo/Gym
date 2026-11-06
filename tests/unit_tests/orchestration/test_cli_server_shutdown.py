@@ -93,7 +93,7 @@ print('cleanup finished', flush=True)
 
 def test_server_launched_with_the_interrupt_blocked_still_receives_it(tmp_path):
     # Ray blocks SIGINT in every thread of its workers, and a process starts with the mask of the thread that launched
-    # it: every server that NeMo RL's Gym actor launches starts with the interrupt blocked.
+    # it: every server that a Ray worker launches starts with the interrupt blocked.
     # This test covers the blocked mask passing through the launch shell and the log tee. Its stand-in calls the helper
     # itself, so the call in `run_webserver` is covered by the unit test in
     # tests/unit_tests/server_runtime/test_base_server.py (test_uvicorn_starts_with_the_shutdown_signals_unblocked).
