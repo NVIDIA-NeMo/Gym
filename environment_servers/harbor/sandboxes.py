@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import random
+import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
@@ -28,44 +29,53 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
+from environment_servers.harbor.entrypoint import is_keepalive_entrypoint
 from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
 from environment_servers.harbor.users import _creation_user, _is_root
 from environment_servers.harbor.verifier import _verifier_image, _verifier_key, _verifier_runs_task_image
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxSpec, clamp_resource_requests
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.compose_config import (
-    adapt_non_root_sidecars,
-    deployment_platform,
-    document_volume_sources,
-    opensandbox_shm_labels,
-    resolve_compose,
-    sandbox_platform,
-)
-from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata, resolve_provider_volume_sources
-from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, SandboxCreateError
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.server_utils import apply_rollout_prefix
-from nemo_gym.tasks.harbor import HarborTask
-from nemo_gym.tasks.harbor.compose_overlay import overlay_files
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.image_configs import (
+from nemo_gym.agents import sandbox_server_url
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import FailureBoundary, NgFailureEvent, observe_failure
+from nemo_gym.data.tasks.harbor import (
+    MAIN_SERVICE,
+    RECORD_VERSION,
+    HarborEnvironment,
+    HarborTask,
+    HarborTaskError,
+    ImageConfigError,
     check_task_compose_fields,
     check_task_compose_services,
     check_task_sidecar_extra_hosts,
     load_compose_document,
+    overlay_files,
     plan_task_compose_volumes,
     reusable_record,
     task_declares_gpus,
     without_restated_main_build,
 )
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import MAIN_SERVICE
-from nemo_gym.tasks.harbor.registry import ImageConfigError
+from nemo_gym.sandbox import (
+    ORPHAN_REAP_TIMEOUT_S,
+    AsyncSandbox,
+    AsyncSandboxCompose,
+    SandboxCreateError,
+    SandboxSpec,
+    adapt_non_root_sidecars,
+    clamp_resource_requests,
+    cpu_cap_env,
+    deployment_platform,
+    document_volume_sources,
+    opensandbox_shm_labels,
+    resolve_compose,
+    resolve_provider_config,
+    resolve_provider_metadata,
+    resolve_provider_volume_sources,
+    sandbox_platform,
+    service_gpus,
+    service_resources,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -126,6 +136,9 @@ def _is_image_pull_failure(error: BaseException) -> bool:
     Walks the cause/context chain and the members of exception groups: a Compose group whose cleanup
     after a failed pull failed too surfaces as an ``ExceptionGroup`` of the cleanup errors, raised while
     the pull failure was being handled.
+
+    No image-pull failure kind is registered yet. This text heuristic preserves bounded retries of
+    fresh sandbox creation; it must not be used to replay a submitted command.
     """
     seen: set[int] = set()
     pending: list[BaseException] = [error]
@@ -394,7 +407,7 @@ class HarborSandboxMixin:
         """Refuse, before anything is provisioned, a Compose group whose images prepare did not record for this
         deployment: the record file missing next to the task folders, or a service of the merged document (an overlay's,
         or ``main`` with the task's image) without an entry this deployment can use, by prepare's own rule
-        (:func:`~nemo_gym.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
+        (:func:`~nemo_gym.data.tasks.harbor.image_configs.reusable_record`: the current record version and the platform the
         sandboxes run; ``resolve_compose`` refuses a record of another platform at the group's start). A dataset
         prepared without the ``compose_overlay`` the server now runs with, or for another platform (prepared on x86,
         served on arm64), is the usual cause; it is a configuration error, so the seed is refused terminally (422)
@@ -700,36 +713,67 @@ class HarborSandboxMixin:
         provider_config = resolve_provider_config(task_ref, global_config_dict)
         platform = self._compose_platform()
         # An overlay task's Dockerfile RUN lines run inside the group's start, on main once it exists and before
-        # its bind-mount uploads, its command and its healthcheck: Harbor's order (a build, then `compose up` with
-        # the mounts). The overlay keeps its own budget on top of the start's, and the names it resolved wait for
-        # the seed under the episode key.
+        # its log links, uploads, command and healthcheck. Named/external volumes are already mounted at sandbox
+        # creation, so RUN lines can write to shared storage. The overlay keeps its own budget on top of the
+        # start's, and the names it resolved wait for the seed under the episode key.
         service_setup: dict[str, Callable[[AsyncSandbox], Awaitable[None]]] = {}
         timeout_s = self.config.sandbox_ready_timeout_s
         overlay_failure: list[HarborOverlayError] = []
         if task.overlay:
             timeout_s += task.config.environment.build_timeout_sec
+        image_startup = not task.needs_compose and task.image_shell is not None
+        main = document["services"]["main"]
+        startup_command = False
+        for field in ("entrypoint", "command"):
+            value = main.get(field) or []
+            argv = shlex.split(value) if isinstance(value, str) else value
+            if argv and not is_keepalive_entrypoint(argv):
+                startup_command = True
+        healthcheck = main.get("healthcheck") or {}
+        startup_uses_image_user = (
+            image_startup
+            and main.get("user") in (None, "")
+            and (
+                startup_command
+                or task.config.environment.healthcheck is not None
+                or any(hook.get("user") in (None, "") for hook in main.get("post_start") or [])
+                or (
+                    bool(healthcheck.get("test"))
+                    and not healthcheck.get("disable")
+                    and healthcheck["test"] != ["NONE"]
+                )
+            )
+        )
+        if startup_uses_image_user:
+            # Fail before creating any service or running setup; an unused image identity needs no support.
+            self._refuse_unsupported_group(task, task.entrypoint_user, global_config_dict, " image startup")
+        own_workdir = task.built_image is None and task.entrypoint_workdir and not _is_root(task.entrypoint_user)
+        if task.overlay or image_startup or own_workdir:
 
-            async def run_overlay(sandbox: AsyncSandbox) -> None:
-                try:
-                    self._overlay_names[episode_key] = await self._apply_overlay(sandbox, task)
-                except HarborOverlayError as exc:
-                    overlay_failure.append(exc)
-                    raise
+            async def setup_main(sandbox: AsyncSandbox) -> None:
+                names: dict[str, str] = {}
+                if task.overlay:
+                    try:
+                        names = await self._apply_overlay(sandbox, task)
+                    except HarborOverlayError as exc:
+                        overlay_failure.append(exc)
+                        raise
+                elif own_workdir:
+                    # The adapter defers WORKDIR until this hook has run. A built image already owns its
+                    # directory; a Dockerfile overlay creates it under the USER in effect at that step.
+                    await self._own_workdir(sandbox, task.entrypoint_workdir, task.entrypoint_user, create=True)
+                if startup_uses_image_user:
+                    # Startup belongs to the image, even when [agent].user names someone else. The seed
+                    # installs the agent's default after the group has started. An explicit Compose user
+                    # replaces the image identity, so do not resolve or validate an unused image user.
+                    creation_user = sandbox.default_user
+                    await self._set_default_user(sandbox, task, names, role="verifier")
+                    if sandbox.default_user is None and not _is_root(creation_user):
+                        # Some providers retain the user they were created with when exec names no user.
+                        sandbox.set_default_user("root")
+                self._overlay_names[episode_key] = names
 
-            service_setup["main"] = run_overlay
-        elif task.built_image is None and task.entrypoint_workdir and not _is_root(task.entrypoint_user):
-
-            async def own_workdir(sandbox: AsyncSandbox) -> None:
-                # `synthesized_group` writes the Dockerfile's final WORKDIR as main's working_dir, which the adapter
-                # has just made as root, as Docker makes a missing working_dir at create. The single sandbox makes
-                # that directory the entrypoint user's before the entrypoint starts (`_start_entrypoint`, through
-                # `overlay_workdir_command`: a WORKDIR under that USER, as the build makes it), so it is handed over
-                # here, in the adapter's slot between the create and main's command, which starts the entrypoint in
-                # it; the seed's `_prepare_workdir` then hands the task workdir to `task.user`, as in a single sandbox.
-                # A built image carries its WORKDIR's owner itself, and an overlay task's is the overlay's (above).
-                await self._own_workdir(sandbox, task.entrypoint_workdir, task.entrypoint_user)
-
-            service_setup["main"] = own_workdir
+            service_setup["main"] = setup_main
         # Ownership starts before start(): a group that fails half-way is still stopped whole, and a pull
         # failure of any service is retried with a fresh group, like a single sandbox's. A private document
         # is read by every attempt and removed by `_create_compose` once the last one has returned.
@@ -864,10 +908,13 @@ class HarborSandboxMixin:
                     async with self._pull_retry_gate:
                         await start(sandbox)
                 return sandbox
-            except (SandboxCreateError, RuntimeError, OSError, ExceptionGroup) as exc:
+            except (NgFailureEvent, SandboxCreateError, RuntimeError, OSError, ExceptionGroup) as exc:
                 # A Compose group whose cleanup failed too raises an ExceptionGroup over the pull failure.
+                if isinstance(exc, NgFailureEvent) and exc.boundary != FailureBoundary.SANDBOX:
+                    raise
                 if attempt >= attempts or not _is_image_pull_failure(exc):
                     raise
+                observe_failure(exc)
                 LOGGER.warning(
                     f"{task.task_id}: image pull failed starting {what} (attempt {attempt}/{attempts}): {exc}"
                 )
@@ -876,7 +923,9 @@ class HarborSandboxMixin:
                 except Exception:
                     # Still owned: shutdown retries the stop. Do not start a second sandbox under the same key.
                     LOGGER.exception(f"{task.task_id}: could not stop the {what} of a failed image pull")
-                    raise exc from None
+                    # Hide cleanup context without erasing the provider failure's existing cause.
+                    exc.__suppress_context__ = True
+                    raise exc
                 await asyncio.sleep(_pull_retry_delay(attempt))
         raise AssertionError("unreachable")  # pragma: no cover
 

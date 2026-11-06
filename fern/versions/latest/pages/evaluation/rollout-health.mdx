@@ -1,7 +1,7 @@
 ---
 title: "Rollout Health Checks"
 description: "Verify that evaluation rollouts contain complete, internally consistent trajectory and model-call evidence."
-position: 6
+position: 7
 ---
 
 Rollout health checks verify the integrity and observability of completed evaluation artifacts. They detect unreadable records,
@@ -20,6 +20,15 @@ metrics, model servers, or agent behavior. It writes two additional report files
 </Info>
 
 ## When Health Checks Run
+
+<Note>
+For runs with a recovery manifest, health checks inspect only the selected completed attempts. Older successes
+superseded by another attempt do not count as additional samples, even if the newer attempt failed or has no saved
+outcome. Checks read the selected records from their original files without requiring an exported projection.
+Run-level failure and timeout accounting still includes the source history. This applies to standalone checks,
+automatic checks, multi-shard aggregation and file symlinks. Loose files and explicitly supplied failure sidecars
+remain available for line-by-line diagnostics.
+</Note>
 
 `gym eval run` runs health checks after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs health checks
 after aggregating the selected shards. Both commands print a short report:
@@ -64,7 +73,7 @@ Refer to the [`gym eval` CLI reference](/main/reference/cli-commands#gym-eval-he
 Health checks read each rollout record and its standard `ng_trajectory` attachment. `ng_trajectory` combines the agent turns,
 model-call evidence, explicit model-call references, and observation gaps produced during collection. Refer to the
 [rollout-evidence guide](/main/observability/rollout-evidence) for the complete source and projection model, the
-[trajectory capability matrix](/main/reference/trajectory-capabilities) for measured harness conformance and
+[harness conformance results](/main/observability/harness-conformance#results) for measured harness conformance and
 [model-call capture](/main/model-server/model-call-capture) for collection configuration.
 
 The integrity checks do not reopen raw model-call capture files, inspect `ng_model_call_capture`, or reconstruct turns from an
@@ -106,7 +115,8 @@ Check IDs identify both the evidence being evaluated and the condition detected.
 | `check_execution_error` | Rollout | Another health check raises an unexpected exception while evaluating the record. The failed check is also marked unobserved, and remaining checks continue. |
 | `record_unreadable` | Rollout | A non-empty JSONL line is not a JSON object, or its `ng_trajectory` cannot be parsed as a `TrajectoryRecord`. |
 | `rollout_duplicate_identity` | Rollout | More than one record in the same input file has the same `_ng_task_index` and `_ng_rollout_index`. Each input numbers its rollouts on its own, so runs merged from different environment servers can reuse indices. Every duplicated record receives the finding. |
-| `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. |
+| `rollout_missing_agent_turns` | Rollout | Agent turns are observable, but no turn contains any of the following: (1) non-empty answer or reasoning content, (2) a tool call, or (3) a model-call reference. When the record carries `sandbox_resource_limit` (the provider ended the sandbox for exceeding a resource limit), the finding is still reported and its `detail.expected_absence` is `sandbox_resource_limit:<resource>`. |
+| `rollout_tool_call_failed` | Rollout | One or more tool outputs in `ng_trajectory.tool_calls` open with the text a harness returns when a tool could not run at all: today `ripgrep execution failed` from OpenCode's built-in `grep` and `glob`, counted only for those tools. A call the trajectory records with status `completed` is not counted, since a command that succeeded can print the same text (for example when it reads a log). One finding per rollout; `detail.count` is the number of such outputs. The finding changes no reward and no retry decision, and the gate logic is unchanged, but it marks the rollout unhealthy, so it counts toward `--max-unhealthy-fraction` when that criterion is set. |
 | `rollout_ended_on_failed_model_call` | Rollout | A model's own last call in the rollout has an HTTP error status, an error category, or response status `failed`, `error`, or `cancelled`. A last call the upstream rejected because the context was full (an upstream `400` recorded with `error_category` or `local_response_reason` `context_length_exceeded`) produces no finding: the rollout ended on the model's own context overflow, which is scored like any other answer. This holds only once the model has answered earlier in the same conversation: a successful call to the same model whose request opens the same way, with the same `instructions`, `system` prompt, or first item of `messages` or `input` (a plain-text `input` as a whole), and that no captured session tells apart: calls of two different sessions are two conversations, while activations of one harness session are one. A success in another conversation, such as a user simulator served by the same model server, does not count, and a call whose request was not captured belongs to no conversation. An overflow before any such answer means the request never fit the deployment (a prompt or output budget too large for it), and is flagged like any other failed call. Read from the captured calls directly rather than through a reference, because a failed call carries no response ID to be referenced by. Judged per model and in `started_at` order, so a call to a different model landing later does not mask the failure, and a failure the client retried successfully produces no finding. One finding per model. When a chain mixes failures and successes and carries no timestamps it cannot be ordered, and no finding is produced; a chain of only failures is flagged either way. |
 | `rollout_token_count_mismatch` | Rollout | Both top-level rollout token totals and a complete set of invocation- or turn-owned policy-model-call token counts are available, but the prompt-token total or completion-token total differs from the corresponding call-level sum. |
 | `agent_turn_hollow` | Agent turn | An observable `TrajectoryTurn` does not contain any of the following: (1) non-empty answer content, (2) non-empty reasoning content, or (3) a tool call. A turn whose own model calls end on one the upstream rejected because the context was full (the last in `started_at` order, or every one when they carry no timestamps) is not hollow when another check accounts for that overflow: an answer from the same model in the same conversation excuses it, and `rollout_ended_on_failed_model_call` flags a request that never fit. When neither applies, as for calls without timestamps that mix in another conversation's answer, the empty turn is still flagged. Each of the turn's model-call references must resolve to exactly one captured call, and the exemption is not applied when a `model_calls_unavailable`, `model_call_capture_incomplete`, `model_call_capture_records_unreadable`, or `model_call_capture_unreadable` gap leaves that check unobserved. |
@@ -299,18 +309,29 @@ as a number of calls.
 
 `run.artifacts` also counts the run against its `<output stem>_materialized_inputs.jsonl` inventory:
 
+- `state`: whether the health check observed the run. `observed` means it read the rollouts and the inventory.
+  `unavailable` means an input it needs is missing: there is no inventory, or the run stopped before its rollouts were
+  read. `disabled` means `--no-health-check` (`disable_health_check`) is set. `state_reason` says why when the state is
+  not `observed`.
 - `expected`: rollouts in the inventory.
-- `failed`: the last failure row of each owed rollout in the `<output stem>_failures.jsonl` sidecar that did not later land, as `total`, `final`, `not_final` and `by_class`. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
-- `missing`: owed rollouts with neither a record nor a failure row.
-- `healthy`: false when a rollout is missing, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set. `unhealthy_reasons` names each cause.
+- `completed`: expected rollouts with a saved result. Without an inventory, every rollout with a saved result.
+- `scored`: completed rollouts with a numeric reward that are not masked, as `measured` in the run's coverage report. A
+  failure that a policy settles as a scored zero counts in `failed`, not here. Null when the rollouts were not read and
+  the run has no manifest.
+- `failed`: selected failures from the run manifest and saved history, as `total`, `final`, `not_final` and `by_class`. Intentional omissions are excluded; exhausted retry budgets count as final. For legacy runs without a manifest, this uses the last sidecar failure for each rollout that did not later land. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
+- `missing`: for a run with a manifest, reserved executions with no outcome. Legacy runs use owed rollouts with neither a record nor a failure row.
+- `not_started`: tasks with no reserved execution in a managed run.
+- `omitted`: intentional omissions in a managed run; these do not count toward failure limits.
+- `healthy`: true only when `state` is `observed` and the run has no reason to be unhealthy. It is false when no expected rollout completed, a rollout is missing or not started, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set; a run with 8 expected rollouts and 8 failures is still unhealthy, because none of them completed. `unhealthy_reasons` names each cause.
 - `limits`: the limits the run was judged by (`max_not_final_failure_fraction`, `max_final_failure_fraction`, null for no limit) and, in `source`, where each limit came from: `config` for the run's own settings, `persisted` when `gym eval health-check` reused it, `override` when its own limit flag replaced it. A flag value of `none` removes the limit, recorded as null with `override`.
 
-`expected`, `missing` and `healthy` are null without an inventory. The summary is also written when collection fails or Slurm stops the job with SIGTERM.
+`expected`, `missing` and `healthy` are null without an inventory, and `state` is `unavailable`. After collection starts, the summary is also written when collection fails or Slurm stops the job with SIGTERM. When the check is disabled, the summary still exists: it has the `state` and `state_reason`, null counts and a null `healthy`, and no `rollout_verdicts.jsonl`. A check that cannot run (for example, a history with superseded outcomes and no merged projection, or a check that raises) writes no summary; read a missing summary as unavailable. The built-in collector retains its run lock through reporting. A refused resume does not remove or replace reports from the saved run.
 
 ### Timeouts
 
 `run.stats.timeouts` counts the rollouts that ran out of time. It reads each rollout's final record: its row in the
-rollout file, or the last failure row of a rollout that never landed. `gym eval health-check` recomputes it from the
+rollout file, or the last failure row of a rollout that never landed. For a run with a manifest, that failure is
+the attempt the run history selects. `gym eval health-check` recomputes it from the
 same files, and from the run's model-call captures when given `--model-call-capture-dir` (see `time_split`). A
 recheck of a directory `gym eval aggregate` merged shards into reads the shards listed in `rollouts_sources.json`,
 with their failure rows, so it counts the same timeouts as the aggregation; a `--rollouts-file` path is counted alone.
@@ -394,7 +415,7 @@ such as `health/timeouts/timed_out` and `health/timeouts/by_evidence/typed`. A n
 enforcer that only an earlier failed attempt named is sent as 0, so a resumed tracking run does not keep its old
 count. A failed export is logged and does not stop the run.
 
-A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A stopped run exits with status 143, or with status 1 (`EVAL FAILED`) when `require_complete` is on, which is the default under `gym eval submit`.
+A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, `state: unavailable`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A SIGTERM-stopped run exits with status 143. An interactive interruption with `require_complete` enabled reports `EVAL FAILED`.
 
 ### `rollout_verdicts.jsonl`
 
@@ -442,6 +463,10 @@ gym eval run ... --no-health-check
 gym eval aggregate ... --no-health-check
 ```
 
+`gym eval run --no-health-check` then writes a `quality_summary.json` with `run.artifacts.state: disabled` and a
+null `healthy`, so a reader can tell a disabled check from a run that the check found healthy. `gym eval aggregate
+--no-health-check` writes no summary.
+
 To exclude specific checks from one automatic run:
 
 ```bash
@@ -480,7 +505,7 @@ healthy.
 
 ## Implementation Reference
 
-- [`TrajectoryRecord`, `TrajectoryTurn`, `AgentInvocation`, `ObservationGap`, and `ModelCallRef`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_observability.py) define the standard evidence consumed by health checks.
-- [`CheckSpec`, `Finding`, and `RolloutDigest`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/health/types.py) define the health data contracts.
-- [The check registry](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/health/checks.py) defines the stable check IDs and per-rollout rules.
-- [The rollout-health runner](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollout_health.py) derives verdicts and writes reports.
+- [`TrajectoryRecord`, `TrajectoryTurn`, `AgentInvocation`, `ObservationGap`, and `ModelCallRef`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/trajectory/trajectory_record.py) define the standard evidence consumed by health checks.
+- [`CheckSpec`, `Finding`, and `RolloutDigest`](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollouts/health/types.py) define the health data contracts.
+- [The check registry](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollouts/health/checks.py) defines the stable check IDs and per-rollout rules.
+- [The rollout-health runner](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/rollouts/rollout_health.py) derives verdicts and writes reports.

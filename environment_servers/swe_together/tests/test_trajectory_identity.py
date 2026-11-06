@@ -6,16 +6,16 @@ from copy import deepcopy
 import pytest
 
 from environment_servers.swe_together.schemas import SWETRequest
-from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import (
+from nemo_gym.agents import AgentCloseSessionResponse
+from nemo_gym.config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.rollouts.rollout_collection import _episode_record, _episode_request_body
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 @pytest.mark.parametrize("reverse_task_keys", [False, True])
@@ -32,7 +32,7 @@ from nemo_gym.rollout_observability import TrajectoryRecord
     ],
 )
 @pytest.mark.parametrize("failed", [False, True])
-def test_forwarded_trajectory_matches_collector_without_changing_harness_evidence(
+def test_materialized_task_trajectory_matches_collector_without_changing_harness_evidence(
     reverse_task_keys: bool, indices: dict[str, int | str], rollout_id: str, failed: bool
 ) -> None:
     task_id = {"taskset": "swe_together:full109", "task_id": "task-logical"}
@@ -73,63 +73,38 @@ def test_forwarded_trajectory_matches_collector_without_changing_harness_evidenc
     )
     close = AgentCloseSessionResponse(agent_session_id="candidate", cleanup_confirmed=True, trajectory=trajectory)
     original = deepcopy(close.model_dump(mode="json"))
-    forwarded = request.trajectory_for_collection(close.trajectory)
-    assert forwarded is not None
     response = {"episode_id": request.episode_id.model_dump(mode="json"), "task_id": task_id}
     if failed:
         response["failure"] = {
             "failure_reason": "candidate failed after execution",
             "terminal": True,
-            "trajectory": forwarded.model_dump(mode="json"),
+            "trajectory": original["trajectory"],
         }
     else:
-        response["result"] = {"task_id": "task-logical", "ng_trajectory": forwarded.model_dump(mode="json")}
+        response["result"] = {"task_id": "task-logical", "ng_trajectory": original["trajectory"]}
 
     record = _episode_record(response)
     projected = _build_trajectory_record(row, record).model_dump(mode="json")
 
-    assert projected["task_id"] == str(task_id)
+    assert projected["task_id"] == "task-logical"
     assert projected["rollout_id"] == rollout_id
     assert "producer_trajectory_identity_mismatch" not in {gap["code"] for gap in projected["gaps"]}
-    assert projected["turns"] == forwarded.model_dump(mode="json")["turns"]
+    assert projected["turns"] == original["trajectory"]["turns"]
     assert projected["model_calls"] == original["trajectory"]["model_calls"]
-    for before, after in zip(original["trajectory"]["turns"], projected["turns"], strict=True):
-        assert {key: value for key, value in before.items() if key != "task_id"} == {
-            key: value for key, value in after.items() if key != "task_id"
-        }
     assert close.model_dump(mode="json") == original
     assert request.task.task_id.task_id == "task-logical"
     assert request.model_dump()["task"]["task_id"] == {"taskset": "swe_together:full109", "task_id": "task-logical"}
-    assert "_collector_task_id" not in request.model_dump()
     if not failed:
         assert record["task_id"] == "task-logical"
 
 
-def test_programmatic_request_preserves_its_identity_when_revalidated() -> None:
-    request = SWETRequest(
-        episode_id=EpisodeId(rollout_id="one"),
-        task={
-            "task_id": TaskId(taskset="swet", task_id="task"),
-            "task_input": {"task_data": {"task_id": "task", "image": "image", "image_digest": "sha256:" + "1" * 64}},
-        },
-    )
-    assert request.trajectory_for_collection(None) is None
-    trajectory = TrajectoryRecord(task_id="task", rollout_id="one")
-    revalidated = SWETRequest.model_validate(request)
-    forwarded = revalidated.trajectory_for_collection(trajectory)
-    assert forwarded is not None
-    assert forwarded.task_id == "{'taskset': 'swet', 'task_id': 'task'}"
-    assert trajectory.task_id == "task"
-
-
-def test_identity_adaptation_retains_wrong_task_evidence() -> None:
+def test_collection_retains_wrong_task_evidence() -> None:
     row = {
         "task_id": {"taskset": "swet", "task_id": "task"},
         "task_input": {"task_data": {"task_id": "task", "image": "image", "image_digest": "sha256:" + "1" * 64}},
         TASK_INDEX_KEY_NAME: 0,
         ROLLOUT_INDEX_KEY_NAME: 0,
     }
-    request = SWETRequest.model_validate(_episode_request_body(row))
     trajectory = TrajectoryRecord.model_validate(
         {
             "task_id": "wrong-task",
@@ -147,11 +122,9 @@ def test_identity_adaptation_retains_wrong_task_evidence() -> None:
             ],
         }
     )
-    forwarded = request.trajectory_for_collection(trajectory)
-    assert forwarded is not None
-    assert forwarded.turns[0].task_id == "wrong-task"
-    assert forwarded is trajectory
-    projected = _build_trajectory_record(row, {"ng_trajectory": forwarded.model_dump(mode="json")})
+    original = trajectory.model_dump(mode="json")
+    projected = _build_trajectory_record(row, {"ng_trajectory": original})
+    assert trajectory.model_dump(mode="json") == original
     assert any(
         gap.code == "producer_trajectory_identity_mismatch" and gap.detail == "task_id" for gap in projected.gaps
     )

@@ -27,6 +27,8 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, TypeVar
 
+from nemo_gym.core.failure_kinds import PROVIDER_COMMAND_OUTCOME_UNKNOWN
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
@@ -34,13 +36,13 @@ from nemo_gym.sandbox.providers import (
     SandboxExecResult,
     SandboxHandle,
     SandboxProvider,
-    SandboxPtyError,
     SandboxPtySession,
     SandboxPtySpec,
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
     SupportsSandboxEndpoint,
+    SupportsSandboxIndependentUploads,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
@@ -95,7 +97,11 @@ async def _run_in_pty_session(session: SandboxPtySession, command: str) -> Sandb
     while needle not in buffer:
         chunk = await session.read()
         if not chunk:
-            raise SandboxPtyError("PTY session ended before the command finished")
+            raise sandbox_failure(
+                operation="pty_exec",
+                failure_kind=PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                reason="PTY session ended before the command finished",
+            )
         buffer.extend(chunk)
 
     stdout, _, trailing = bytes(buffer).partition(needle)
@@ -425,12 +431,51 @@ class AsyncSandbox:
         # Whether this instance added itself to `gym.sandbox.active`; a `connect()`ed sandbox
         # was counted by the process that started it and must not be subtracted here.
         self._counted_active = False
+        # Client-side monotonic times at which provider.create and provider.close returned in this instance;
+        # a connect()ed handle has no observed create. Cleanup errors are kept in order across retries.
+        self._created_at: float | None = None
+        self._closed_at: float | None = None
+        self._cleanup_errors: list[str] = []
         self.pty = SandboxPty(self)
 
     @property
     def sandbox_id(self) -> str | None:
         """The provider's id for this sandbox, or None before it has started or connected."""
         return _sandbox_id(self._handle)
+
+    @property
+    def provider_name(self) -> str:
+        """The name of this sandbox's runtime provider."""
+        return self._provider.name
+
+    @property
+    def observed_client_interval_s(self) -> float | None:
+        """Client-observed seconds from the provider's create return to its close return in this instance.
+
+        Not the remote sandbox lifetime or its CPU time; None unless this instance observed both returns.
+        """
+        if self._created_at is None or self._closed_at is None:
+            return None
+        return self._closed_at - self._created_at
+
+    @property
+    def teardown_confirmed(self) -> bool | None:
+        """True once the provider's close returned, False after only failed closes, None before any stop."""
+        if self._closed_at is not None:
+            return True
+        return False if any(error.startswith("close:") for error in self._cleanup_errors) else None
+
+    @property
+    def cleanup_errors(self) -> tuple[str, ...]:
+        """Every failed provider close or client release, in order, as ``close:<type>`` or ``aclose:<type>``."""
+        return tuple(self._cleanup_errors)
+
+    @property
+    def uploads_independent_of_execs(self) -> bool:
+        """Whether an upload can run while commands hold the provider's capacity (``SupportsSandboxIndependentUploads``)."""
+        return isinstance(self._provider, SupportsSandboxIndependentUploads) and bool(
+            self._provider.uploads_independent_of_execs()
+        )
 
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
@@ -475,6 +520,7 @@ class AsyncSandbox:
         else:
             handle = await self._provider.create(requested_spec)
         self._handle = handle
+        self._created_at, self._closed_at, self._cleanup_errors = time.monotonic(), None, []
         self._spec = requested_spec
         self._stopped = False
         try:
@@ -621,6 +667,14 @@ class AsyncSandbox:
         """
         self._spec = replace(self._spec, user=user) if self._spec is not None else SandboxSpec(user=user)
 
+    def set_default_workdir(self, workdir: str | None) -> None:
+        """Change the default exec directory after sandbox setup has created it.
+
+        This does not create or change ownership of the directory. ``serialize()`` carries the new
+        default, so a harness that reattaches executes in the same directory.
+        """
+        self._spec = replace(self._spec, workdir=workdir) if self._spec is not None else SandboxSpec(workdir=workdir)
+
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
 
@@ -694,25 +748,35 @@ class AsyncSandbox:
         # A failed remote stop is retryable. Do not close its client or mark the
         # wrapper closed until the provider confirms container teardown.
         if self._handle is not None and not self._stopped:
-            if is_span_group_enabled(GymSpanGroup.SANDBOX):
-                with managed_span(
-                    GymSpanGroup.SANDBOX,
-                    "gym.sandbox.stop",
-                    **{
-                        "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
-                        "nemo.gym.sandbox.id": _sandbox_id(self._handle),
-                        **default_span_attributes(),
-                    },
-                ):
+            try:
+                if is_span_group_enabled(GymSpanGroup.SANDBOX):
+                    with managed_span(
+                        GymSpanGroup.SANDBOX,
+                        "gym.sandbox.stop",
+                        **{
+                            "nemo.gym.sandbox.provider": self._telemetry_provider_name(),
+                            "nemo.gym.sandbox.id": _sandbox_id(self._handle),
+                            **default_span_attributes(),
+                        },
+                    ):
+                        await self._provider.close(self._handle)
+                else:
                     await self._provider.close(self._handle)
-            else:
-                await self._provider.close(self._handle)
+            except BaseException as exc:
+                self._cleanup_errors.append(f"close:{type(exc).__name__}")
+                raise
+            self._closed_at = time.monotonic()
             self._stopped = True
             if self._counted_active:
                 self._counted_active = False
                 record_sandbox_active(-1, provider=self._telemetry_provider_name())
         if self._owns_provider:
-            await self._provider.aclose()
+            try:
+                await self._provider.aclose()
+            except BaseException as exc:
+                # Teardown, if confirmed above, stays confirmed; the client release failure is its own fact.
+                self._cleanup_errors.append(f"aclose:{type(exc).__name__}")
+                raise
         self._closed = True
 
     async def disconnect(self) -> None:
@@ -746,7 +810,11 @@ class AsyncSandbox:
         # Carry the working directory so a reattached sandbox lands in the same
         # place, even for providers whose descriptor does not include it (the
         # remote provider's SandboxRef already has it; e.g. OpenSandbox does not).
-        if isinstance(descriptor, dict) and descriptor.get("workdir") is None and self._spec is not None:
+        if (
+            isinstance(descriptor, dict)
+            and self._spec is not None
+            and (self._spec.workdir is not None or descriptor.get("workdir") is None)
+        ):
             descriptor = {**descriptor, "workdir": self._spec.workdir}
         if isinstance(descriptor, dict) and self._spec is not None and self._spec.ports:
             descriptor = {**descriptor, "ports": list(self._spec.ports)}

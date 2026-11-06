@@ -11,6 +11,24 @@ Running at scale? Read [OpenSandbox Best Practices](/infrastructure/sandbox/open
 for resource requests vs limits, timeout and retry guidance, and the failure signatures that are not bugs.
 </Tip>
 
+## SciCode-Verified grading
+
+Local grading remains the default. Select `--benchmark scicode_verified/configs/opensandbox`
+to run scientific grading remotely. Configure `OPENSANDBOX_DOMAIN`,
+`OPENSANDBOX_API_KEY`, and `SCICODE_SANDBOX_IMAGE` with an immutable image digest.
+The [overlay](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/scicode_verified/configs/opensandbox.yaml)
+expects `/opt/scicode/2024/bin/python`, `/opt/scicode/2025/bin/python`, and the corrected
+HDF5 at `/data/test_data_cleaned.h5`; see the
+[image instructions](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/scicode/sandbox_image).
+
+`scicode_verified_resources_server.resources_servers.scicode.num_processes`
+limits concurrent grading attempts, including creation and cleanup (64 by default for this remote overlay).
+Each attempt requests one CPU and 8 GiB; adjust concurrency and
+`sandbox.memory_mib` to your service quota and measured workload. Model generation
+concurrency is independent. Infrastructure failures propagate without being scored
+as incorrect answers; ordinary assertions and code timeouts retain the existing
+grading semantics. Failed rows need investigation before retrying.
+
 ## Setup
 
 ### Obtain service access
@@ -53,6 +71,26 @@ Set connection values through the provider config. The shipped config reads thes
 Sandbox, model, and image-registry credentials are separate. Keep secrets out of
 source control, issues, and resolved-config logs.
 
+### Multi-cell front ends
+
+A deployment can put several OpenSandbox servers ("cells") behind one front end,
+such as a cell router. Point `OPENSANDBOX_DOMAIN` at the front end; no other Gym
+setting changes:
+
+- Sandbox IDs carry the owning cell as a prefix (for example `c5-<uuid>`). Treat
+  them as opaque strings; later calls for that sandbox are routed by the prefix.
+- Keep `connection.use_server_proxy: true` (the default). Endpoint lookups then
+  return the owning cell's server-proxy URL, so commands, file transfers, and PTY
+  traffic go from Gym straight to the cell. The host that runs Gym must be able to
+  reach every cell's endpoint, not only the front end.
+- The cell's server proxy authenticates these direct calls with the same API key.
+  The provider sends `OPENSANDBOX_API_KEY` as a header on them. If you call the
+  OpenSandbox SDK directly, pass the key in `ConnectionConfig.headers` as well as
+  `api_key`: `api_key` alone covers only lifecycle calls, and execd requests get
+  `401`.
+- Compose collections stay on one cell; see
+  [Compose networking](/infrastructure/sandbox/compose#networking-and-shared-storage).
+
 ### Check access before allocating sandboxes
 
 From the Gym server's host or container:
@@ -89,7 +127,7 @@ sandbox:
       use_server_proxy: true
     create:
       request_timeout_s: 1200
-      timeout_s: 1500
+      timeout_s: null
       fail_fast_on_pending: false
       connect_attempt_timeout_s: 1500
       skip_health_check: false
@@ -137,14 +175,76 @@ gym env start \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
 
-The provider constructor accepts four optional config sections:
+The provider constructor accepts these optional config sections:
 
 | Section | Purpose |
 | --- | --- |
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
+| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. |
+| `diagnostics` | `timeout_s` bounds active diagnostic I/O during one uninterrupted status-read recovery. Status requests and polling sleeps do not spend it; each lookup also respects the recovery and client-wait deadlines. A successful status read resets the diagnostic budget. `request_timeout_s` bounds each diagnostic request; `poll_interval_s` controls diagnostic polling. Both `inspect_oom` and `ended_report_oom` are deployment-specific OOM evidence options, disabled by default; see [OOM evidence](./opensandbox-debugging#the-whole-sandbox-died). |
+
+## Failure reporting and recovery
+
+Creation, readiness, lifecycle and runtime failures use `NgFailureEvent(boundary="sandbox")`; see [Error Handling](./index#error-handling).
+Status and log reads retry through `operations.outcome_policy`, whose HTTP rules take precedence over kind rules.
+Partial overrides merge with defaults. With the default `aiohttp` transport, provider retries honor an observed HTTP 429 `Retry-After` header;
+bounded recovery waits stop at their existing deadline. Supported actions are `retry` and `fail`; budgets and replay safety remain
+execution constraints. Command submissions are single-attempt. `command_retries` remains accepted for config
+compatibility, but neither it nor a retry rule enables command replay. Transport-level 429 retries are disabled for OpenSandbox so they
+cannot bypass this policy. Lifecycle SDK operations use the same event/reporting path.
+Creation and reconnect recovery use `create.outcome_policy`, with retry defaults for transport failures,
+SDK internal failures, create deadlines, Pending observations and failed readiness probes. Setup-command failures
+and unclassified requests fail by default. HTTP rules take precedence over kind rules. Error text alone never
+selects a retry. `create.fail_fast_on_pending` still prevents another Pending attempt when enabled.
+Policy evaluates the current event's HTTP status, then its kind, then the default action. It does not search
+causes. A lifecycle observation wrapping a failed HTTP 410 request has no HTTP status of its own; the cause
+retains 410. Likewise, an expired readiness probe reports `provider_not_ready` above those events. The default
+create policy retries that readiness failure within `create.retries`, even with `by_status_code: {410: fail}`.
+To stop that create path, configure `create.outcome_policy.by_failure_kind: {provider_not_ready: fail}`.
+Failed create attempts and recovered PTY requests are retained in the request failure report.
+
+```yaml
+create:
+  outcome_policy:
+    by_failure_kind: {provider_not_ready: fail}  # Other create defaults remain.
+operations:
+  command_timeout_headroom_s: 60
+  status_recovery_timeout_s: 300
+  exec_hard_cap_slack_s: 30
+  status_poll_timeout_s: 10
+  outcome_policy:
+    by_status_code: {503: fail}  # Other defaults, including 429: retry, remain.
+    by_failure_kind: {provider_io_timeout: retry}
+diagnostics:
+  timeout_s: 5
+  request_timeout_s: 2
+  poll_interval_s: 0.5
+  inspect_oom: false
+  ended_report_oom: false
+```
+
+The status-recovery window covers reads of the **same execution ID** and is capped by the existing command
+budget; diagnostic calls cannot restart it. Failed attempts enter the request's failure report before retry,
+including when a later read succeeds. Collection persists that report through the shared failure-reporting path.
+An ambiguous outcome is not proof of OOM or model fault, and this provider does not assign benchmark scores.
+
+### Closing a sandbox
+
+Sandbox deletion is idempotent. If a DELETE reply is lost, the provider can retry
+within `operations.retries`; a subsequent not-found response confirms that the
+sandbox is gone. All DELETE attempts and retry delays share one
+`operations.close_timeout_s` deadline. Permission failures and caller cancellation
+remain terminal. If termination fails or its deadline expires, the provider keeps
+the SDK handle available for the owner's retry and does not close its transport.
+This recovery does not change CREATE or command retry policies.
+
+After confirmed deletion, local SDK transport cleanup has its own existing
+`close_timeout_s` bound. Allow both phases, renewal shutdown and other workload
+cleanup inside the caller's outer deadline: a 12-second close setting allows up
+to 12 seconds for DELETE and another 12 seconds for transport cleanup, before
+other cleanup work. Increasing retries never extends the DELETE deadline.
 
 ## Image policy and setup commands
 
@@ -209,7 +309,7 @@ Unknown provider option keys raise `ValueError`; values with the wrong type rais
 
 ## Network Policy
 
-`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.sandbox.agent_tools` builds one from endpoint URLs; the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
+`provider_options.network_policy` is the sandbox's egress policy: a `defaultAction` (`allow` or `deny`) and ordered `egress` rules of `{action, target}`, where a target is a host name, a `*.domain` wildcard or an IP literal. `restricted_network_policy` in `nemo_gym.agents.agent_tools` builds one from endpoint URLs, and a harness that creates its own sandbox applies its `network_access` setting with `restrict_sandbox_network` in `nemo_gym.agents.utils.sandbox_network`, which builds that policy for the model and tool endpoints (see [Restrict the egress of an owned sandbox](/main/agent-server/add-or-update-a-harness#restrict-the-egress-of-an-owned-sandbox)); the Harbor environment server's `phase_network_policy` (`environment_servers/harbor/network_policy.py`) builds one from a Harbor phase's `network_mode` and `allowed_hosts`.
 
 ```yaml
 sandbox_spec:
@@ -351,14 +451,26 @@ The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
 | Integer uid | Pass the uid through the OpenSandbox command options. |
 | Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
 
-Command failures return `SandboxExecResult` with the command's exit code. If OpenSandbox reports an execution error without an exit code, the provider returns code `125` with `error_type="sandbox"`.
+Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. For session commands, Gym observes its own deadline directly: it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
+
+If background status reads keep reporting `running=True` until Gym's overall client wait expires, Gym reports
+`provider_command_outcome_unknown` and retains that last Running observation in the reason. Failed status reads
+that exhaust the recovery budget instead report `provider_status_unavailable`, with the failed read as cause.
+Neither event proves that the remote command stopped.
+
+A reported signal exit retains `error_type=None`; it is not automatically excluded as a timeout. In AnySWE,
+a patch from such an agent execution can still be verified. A signal exit from a grading command proceeds to
+the benchmark's log parser and can produce a counted zero if the logs do not establish success. Consumers must
+make grading and inclusion decisions explicitly from available evidence; the provider does not infer them
+from elapsed time or a signal code.
 
 The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid values are `Always`, `IfNotPresent`, and `Never`. The resolved policy is written into OpenSandbox create extensions as both `imagePullPolicy` and `opensandbox.extensions.image-pull-policy` unless those keys are already present in `provider_options.extensions`.
 
-Create retries handle transient allocation, connection, image pull, and server-side errors. Command retries are controlled separately by `operations.command_retries`.
+Create retries handle eligible allocation, connection and server-side failures through `create.outcome_policy`.
+Command submissions remain single-attempt, including when `operations.command_retries` is nonzero.
 
 execd, the exec daemon inside each sandbox, holds every command response open for `EXECD_API_GRACE_SHUTDOWN` (default 1s) after the command's last event, which is fixed latency on each command and on the readiness probe. Set it in the sandbox spec's `env` to shorten it; the shipped SWE-bench and OpenCode configs use `50ms`, and the provider's `operations.background_poll_initial_s` (0.5) is sized to that.
 
 `connection.tls_verify` (default `false`) controls certificate verification on every connection the provider opens, both the SDK transport and PTY WebSockets. The default skips verification so that `https://` endpoints with a certificate the client cannot verify, such as a validation cluster behind a self-signed load balancer, work without extra setup; set `tls_verify: true` for endpoints with a verifiable certificate. For `https` endpoints, either set `connection.protocol: https` or include the scheme in the domain (`connection.domain: https://sandbox.example`, or `OPENSANDBOX_DOMAIN=https://sandbox.example`): a scheme in the domain sets the protocol and takes precedence over `connection.protocol`. The `cleanup_sandboxes.py` helper mirrors the setting with `--tls-verify` and reads `tls_verify` from `--connection-config`.
 
-Setting `connection.keepalive_expiry_s: null` preserves the configured `tls_verify` behavior. It uses the SDK's default transport only when `tls_verify: true` and `disable_connection_pooling: false`; otherwise, the provider supplies a transport to apply those settings.
+Setting `connection.keepalive_expiry_s: null` preserves the configured `tls_verify` behavior. With `transport_backend: httpx`, `tls_verify: true` and `disable_connection_pooling: false`, it uses the SDK's default transport. SDK 0.1.15 drops command-status HTTP 410 response bodies on that path, so ended-report OOM inference is unavailable there. Every transport the provider supplies, including the default `aiohttp` one, retains command-status HTTP 410 bodies up to 64 KiB; oversized bodies provide no termination evidence. Interpreting a retained report as OOM still requires the separate `diagnostics.ended_report_oom` opt-in.
