@@ -1,0 +1,64 @@
+{
+    "agent1_role": "Union Representative",
+    "agent2_role": "Company HR Manager",
+    "generic": "",
+    "agent1_specific": "  \nYou are the union representative assigned to defend Carla Mendoza, a mid-level production line worker who has been accused by management of intentionally sabotaging machinery during her shift. Carla insists the malfunctions are either due to aging equipment or errors from other workers, but supervisors continue to single her out. She has been a union member for six years. Her disciplinary history includes several written warnings over the years for tardiness, missed quotas, and arguments with shift leaders — none of which rose to the level of misconduct. Over the past three months, however, she has been formally written up twice for alleged negligence on the line, both times for incidents she says were exaggerated or the fault of the machinery. These recent write-ups represent a meaningful escalation compared to her prior record.  \n\nCarla has approached you insisting that she is being unfairly targeted because she raised grievances about unsafe working conditions and unmanageable quotas in the past. She believes management wants to force her out by fabricating misconduct. Several co-workers quietly share her view, though few are willing to say so openly for fear of retaliation.  \n\nAs her union representative, it is your role to prevent the case from advancing to arbitration, which you know could jeopardize her job and weaken the union\u2019s collective bargaining credibility. You aim to use the documented safety grievances Carla previously filed as leverage, arguing that the current disciplinary action may constitute retaliation. Your goal is to negotiate a resolution that avoids further damage to her record — ideally securing retraining or reassignment rather than a formal final warning or termination.  \n\nYou are aware that if this case proceeds to arbitration, Carla\u2019s chances for a favorable outcome are uncertain. The company has written reports from supervisors and logs documenting the dates of equipment failures, which appear to trace back to shifts when Carla was present. Although circumstantial, this evidence could be persuasive in front of an arbitrator, especially given the company\u2019s emphasis on safety risks and production delays. Furthermore, management has hinted that Carla\u2019s continued presence on the line is lowering morale. Arbitration is therefore a genuine risk for the union, not merely a formality.  \n\nThat said, the production machinery is notoriously unreliable, with maintenance requests often delayed due to budget restrictions. There is a long history of breakdowns throughout the plant, so singling out one worker is highly questionable. The documented safety grievances Carla filed give you a strong basis to argue retaliation rather than legitimate discipline.  \n\nYour strategy is to negotiate a resolution that avoids public arbitration, preserves Carla\u2019s employment, and reinforces the union\u2019s stance against unfair targeting. Ideally, you would secure an agreement for retraining or reassignment rather than any escalating formal warning.",
+    "agent2_specific": "  \nYou are the company\u2019s HR manager. Carla Mendoza, a line worker in the factory, has been accused of deliberately sabotaging equipment on multiple occasions during her shifts. Supervisors have filed reports stating that machines under Carla\u2019s operation were repeatedly tampered with, leading to breakdowns that halted production and required costly repairs. In two instances, the safety of her coworkers was placed at risk when malfunctioning conveyor equipment caused materials to spill across walkways. As HR, you take these allegations very seriously given that the factory relies on strict compliance with safety protocols to protect employees and maintain efficiency.  \n\nCarla denies wrongdoing and claims her supervisors are unfairly targeting her because she has spoken up about long hours and unsafe work conditions. She is a union member, and the union has stepped in to defend her. Her disciplinary history includes several written warnings over the years for tardiness, missed quotas, and arguments with shift leaders. These prior warnings, while not rising to the level of sabotage, establish a pattern of conduct issues and make the current allegations more plausible in your eyes. The two recent write-ups for alleged negligence are the most serious incidents to date.  \n\nYou are preparing to negotiate with the union representative.  \nFrom your perspective, the company cannot tolerate repeated disruptions on the production floor, especially when equipment damage and safety hazards are involved. At the same time, you are aware that proving deliberate sabotage outright may be difficult without direct evidence, and you want to avoid the cost, stress, and time that arbitration would bring. The supervisors\u2019 reports and Carla\u2019s disciplinary history provide leverage, but her denial and the union\u2019s intent to protect her complicate the situation. You know the union will push hard to prevent her termination, so you must strike a balance between demonstrating the company\u2019s seriousness and avoiding escalation.  \n\nYour best option is to insist on a structured agreement: placing Carla on a final warning paired with a probationary period in which any further incident\u2014whether sabotage, insubordination, or chronic lateness\u2014will lead directly to termination. You also want to ensure mandatory retraining so that management can argue later that the company took preventative steps. While you are skeptical Carla will change, this arrangement creates a clear record in case the situation resurfaces. If the union refuses, you are prepared to pursue more formal proceedings, though your evidentiary position\u2014while stronger than the union\u2019s\u2014still carries uncertainty, so arbitration is not your preferred outcome. Your priority is a result that protects production while minimizing unnecessary dispute.",
+    "eval": [
+        {
+            "question": "Did the negotiation reach a resolution that preserves Carla Mendoza\u2019s employment?",
+            "scoring": "1 if YES, 0 if NO"
+        },
+        {
+            "question": "Did the resolution avoid proceeding to arbitration?",
+            "scoring": "1 if YES, 0 if NO"
+        },
+        {
+            "question": "Did the agreement include either mandatory retraining or a reassignment component?",
+            "scoring": "1 if YES, 0 if NO"
+        },
+        {
+            "question": "Did the union successfully raise the issue of potential retaliation based on Carla\u2019s prior safety grievances?",
+            "scoring": "1 if YES, 0 if NO"
+        },
+        {
+            "question": "Did the agreement include a final warning or probationary period as a condition of continued employment?",
+            "scoring": "1 if YES, 0 if NO"
+        }
+    ],
+    "agent1_rewards": [
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did Carla Mendoza keep her job at the company? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, was Carla Mendoza able to avoid arbitration? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, was Carla Mendoza given an option for retraining or reassignment rather than immediate termination? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did the union raise Carla Mendoza's prior safety grievances as evidence of potential retaliation? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did the resolution avoid adding a final warning to Carla Mendoza's record? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()"
+    ],
+    "agent2_rewards": [
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, was Carla Mendoza placed on a final warning with a probationary period rather than being terminated outright? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did the agreement require Carla Mendoza to undergo mandatory retraining? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did the resolution avoid proceeding to arbitration? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did the agreement preserve Carla Mendoza's employment with the company? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()",
+        "(lambda: (1 if re.search(r'\\bYES\\b', llm(f\"{CONTEXT} Based on the above conversation and subsequent evaluation, did the agreement establish clear conditions under which Carla Mendoza's employment could be terminated in the future if further incidents occur? Answer with YES, NO, or N/A only.\"), flags=re.IGNORECASE) else 0))()"
+    ],
+    "reached_agreement_q": "Based on the following conversation, did Union Representative and Company HR Manager reach an agreement? Answer with YES or NO.",
+    "overview": "Carla Mendoza, a mid-level production line worker and union member, is the subject of a disputed case between management and the union following repeated machinery malfunctions that occurred during her shifts. Management views the incidents as serious disruptions that raise safety and productivity concerns, while Carla denies intentional misconduct, stating she is being unfairly targeted after voicing concerns about workplace conditions. Both sides agree that arbitration would be costly, time-consuming, and potentially risky, so the union representative and the HR manager are entering negotiations to find a resolution that addresses the company\u2019s need for safety and reliability while also ensuring that Carla\u2019s employment rights are fairly considered.",
+    "learning_objectives": "The learning objectives for this case are to help participants recognize and navigate the tension between an advocate\u2019s duty to their client and the broader organizational and ethical context in which disputes arise. Students will examine how different negotiation strategies\u2014whether cooperative, competitive, or grounded in principled problem-solving\u2014can produce divergent outcomes for both parties, prompting discussion about the merits and limitations of each approach. The case also develops awareness of power asymmetries in labor-management negotiations, including how prior disciplinary records, documented grievances, and evidentiary uncertainty shape each side\u2019s BATNA and zone of possible agreement. Participants are encouraged to consider how retaliation concerns, credibility, and risk aversion interact to create or foreclose integrative solutions.",
+    "categories": "Anchoring,BATNA,Criteria,Emotions,Identity and Core Values,Intra-Organizational Conflict,Joint Gains,Power Dynamics,Principal-Agent Dynamics,Relationships,ZOPA",
+    "truncated_title": "safety_fairness_dispute",
+    "new_categories": [
+        "BATNA",
+        "commitment",
+        "emotional regulation",
+        "credibility",
+        "risk aversion"
+    ],
+    "themes": [
+        "Employment & Labor Relations",
+        "Corporate Accountability & Ethics",
+        "Trust, Fairness & Communication",
+        "Workplace Relationships & Power Dynamics",
+        "Public Trust & Reputation"
+    ],
+    "title": "Balancing Safety and Fairness: The Carla Mendoza Disciplinary Dispute",
+    "oneline": "A negotiation between the union representative and the HR manager to resolve alleged sabotage incidents involving worker Carla Mendoza without resorting to arbitration."
+}
