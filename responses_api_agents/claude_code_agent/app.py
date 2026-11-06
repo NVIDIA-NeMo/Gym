@@ -33,18 +33,25 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_TIMEOUT_METADATA_KEY,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    restrict_sandbox_network,
+    stage_skills,
 )
+from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -56,16 +63,25 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts import (
+    await_model_call_capture_quiescence,
+    model_call_capture_dirs_from_config,
+    read_available_model_call_records,
+)
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ObservationGap,
     SandboxObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
-from nemo_gym.skills import stage_skills
-from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
+from responses_api_agents.claude_code_agent.observability import (
+    associate_claude_code_compaction_calls,
+    extract_claude_code_observations,
+)
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
@@ -89,6 +105,12 @@ _BASH_BOOTSTRAP = """if ! command -v bash >/dev/null 2>&1; then
     fi
 fi
 """
+
+
+# A headless run ends when the CLI exits, and the CLI first waits for every background task. A Bash command the model
+# moves to the background (`run_in_background`) can therefore hold the run open long after the final answer, up to
+# the agent timeout. Keep commands in the foreground, where the Bash tool's own timeout bounds them.
+_HEADLESS_RUN_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1"}
 
 
 class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -119,6 +141,14 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Used only when an episode does not supply a borrowed SandboxAccess.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Claude creates: `model_only` allows only the model endpoint's host. Claude uses no "
+            "tool grants, so `model_and_tools` is rejected. A borrowed task sandbox keeps its owner's network, so a "
+            "session that borrows one rejects any other value than `inherit`."
+        ),
+    )
     sandbox_executable_path: str | None = None
     sandbox_local_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
@@ -324,6 +354,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 "CLAUDE_CODE_SUBAGENT_MODEL": model,
                 "IS_SANDBOX": "1",
                 "CLAUDE_CONFIG_DIR": str(claude_config_dir),
+                **_HEADLESS_RUN_ENV,
             }
             if base_url:
                 env["ANTHROPIC_BASE_URL"] = base_url
@@ -565,6 +596,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(422, "A supplied Claude binary requires sandbox_executable_sha256")
         access = body.sandbox_access
         owns_sandbox = access is None
+        if self.config.network_access == "model_and_tools":
+            raise AgentSeedRejectedError("Claude uses no tool grants; set network_access to model_only or inherit")
+        if not owns_sandbox and self.config.network_access != "inherit":
+            raise AgentSeedRejectedError(
+                "Claude network_access applies only to a sandbox it creates, not a borrowed one"
+            )
         if owns_sandbox and not self.config.sandbox_provider:
             raise HTTPException(422, "Claude requires sandbox_access or a configured sandbox_provider")
         spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config}) if owns_sandbox else None
@@ -585,6 +622,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         provider_ref = access.connection.provider_config_ref if access else self.config.sandbox_provider
         provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    # With neither a Gym model server nor anthropic_base_url, the CLI calls Anthropic's own API.
+                    # Only the allowlist needs that host; activation still leaves ANTHROPIC_BASE_URL unset.
+                    model_base_url=self._resolve_base_url() or "https://api.anthropic.com",
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -710,6 +759,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             "CLAUDE_CODE_SUBAGENT_MODEL": model,
             "DISABLE_AUTOUPDATER": "1",
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+            **_HEADLESS_RUN_ENV,
         }
         if base_url:
             env.update(
@@ -771,6 +821,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
+        state.observations = await self._associate_compaction_calls(
+            state.observations, rollout_id=state.request.episode_id.capture_key
+        )
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup:
@@ -821,6 +874,36 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
+    async def _associate_compaction_calls(
+        self, observations: AgentObservationBundle, *, rollout_id: str | None
+    ) -> AgentObservationBundle:
+        """Resolve Claude's hidden helpers before handing its bundle to the collector."""
+        if (
+            rollout_id is None
+            or self.config.model_server is None
+            or not any(
+                isinstance(record, ContextCompactionObservation) and not record.model_calls
+                for record in observations.records
+            )
+        ):
+            return observations
+        try:
+            capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
+            if not capture_dirs:
+                return observations
+            await await_model_call_capture_quiescence(rollout_id, capture_dirs)
+            # The agent host reads the run's shared capture; the sandbox needs no access.
+            calls, _ = await asyncio.to_thread(
+                read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
+            )
+            return associate_claude_code_compaction_calls(
+                observations, [call for call in calls if call.model_ref == self.config.model_server]
+            )
+        except Exception:
+            LOG.warning("Could not associate Claude Code compaction calls for rollout %s.", rollout_id, exc_info=True)
+            observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
+            return observations
+
     async def _create_episode(
         self,
         body: NeMoGymResponseCreateParamsNonStreaming,
@@ -863,6 +946,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
+        observations = await self._associate_compaction_calls(observations, rollout_id=rollout_id)
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 

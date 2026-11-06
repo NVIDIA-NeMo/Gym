@@ -7,8 +7,16 @@ Evaluate a model's chat capabilities on diverse conversational prompts. An LLM j
 | Benchmark | Prompts | Main differences |
 |---|---:|---|
 | `lmarena_v3` | 3,713 | Recommended. Exact human-battle opponents, equal verdict weights, `both bad` as a tie, reference-length style control. |
+| ↳ Subset of Super3.5's difficulty level | 2,328 | `config_super35_gemini38flash_judge.yaml`; Gemini 3.8 Flash judge. |
+| ↳ Subset of Nano3.5's difficulty level | 1,371 | `config_nano35_gemini38flash_judge.yaml`; Gemini 3.8 Flash judge. |
 | `lmarena_v2` | 1,475 | Legacy/deprecated. Synthetic baselines, strong verdict weight 3, `both bad` excluded, Bradley-Terry style control. |
 | `vision_arena_v1` | 486 | Fixed subset of 500 upstream prompts; 14 lack usable baseline answers. Multimodal judge, no style control. |
+
+Subset configs live in `benchmarks/lmarena_v3/`; use
+`config_super35_glm53_judge.yaml` or `config_nano35_glm53_judge.yaml` for GLM-5.3.
+
+Note, you can override the judge in your config or on the CLI with
+`++judge_model.responses_api_models.vllm_model.model=<judge-model-id>`.
 
 ## Setup
 
@@ -32,6 +40,8 @@ gym eval prepare --config benchmarks/lmarena_v3/config.yaml
 ```
 
 This creates `benchmarks/lmarena_v3/data/lmarena_v3_validation.jsonl` with 3,713 rows.
+
+For a subset, replace `config.yaml` with its config in both preparation and evaluation commands.
 
 ## Run the benchmark
 
@@ -90,7 +100,7 @@ Each JSONL row contains:
 | `response_tokens/*`, `reasoning_tokens/*` | Response and reasoning length statistics. |
 | `arena/*`, `taxonomy-language/*`, `taxonomy-task-type/*` | Prompt count and ON/OFF scores for slices with at least 50 prompts. |
 
-Each benchmark config also sets `health_check_max_not_final_failure_fraction` to the same limit. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
+Each benchmark config also sets `health_check_max_not_final_failure_fraction` and `health_check_max_final_failure_fraction` to the same limit; an outage counts as final once its retries are used up. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
 
 `lmarena_v3` keeps the judge score when `0.5 < response length / reference length < 1.75`; otherwise it assigns zero. The reference length is the median length from reference models. For short references (at most 100 tokens), responses from 0 to 175 tokens are accepted.
 

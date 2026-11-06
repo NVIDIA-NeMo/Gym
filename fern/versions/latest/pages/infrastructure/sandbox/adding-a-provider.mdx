@@ -8,12 +8,12 @@ Add a provider when NeMo Gym needs to create sandboxes through a new runtime bac
 
 ## Provider Contract
 
-Providers implement the `SandboxProvider` protocol from `nemo_gym.sandbox.providers.base`. Keep common caller fields on `SandboxSpec`; put backend-specific options in `SandboxSpec.provider_options`.
+Providers implement the `SandboxProvider` protocol from `nemo_gym.sandbox`. Keep common caller fields on `SandboxSpec`; put backend-specific options in `SandboxSpec.provider_options`.
 
 ```python
 from pathlib import Path
 
-from nemo_gym.sandbox.providers.base import (
+from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
@@ -61,13 +61,26 @@ class MySandboxProvider:
         return None
 ```
 
-Provider implementations should preserve the same lifecycle contract as the built-in providers:
+New provider implementations must follow this lifecycle and failure contract:
 
 - Return a `SandboxHandle` from `create()` only after the sandbox is ready enough to run commands and transfer files.
 - Return command status through `SandboxExecResult` for process exits, including nonzero exits.
-- Raise `SandboxCreateError` or `SandboxCreateVerificationError` for sandbox allocation and readiness failures.
+- For allocation, readiness and runtime failures, raise `NgFailureEvent` with `boundary="sandbox"`, the operation
+  and a kind registered in [failure_kinds.py](https://github.com/NVIDIA-NeMo/Gym/blob/main/nemo_gym/core/failure_kinds.py).
+  Each provider classifies its own SDK errors. The shared `nemo_gym.sandbox.failures.sandbox_failure` factory
+  builds the event from an explicit `failure_kind`, observed `http_status` and sandbox details; it does not
+  interpret SDK exceptions or choose policy actions. Use `raise ... from error` to retain the original cause.
+- A provider-request timeout leaves remote completion unknown. Report `provider_io_timeout`; do not invent a command timeout.
+- Report `provider_oom_killed` only from authoritative current-sandbox evidence, retaining its source.
+- Choose runtime actions through configurable `OutcomePolicyConfig` rules. Bound retries by the operation's
+  existing budget and never replay a command whose delivery is uncertain. Record failed attempts with
+  `observe_failure` before retrying. It records the attempt in the current request's failure report without
+  changing the result; see [Failure observations](/observability/rollout-failures#recovered-failures).
 - Make `close()` safe to call from cleanup paths.
 - Use `aclose()` for provider-scoped resources such as SDK clients.
+
+OpenSandbox implements this contract. See [Required provider migrations](./index#required-provider-migrations)
+for the built-in providers that must adopt it in follow-up changes.
 
 ## Provider Config
 

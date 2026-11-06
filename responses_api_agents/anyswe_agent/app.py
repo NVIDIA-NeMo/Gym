@@ -32,10 +32,16 @@ from typing import Any, Dict, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    FailureBoundary,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    observe_failure,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxCreateError,
@@ -44,7 +50,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import apply_rollout_prefix
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 class SWEBenchMetrics(BaseModel):
@@ -402,11 +408,14 @@ class GymAgentHarnessProcessor(BaseModel):
         sources = (
             scripts / f"{self._agent_key}_deps.sh",
             scripts / "_portable_python.sh",
-            PARENT_DIR / "responses_api_agents" / self._agent_key / "requirements.txt",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "pyproject.toml",
+            PARENT_DIR / "responses_api_agents" / self._agent_key / "uv.lock",
             *sorted((PARENT_DIR / "responses_api_agents" / self._agent_key).glob("*.py")),
             # The bundle carries its own copy of nemo_gym, so library changes must rebuild it too.
             *sorted((PARENT_DIR / "nemo_gym").rglob("*.py")),
             PARENT_DIR / "pyproject.toml",
+            PARENT_DIR / "uv.lock",
+            PARENT_DIR / "setup.py",
         )
         return hashlib.sha256(b"".join(path.read_bytes() for path in sources if path.exists())).hexdigest()
 
@@ -826,6 +835,8 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 if exists.return_code == 0:
                     await sandbox.download(remote, local)
         except Exception as exc:
+            if isinstance(exc, NgFailureEvent):
+                observe_failure(exc)
             sandbox_failed = True
             update_metrics(
                 params.metrics_fpath,
@@ -874,6 +885,12 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         if patch.strip() and error_kind is None:
             try:
                 resolved, error_kind = await self._grade_sandbox_patch(params, patch_bytes)
+            except NgFailureEvent as exc:
+                if exc.boundary != FailureBoundary.SANDBOX:
+                    raise
+                observe_failure(exc)
+                error_kind = "sandbox"
+                (params.persistent_dir / "eval_error.txt").write_text(repr(exc))
             except SandboxCreateError as exc:
                 error_kind = "sandbox"
                 (params.persistent_dir / "eval_error.txt").write_text(repr(exc))

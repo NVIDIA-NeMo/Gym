@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config.config_types import (
     AgentCompositionError,
@@ -46,6 +46,7 @@ from nemo_gym.config.config_types import (
     is_almost_server,
 )
 from nemo_gym.config.global_config import (
+    AGENT_SESSION_AGENT_TYPES,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
@@ -61,7 +62,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
-from nemo_gym.rollout_collection import _environment_servers_by_agent
+from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
 class TestGlobalConfig:
@@ -89,6 +90,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "server_spinup_timeout_seconds": 600,
+            "server_shutdown_timeout_seconds": 1,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
@@ -369,7 +371,7 @@ class TestGlobalConfig:
         omegaconf_load_mock.side_effect = lambda path: (
             DictConfig({}) if "env" not in str(path) else DictConfig({"extra_dot_env_key": 2})
         )
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -418,7 +420,7 @@ b: 2
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
         omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -465,7 +467,7 @@ config_paths:
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
         omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         get_global_config_dict()
 
@@ -511,7 +513,7 @@ config_paths:
                 return DictConfig({})
 
         omegaconf_load_mock.side_effect = omegaconf_load_mock_side_effect
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -555,7 +557,7 @@ config_paths:
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
         omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
     def test_get_global_config_dict_config_paths_later_sibling_wins(
         self, monkeypatch: MonkeyPatch, tmp_path: Path
@@ -3429,6 +3431,109 @@ class TestComposeUnboundAgent:
         assert "max_steps" not in block
         assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
         assert "hermes_agent" not in resolved
+
+    def _session_environment_config(self, harness_type: str) -> DictConfig:
+        """The standard config with `harness_type` as the swap source and a single_agent_turn_legacy server."""
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        config[harness_type] = {
+            "responses_api_agents": {
+                harness_type: {
+                    "entrypoint": "app.py",
+                    "resources_server": {"type": "resources_servers", "name": "???"},
+                    "model_server": {"type": "responses_api_models", "name": "harness_model"},
+                }
+            }
+        }
+        config["gpqa_mcqa_environment_server"] = {
+            "environment_servers": {
+                "single_agent_turn_legacy": {
+                    "entrypoint": "app.py",
+                    "resources_server": {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"},
+                    "agent_server": {"type": "responses_api_agents", "name": "gpqa_mcqa_simple_agent"},
+                    "resources_tool_transports": ["mcp"],
+                    "max_concurrent_episodes": 4,
+                    "queue_timeout_seconds": 60,
+                    "default_episode_timeout_seconds": 600,
+                    "cleanup_timeout_seconds": 30,
+                }
+            }
+        }
+        return config
+
+    @mark.parametrize("harness_type", ["opencode_sandboxed_agent", "non_executing_simple_agent"])
+    def test_swap_to_agent_without_sessions_falls_back_to_legacy_relay(self, harness_type: str) -> None:
+        config = self._session_environment_config(harness_type)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
+        assert list(servers) == ["legacy_agent"]
+        assert OmegaConf.to_container(servers["legacy_agent"]) == {
+            "entrypoint": "app.py",
+            "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
+        }
+
+    def test_legacy_relay_keeps_the_servers_own_worker_settings(self) -> None:
+        config = self._session_environment_config("opencode_sandboxed_agent")
+        server = config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        server["num_workers"] = 4
+        server["uvicorn_reuse_port"] = True
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        relay = config["gpqa_mcqa_environment_server"]["environment_servers"]["legacy_agent"]
+        assert relay["num_workers"] == 4
+        assert relay["uvicorn_reuse_port"] is True
+
+    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
+    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
+        config = self._session_environment_config(harness_type)
+        server_before = OmegaConf.to_container(
+            config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
+        assert list(servers) == ["single_agent_turn_legacy"]
+        server_before["agent_server"]["name"] = f"gpqa_mcqa_{harness_type}"
+        assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
+
+    def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
+        """Every agent app that seeds agent sessions is listed, and nothing else is."""
+        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        implementing = {
+            app.parent.name
+            for app in agents_root.glob("*/app.py")
+            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
+        }
+
+        assert implementing == AGENT_SESSION_AGENT_TYPES
+
+    def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
+        config = self._session_environment_config("langgraph_agent")
+        config.langgraph_agent.responses_api_agents.langgraph_agent.resources_server = None
+        config["independent_agent"] = {
+            "responses_api_agents": {"hermes_agent": {"entrypoint": "app.py", "resources_server": None}}
+        }
+        config["independent_environment"] = {
+            "environment_servers": {
+                "single_agent_turn_legacy": {
+                    "agent_server": {"type": "responses_api_agents", "name": "independent_agent"},
+                    "resources_tool_transports": ["mcp"],
+                }
+            }
+        }
+        independent_before = OmegaConf.to_container(config.independent_environment)
+
+        GlobalConfigDictParser().compose_unbound_agent(config, selected_agent="langgraph_agent")
+
+        environment = config.gpqa_mcqa_environment_server.environment_servers.single_agent_turn_legacy
+        assert environment.agent_server.name == "gpqa_mcqa_langgraph_agent"
+        assert environment.resources_tool_transports == []
+        assert OmegaConf.to_container(config.independent_environment) == independent_before
+        assert config.independent_agent.responses_api_agents.hermes_agent.resources_server is None
 
     def _cli_dict(self, config: dict) -> DictConfig:
         """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""

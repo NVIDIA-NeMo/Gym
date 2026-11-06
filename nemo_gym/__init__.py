@@ -102,7 +102,7 @@ def _resolve_under_cwd_or_install(
     ``benchmarks/<name>/config.yaml`` or ``resources_servers/<env>/data/example.jsonl`` resolves by name
     from any cwd or plugin root. ``validator`` overrides the default ``Path.exists`` check — pass it when a
     candidate is valid only if specific markers are present (e.g. a server dir must ship
-    ``requirements.txt`` or ``pyproject.toml``). If nothing matches, the path under the highest-priority
+    ``pyproject.toml`` and ``uv.lock``). If nothing matches, the path under the highest-priority
     root is returned so error messages point at the user's own location.
 
     Use this for read paths only — never for write targets (e.g. metrics written next to a dataset), which
@@ -187,25 +187,25 @@ from nemo_gym.package_info import (
 # Maps each public name to its defining submodule. Existing deep import paths continue to work.
 _LAZY_EXPORTS: dict[str, str] = {
     # Resources server extension points and contracts
-    "BaseResourcesServerConfig": "base_resources_server",
-    "SimpleResourcesServer": "base_resources_server",
-    "BaseRunRequest": "base_resources_server",
-    "BaseVerifyRequest": "base_resources_server",
-    "BaseVerifyResponse": "base_resources_server",
-    "BaseMultiRewardVerifyResponse": "base_resources_server",
-    "BaseSeedSessionRequest": "base_resources_server",
-    "BaseSeedSessionResponse": "base_resources_server",
-    "ReverifyMode": "base_resources_server",
+    "BaseResourcesServerConfig": "server_runtime.base_resources_server",
+    "SimpleResourcesServer": "server_runtime.base_resources_server",
+    "BaseRunRequest": "server_runtime.base_resources_server",
+    "BaseVerifyRequest": "server_runtime.base_resources_server",
+    "BaseVerifyResponse": "server_runtime.base_resources_server",
+    "BaseMultiRewardVerifyResponse": "server_runtime.base_resources_server",
+    "BaseSeedSessionRequest": "server_runtime.base_resources_server",
+    "BaseSeedSessionResponse": "server_runtime.base_resources_server",
+    "ReverifyMode": "server_runtime.base_resources_server",
     # Agent and model extension points
-    "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
-    "SimpleResponsesAPIAgent": "base_responses_api_agent",
-    "BaseResponsesAPIModelConfig": "base_responses_api_model",
-    "SimpleResponsesAPIModel": "base_responses_api_model",
+    "BaseResponsesAPIAgentConfig": "agents.base_responses_api_agent",
+    "SimpleResponsesAPIAgent": "agents.base_responses_api_agent",
+    "BaseResponsesAPIModelConfig": "models.base_responses_api_model",
+    "SimpleResponsesAPIModel": "models.base_responses_api_model",
     # Common server-client utilities
-    "ServerClient": "server_utils",
-    "raise_for_status": "server_utils",
-    "get_response_json": "server_utils",
-    "SESSION_ID_KEY": "server_utils",
+    "ServerClient": "client.server_client",
+    "raise_for_status": "client.http_client",
+    "get_response_json": "client.http_client",
+    "SESSION_ID_KEY": "client.server_client",
     # Author-facing config and metrics types
     "BaseServerConfig": "config.config_types",
     "BaseRunServerInstanceConfig": "config.config_types",
@@ -214,7 +214,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AggregateMetricsRequest": "config.config_types",
     "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
-    "NeMoGymAsyncOpenAI": "openai_utils",
+    "NeMoGymAsyncOpenAI": "client.openai_client",
     "NeMoGymResponse": "core.responses_api_types",
     "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
     "NeMoGymChatCompletion": "core.responses_api_types",

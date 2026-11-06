@@ -48,9 +48,9 @@ def main() -> None:
     agent_cfg_class = os.environ["NV_AGENT_CFG_CLASS"]
 
     try:
+        from nemo_gym.client import ServerClient
         from nemo_gym.config import ModelServerRef, ResourcesServerRef
         from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-        from nemo_gym.server_utils import ServerClient
     except ModuleNotFoundError as exc:
         # This runs against the nemo-gym the sandbox image installed, which can predate the package
         # reorganization (#5166). A missing dependency other than nemo_gym still fails here.

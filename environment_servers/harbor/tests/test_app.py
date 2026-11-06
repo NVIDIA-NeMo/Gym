@@ -69,19 +69,21 @@ from environment_servers.harbor.verifier import (
     summing_components,
     verifier_command,
 )
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
-from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import failure_kinds
-from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.digest import DIGEST_KEY
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
+from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
+from nemo_gym.data.tasks.harbor import (
+    BUILT_IMAGES_FILE,
+    DIGEST_KEY,
+    IMAGE_CONFIGS_FILE,
+    RECORD_VERSION,
+    HarborEnvironment,
+    HarborTaskError,
+    load_task,
+)
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
+from nemo_gym.server_runtime import BaseEnvironmentServerConfig
 
 
 def harness_trajectory(step_count: int) -> dict:
@@ -395,6 +397,42 @@ class TestEpisode:
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "pull failed" in response.failure.failure_reason
         assert server.server_client.calls == []
+
+    @pytest.mark.parametrize("status", [401, 403, 500, None])
+    async def test_sandbox_credentials_refused_at_seed_are_named(self, tmp_path, monkeypatch, status):
+        """Provider credentials are classified on the cause, without reclassifying the environment outcome."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+
+        class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
+            status_code = status
+            request_payload = {"secret": "must not be serialized"}
+
+        async def refused(task, workdir, *, episode_key):
+            raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
+
+        monkeypatch.setattr(server, "_create_sandbox", refused)
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert "Could not set up sandbox for 'hello'" in failure.failure_reason
+        assert response.failure_report is not None
+        events = list(response.failure_report.events.values())
+        outer = response.failure_report.events[response.failure_report.failure_id]
+        assert outer.boundary == "environment"
+        assert outer.failure_kind == "environment_episode_failed" and failure.failure_kind is None
+        assert outer.foreign_error.http_status == 503
+        setup = response.failure_report.events[outer.cause_id]
+        assert len(events) == 2
+        assert setup.operation == "sandbox.setup"
+        assert setup.boundary == ("sandbox" if status in (401, 403) else "environment")
+        assert setup.foreign_error.exception_type.endswith("SandboxApiException")
+        assert setup.foreign_error.message == "Create sandbox failed: Authentication credentials are invalid."
+        assert setup.foreign_error.http_status == status
+        assert "must not be serialized" not in response.failure_report.model_dump_json()
+        assert setup.cause_id is None
+        assert setup.failure_kind == (
+            "provider_credentials_rejected" if status in (401, 403) else "environment_episode_failed"
+        )
 
     async def test_shutdown_refuses_new_episodes(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
@@ -909,8 +947,7 @@ class TestSeedWorkdirAndResources:
         assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
 
     async def test_build_mode_task_seeds_from_its_recorded_image(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         # A Dockerfile that needs a build resolves to the image prepare recorded beside the task folders.
@@ -1240,7 +1277,7 @@ class TestAgentStage:
     @pytest.mark.parametrize(
         ("path", "status", "stage", "terminal"),
         [
-            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a final 422.
+            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a terminal 422.
             ("/v1/agent_sessions", 422, "agent", True),
             ("/ng-rollout/r1/v1/responses", 422, "agent", True),
             ("/v1/agent_sessions/close", 503, "cleanup", False),
@@ -2381,7 +2418,8 @@ class TestComposeAndRouting:
         verifier = FakeSandbox()
 
         async def start_compose(task, episode_key):
-            documents.append(server._compose_document(task))
+            compose.document = server._compose_document(task)
+            documents.append(compose.document)
             return compose
 
         async def create_verifier(task, *, episode_key=None):
@@ -2468,10 +2506,8 @@ class TestComposeAndRouting:
         recorded images stand in, so the ``build:`` and ``pull_policy: build`` keys that only describe those builds are
         dropped before the Compose adapter, which starts images only, and the sidecar's entrypoint, command and
         ports come from its recorded configuration like any pulled image's."""
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, built_service_images, context_digest
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
-        from nemo_gym.tasks.harbor.task import built_service_images
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
@@ -2538,9 +2574,8 @@ class TestComposeAndRouting:
         """``load_task`` (once per task, in a thread) hashes ``environment/`` once and carries Harbor's context id
         and the build record on the task; ``_compose_document``, which runs per episode, hashes nothing, whatever
         the folder's size, and still substitutes the recorded images and defines ``COMPOSE_PROJECT_NAME``."""
-        import nemo_gym.tasks.harbor.digest as digest_module
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        import nemo_gym.data.tasks.harbor.digest as digest_module
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
@@ -2605,8 +2640,8 @@ class TestComposeAndRouting:
         """Harbor's own template already builds ``main`` from ``environment/Dockerfile`` with ``context: ${CONTEXT_DIR}``,
         so a task file that only restates that (orca-bench, terminal_bench_aai) changes nothing there. Gym runs the
         Dockerfile without a build in pull and overlay mode, so the section is dropped and the document starts."""
+        from nemo_gym.data.tasks.harbor import check_task_compose_fields, load_compose_document
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile=dockerfile)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2629,9 +2664,12 @@ class TestComposeAndRouting:
         """A ``target`` (or ``args``, ``dockerfile_inline``, another ``dockerfile`` or ``context``) would change the image
         Harbor builds; without a build Gym cannot honour it, so the task is an error naming the key, as prepare already
         reported it into ``skipped.json``, instead of starting on the wrong image."""
-        from nemo_gym.tasks.harbor.errors import HarborTaskError
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import (
+            HarborTaskError,
+            ImageConfigError,
+            check_task_compose_fields,
+            load_compose_document,
+        )
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2657,9 +2695,8 @@ class TestComposeAndRouting:
         invalid value is the task's error, as prepare reports it (review: the key was dropped from every service
         before the field check, by prepare and again here, so the advertised support never saw a task's setting).
         Only ``pull_policy: build`` leaves, with the build it names (``test_built_images_stand_in...``)."""
+        from nemo_gym.data.tasks.harbor import ImageConfigError, check_task_compose_fields, load_compose_document
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
 
         class PullPolicyStubProvider(NetworkedStubProvider):
             def pull_policy_options(self, policy):
@@ -2712,9 +2749,8 @@ class TestComposeAndRouting:
         adapter and prepare's check normalizes it the same way; only ``pull_policy: build``, the policy naming that
         build, leaves with it (review: ``with_built_images`` dropped every policy of a built service, so with a
         recorded build preparation succeeded and the server and the adapter received no policy)."""
+        from nemo_gym.data.tasks.harbor import check_task_compose_fields, context_digest, load_compose_document
         from nemo_gym.sandbox import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
 
         class PullPolicyStubProvider(NetworkedStubProvider):
             def pull_policy_options(self, policy):
@@ -2878,8 +2914,7 @@ class TestComposeAndRouting:
     def test_a_built_images_recorded_env_sits_under_the_compose_file_too(self, tmp_path, monkeypatch):
         """Build mode: the recorded built image's whole ``Env`` is the image layer, under the file and under the
         host-resolved ``[environment].env``; a key only the image names survives."""
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
         server, task, _, _ = make_server(
             tmp_path, monkeypatch, toml=TASK_TOML + '\n[environment.env]\nTOK = "${TOK:-fromtoml}"\n'
@@ -2920,7 +2955,7 @@ class TestComposeAndRouting:
         ``[environment].env``; prepare could only use the dataset-time default. At seed the sidecars' ``environment``
         is read again with the host values (tau3 / hil-bench shape); a literal entry and the structure are untouched,
         and without the variable the default still applies."""
-        from nemo_gym.tasks.harbor.image_configs import load_compose_document
+        from nemo_gym.data.tasks.harbor import load_compose_document
 
         server, task, _, _ = make_server(
             tmp_path,
@@ -3282,6 +3317,29 @@ class TestComposeAndRouting:
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
 
+    @pytest.mark.parametrize("compose_user,expected_user", [("nobody", "nobody"), ("1000", 1000)])
+    async def test_task_healthcheck_uses_own_compose_user_without_job_overlay(
+        self, tmp_path, monkeypatch, compose_user, expected_user
+    ):
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        path = task.path / "environment" / "docker-compose.yaml"
+        document = yaml.safe_load(path.read_text())
+        document["services"]["main"]["user"] = compose_user
+        path.write_text(yaml.safe_dump(document))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.needs_compose and server.config.compose_overlay is None
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert documents[0]["services"]["main"]["user"] == compose_user
+        checks = [record for record in compose.services["main"].execs if record["command"] == "test -f /tmp/ready"]
+        assert len(checks) == 3
+        assert all(record["user"] == expected_user for record in checks)
+        assert response.result.reward == 1.0
+        assert compose.stopped and not server._sandboxes
+
     async def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
         server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
         main = compose.services["main"]
@@ -3551,7 +3609,7 @@ class TestComposeAndRouting:
         assert gpu.closed == ["1"] and sorted(cpu.closed) == ["1", "2"]
 
     def test_platform_at_seed_is_read_from_the_provider_options_as_at_prepare(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError
 
         server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
 
@@ -3583,8 +3641,7 @@ class TestComposeAndRouting:
     async def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(
         self, tmp_path, monkeypatch
     ):
-        from nemo_gym.tasks.harbor.image_configs import record_compose_images
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError, record_compose_images
 
         server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -3618,7 +3675,7 @@ class TestComposeAndRouting:
         assert kafka["extra_hosts"] == {"licence.example": "198.51.100.7"} and "x-sandbox" not in kafka
 
     def test_a_gpu_sidecars_options_are_checked_against_the_gpu_block_at_seed(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError
 
         server, task = self.gpu_sidecar_server(tmp_path, monkeypatch, extra="    tmpfs: [/run]\n")
         # Docker task block, OpenSandbox GPU block: kafka runs on the GPU block, which applies no tmpfs.
@@ -3639,7 +3696,7 @@ class TestComposeAndRouting:
     def test_compose_document_normalizes_the_example_fields_and_names_what_the_provider_cannot_apply(
         self, tmp_path, monkeypatch
     ):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError
 
         server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
         # alibaba-ctf style: restart always and a custom network, which need nothing else.
@@ -4334,7 +4391,7 @@ class TestGeneralization:
         assert "sk-from-the-process" not in str(sandbox.execs)
 
     async def test_failed_trajectory_export_masks_the_turn_before_test_sh(self, tmp_path, monkeypatch):
-        from nemo_gym.atif_export import AtifExportError
+        from nemo_gym.trajectory import AtifExportError
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
 
@@ -4546,7 +4603,8 @@ class TestGeneralization:
             async def start(self, spec):
                 starts.append(spec.image)
                 if len(starts) <= len(failures):
-                    raise SandboxCreateError(failures[len(starts) - 1])
+                    failure = failures[len(starts) - 1]
+                    raise failure if isinstance(failure, BaseException) else SandboxCreateError(failure)
 
             def __getattr__(self, name):
                 return getattr(sandbox, name)
@@ -4567,6 +4625,30 @@ class TestGeneralization:
         response = await run_episode(server, task)
         assert response.failure.stage == "seed" and not response.failure.terminal
         assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
+        assert not server._sandboxes
+
+    @pytest.mark.parametrize("message, failures", [("ErrImagePull", 1), ("ErrImagePull", 3), ("quota exceeded", 1)])
+    async def test_shared_sandbox_failure_preserves_pull_retry_policy(self, tmp_path, monkeypatch, message, failures):
+        cause = RuntimeError(message)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_request_failed",
+            operation="create",
+            failure_reason="Sandbox create failed",
+        )
+        error.__cause__ = cause
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, [error] * failures)
+        with RequestFailureLog.capture() as log:
+            response = await run_episode(server, task)
+        if message == "ErrImagePull" and failures == 1:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0
+            assert starts == ["ubuntu:24.04"] * 2
+            assert log.report.events[error.event_id].foreign_error.exception_type == "RuntimeError"
+        else:
+            assert response.failure is not None
+            assert len(starts) == failures
+        assert error.__cause__ is cause
         assert not server._sandboxes
 
     async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):
@@ -4673,6 +4755,7 @@ class TestGeneralization:
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = False
 
             async def start(self):
@@ -4775,6 +4858,7 @@ class TestGeneralization:
             ):
                 groups.append(self)
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = 0
 
             async def start(self):

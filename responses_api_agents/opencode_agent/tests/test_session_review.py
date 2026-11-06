@@ -11,6 +11,7 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from nemo_gym.agents import raises_agent_failure
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import format_error_message
@@ -114,6 +115,8 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         closed.raise_for_status()
     assert "observation_capture_failed" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    # With no parsed session, close sends no trajectory, so collection keeps its call-built turns.
+    assert "trajectory" not in closed.json()
     assert "Failed to parse OpenCode observations" in caplog.text
 
 
@@ -154,7 +157,7 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         session_id = created.json()["agent_session_id"]
         state = active_sessions(agent)[session_id]
         expected = TimeoutError if failure == "provider_timeout" else RuntimeError
-        with pytest.raises(expected) as error:
+        with raises_agent_failure(expected) as error:
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if failure == "provider_timeout":
             assert state.session.artifacts == sandbox.events
@@ -185,7 +188,7 @@ async def test_observation_parser_runs_off_event_loop(setup, tmp_path):
     capture_observations(sandbox, tmp_path)
     loop_thread = threading.get_ident()
     parser_threads = []
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
     from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import activate
 
     def parse(*args, **kwargs):
@@ -218,7 +221,7 @@ def test_malformed_capture_never_replaces_provider_failure(setup, artifact):
         created.raise_for_status()
         session_id = created.json()["agent_session_id"]
         state = active_sessions(agent)[session_id]
-        with pytest.raises(TimeoutError):
+        with raises_agent_failure(TimeoutError):
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert any(record.kind == "sandbox" for record in state.observations.records)
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()

@@ -34,8 +34,8 @@ from pathlib import Path
 
 from tqdm.auto import tqdm
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.server_utils import ServerClient
 
 
 EMPTY_RESPONSE = {

@@ -37,8 +37,9 @@ The HDF5 target-loading and comparison helpers (`process_hdf5_to_tuple`,
 `cmp_tuple_or_list`, …) are ported from nemo-skills' `scicode_utils.eval_prefix`; the only change is
 that the `test_data.h5` path is injected from config rather than hardcoded.
 
-Because the generated code runs in this server's own venv, `requirements.txt` pins `scipy<1.14`
-(keeps `scipy.integrate.simps`, has Python 3.12 wheels) plus `numpy`, `matplotlib`, `h5py`, `sympy`.
+The generated code runs in this server's own venv. `pyproject.toml` declares its
+scientific dependencies (`scipy>=1.14.1`, `numpy`, `matplotlib`, `h5py`, `sympy`,
+and `networkx`); `uv.lock` records the exact versions installed by `uv sync --locked`.
 
 **Scoring notes** (mirroring nemo-skills):
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
@@ -47,14 +48,22 @@ Because the generated code runs in this server's own venv, `requirements.txt` pi
   `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
   computed on the **agent** (`/aggregate_metrics` runs there), not this server.
 
+**How each sub-step's grading process ended (always recorded).** `step_exits` holds one record per
+scored sub-step, aligned with `step_results`: `returncode` (`null` when no process exit code exists),
+`timed_out` and `exit`, typed as `exit:<code>`, `timeout`, `killed:<SIGNAL>` for a negative return code
+(a signal killed the grading process, e.g. `killed:SIGKILL` from an out-of-memory kill) or `not_run`
+(an out-of-context or empty step). It describes the run that decided the step, as below, and holds no model
+output, so it is on by default. A zero exit code alone is insufficient to pass: the completion sentinel
+must also be present.
+
 **Per-sub-step execution records (opt-in).** The runner always checks stdout for the completion
-sentinel. By default, the verify response keeps pass/fail results and per-environment errors without
+sentinel. By default, the verify response keeps pass/fail results, process exits and per-environment errors without
 the detailed execution records. Set `record_step_outputs: true` to add `step_outputs` to the verify
 response (and therefore to every rollout row): one record per scored sub-step, aligned with `step_results`, with `step_id`,
 `step_number`, `environment` (the grading interpreter whose run the record describes: under the OR rule
 the one that passed, else the last one tried; `null` for a sentinel step), `status` (`executed`, or
 `out_of_context` / `empty` for sentinels that never ran), `passed`, `returncode` (`null` on a timeout),
-`timed_out`, `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
+`timed_out`, `exit` (as in `step_exits`), `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
 `AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`; `null` when there is none) and the last
 `output_tail_chars` characters (default 2000; 0 keeps none, negative values are rejected) of `stdout_tail`
 and `stderr_tail`. The per-environment
