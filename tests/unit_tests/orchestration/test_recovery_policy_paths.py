@@ -1,0 +1,90 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+import pytest
+
+from nemo_gym.orchestration.recovery import (
+    ManagedRecoveryFact,
+    RecoveryOutcomePolicyConfig,
+    decide_recovery,
+    saved_row_evidence,
+)
+from tests.unit_tests.orchestration.test_eval_recovery_gate import OK_BUDGET, inventory
+from tests.unit_tests.orchestration.test_recovery_infra_agent_timeout import LAST_503, harbor_zero
+from tests.unit_tests.orchestration.test_unparsed_judge_verdict import _xstest_row
+
+
+def decide(row, policy, **kwargs):
+    return decide_recovery(
+        materialized=inventory(1),
+        results=[row],
+        failures=[],
+        budget=OK_BUDGET,
+        outcome_policy=RecoveryOutcomePolicyConfig(**policy),
+        **kwargs,
+    )
+
+
+@pytest.mark.parametrize(
+    "policy,state",
+    [
+        ({}, "judge_recoverable"),
+        ({"saved_answer_default_action": "fail"}, "terminal"),
+        ({"by_failure_kind": {"judge_unparseable": "fail"}}, "terminal"),
+        ({"by_failure_kind": {"judge_unparseable": "retry"}}, "unknown"),
+        ({"by_failure_class": {"evaluation": "fail"}}, "terminal"),
+    ],
+)
+def test_saved_unparsed_answer_obeys_policy_without_resampling(policy, state):
+    row = saved_row_evidence(_xstest_row(None))
+    decision = decide(row, policy)
+    assert decision.evidence[0].state.value == state
+    assert decision.action.value != "resubmit"
+
+
+def test_saved_decision_is_not_overridden_by_recovery():
+    row = saved_row_evidence(_xstest_row(None))
+    row["failure_outcome_action"] = "fail"
+    assert decide(row, {"by_failure_kind": {"judge_unparseable": "verify"}}).evidence[0].state == "terminal"
+
+
+def test_masked_judge_status_kind_class_precedence():
+    row = saved_row_evidence(_xstest_row(None)) | {
+        "mask_sample": True,
+        "failure_kind": "judge_unparseable",
+        "_ng_failure_http_status": 503,
+    }
+    policy = {
+        "by_status_code": {503: "verify"},
+        "by_failure_kind": {"judge_unparseable": "fail"},
+        "by_failure_class": {"evaluation": "retry"},
+    }
+    assert decide(row, policy).evidence[0].state == "judge_recoverable"
+    del policy["by_status_code"]
+    assert decide(row, policy).evidence[0].state == "terminal"
+
+
+@pytest.mark.parametrize("action,state", [("retry", "retryable"), ("fail", "terminal"), ("verify", "unknown")])
+def test_managed_infrastructure_timeout_obeys_policy(action, state):
+    row = harbor_zero(0, LAST_503)
+    managed = [ManagedRecoveryFact(identity=(0, 0), attempts=1, max_attempts=3, pending=True, reserved=False)]
+    result = decide(row, {"by_failure_class": {"evaluation": action}}, managed_selection=managed)
+    assert result.evidence[0].state == state
+
+
+def test_explicit_zero_stays_scored_despite_completion_and_recovery_overrides():
+    row = harbor_zero(0, LAST_503) | {
+        "evaluation_completed": False,
+        "failure_outcome_action": "count_as_zero",
+        "failure_outcome_attribution": "model",
+    }
+    assert decide(row, {"default_action": "fail"}).evidence[0].state == "scored"
+
+
+def test_clean_timeout_override_does_not_stop_infrastructure_timeout():
+    managed = [ManagedRecoveryFact(identity=(0, 0), attempts=1, max_attempts=3, pending=True, reserved=False)]
+    result = decide(
+        harbor_zero(0, LAST_503), {"by_failure_kind": {"agent_timeout": "fail"}}, managed_selection=managed
+    )
+    assert result.evidence[0].state == "retryable"
+    assert result.evidence[0].failure_kind == "agent_timeout_infrastructure"
