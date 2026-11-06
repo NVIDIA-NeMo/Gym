@@ -8,9 +8,11 @@ can create schemas and roles, e.g. a ``postgres:16`` container. They load one sm
 """
 
 import asyncio
+import contextlib
 import importlib.util
 import os
 import sqlite3
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -26,7 +28,7 @@ ADMIN_DSN = os.environ.get("BIRD_PG_TEST_ADMIN_DSN", "")
 READER_DSN = os.environ.get(
     "BIRD_PG_TEST_DSN", "postgresql://bird_pytest_reader:bird_pytest_reader@127.0.0.1:5432/bird"
 )
-_HAS_DEPS = all(importlib.util.find_spec(m) for m in ("psycopg", "pandas"))
+_HAS_DEPS = all(importlib.util.find_spec(m) for m in ("psycopg", "psycopg_pool", "pandas"))
 
 
 def _postgres_reachable() -> bool:
@@ -43,9 +45,9 @@ def _postgres_reachable() -> bool:
 
 requires_postgres = pytest.mark.skipif(
     not _postgres_reachable(),
-    reason="PostgreSQL dialect tests need psycopg, pandas and a server at BIRD_PG_TEST_ADMIN_DSN",
+    reason="PostgreSQL dialect tests need psycopg, psycopg_pool, pandas and a server at BIRD_PG_TEST_ADMIN_DSN",
 )
-requires_psycopg = pytest.mark.skipif(not _HAS_DEPS, reason="needs psycopg and pandas")
+requires_psycopg = pytest.mark.skipif(not _HAS_DEPS, reason="needs psycopg, psycopg_pool and pandas")
 
 
 @requires_psycopg
@@ -72,14 +74,21 @@ async def test_verify_postgres_dialect_routes_to_postgres(tmp_path, monkeypatch)
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare_postgres", fake_postgres)
     monkeypatch.setattr("resources_servers.bird_sql.app.execute_and_compare", fail_sqlite)
     config = BirdSqlResourcesServerConfig(
-        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="postgres", postgres_dsn="dsn"
+        host="127.0.0.1",
+        port=20099,
+        entrypoint="",
+        bird_sql_dir=str(tmp_path),
+        dialect="postgres",
+        postgres_dsn="dsn",
+        max_concurrency=7,
     )
     server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
     resp = await server.verify(_make_verify_request("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t"))
     assert resp.reward == 1.0
     assert checked == [(tmp_path, "dsn")]
-    assert (seen["dsn"], seen["db_id"]) == ("dsn", "TestDB")
+    # One pool per server, sized to max_concurrency so a grade holding the semaphore always finds a connection.
+    assert (seen["pool"].dsn, seen["pool"].size, seen["db_id"]) == ("dsn", 7, "TestDB")
     assert seen["db_path"] == tmp_path / "TestDB" / "TestDB.sqlite"  # gold runs on SQLite
     assert seen["gold_sql"] == "SELECT x FROM t"  # untouched, never transpiled
 
@@ -102,6 +111,18 @@ async def test_unreachable_server_is_not_scored_as_a_pred_error(tmp_path, monkey
     server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
     resp = await server.verify(_make_verify_request("```sql\nSELECT 1\n```", gt_sql="SELECT 1"))
     assert (resp.reward, resp.failure_reason) == (0.0, FailureCode.UNKNOWN_ERROR)
+
+
+@requires_psycopg
+def test_missing_psycopg_pool_fails_at_startup_not_on_every_grade(tmp_path, monkeypatch):
+    monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: tmp_path)
+    monkeypatch.setattr("resources_servers.bird_sql.setup_bird_postgres.check_bird_postgres", lambda *_a: None)
+    monkeypatch.setitem(sys.modules, "psycopg_pool", None)  # makes `import psycopg_pool` raise ImportError
+    config = BirdSqlResourcesServerConfig(
+        host="127.0.0.1", port=20099, entrypoint="", bird_sql_dir=str(tmp_path), dialect="postgres", postgres_dsn="dsn"
+    )
+    with pytest.raises(ImportError):
+        BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
 
 
 class _PostgresEnv:
@@ -200,6 +221,17 @@ class TestLoader:
             check_bird_postgres(tmp_path, READER_DSN)
 
 
+@contextlib.asynccontextmanager
+async def _reader_pool(size):
+    from resources_servers.bird_sql.eval_utils import PostgresPool
+
+    pool = PostgresPool(READER_DSN, size)
+    try:
+        yield pool
+    finally:
+        await pool.close()
+
+
 @requires_postgres
 class TestExecuteAndComparePostgres:
     @staticmethod
@@ -207,9 +239,10 @@ class TestExecuteAndComparePostgres:
         from resources_servers.bird_sql.eval_utils import execute_and_compare_postgres
 
         db_path = env.dev_dir / DB_ID / f"{DB_ID}.sqlite"
-        return await execute_and_compare_postgres(
-            db_path, READER_DSN, DB_ID, gold, pred, asyncio.Semaphore(2), timeout_s=timeout_s
-        )
+        async with _reader_pool(2) as pool:
+            return await execute_and_compare_postgres(
+                db_path, pool, DB_ID, gold, pred, asyncio.Semaphore(2), timeout_s=timeout_s
+            )
 
     @pytest.mark.asyncio
     async def test_match_ignores_row_order(self, postgres_env):
@@ -321,6 +354,125 @@ class TestExecuteAndComparePostgres:
         slow = await server.verify(
             _make_verify_request("```sql\nSELECT pg_sleep(60)\n```", gt_sql=sqlite_gold, db_id=DB_ID)
         )
+        await server._postgres.close()
         assert (good.reward, good.failure_reason) == (1.0, FailureCode.NONE)
         assert (bad.reward, bad.failure_reason) == (0.0, FailureCode.RESULT_MISMATCH)
         assert slow.failure_reason == FailureCode.EXECUTION_TIMEOUT
+
+
+def _reader_connections(expected: int) -> int:
+    """The test reader's server connections, polled for up to 2 s until they equal ``expected``: a backend leaves
+    pg_stat_activity when its process exits, a moment after the client closes the socket."""
+    import time
+
+    import psycopg
+
+    with psycopg.connect(ADMIN_DSN, autocommit=True) as conn:
+        for _ in range(20):
+            count = conn.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE usename = 'bird_pytest_reader' AND pid <> pg_backend_pid()"
+            ).fetchone()[0]
+            if count == expected:
+                break
+            time.sleep(0.1)
+    return count
+
+
+@requires_postgres
+class TestPooling:
+    @staticmethod
+    async def _run(pool, sql, semaphore=None, timeout_s=30.0):
+        from resources_servers.bird_sql.eval_utils import execute_postgres_async
+
+        semaphore = semaphore or asyncio.Semaphore(pool.size)
+        return await execute_postgres_async(pool, DB_ID, sql, semaphore, timeout_s, raise_on_timeout=True)
+
+    @pytest.mark.asyncio
+    async def test_grades_reuse_one_connection(self, postgres_env):
+        async with _reader_pool(1) as pool:
+            first = await self._run(pool, "SELECT pg_backend_pid()")
+            second = await self._run(pool, "SELECT pg_backend_pid()")
+        assert first == second
+
+    @pytest.mark.asyncio
+    async def test_concurrent_grades_never_use_more_than_size_connections(self, postgres_env):
+        async with _reader_pool(2) as pool:
+            semaphore = asyncio.Semaphore(8)  # more grades in flight than connections: the rest wait for one
+            rows = await asyncio.gather(
+                *(self._run(pool, "SELECT pg_backend_pid() FROM pg_sleep(0.1)", semaphore) for _ in range(8))
+            )
+        assert len({r[0][0] for r in rows}) <= 2
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_grade_returns_its_connection_for_reuse(self, postgres_env):
+        async with _reader_pool(1) as pool:
+            pid = await self._run(pool, "SELECT pg_backend_pid()")
+            with pytest.raises(asyncio.TimeoutError):
+                await self._run(pool, "SELECT 1 FROM pg_sleep(5)", timeout_s=0.5)
+            assert await self._run(pool, "SELECT pg_backend_pid()") == pid
+
+    @pytest.mark.asyncio
+    async def test_a_query_cannot_change_settings_for_later_grades(self, postgres_env):
+        # A pooled connection outlives the grade, so a model's SET must not reach the next rollout on it (DateStyle or
+        # TimeZone change how results print, and so whether they match).
+        settings = "SELECT current_setting('DateStyle'), current_setting('TimeZone'), current_setting('search_path')"
+        async with _reader_pool(1) as pool:
+            before = await self._run(pool, settings)
+            await self._run(pool, "SELECT set_config('DateStyle', 'German', false)")
+            assert await self._run(pool, "SET TimeZone = 'Asia/Tokyo'") is None
+            await self._run(pool, "SELECT set_config('search_path', 'pg_catalog', false)")
+            after = await self._run(pool, settings)
+        assert after == before
+
+    @pytest.mark.asyncio
+    async def test_waiting_for_a_connection_does_not_count_against_the_query(self, postgres_env, monkeypatch):
+        # Backstop 1.2 s; the third grade waits about 0.8 s for the only connection, then runs 0.4 s.
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils._OUTER_TIMEOUT_BUFFER_S", 0.2)
+        async with _reader_pool(1) as pool:
+            semaphore = asyncio.Semaphore(3)
+            results = await asyncio.gather(
+                *(self._run(pool, "SELECT 1 FROM pg_sleep(0.4)", semaphore, timeout_s=1.0) for _ in range(3))
+            )
+        assert results == [[(1,)]] * 3
+
+    @pytest.mark.asyncio
+    async def test_a_backstop_cancel_discards_the_connection(self, postgres_env, monkeypatch):
+        # The outer wait_for fires (0.2 s) before the server's statement_timeout (1 s): the server-side query is
+        # cancelled and the connection, which may still be mid-query, is replaced rather than reused.
+        monkeypatch.setattr("resources_servers.bird_sql.eval_utils._OUTER_TIMEOUT_BUFFER_S", -0.8)
+        async with _reader_pool(1) as pool:
+            pid = await self._run(pool, "SELECT pg_backend_pid()", timeout_s=1.0)
+            with pytest.raises(asyncio.TimeoutError):
+                await self._run(pool, "SELECT 1 FROM pg_sleep(5)", timeout_s=1.0)
+            assert await self._run(pool, "SELECT pg_backend_pid()", timeout_s=1.0) != pid
+        import psycopg
+
+        with psycopg.connect(ADMIN_DSN) as conn:
+            running = conn.execute(
+                "SELECT count(*) FROM pg_stat_activity WHERE state = 'active' AND query LIKE '%%pg_sleep(5)%%'"
+                " AND pid <> pg_backend_pid()"
+            ).fetchone()[0]
+        assert running == 0
+
+    @pytest.mark.asyncio
+    async def test_verify_keeps_one_pool_per_server(self, postgres_env, tmp_path, monkeypatch):
+        monkeypatch.setattr("resources_servers.bird_sql.app.ensure_bird_sql", lambda _path: postgres_env.dev_dir)
+        config = BirdSqlResourcesServerConfig(
+            host="127.0.0.1",
+            port=20099,
+            entrypoint="",
+            bird_sql_dir=str(tmp_path),
+            dialect="postgres",
+            postgres_dsn=READER_DSN,
+            max_concurrency=2,
+        )
+        server = BirdSqlResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        request = _make_verify_request("```sql\nSELECT x FROM t\n```", gt_sql="SELECT x FROM t", db_id=DB_ID)
+        try:
+            rewards = [r.reward for r in await asyncio.gather(*(server.verify(request) for _ in range(5)))]
+            open_connections = _reader_connections(expected=2)
+        finally:
+            await server._postgres.close()
+        assert rewards == [1.0] * 5
+        assert open_connections == 2
+        assert _reader_connections(expected=0) == 0
