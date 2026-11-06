@@ -39,7 +39,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from uuid import uuid4
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymMessage,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessageForTraining,

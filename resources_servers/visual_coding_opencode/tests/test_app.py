@@ -128,7 +128,7 @@ async def test_judge_request(server) -> None:
         ],
     }
     with patch("resources_servers.visual_coding_opencode.app.call_judge", AsyncMock()) as call:
-        from nemo_gym.openai_utils import NeMoGymChatCompletion
+        from nemo_gym.core import NeMoGymChatCompletion
 
         call.return_value = NeMoGymChatCompletion.model_validate(completion)
         judged = await server.judge("Q" * 3000, "(4,7)", None, "x" * 5000 + "end")
