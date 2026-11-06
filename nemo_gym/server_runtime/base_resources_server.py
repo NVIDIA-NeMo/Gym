@@ -68,7 +68,7 @@ from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_H
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
-from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from nemo_gym.server_runtime.verifier_observability import observe_verifier, verification_outcome
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
 from nemo_gym.verification.judge import judge_failsafe
@@ -191,6 +191,9 @@ class BaseVerifyResponse(BaseVerifyRequest):
         description="Shared failure classification applied by the owning boundary alongside failure_outcome_action.",
     )
     ng_verifier_invocations: list[VerifierInvocation] = Field(default_factory=list, exclude_if=lambda value: not value)
+    ng_verifier_invocation_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Retained while server schemas migrate; observe_verifier projects the selected status here.
+    evaluation_completed: bool | None = Field(default=None, exclude_if=lambda value: value is None)
 
     mask_sample: bool = Field(
         default=False,
@@ -378,10 +381,14 @@ class ResourcesSessionLostError(HTTPException):
 class LostSessionVerification(TypedDict):
     """The verify response fields of a masked sample for a session the server no longer holds."""
 
+    evaluation_completed: bool
+
     reward: float
     mask_sample: bool
     failure_kind: str
     failure_reason: str
+    ng_verifier_invocations: list[dict]
+    ng_verifier_invocation_id: str
 
 
 def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) -> LostSessionVerification:
@@ -398,7 +405,14 @@ def lost_session_verification(reason: str, *, failure_kind: str = SESSION_LOST) 
     point at a wiring fault such as a session cookie that never reaches ``/verify``.
     """
     logger.warning("Masking the verify of a session this server no longer holds (%s): %s", failure_kind, reason)
-    return {"reward": 0.0, "mask_sample": True, "failure_kind": failure_kind, "failure_reason": reason}
+    return {
+        "reward": 0.0,
+        "mask_sample": True,
+        "failure_kind": failure_kind,
+        "failure_reason": reason,
+        "evaluation_completed": False,
+        **verification_outcome("incomplete", failure_kind=failure_kind),
+    }
 
 
 # A resources session is the cookie session: an episode seed or close names it by resources_session_id,

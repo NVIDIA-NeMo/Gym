@@ -130,6 +130,21 @@ def test_the_predicate_reads_the_captured_calls_of_the_window(calls, infra) -> N
     assert not is_infrastructure_agent_timeout(timeout_row(0, calls) | {"failure_kind": "agent_limit"})
 
 
+@pytest.mark.parametrize("attribution", ["model", "unknown", "evaluation"])
+@pytest.mark.parametrize("action", ["count_as_zero", "fail", "verify"])
+def test_recorded_policy_attribution_is_not_redecided_from_captured_calls(attribution, action):
+    from nemo_gym.rollouts.rollout_recovery import applied_failure_class
+
+    for calls in (CLEAN, LAST_503):
+        row = timeout_row(0, calls) | {
+            "failure_outcome_action": action,
+            "failure_outcome_attribution": attribution,
+            "evaluation_completed": False,
+        }
+        assert applied_failure_class(row) == attribution
+        assert is_infrastructure_agent_timeout(row) is (attribution == "evaluation" and action == "verify")
+
+
 @pytest.mark.parametrize(
     "excluded",
     [
@@ -324,3 +339,58 @@ def test_applied_final_action_prevents_timeout_replay(action):
     row = timeout_row(0, [call(0, 600, 503)])
     row.update(failure_outcome_action=action, failure_outcome_attribution="evaluation")
     assert not is_infrastructure_agent_timeout(row)
+
+
+@pytest.mark.parametrize("turn_action,infra", [("count_as_zero", False), ("verify", True), (None, True)])
+def test_mean_timeout_recovery_consumes_the_turns_applied_action(turn_action, infra):
+    row = timeout_row(0, LAST_503) | {
+        "turn_reward_strategy": "mean",
+        "mask_sample": False,
+        "failure_outcome_attribution": "evaluation",
+        "turns": [
+            {
+                "failure_kind": "agent_timeout",
+                "reward": 0.0,
+                "mask_sample": False,
+                "failure_outcome_action": turn_action,
+            }
+        ],
+    }
+    assert is_infrastructure_agent_timeout(row) is infra
+
+
+@pytest.mark.parametrize("attribution", ["model", "evaluation", "unknown"])
+def test_collector_preserves_mean_turn_decisions_without_transcripts(tmp_path, attribution):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text(json.dumps(inventory(1)[0]) + "\n")
+    turn = {
+        "failure_kind": "agent_timeout",
+        "failure_outcome_action": "count_as_zero",
+        "failure_outcome_attribution": attribution,
+        "reward": 0.0,
+        "mask_sample": False,
+    }
+    row = harbor_zero(0, LAST_503) | {
+        "reward": 0.5,
+        "mask_sample": False,
+        "evaluation_completed": True,
+        "turn_reward_strategy": "mean",
+        "ng_verifier_invocation_id": "aggregate",
+        "failure_outcome_attribution": attribution,
+        "turns": [turn | {"response": {"output": "private transcript"}}],
+    }
+    (artifacts / "rollouts.jsonl").write_text(json.dumps(row) + "\n")
+    (artifacts / "rollouts_failures.jsonl").write_text("")
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    assert "private transcript" not in raw.stdout
+    collected = CollectedEvidence.model_validate_json(raw.stdout)
+    projected = collected.results[0]
+    assert projected["ng_verifier_invocation_id"] == "aggregate"
+    assert projected["turn_reward_strategy"] == "mean" and projected["turns"] == [turn]
+    assert not is_infrastructure_agent_timeout(projected)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.counts == {IdentityState.SCORED: 1}
+    assert trial_faults(decision, collected) == {"agent_timeout": 1}

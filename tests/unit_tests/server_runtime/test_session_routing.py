@@ -801,7 +801,8 @@ class TestOwnershipLifetime:
             time.sleep(0.4)
             assert a.post("/store", json={"value": 3}, cookie=cookie).json() == {"worker": "b"}
             verified = a.post("/verify", json={}, cookie=cookie)
-            assert verified.json() == {"worker": "b", "value": 3}
+            assert {key: verified.json()[key] for key in ("worker", "value")} == {"worker": "b", "value": 3}
+            assert verified.json()["evaluation_completed"] is True
             owned_after_verify = _owner(socket_dir, session_id)
             _wait_until(lambda: _owner(socket_dir, session_id) is None)
 

@@ -64,7 +64,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
     is_server_status,
 )
-from nemo_gym.core.outcome_policy import OutcomeAction
+from nemo_gym.core.outcome_policy import OutcomeAction, is_policy_counted_zero
 from nemo_gym.utils.path_utils import (
     attempt_extension_path_for,
     failures_path_for,
@@ -258,13 +258,10 @@ def saved_failure_classification(output: Path) -> FailureClassificationConfig:
 
 def applied_failure_class(row: Mapping[str, Any]) -> FailureClass | None:
     """Read an applied result class, preserving explicit unknown over later configuration."""
-    action, attribution = row.get("failure_outcome_action"), row.get("failure_outcome_attribution")
-    if (
-        isinstance(action, str)
-        and action in OutcomeAction
-        and isinstance(attribution, str)
-        and attribution in FailureClass
-    ):
+    attribution = row.get("failure_outcome_attribution")
+    # Classification and action are independent. An aggregate can retain the
+    # source failure's class without claiming one action for all its turns.
+    if isinstance(attribution, str) and attribution in FailureClass:
         return FailureClass(attribution)
     return None
 
@@ -404,6 +401,13 @@ def is_infrastructure_agent_timeout(
     (``is_server_fault_call``) that owns the window (``_material_model_call_faults``). A clean agent timeout stays the
     model's result under the benchmark's time limit. Read from saved rows alone, so it applies to existing runs.
     """
+    # A mean is not itself a count_as_zero decision, but cannot reopen a turn
+    # whose zero was already applied. Consume its saved treatment, not its class.
+    turns = row.get("turns")
+    if row.get("turn_reward_strategy") == "mean" and row.get("mask_sample") is False and isinstance(turns, list):
+        timeouts = [turn for turn in turns if isinstance(turn, Mapping) and _row_failure_kind(turn) == AGENT_TIMEOUT]
+        if timeouts and all(is_policy_counted_zero(turn) for turn in timeouts):
+            return False
     applied = applied_failure_class(row)
     if applied is not None:
         if row.get("failure_outcome_action") in (OutcomeAction.COUNT_AS_ZERO, OutcomeAction.FAIL):

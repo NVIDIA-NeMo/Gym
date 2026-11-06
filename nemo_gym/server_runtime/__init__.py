@@ -119,10 +119,12 @@ if TYPE_CHECKING:
         ToolAccess,
     )
     from nemo_gym.server_runtime.verifier_observability import (
+        apply_zero_score,
         observe_llm_judge_grading,
         observe_programmatic_grading,
         observe_verifier,
         observe_verifier_sandbox,
+        verification_outcome,
     )
 
 
@@ -208,6 +210,8 @@ _PUBLIC_API = {
     "observe_llm_judge_grading": "verifier_observability",
     "observe_programmatic_grading": "verifier_observability",
     "observe_verifier": "verifier_observability",
+    "apply_zero_score": "verifier_observability",
+    "verification_outcome": "verifier_observability",
     "observe_verifier_sandbox": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
     "seed_restarts": "_checkpoint.steps",

@@ -88,7 +88,7 @@ KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_in
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "_ng_elapsed_s",
-        "ng_policy_model_server", "_ng_rejudge_operation_id", "failure_outcome_action", "failure_outcome_attribution")
+        "ng_policy_model_server", "_ng_rejudge_operation_id", "failure_outcome_action", "failure_outcome_attribution", "turn_reward_strategy", "ng_verifier_invocation_id")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.
@@ -438,6 +438,10 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if isinstance(r.get("turns"), list):
+                # Keep each turn's applied decision, never its response, transcript or artifacts.
+                selected["turns"] = [{k: turn[k] for k in ("failure_kind", "failure_outcome_action", "failure_outcome_attribution", "reward", "mask_sample") if k in turn}
+                                     for turn in r["turns"] if isinstance(turn, dict)]
             if name in ("rollouts.jsonl", "rollouts_failures.jsonl"):
                 calls = model_call_facts(r)
                 if calls is not None:
@@ -540,7 +544,7 @@ def rows(name, skip=0):
                     "task_id": trajectory.get("task_id"), "rollout_id": trajectory.get("rollout_id"),
                     "invocations": [({k: item.get(k) for k in ("invocation_id", "status", "in_session", "verification_skipped", "error_type", "parent_invocation_id", "stop_reason")} | {"model_calls": trial_refs(item.get("model_calls"))})
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
-                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
+                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind", "capture_enabled")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
                     "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),

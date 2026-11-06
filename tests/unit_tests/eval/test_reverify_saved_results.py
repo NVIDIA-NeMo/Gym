@@ -154,6 +154,22 @@ def test_a_saved_grading_record_artifact_or_settlement_is_recorded_grading() -> 
     assert reverification_cause(saved_row_evidence(ident(0, reward=1.0, response=ANSWER))) is None
 
 
+async def test_completion_without_optional_capture_does_not_request_reverification():
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier
+
+    async def verify():
+        return ident(0, reward=1.0, response=ANSWER)
+
+    row = await observe_verifier(verify, enabled=False)()
+    row["ng_trajectory"] = {
+        "task_id": "t0",
+        "rollout_id": "r0",
+        "verifier_invocations": row.pop("ng_verifier_invocations"),
+    }
+    assert row["evaluation_completed"] is True
+    assert reverification_cause(saved_row_evidence(row)) is None
+
+
 # --- --recover --------------------------------------------------------------------------------------------------
 
 
@@ -180,8 +196,16 @@ def test_recover_keeps_a_deterministic_unmeasurable_mask_as_before() -> None:
 def test_the_cluster_projection_selects_the_same_masked_rows(tmp_path) -> None:
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
-    rows = [verify_transport_masked(0), verifier_unmeasurable(1), ungraded(2), ungraded(3, judge_response="A")]
-    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory(4)))
+    uncaptured = ungraded(4)
+    uncaptured["ng_trajectory"]["verifier_invocations"][0]["capture_enabled"] = False
+    rows = [
+        verify_transport_masked(0),
+        verifier_unmeasurable(1),
+        ungraded(2),
+        ungraded(3, judge_response="A"),
+        uncaptured,
+    ]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory(5)))
     (artifacts / "rollouts.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
     (artifacts / "rollouts_failures.jsonl").write_text("")
     raw = subprocess.run(
@@ -194,9 +218,10 @@ def test_the_cluster_projection_selects_the_same_masked_rows(tmp_path) -> None:
     assert d.identities[IdentityState.MASKED] == [(1, 0)]
     # A result whose grading was never recorded stays scored for recovery (the trial gate reports it unobserved);
     # the projection still names it, so the completion pass and the gate read the same selection.
-    assert d.identities[IdentityState.SCORED] == [(2, 0), (3, 0)]
+    assert d.identities[IdentityState.SCORED] == [(2, 0), (3, 0), (4, 0)]
     projected = {(row["_ng_task_index"]): row for row in CollectedEvidence.model_validate_json(raw.stdout).results}
     assert reverification_cause(projected[2]) == "ungraded" and reverification_cause(projected[3]) is None
+    assert reverification_cause(projected[4]) is None
 
 
 def test_a_mixed_run_reverifies_the_saved_answers_first_then_resubmits_the_policy_work() -> None:

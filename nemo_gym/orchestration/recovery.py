@@ -5891,7 +5891,10 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
     if not isinstance(verifiers, list) or not verifiers:
         return False
     if any(
-        not isinstance(verifier, Mapping) or verifier.get("grading_operations") or verifier.get("grading_record")
+        not isinstance(verifier, Mapping)
+        or verifier.get("capture_enabled") is False
+        or verifier.get("grading_operations")
+        or verifier.get("grading_record")
         for verifier in verifiers
     ):
         return False
