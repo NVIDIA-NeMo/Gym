@@ -1,0 +1,146 @@
+{
+ "about": "Golden input -> output pairs for if-boundary.mjs: OpenCode's request, the model server's reply, what the plugin sends and returns, and the records it writes. test_golden_equivalence.py replays every fixture listed here and requires a byte-for-byte match.",
+ "cases": [
+  {
+   "case": "example-row-0",
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
+  },
+  {
+   "case": "example-row-1",
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
+  },
+  {
+   "case": "example-row-2",
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
+  },
+  {
+   "case": "example-row-3",
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
+  },
+  {
+   "case": "example-row-4",
+   "feature": "real OpenCode 1.17.11 request and stream for a row without a system prompt or tool selection"
+  },
+  {
+   "case": "prepare-text-blocks-framing",
+   "feature": "OpenCode's text-part user content accepted unchanged"
+  },
+  {
+   "case": "prepare-system-none-root",
+   "feature": "no system text: OpenCode's system/developer messages kept"
+  },
+  {
+   "case": "prepare-system-none-child",
+   "feature": "no system text, child session"
+  },
+  {
+   "case": "prepare-empty-selection-refuses-exposed-tools",
+   "feature": "inventory check refusal"
+  },
+  {
+   "case": "derived-auxiliary-title",
+   "feature": "an auxiliary call (no saved assistant, no tools) is forwarded untouched and not recorded"
+  },
+  {
+   "case": "derived-child-intersection",
+   "feature": "a child session may be offered a subset of the selected tools"
+  },
+  {
+   "case": "derived-compaction-json",
+   "feature": "OpenCode's compaction call bypasses actor presentation but is recorded (JSON)"
+  },
+  {
+   "case": "derived-compaction-stream",
+   "feature": "OpenCode's compaction call bypasses actor presentation but is recorded (stream)"
+  },
+  {
+   "case": "derived-descriptions-pointers-history",
+   "feature": "parameter descriptions at JSON pointers (properties, items, anyOf, $defs, tuple items), tool_choice, tool-message name removal, history restore"
+  },
+  {
+   "case": "derived-duplicate-call-identity",
+   "feature": "a duplicate tool call ID in a stream is refused"
+  },
+  {
+   "case": "derived-historical-rejected-call",
+   "feature": "a rejected call recorded in a continuation prefix is presented in the root session and refused in a child session"
+  },
+  {
+   "case": "derived-http-rejection",
+   "feature": "an HTTP rejection is recorded without poisoning OpenCode's retry",
+   "returned": "pass_through"
+  },
+  {
+   "case": "derived-invalid-json-repair-selected",
+   "feature": "OpenCode's invalid-JSON repair: the model's raw arguments are restored in history (tools selected)"
+  },
+  {
+   "case": "derived-invalid-json-repair-unrestricted",
+   "feature": "OpenCode's invalid-JSON repair: the model's raw arguments are restored in history (no selection)"
+  },
+  {
+   "case": "derived-invalid-tool-recovery-child",
+   "feature": "an invalid tool call's result lists the tools its request offered (child session)"
+  },
+  {
+   "case": "derived-invalid-tool-recovery-root",
+   "feature": "an invalid tool call's result lists the tools its request offered (root session)"
+  },
+  {
+   "case": "derived-json-history-restore",
+   "feature": "a JSON reply's tool calls are restored in later history"
+  },
+  {
+   "case": "derived-json-number-and-text-fidelity",
+   "feature": "a JSON reply re-rendered as compact JSON with numbers and text unchanged"
+  },
+  {
+   "case": "derived-lowercase-repair",
+   "feature": "OpenCode's lowercase tool-name repair is recorded in execution_tools"
+  },
+  {
+   "case": "derived-missing-call-identity",
+   "feature": "a tool call without an ID is refused"
+  },
+  {
+   "case": "derived-name-after-arguments",
+   "feature": "a stream whose function name continues after its arguments started is refused"
+  },
+  {
+   "case": "derived-non-text-user-content",
+   "feature": "non-text user content in the root session is refused"
+  },
+  {
+   "case": "derived-opencode-literal-system-and-history",
+   "feature": "real OpenCode 1.17.11 requests with the row's literal system prompt, every tool selected and described, and raw tool-call arguments restored in history"
+  },
+  {
+   "case": "derived-root-missing-selected-tool",
+   "feature": "a selected tool missing from the root session's request is refused"
+  },
+  {
+   "case": "derived-stream-number-and-text-fidelity",
+   "feature": "every SSE data event re-serialized with numbers and text unchanged"
+  },
+  {
+   "case": "derived-stream-split-name",
+   "feature": "a tool-call name split across chunks reaches OpenCode whole"
+  },
+  {
+   "case": "derived-stream-without-terminal-choice",
+   "feature": "a stream without a terminal choice is refused and records no response"
+  },
+  {
+   "case": "derived-tool-choice-unselected",
+   "feature": "a tool_choice naming an unselected tool is refused"
+  },
+  {
+   "case": "derived-unexpected-tools",
+   "feature": "OpenCode exposing an unselected tool is refused"
+  },
+  {
+   "case": "derived-unknown-parameter-target",
+   "feature": "a parameter description pointing at a missing property is refused"
+  }
+ ]
+}
