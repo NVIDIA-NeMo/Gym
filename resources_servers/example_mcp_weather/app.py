@@ -113,6 +113,8 @@ class ExampleMCPWeatherResourcesServer(SimpleResourcesServer):
         body: ExampleMCPWeatherGetWeatherRequest,
     ) -> ExampleMCPWeatherGetWeatherResponse:
         """Get a deterministic weather report for a city."""
+        # No await between this lookup and the append, so verify's snapshot and release cannot interleave with a call.
+        # A handler that awaits must hold self.session_lock(session_id).
         state = self.session_id_to_state.get(request.session[SESSION_ID_KEY])
         if state is None:
             # Never seeded, or already closed. The signed MCP session token stays valid after a close, so the call

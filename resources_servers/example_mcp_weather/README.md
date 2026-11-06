@@ -24,7 +24,7 @@ per-rollout session token) that a cookie seed returns under `mcp`; the Environme
 `/verify` releases the live weather-call history and typed binding before checkpoint tracking ends. It keeps only
 the unique called cities and optional typed identity for `session_close_retry_window_seconds`, so a repeated verify
 can still score the response. Checkpoint retirement also releases a live history. The Environment Server then
-calls `/close_session`, which fences verification retries. From then on:
+calls `/close_session`, which fences verification retries. After `/verify` a `/get_weather` call gets 404 and a typed seed for the same ID gets 409; after the close:
 
 - a `/get_weather` call for the session, over HTTP or with its MCP token, fails with 404 (`failure_kind: session_lost`);
 - `/verify` returns a masked sample (`mask_sample: true`, `failure_kind: session_lost`) instead of a reward of 0;

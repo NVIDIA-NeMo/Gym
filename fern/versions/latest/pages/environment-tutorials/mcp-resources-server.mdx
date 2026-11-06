@@ -234,7 +234,7 @@ The generated MCP config uses the weather server's name and address; you do not 
 
 </Accordion>
 
-<Accordion title="Legacy: workplace_assistant with Claude Code (/run)">
+<Accordion title="Agent-owned /run: workplace_assistant with Claude Code">
 
 `workplace_assistant` is a real environment with 27 tools (five toolkits plus an always-included company-directory lookup).
 
@@ -302,7 +302,7 @@ The same `mcp_tools()` override can filter `harvested` to exclude routes or retu
 
 </Accordion>
 
-<Accordion title="Legacy: Claude Code with an external MCP server">
+<Accordion title="Agent-owned /run: Claude Code with an external MCP server">
 
 For an existing Claude Code `/run` integration with a server outside Gym, the agent accepts a static `mcp_config`. The Resources Server verifies the resulting trajectory, since it does not own the external tool's session state:
 
