@@ -519,6 +519,45 @@ class TestSimulateWithLLM:
 # --- /verify ------------------------------------------------------------------------------------------------
 
 
+class TestJudgeGrading:
+    async def test_a_judged_row_records_its_judge_grading_and_is_not_graded_again(self) -> None:
+        from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
+
+        server = make_server()
+        script(server, [judge_reply(GOOD)])
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            out = await server.verify(req(), _verify_body())
+        finally:
+            verifier_observability._active_verifier.reset(token)
+
+        (operation,) = invocation.grading_operations
+        assert (operation.kind, operation.outcome) == ("llm_judge", "completed")
+        assert len(operation.dependencies) == 1
+        assert operation.result_binding_sha256 == grading_result_binding(out)
+        row = out.model_dump(mode="json") | {
+            "ng_trial_observations": {"verifier_invocations": [invocation.model_dump(mode="json")]}
+        }
+        assert reverification_cause(saved_row_evidence(row)) is None
+
+    async def test_an_unusable_verdict_leaves_the_grading_unknown(self) -> None:
+        from nemo_gym.server_runtime import verifier_observability
+        from nemo_gym.trajectory import VerifierInvocation
+
+        server = make_server()
+        script(server, [judge_reply(text="no verdict here")] * server.config.judge_max_attempts)
+        invocation = VerifierInvocation(invocation_id="verify-1")
+        token = verifier_observability._active_verifier.set(invocation)
+        try:
+            await server.verify(req(), _verify_body())
+        finally:
+            verifier_observability._active_verifier.reset(token)
+        assert [operation.outcome for operation in invocation.grading_operations] == ["unknown"]
+
+
 class TestVerifyMasks:
     async def test_the_wall_clock_cap_is_masked(self) -> None:
         server = make_server()
