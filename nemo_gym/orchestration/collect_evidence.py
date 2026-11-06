@@ -18,7 +18,13 @@ over the executor's connection (or locally), that reads the job directory and pr
 Decisions live in ``nemo_gym.orchestration.recovery``; this module holds the script and the constants it embeds.
 """
 
-from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED
+from nemo_gym.core.failure_kinds import (
+    ENVIRONMENT_PROTOCOL_VIOLATION,
+    JUDGE_SKIPPED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
+    QUOTA_RESET_REGEX,
+)
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
@@ -61,6 +67,18 @@ COLLECT_SCRIPT = (
     + "PROVIDER_CREDENTIALS_REJECTED = "
     + repr(PROVIDER_CREDENTIALS_REJECTED)
     + "\n"
+    + "ENVIRONMENT_PROTOCOL_VIOLATION = "
+    + repr(ENVIRONMENT_PROTOCOL_VIOLATION)
+    + "\n"
+    + "JUDGE_SKIPPED = "
+    + repr(JUDGE_SKIPPED)
+    + "\n"
+    + "PROVIDER_QUOTA_EXHAUSTED = "
+    + repr(PROVIDER_QUOTA_EXHAUSTED)
+    + "\n"
+    + "QUOTA_RESET_REGEX = "
+    + repr(QUOTA_RESET_REGEX)
+    + "\n"
     + "FOLLOW_UP_SUBMISSION_REFUSED = "
     + repr(FOLLOW_UP_SUBMISSION_REFUSED)
     + "\n"
@@ -74,7 +92,7 @@ COLLECT_SCRIPT = (
     + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
     + f"JUDGE_JOB_ACK_JOURNAL_NAME = {JUDGE_JOB_ACK_JOURNAL_NAME!r}\n"
     + r"""
-import hashlib, json, math, os, sys
+import hashlib, json, math, os, re, sys
 d = sys.argv[1]
 def job_identity():
     try:
@@ -309,6 +327,8 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "judge_error_message": isinstance(r.get("judge_error"), str) and bool(r["judge_error"].strip()),
+        "invalid_judge_response": r.get("invalid_judge_response") is True,
         "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
@@ -438,6 +458,14 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if isinstance(r, dict) and r.get("failure_kind") == JUDGE_SKIPPED and isinstance(r.get("failure_reason"), str):
+                # The skip's own reason (a bounded configuration note), never an answer.
+                selected["_ng_skipped_reason"] = r["failure_reason"][:200]
+            if isinstance(r, dict) and r.get("failure_kind") == PROVIDER_QUOTA_EXHAUSTED:
+                # Only the reset time of a quota stop leaves the run host, never its message.
+                reset = re.search(QUOTA_RESET_REGEX, str(r.get("_ng_failure_message") or r.get("failure_reason") or ""))
+                if reset:
+                    selected["_ng_quota_resets_at"] = reset.group(1)
             if name in ("rollouts.jsonl", "rollouts_failures.jsonl"):
                 calls = model_call_facts(r)
                 if calls is not None:
@@ -897,6 +925,8 @@ def chain_continuation_note():
         line.startswith(PROVISIONAL_MARKER_PREFIX)
         or CANCELLED_FOLLOWUP_MARKER in line
         or PROVIDER_CREDENTIALS_REJECTED in line
+        or PROVIDER_QUOTA_EXHAUSTED in line
+        or ENVIRONMENT_PROTOCOL_VIOLATION in line
         or line.startswith(FOLLOW_UP_SUBMISSION_REFUSED)
     )
     return line[:500] if named else None
