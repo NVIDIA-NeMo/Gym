@@ -315,8 +315,8 @@ async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog
 
 def test_typed_sessions_follow_the_resources_session_contract():
     """An Environment Server's typed seed binds the session to its episode and task, and a close fences the ID
-    against a delayed seed of the same session for the retry window. A close naming another episode leaves an
-    open session, question and binding, untouched."""
+    against a delayed seed of the same session for the retry window. A seed of the same ID for another task, or
+    a close naming another episode, leaves an open session, question and binding, untouched."""
     server = make_server()
     app = server.setup_webserver()
     check_resources_session_contract(
@@ -338,6 +338,11 @@ def test_typed_sessions_follow_the_resources_session_contract():
     )
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
         assert client.post("/seed_session", json=live.model_dump(mode="json")).status_code == 200
+        spans, identity = server._session_spans["live-session"].digest, server._session_identity["live-session"]
+        other_task = live.model_copy(update={"task_id": TaskId(taskset="hle_diamond", task_id="2")})
+        assert client.post("/seed_session", json=other_task.model_dump(mode="json")).status_code == 409
+        assert server._session_spans["live-session"].digest == spans
+        assert server._session_identity["live-session"] == identity
         other = {"resources_session_id": "live-session", "episode_id": {"rollout_id": "rollout-b", "attempt": 0}}
         assert client.post("/close_session", json=other).status_code == 409
     assert "live-session" in server._session_spans and "live-session" in server._session_identity
