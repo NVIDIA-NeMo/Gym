@@ -843,3 +843,195 @@ def test_observed_score_survives_failed_release_and_remains_owned(failed_release
     assert server.state == {} and not server.session_release_pending("session")
     assert server.checkpoint_participant.readiness().counts["sessions"] == 0
     assert server.scores == 1  # Cleanup retries never execute the successful grader again.
+
+
+async def test_a_retry_finishing_after_expiry_does_not_resurrect_its_receipt_behind_a_later_one(monkeypatch) -> None:
+    # The receipts are ordered by expiry, so a stale record re-added at the back would outlive its window
+    # whenever a later receipt keeps the front of the table fresh.
+    server = _server()
+    clock = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    window = server.config.session_close_retry_window_seconds
+    await server.seed_session(SEED, request=_request())
+    await _verify_and_release(server)
+    clock[0] += 10
+    later = SEED.model_copy(update={"resources_session_id": "later"})
+    await server.seed_session(later, request=_request())
+    async with server.verifying("later") as verification:
+        verification.retain("later receipt")
+
+    async with server.verifying("session") as verification:
+        assert verification.retained == "receipt"
+        clock[0] = 100 + window  # "session" has expired; "later" still has 10 seconds left
+        assert server.session_is_verified("later")
+        await asyncio.sleep(0)
+
+    assert not server.session_is_verified("session")
+    assert server.session_is_verified("later")
+    async with server.verifying("session") as verification:
+        assert verification.is_lost
+
+
+async def test_cancelled_close_waiting_on_verification_leaves_the_lock_and_session_usable() -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    scoring = asyncio.Event()
+    gate = asyncio.Event()
+
+    async def slow_verify() -> None:
+        async with server.verifying("session") as verification:
+            verification.retain("receipt")
+            scoring.set()
+            await gate.wait()
+
+    async with asyncio.TaskGroup() as tasks:
+        verify = tasks.create_task(slow_verify())
+        await asyncio.wait_for(scoring.wait(), timeout=1)
+        close = asyncio.create_task(server.close_resources_session(CLOSE))
+        await asyncio.sleep(0)
+        close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await close
+        assert not server.session_is_closed("session")
+        assert list(server._lifecycle_locks._locks) == ["session"]  # only the verification still holds it
+        gate.set()
+        await verify
+    assert server._lifecycle_locks._locks == {}
+    assert server.state == {} and server.session_is_verified("session")
+    await server.close_resources_session(CLOSE)
+    assert server.session_is_closed("session") and not server.session_is_verified("session")
+
+
+async def test_server_wiring_keeps_worker_ownership_until_pending_verification_cleanup_succeeds(
+    monkeypatch, tmp_path
+) -> None:
+    from fastapi import FastAPI
+
+    from nemo_gym.server_runtime.request_handling.session_routing import install_session_routing
+
+    clock = [0.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.request_handling.session_routing.monotonic", lambda: clock[0])
+    config = _server().config.model_copy(update={"session_close_retry_window_seconds": 10})
+    server = AsyncResourceServer(config=config, server_client=MagicMock(spec=ServerClient))
+    app = FastAPI()
+    # As run_webserver wires a worker: the server declares what keeps its sessions owned.
+    install_session_routing(
+        app, socket_dir=str(tmp_path), session_cookie="key", secret_key="key", **server.owned_session_routing()
+    )
+    lifetimes = app.state.nemo_gym_resources_session_lifetimes
+
+    await server.seed_session(SEED, request=_request())
+    server._fail_release = True
+    await _verify_and_release(server)  # The score is returned; its cleanup failed and must be retried.
+    lifetimes.served("session", {"path": "/verify", "headers": []}, 200)
+    clock[0] = 1000
+    assert lifetimes.sweep() == [] and lifetimes.holds("session")  # A close must still reach this worker.
+
+    server._fail_release = False
+    await server.close_resources_session(CLOSE)
+    lifetimes.served("session", {"path": "/close_session", "headers": []}, 200)
+    clock[0] += 10
+    assert lifetimes.sweep() == ["session"]
+
+
+async def test_restore_refuses_a_verified_a_cookie_seeded_and_another_episodes_session() -> None:
+    server = _server()
+    await server.seed_session(SEED, request=_request())
+    with pytest.raises(ResourcesSessionConflictError, match="already bound"):
+        server.restore_session_identity("session", episode_id=EpisodeId(rollout_id="other"), task_id=SEED.task_id)
+    assert server.session_identity("session") == (SEED.episode_id, SEED.task_id)
+
+    await _verify_and_release(server)
+    with pytest.raises(ResourcesSessionConflictError, match="verified or partially initialized"):
+        server.restore_session_identity("session", episode_id=SEED.episode_id, task_id=SEED.task_id)
+
+    await server.seed_session(TaskSeed(value=1), request=_request())
+    with pytest.raises(ResourcesSessionConflictError, match="cookie-seeded"):
+        server.restore_session_identity("caller-cookie", episode_id=SEED.episode_id, task_id=SEED.task_id)
+    assert server.session_identity("caller-cookie") is None
+
+
+@pytest.mark.parametrize("operation", ["close", "retire"])
+async def test_release_waits_for_in_flight_cookie_initialization(operation: str) -> None:
+    server = _server()
+    request = _request()
+    server._initialization_gate = asyncio.Event()
+    cookie_close = CLOSE.model_copy(update={"resources_session_id": "caller-cookie"})
+    async with asyncio.TaskGroup() as tasks:
+        tasks.create_task(server.seed_session(TaskSeed(value=5), request=request))
+        await asyncio.wait_for(server._initializing.wait(), timeout=1)
+        closing = tasks.create_task(
+            server.close_resources_session(cookie_close)
+            if operation == "close"
+            else server.retire_session_state("caller-cookie")
+        )
+        await asyncio.sleep(0)
+        assert not closing.done()
+        server._initialization_gate.set()
+    assert server.state == {}
+    assert server._cookie_sessions == set() and server._initializing_sessions == {}
+    assert server.session_is_closed("caller-cookie") == (operation == "close")
+
+
+async def test_typed_seed_cannot_take_over_cookie_seeded_or_unbound_live_state() -> None:
+    server = _server()
+    await server.seed_session(TaskSeed(value=1), request=_request())
+    cookie_typed = SEED.model_copy(update={"resources_session_id": "caller-cookie"})
+    with pytest.raises(ResourcesSessionConflictError, match="cookie-seeded"):
+        await server.seed_session(cookie_typed, request=_request())
+    assert server.state == {"caller-cookie": 1}
+
+    server.state["created-by-a-tool"] = 7  # Live state no seed recorded, as a tool call can leave.
+    with pytest.raises(ResourcesSessionConflictError, match="cookie-seeded"):
+        await server.seed_session(
+            SEED.model_copy(update={"resources_session_id": "created-by-a-tool"}), request=_request()
+        )
+    assert server.state["created-by-a-tool"] == 7
+
+
+async def test_cookie_seed_after_close_is_refused() -> None:
+    server = _server()
+    request = _request()
+    await server.seed_session(TaskSeed(value=1), request=request)
+    await server.close_resources_session(CLOSE.model_copy(update={"resources_session_id": "caller-cookie"}))
+    with pytest.raises(ResourcesSessionConflictError, match="already closed"):
+        await server.seed_session(TaskSeed(value=2), request=request)
+    assert server.state == {}
+
+
+async def test_cancellation_during_failed_initialization_cleanup_is_not_swallowed() -> None:
+    class BlockedCleanupServer(PublishedPartialServer):
+        _cleaning: asyncio.Event = PrivateAttr(default_factory=asyncio.Event)
+
+        async def release_session_state(self, session_id: str) -> None:
+            self._cleaning.set()
+            await asyncio.Event().wait()
+
+    server = BlockedCleanupServer(config=_server().config, server_client=MagicMock(spec=ServerClient))
+    task = asyncio.create_task(server.seed_session(SEED, request=_request()))
+    await asyncio.wait_for(server._cleaning.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):  # Not replaced by the initialization error it was cleaning up.
+        await task
+    assert server.session_identity("session") == (SEED.episode_id, SEED.task_id)  # Still owned for a retry.
+
+
+async def test_a_failed_cookie_reseed_does_not_leave_released_cleanup_pending() -> None:
+    server = _flaky_server()
+    server._fail_initialization = False
+    request = _request()
+    await server.seed_session(TaskSeed(value=1), request=request)
+    server._fail_release = True
+    async with server.verifying("caller-cookie") as verification:
+        verification.retain("finished run")
+    with pytest.raises(RuntimeError, match="resource still running"):
+        await server.seed_session(TaskSeed(value=2), request=request)
+    assert server.session_release_pending("caller-cookie")  # The release failed, so the cleanup stays owned.
+
+    server._fail_release = False
+    server._fail_initialization = True
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await server.seed_session(TaskSeed(value=2), request=request)  # The reseed's release succeeds first.
+    assert not server.session_release_pending("caller-cookie")  # Nothing is left to release.
+    async with server.verifying("caller-cookie") as verification:
+        assert verification.retained == "finished run"  # The receipt stays for its window.
