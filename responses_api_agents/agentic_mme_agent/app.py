@@ -211,7 +211,8 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
                     }
                 )
                 image_url = result.get("image_url")
-                observation = {key: value for key, value in result.items() if key != "image_url"}
+                # The trace keeps the provider's answer ("raw"); the model sees only its compact "context".
+                observation = {key: value for key, value in result.items() if key not in ("image_url", "raw")}
                 # Set type explicitly: requests are serialized with exclude_unset, and the model
                 # server's converter cannot route an item that has neither type nor role.
                 outputs.append(

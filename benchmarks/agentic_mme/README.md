@@ -32,6 +32,9 @@ retrieval).
   turn, capped at 2048×2048 pixels like the inputs and sent as the smaller of PNG and JPEG (quality 95), so long
   episodes stay under hosted endpoints' request-size limits. Retrieval (google_search, google_lens_search,
   fetch_webpage) is off in `config.yaml` and enabled by the `retrieval_*.yaml` overlays, which need provider keys.
+  Search results reach the model as the reference harness's compact text (knowledge-graph title, description and
+  website; the top 5 results; "people also ask"). Google's answer box is never shown, since it often states the
+  answer outright; the provider's full answer stays in the tool trace.
 - **Prompting:** prompts are prepared (`prompt_source: prepared`); the harness appends tool results and new images
   to the history and never rewrites earlier turns.
 

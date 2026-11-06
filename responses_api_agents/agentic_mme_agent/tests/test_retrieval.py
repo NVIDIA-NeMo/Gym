@@ -421,3 +421,56 @@ async def test_contamination_guard_filters_cache_hits_but_cache_keeps_raw(tmp_pa
     hit = await on.call("google_search", {"query": "cached q"}, workspace)
     assert hit["cache"] == "exact" and [r["title"] for r in hit["raw"]["organic"]] == ["Clean"]
     assert http.call_count == 1
+
+
+SERPER_ANSWER = {
+    "answerBox": {"title": "Eiffel Tower / Height", "answer": "330 m"},
+    "knowledgeGraph": {
+        "title": "Eiffel Tower",
+        "description": "Wrought-iron tower in Paris",
+        "attributes": {"Height": "330 m"},
+    },
+    "organic": [
+        {"title": f"Result {i}", "link": f"https://r{i}.example", "snippet": f"snippet {i}", "date": "2024"}
+        for i in range(1, 8)
+    ],
+    "peopleAlsoAsk": [{"question": "How tall is it?", "snippet": "It is tall.", "link": "https://q.example"}],
+    "relatedSearches": [{"query": "eiffel tower tickets"}],
+}
+
+
+@pytest.mark.asyncio
+async def test_search_is_shown_as_compact_text_without_answer_box(workspace, monkeypatch) -> None:
+    monkeypatch.setattr(retrieval, "http_payload", AsyncMock(return_value=json.dumps(SERPER_ANSWER).encode()))
+    client = Retrieval(RetrievalConfig(mode="live", serper_api_key="s"))
+    result = await client.call("google_search", {"query": "eiffel tower height"}, workspace)
+    context = result["context"]
+    assert context.startswith("[KnowledgeGraph] Eiffel Tower\n  - Wrought-iron tower in Paris")
+    assert "1. Result 1 (2024)\n   https://r1.example\n   snippet 1" in context
+    assert "5. Result 5" in context and "Result 6" not in context
+    assert "- Q: How tall is it?\n  A: It is tall." in context
+    # The answer box, knowledge-graph attributes and related searches never reach the model.
+    assert "330" not in context and "tickets" not in context
+    assert result["raw"] == SERPER_ANSWER  # the trace keeps the provider answer
+
+
+def test_serpapi_answer_drops_the_answer_box() -> None:
+    data = retrieval.serpapi_to_serper(
+        {
+            "answer_box": {"answer": "330 m"},
+            "organic_results": [{"title": "T", "link": "https://t.example", "snippet": "s"}],
+            "related_questions": [{"question": "Q?", "snippet": "A."}],
+        },
+        lens=False,
+    )
+    assert "answerBox" not in data and data["peopleAlsoAsk"][0]["question"] == "Q?"
+    assert "330" not in retrieval.search_text(data)
+
+
+def test_compact_text_for_lens_and_empty_answers() -> None:
+    lens = {"organic": [{"title": "Red", "source": "Shop", "link": "https://s.example", "thumbnailUrl": "https://t"}]}
+    assert (
+        retrieval.lens_text(lens) == "[Lens Organic]\n1. Red [Shop]\n   https://s.example\n   thumbnailUrl: https://t"
+    )
+    assert retrieval.search_text({"organic": []}) == retrieval.NO_RESULTS_MESSAGE
+    assert retrieval.lens_text({}) == retrieval.NO_RESULTS_MESSAGE

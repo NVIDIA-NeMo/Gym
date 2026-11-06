@@ -20,7 +20,10 @@ with cache_write, stores the answer for every later rollout. Tool outputs carry 
 fetch_webpage reads pages through Jina Reader (fetch_provider=jina, default) or Exa's /contents
 endpoint (fetch_provider=exa, so Exa alone serves text search and page reads). Every provider's
 search answer is reduced to the same Serper-shaped object ({"organic": [{title, link, snippet}],
-...}) so the model sees one format whatever the backend.
+...}). The model sees it as the reference harness's compact text (search_text / lens_text): the
+knowledge graph's title, description and website, the top 5 results and "people also ask". Google's
+answer box is never shown: it often states the answer outright. The Serper-shaped object stays in
+the tool trace and cache as "raw"; it never reaches the model.
 
 Benchmark-contamination guard (as in browsecomp_advanced_harness): a result that quotes the
 Agentic-MME benchmark itself (dataset mirror, repo, paper page) hands the model the answer key.
@@ -231,10 +234,78 @@ def serpapi_to_serper(data: dict[str, Any], lens: bool) -> dict[str, Any]:
     kg = data.get("knowledge_graph")
     if isinstance(kg, dict) and kg.get("title"):
         out["knowledgeGraph"] = {k: kg.get(k) for k in ("title", "type", "description", "website")}
-    box = data.get("answer_box")
-    if isinstance(box, dict):
-        out["answerBox"] = {k: box.get(k) for k in ("title", "answer", "snippet", "link")}
+    questions = [
+        {"question": q.get("question"), "snippet": q.get("snippet"), "link": q.get("link")}
+        for q in data.get("related_questions") or []
+        if isinstance(q, dict)
+    ]
+    if questions:
+        out["peopleAlsoAsk"] = questions
     return out
+
+
+# Results shown per section, as the reference harness (search_tools.py _compact_serper_search).
+MAX_SHOWN_RESULTS = 5
+NO_RESULTS_MESSAGE = "No results."
+
+
+def _text(value: Any) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def search_text(raw: dict[str, Any]) -> str:
+    """Serper-shaped search answer -> the compact text the model sees (no answer box)."""
+    lines: list[str] = []
+    kg = raw.get("knowledgeGraph")
+    if isinstance(kg, dict):
+        for prefix, key in (("[KnowledgeGraph] ", "title"), ("  - ", "description"), ("  - ", "website")):
+            if _text(kg.get(key)):
+                lines.append(prefix + _text(kg.get(key)))
+        lines.append("")
+    organic = raw.get("organic")
+    if isinstance(organic, list):
+        lines.append("[Organic]")
+        for i, item in enumerate(organic[:MAX_SHOWN_RESULTS], start=1):
+            if not isinstance(item, dict):
+                continue
+            title, link, snippet, date = (_text(item.get(k)) for k in ("title", "link", "snippet", "date"))
+            if not (title or link or snippet):
+                continue
+            lines.append(f"{i}. {title}".rstrip() + (f" ({date})" if date else ""))
+            lines.extend(f"   {value}" for value in (link, snippet) if value)
+        lines.append("")
+    questions = raw.get("peopleAlsoAsk")
+    if isinstance(questions, list) and questions:
+        lines.append("[PeopleAlsoAsk]")
+        for item in questions[:MAX_SHOWN_RESULTS]:
+            if isinstance(item, dict) and _text(item.get("question")):
+                lines.append(f"- Q: {_text(item.get('question'))}")
+                if _text(item.get("snippet")):
+                    lines.append(f"  A: {_text(item.get('snippet'))}")
+                if _text(item.get("link")):
+                    lines.append(f"  {_text(item.get('link'))}")
+        lines.append("")
+    if not any(line.strip() and line not in ("[Organic]", "[PeopleAlsoAsk]") for line in lines):
+        return NO_RESULTS_MESSAGE
+    return "\n".join(lines).strip()
+
+
+def lens_text(raw: dict[str, Any]) -> str:
+    """Serper-shaped Lens answer -> the compact text the model sees."""
+    lines = ["[Lens Organic]"]
+    organic = raw.get("organic")
+    for i, item in enumerate(organic[:MAX_SHOWN_RESULTS] if isinstance(organic, list) else [], start=1):
+        if not isinstance(item, dict):
+            continue
+        title, source, link, thumbnail = (_text(item.get(k)) for k in ("title", "source", "link", "thumbnailUrl"))
+        if not (title or link):
+            continue
+        lines.append(f"{i}. {title}".rstrip() + (f" [{source}]" if source else ""))
+        if link:
+            lines.append(f"   {link}")
+        if thumbnail:
+            lines.append(f"   thumbnailUrl: {thumbnail}")
+    return "\n".join(lines) if len(lines) > 1 else NO_RESULTS_MESSAGE
 
 
 def snippets_to_serper(results: list[Any], text_key: str, link_key: str = "url") -> dict[str, Any]:
@@ -332,8 +403,9 @@ class Retrieval:
     def _decontaminate(self, out: dict[str, Any]) -> dict[str, Any]:
         """Drop benchmark-quoting items (filter on read; the cache keeps the raw answer).
 
-        Search / Lens: per organic item, plus knowledgeGraph / answerBox. Page: the whole page.
-        "contaminated" counts the dropped items so the rate shows up in rollout traces.
+        Search / Lens: per organic item, plus every other section. Page: the whole page.
+        "contaminated" counts the dropped items so the rate shows up in rollout traces. The model
+        sees the kept items as compact text (search_text / lens_text).
         """
         if "url" in out:  # fetch_webpage
             # Scan the whole page, not only the max_chars prefix the model sees: an answer-key page
@@ -363,7 +435,9 @@ class Retrieval:
                 out["context"] = CONTAMINATED_MESSAGE
                 return out
         out["raw"] = raw
-        out["context"] = json.dumps(raw, ensure_ascii=False)[:50000]
+        if not isinstance(raw, dict):
+            raise ValueError("retrieval provider returned an invalid JSON object")
+        out["context"] = lens_text(raw) if out["tool"] == "google_lens_search" else search_text(raw)
         return out
 
     @staticmethod
@@ -432,7 +506,7 @@ class Retrieval:
                     json={"query": args.query, "numResults": 5, "contents": {"highlights": True}},
                 )
                 data = snippets_to_serper(json.loads(raw).get("results"), "highlights")
-            return {"ok": True, "tool": name, "context": json.dumps(data, ensure_ascii=False)[:50000], "raw": data}
+            return {"ok": True, "tool": name, "context": "", "raw": data}
         headers = {"X-API-KEY": key}
         if isinstance(args, SearchArgs):
             payload = {"q": args.query, "gl": args.gl, "hl": args.hl, "num": 5}
@@ -492,4 +566,4 @@ class Retrieval:
             data = json.loads(raw)
         if not isinstance(data, dict):
             raise ValueError("retrieval provider returned an invalid JSON object")
-        return {"ok": True, "tool": name, "context": json.dumps(data, ensure_ascii=False)[:50000], "raw": data}
+        return {"ok": True, "tool": name, "context": "", "raw": data}

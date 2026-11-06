@@ -239,7 +239,7 @@ async def test_retrieval_replay_and_visibility() -> None:
         {
             "tool_name": "google_search",
             "arguments": {"query": "red"},
-            "output": {"ok": True, "context": "recorded red result"},
+            "output": {"ok": True, "context": "recorded red result", "raw": {"answerBox": {"answer": "crimson"}}},
         }
     ]
     result = await agent.run(request(), task)
@@ -247,6 +247,8 @@ async def test_retrieval_replay_and_visibility() -> None:
     assert result.successful_tool_calls == 1
     assert len(seen[0]["tools"]) == 17
     assert "recorded red result" in seen[1]["input"][-1]["output"]
+    # The provider answer stays in the trace; the model sees only the compact context.
+    assert "crimson" not in json.dumps(seen[1]["input"]) and result.tool_trace[0]["output"]["raw"]
 
 
 @pytest.mark.asyncio
