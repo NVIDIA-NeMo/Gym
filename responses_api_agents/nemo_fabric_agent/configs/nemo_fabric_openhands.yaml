@@ -1,0 +1,20 @@
+config_paths:
+  - responses_api_agents/nemo_fabric_agent/configs/nemo_fabric_agent.yaml
+
+nemo_fabric_openhands:
+  _inherit_from: nemo_fabric_agent
+  responses_api_agents:
+    nemo_fabric_agent:
+      adapter_id: nvidia.fabric.openhands
+      # Otherwise OpenHands sends the model as openai-compatible/<model>.
+      model_provider: openai
+      harness_settings: {}
+      fabric_config: {}
+
+nemo_fabric_openhands_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: nemo_fabric_openhands
