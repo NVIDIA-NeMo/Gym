@@ -229,18 +229,40 @@ def test_http_verify_and_schema():
         assert client.post("/verify", json={}).status_code == 422
 
 
+@pytest.mark.parametrize("startup_delay", [0, 1.5])
 @pytest.mark.asyncio
-async def test_real_timeout_reaps_renderer(tmp_path):
+async def test_real_timeout_reaps_renderer(tmp_path, startup_delay):
     marker = tmp_path / "pid"
     executable = tmp_path / "sleep-renderer"
     executable.write_text(
-        f"#!{sys.executable}\nimport os, time\n"
-        f"open({str(marker)!r}, 'w').write(str(os.getpid()) + '\\n' + os.environ['TMPDIR'])\ntime.sleep(60)\n"
+        f"#!{sys.executable}\nimport os, time\nfrom pathlib import Path\n"
+        f"time.sleep({startup_delay})\n"
+        f"marker = Path({str(marker)!r})\n"
+        "pending = marker.with_suffix('.tmp')\n"
+        "pending.write_text(str(os.getpid()) + '\\n' + os.environ['TMPDIR'])\n"
+        "pending.replace(marker)\ntime.sleep(60)\n"
     )
     executable.chmod(0o755)
     music_server = server(score_timeout_seconds=1.0)
     music_server._abc2midi = str(executable)
-    result = await music_server.verify(request(ABC))
+    wait_for = asyncio.wait_for
+
+    async def wait_for_renderer(awaitable, timeout):
+        communication = asyncio.create_task(awaitable)
+        try:
+            # Start the cleanup timeout only after the renderer exists, not during worker imports.
+            async with asyncio.timeout(30):
+                while not marker.exists():
+                    if communication.done():
+                        pytest.fail("Scorer exited before the renderer started")
+                    await asyncio.sleep(0.01)
+            return await wait_for(communication, timeout=timeout)
+        finally:
+            communication.cancel()
+            await asyncio.gather(communication, return_exceptions=True)
+
+    with patch("resources_servers.mimo_music.app.asyncio.wait_for", side_effect=wait_for_renderer):
+        result = await music_server.verify(request(ABC))
     assert result.mask_sample
     assert result.failure_kind == "mimo_music:scorer_timeout"
     pid_text, scratch_dir = marker.read_text().splitlines()
