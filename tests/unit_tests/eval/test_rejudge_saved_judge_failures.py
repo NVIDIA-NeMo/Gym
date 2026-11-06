@@ -24,7 +24,9 @@ from nemo_gym.rollouts.rollout_store import RolloutStore
 ANSWER = {"object": "response", "id": "resp_saved", "status": "completed", "output": []}
 
 
-def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Path, list[dict]]:
+def _run(
+    tmp_path: Path, *, judge_failures: int, rollouts: int = 3, failure_fields: dict | None = None
+) -> tuple[Path, list[dict]]:
     """A managed run of ``rollouts`` rollouts: the first ``judge_failures`` failed to judge, the others scored 1.0."""
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(rollouts)]
     source = tmp_path / "source.jsonl"
@@ -46,6 +48,7 @@ def _run(tmp_path: Path, *, judge_failures: int, rollouts: int = 3) -> tuple[Pat
                     "reward": 0.0,
                     "response": ANSWER,
                 }
+                failure.update(failure_fields or {})
                 store.record_outcome(failure)
                 failures.append(failure)
             else:
@@ -582,3 +585,21 @@ def test_the_recovery_pass_withdraws_an_admission_whose_pass_died(tmp_path):
             judge_failed_only=True,
             withdraw_unresolved_admissions=True,
         )
+
+
+@pytest.mark.parametrize("fields", [{"failure_outcome_action": "fail"}, {"_ng_failure_terminal": True}])
+async def test_final_judge_failure_is_not_automatically_reverified(tmp_path, fields):
+    output, _ = _run(tmp_path, judge_failures=1, failure_fields=fields)
+    assert due_judge_failures(output) == []
+    assert bind_judge_failures(output)["failures"] == {}
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+
+
+@pytest.mark.parametrize("fields", [{"failure_outcome_action": "fail"}, {"_ng_failure_terminal": True}])
+def test_final_saved_result_is_not_automatically_reverified(fields):
+    from nemo_gym.eval.rollout_reverification import _reverifiable_saved_result
+    from tests.unit_tests.orchestration.test_unparsed_judge_verdict import _xstest_row
+
+    row = _xstest_row(None)
+    assert _reverifiable_saved_result(row)
+    assert not _reverifiable_saved_result(row | fields)

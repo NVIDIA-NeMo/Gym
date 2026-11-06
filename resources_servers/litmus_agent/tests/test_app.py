@@ -778,3 +778,20 @@ class TestSandboxSpecAndRouting:
 
         without_tool = _make_server().setup_webserver()
         assert not any("stateful" in r.path for r in without_tool.routes)
+
+
+async def test_replaced_verify_route_preserves_final_judge_policy(monkeypatch):
+    import json
+
+    from nemo_gym.verification import JudgeError
+
+    async def fail(self, body: LitmusAgentVerifyRequest):
+        raise JudgeError("judge unavailable")
+
+    monkeypatch.setattr(LitmusAgentResourcesServer, "_verify_and_cleanup", fail)
+    server = _make_sandbox_server(judge_failure_outcome_policy={"default_action": "fail"})
+    route = next(route for route in server.setup_webserver().routes if getattr(route, "path", None) == "/verify")
+    result = await route.endpoint(_make_verify_request("answer", expected_answer="2", answer_type=FLOAT))
+    payload = json.loads(result.body)
+    assert payload["_ng_failure_terminal"] is True
+    assert payload["failure_outcome_action"] == "fail"
