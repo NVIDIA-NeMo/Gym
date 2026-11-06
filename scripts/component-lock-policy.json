@@ -82,6 +82,12 @@
       "protobuf==6.33.6"
     ]
   },
+  "responses_api_agents/auto_ontology_agent": {
+    "include-dependencies": [
+      "alembic",
+      "sqlalchemy"
+    ]
+  },
   "responses_api_agents/harbor_agent_general": {
     "override-dependencies": [
       "pathspec",
