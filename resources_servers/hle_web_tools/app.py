@@ -488,9 +488,16 @@ def _query_prefix_matches(form: str, path: str, pairs: List[Tuple[str, str]]) ->
 
 
 def title_variants(title: str) -> List[str]:
-    """The title, then the title with each trailing ``| Site``-style segment removed, longest first."""
-    variants = [title]
+    """The title as shown (``cap_title``), then the title with each trailing ``| Site``-style segment removed.
+
+    Only a separator that starts within the shown title is tried, so each variant is at most ``MAX_TITLE_CHARS``
+    long however long the title is, and a separator after a long blank run (``Quiz answers<5,000 blanks>| Site``)
+    is still found.
+    """
+    variants = [cap_title(title)]
     for match in _TITLE_SEPARATOR_RE.finditer(title):
+        if match.start() >= MAX_TITLE_CHARS:
+            break
         variants.append(title[: match.start()])
     return variants
 
@@ -1252,8 +1259,8 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             host = normalize_hostname(urlsplit(url).hostname or "")
         except (ValueError, UnicodeError):
             host = ""
-        # The text families see the whole title (linear); the answer-title variants see the title as shown.
-        block = self._blocklist.answer_title_block(cap_title(title), host)
+        # The text families see the whole title (linear); the answer-title variants are cut at the shown length.
+        block = self._blocklist.answer_title_block(title, host)
         block = block or self._blocklist.text_block(title, "result title")
         return block or self._blocklist.text_block(snippet, "result snippet")
 
