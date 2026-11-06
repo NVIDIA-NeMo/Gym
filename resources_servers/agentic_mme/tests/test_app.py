@@ -131,7 +131,9 @@ def judged_server() -> AgenticMMEServer:
     )
 
 
-def judged_request(text: str, value: str = "44.6 million", golden: dict | None = None) -> AgenticMMEVerifyRequest:
+def judged_request(
+    text: str, value: str = "44.6 million", golden: dict | None = None, metadata=None
+) -> AgenticMMEVerifyRequest:
     return AgenticMMEVerifyRequest(
         responses_create_params={
             "input": [
@@ -147,7 +149,7 @@ def judged_request(text: str, value: str = "44.6 million", golden: dict | None =
             ]
         },
         response=response(text),
-        verifier_metadata={"golden_answer": golden or {"value": value, "match_type": "exact"}},
+        verifier_metadata={"golden_answer": golden or {"value": value, "match_type": "exact"}} | (metadata or {}),
     )
 
 
@@ -210,14 +212,17 @@ async def test_judge_skipped_without_answer(judged_server, monkeypatch) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("golden", "shown"),
+    ("golden", "metadata", "shown"),
     [
-        ({"value": "7556", "match_type": "numeric", "tolerance": 150.0}, "within ±150 of the reference"),
-        ({"value": "7556", "match_type": "numeric"}, None),
-        ({"value": "7556", "match_type": "contains", "tolerance": 150.0}, None),
+        ({"value": "7556", "match_type": "numeric", "tolerance": 150.0}, None, "within ±150 of the reference"),
+        ({"value": "7556", "match_type": "numeric"}, None, None),
+        ({"value": "7556", "match_type": "contains", "tolerance": 150.0}, None, None),
+        # Prepared rows: the released golden answer (contains) plus the author's tolerance for the judge.
+        ({"value": "7556"}, {"answer_tolerance": 150.0}, "within ±150 of the reference"),
     ],
+    ids=["numeric_golden", "numeric_no_tolerance", "contains_ignores_tolerance", "prepared_row"],
 )
-async def test_judge_sees_numeric_tolerance(judged_server, monkeypatch, golden, shown) -> None:
+async def test_judge_sees_numeric_tolerance(judged_server, monkeypatch, golden, metadata, shown) -> None:
     seen = {}
 
     async def fake_call_judge(client, *, server_name, url_path, json, response_model):
@@ -225,7 +230,7 @@ async def test_judge_sees_numeric_tolerance(judged_server, monkeypatch, golden, 
         return completion('{"verdict": "equivalent"}')
 
     monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", fake_call_judge)
-    result = await judged_server.verify(judged_request("<answer>7600 km</answer>", golden=golden))
+    result = await judged_server.verify(judged_request("<answer>7600 km</answer>", golden=golden, metadata=metadata))
     assert result.reward == 1.0
     if shown:
         assert shown in seen["user"]

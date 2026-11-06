@@ -26,6 +26,15 @@ from resources_servers.agentic_mme.task_data import GoldenAnswer
 from resources_servers.agentic_mme.verifier_fixture import create_server
 
 
+def judge_tolerance(metadata: dict[str, Any], golden: GoldenAnswer) -> float:
+    """The numeric tolerance shown to the judge: the task's answer_tolerance (the author's final answer
+    check), else a numeric golden answer's own tolerance."""
+    tolerance = metadata.get("answer_tolerance")
+    if isinstance(tolerance, (int, float)) and not isinstance(tolerance, bool) and math.isfinite(tolerance):
+        return max(float(tolerance), 0.0)
+    return golden.tolerance if golden.match_type == "numeric" else 0.0
+
+
 def extract_answer(text: str) -> str:
     """Extract the public atomic answer format, excluding private reasoning."""
     text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.S | re.I)
@@ -207,7 +216,7 @@ class AgenticMMEServer(SimpleResourcesServer):
                 str(golden.value),
                 result.extracted_answer,
                 final_text,
-                tolerance=golden.tolerance if golden.match_type == "numeric" else 0.0,
+                tolerance=judge_tolerance(body.verifier_metadata, golden),
             )
             result.judge_verdict = judged["verdict"]
             result.judge_reason = judged["reason"]

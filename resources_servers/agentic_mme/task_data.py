@@ -35,6 +35,13 @@ class TaskData(BaseModel):
         description="Final-answer reference; tolerance applies to numeric matches only.",
         json_schema_extra=VERIFIER_METADATA | {"consumed_by": ["verify"]},
     )
+    answer_tolerance: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="The author's numeric tolerance from the final answer check; shown to the judge only.",
+        json_schema_extra=VERIFIER_METADATA | {"consumed_by": ["verify"]},
+    )
     task_id: str | None = Field(default=None, json_schema_extra=VERIFIER_METADATA | {"consumed_by": ["provenance"]})
     level: int | None = Field(
         default=None,

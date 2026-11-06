@@ -24,9 +24,9 @@ retrieval).
 - **Model-visible input:** a fixed system prompt (tool conventions and the `<answer>...</answer>` format) and a
   user message with the task images, labelled `Image 0`, `Image 1`, ..., followed by the question. Images are embedded
   as data URLs and downscaled to at most 2048×2048 pixels, as in the reference harness.
-- **Hidden from the model:** task ID, level, domain, the gold answer with its match type and numeric tolerance
-  (taken from the task's final answer check; 29 numeric tasks have one), and process checkpoints, all in
-  `verifier_metadata`.
+- **Hidden from the model:** task ID, level, domain, the gold answer as released (value only), the numeric
+  tolerance from the task's final answer check (`answer_tolerance`; 29 numeric tasks have one), and process
+  checkpoints, all in `verifier_metadata`.
 - **Tools:** 14 image tools (crop, rotate, flip, resize, enhance, grayscale, autocontrast, blur, sharpen, denoise,
   edge_detect, invert, equalize, threshold). Each successful operation appends an image the model sees in its next
   turn, capped at 2048×2048 pixels like the inputs and sent as the smaller of PNG and JPEG (quality 95), so long
@@ -44,8 +44,9 @@ retrieval).
 - **Judge:** `config.yaml` binds an LLM correctness judge (default `gpt-4o-mini` through an OpenAI-compatible
   endpoint; override with `agentic_mme_judge_base_url` and `agentic_mme_judge_model_name`). The judge sees the
   question text, the gold answer, the numeric tolerance when the task has one, and the model's final text, not
-  the images. The released evaluator's string match (`exact` / `contains` / `numeric`, with the same
-  tolerance) is reported alongside as `string_match_reward`.
+  the images. The released Track B string match is reported alongside as `string_match_reward`: like
+  `check_final_answer_only`, it reads the match type from the gold answer, which the release leaves unset, so every
+  task uses `contains`.
 - **Answers:** only the terminal assistant message counts. A response cut off at the output-token limit, or a model
   call refused because the context or request size is exceeded, measures the policy: it scores 0 and is recorded in
   `failure_reason` / `policy_error`.
