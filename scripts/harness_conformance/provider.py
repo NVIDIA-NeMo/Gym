@@ -389,8 +389,9 @@ class Probe:
                         else 100 + policy_index
                     )
                 if self.harness == "terminus_2_sandboxed" and not compacting:
+                    # A runner's login shell can still be starting when the first command is sent.
                     commands = (
-                        [{"keystrokes": f"sh -c {shlex.quote(arguments['command'])}\n", "duration": 0.2}]
+                        [{"keystrokes": f"sh -c {shlex.quote(arguments['command'])}\n", "duration": 2.0}]
                         if calls_tool
                         else []
                     )
