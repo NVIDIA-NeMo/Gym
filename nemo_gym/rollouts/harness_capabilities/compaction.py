@@ -82,13 +82,16 @@ def inspect_compaction(
         lambda: len(events) == len(helper_ids) == int(expected)
         and all(
             e.get("outcome") == "completed"
-            and e.get("trigger")
-            in (("overflow",) if overflow_after is not None else ("automatic", "threshold", "overflow"))
+            and e.get("trigger") in (("overflow",) if overflow_after is not None else ("automatic", "threshold"))
             for e in events
         )
         and (overflow_after is None or _mapping(attempts[overflow_after + 1].get("response")).get("id") in helper_ids),
         "$.ng_agent_observations.records",
-        "expected one completed automatic compaction, or none in the control",
+        (
+            "expected one completed overflow compaction with the helper immediately after the declared context-limit error"
+            if overflow_after is not None
+            else "expected one completed automatic or threshold compaction, or none in the control"
+        ),
         depends_on=("compaction.schema",),
     )
 

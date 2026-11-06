@@ -55,12 +55,12 @@ def test_completed_compaction_retains_helper_without_policy_turn(compaction_evid
 
 
 @pytest.mark.parametrize("trigger", ["automatic", "threshold", "overflow", "manual", "unknown", None])
-def test_wrapped_summary_preserves_witness_and_requires_automatic_trigger(compaction_evidence, trigger):
+def test_wrapped_summary_requires_automatic_or_threshold_trigger(compaction_evidence, trigger):
     record, witness = compaction_evidence
     event = record["ng_agent_observations"]["records"][-1]
     event.update(trigger=trigger, summary=f"Turn context:\n{witness['compaction']['summary']}")
     result = checks(record, witness)
-    if trigger in ("automatic", "threshold", "overflow"):
+    if trigger in ("automatic", "threshold"):
         assert {c["status"] for c in result.values()} == {"pass"}
     else:
         assert result["compaction.event"]["status"] == "fail"
