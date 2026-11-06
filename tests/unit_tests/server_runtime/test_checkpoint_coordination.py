@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint import coordination
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,

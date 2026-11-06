@@ -32,7 +32,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, NonNegativeFloat
 
-from nemo_gym.reward_profile import MASK_SAMPLE_FIELD
+from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from resources_servers.agentic_turn_simulation.harnesses.base import Harness, ObstacleText, ObstacleTexts
 from resources_servers.agentic_turn_simulation.items import Items, content_text, parse_args
 

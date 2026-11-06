@@ -71,6 +71,30 @@ install or rebind one. The existing `--agent-type` swap and automatic benchmark-
 still depend on legacy Agent-to-Resources bindings; they are not equivalent to this workflow.
 A new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. The profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after
+10 minutes. Supply the image in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own
+instance name, `codex_agent.responses_api_agents.codex_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`. A restricted sandbox cannot download Codex, so supply
+`sandbox_runtime_dir`.
+
+The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
+APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
+fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
+model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
+
+```yaml
+hle_equivalence_llm_judge_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_tool_transports: []
+```
+
 ## Runtime and model requirements
 
 Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
@@ -126,14 +150,14 @@ backend that honors it, for example a Model Server that relays Codex's Responses
 unchanged to an OpenAI Responses endpoint. Confirm `reasoning.effort` in captured model calls.
 An explicit request model must match the configured model.
 
-Session identity, immutable seed binding, seed/close locking, and close receipts use Gym's
+Session identity, immutable seed binding, seed and close locks, and fences use Gym's
 shared agent-session implementation. Setup returns a session cookie only after installation
 succeeds. Failed setup with failed cleanup retains cleanup-only state through
 `AgentSessionSetupError`: activation/reseeding are rejected, and close can retry.
 
 Each session supports one logical activation. Identical requests join the running invocation
 or replay its result/error; changed requests are rejected. A disconnected HTTP waiter does
-not cancel the invocation. Session close owns cancellation. Shared successful close receipts
+not cancel the invocation. Session close owns cancellation. The shared fence and saved reply of a successful close
 last `session_close_retry_window_seconds` (default 300 seconds) without renewal on retries.
 Stale cookies never fall back to host execution. State is process-local; Resources/provider
 own sandbox expiry and crash recovery. There is no separate per-agent session-expiry timer.
@@ -387,3 +411,21 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model server's host;
+`model_and_tools` also allows the host of each MCP grant. Each allowed host is open on every port. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit` (the default, the provider's network), and it cannot be combined with
+`sandbox_config.provider_options.network_policy`. Such a sandbox cannot download the runtime: set
+`sandbox_runtime_dir` to an absolute sandbox path that holds `node/` and `codex/` as the installer lays them out.
+Build it into the image with `bash install_codex_runtime.sh <dir> <codex_version>`. The image also needs `bash` and
+Python 3.8 or newer as `python3`, since the session prepare step would otherwise run `apt-get` or `apk`, which a
+restricted sandbox cannot reach. Setup checks that the directory reports `codex-cli <codex_version>` (an exact match)
+instead of installing, and refuses the seed with a 422 when it does not. `sandbox_runtime_dir` applies to a borrowed
+sandbox too: it is checked there in the same way, and a borrowed sandbox is never stopped.
+
+Under `model_only`, a required MCP grant is refused at seed with a 422, since the policy would block its host; under
+`model_and_tools`, a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. A borrowed
+sandbox relies on its owner's network policy. The policy is only as strong as the OpenSandbox server's egress mode:
+in `dns` mode only name resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at the IP
+layer and is needed for full isolation.

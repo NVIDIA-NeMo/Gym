@@ -35,7 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
-from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ResponsesConverter, SimpleResponsesAPIModel
+from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -49,7 +49,7 @@ class InferenceProviderConfig(BaseResponsesAPIModelConfig):
     extra_body: Dict[str, Any] = Field(default_factory=dict)
 
     correlate_via_user_field: bool = False
-    """Forward the current rollout id (see ``nemo_gym.core.episode``) as
+    """Forward the current rollout id (see ``nemo_gym.core.episode_context``) as
     the outbound request's standard OpenAI ``user`` field, so a downstream
     provider that inspects it can correlate per-turn calls back to the same
     rollout. A no-op for any provider that ignores ``user``. Never overrides
@@ -64,7 +64,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
             base_url=self.config.base_url,
             api_key=self.config.api_key,
         )
-        self._converter = ResponsesConverter(
+        self._converter = ChatCompletionsConverter(
             return_token_id_information=False,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,

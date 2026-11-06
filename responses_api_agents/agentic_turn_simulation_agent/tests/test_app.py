@@ -14,9 +14,9 @@ from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import MASK_SAMPLE_FIELD
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from resources_servers.agentic_turn_simulation.app import AgenticTurnSimulationVerifyRequest
 from resources_servers.agentic_turn_simulation.cline_xml import NO_TOOLS_USED
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure

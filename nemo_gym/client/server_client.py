@@ -49,11 +49,12 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
 )
-from nemo_gym.core.episode import (
+from nemo_gym.core.episode_context import (
     VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
+    note_verifier_model_request,
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.telemetry.setup import is_trace_exporter_active
@@ -219,6 +220,8 @@ class ServerClient(BaseModel):
             self.global_config_dict.get(OBSERVABILITY_ENABLED_KEY_NAME, False) or self.checkpoint_enabled()
         )
         server_entry = self.global_config_dict.get(server_name)
+        if server_entry is not None and "responses_api_models" in server_entry:
+            note_verifier_model_request(server_name)
         rollout_id = current_rollout_id()
         if attribute_rollout and server_entry is not None and "resources_servers" in server_entry:
             if url_path == "/verify":
@@ -252,7 +255,7 @@ class ServerClient(BaseModel):
             # A /run starts an episode attempt, so with checkpointing it is never sent twice.
             # A dropped connection usually means the server's worker died mid-episode.
             # Sending it again would run the attempt a second time,
-            # and the first run's sessions on other servers would never be freed: the second run replies,
+            # and the first run's sessions on other servers would never be released: the second run replies,
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),

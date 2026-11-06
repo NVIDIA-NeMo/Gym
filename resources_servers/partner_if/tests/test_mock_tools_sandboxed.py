@@ -23,8 +23,12 @@ from pydantic import ValidationError
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint, SandboxExecResult, SandboxHandle, SandboxStatus
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest, harvest_tools
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+    harvest_tools,
+)
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if import tool_sandbox
 from resources_servers.partner_if.task_data import TaskData, ToolBackendBundle
@@ -425,7 +429,7 @@ def test_a_sandbox_that_fails_to_stop_keeps_its_episode_for_a_retried_close(tmp_
     provider.failing_closes = 1
     close = {key: seed[key] for key in ("resources_session_id", "episode_id")}
     assert client.post("/close_session", json=close).status_code == 500
-    assert "session-one" in resource._episodes and "session-one" not in resource._closed
+    assert "session-one" in resource._episodes and "session-one" not in resource._fences
     assert client.post("/close_session", json=close).status_code == 200
     assert provider.stopped == ["sandbox-0"] and not resource._episodes
 
@@ -472,7 +476,7 @@ async def test_a_close_racing_a_seed_waits_for_the_sandbox_and_stops_it(tmp_path
     provider.create_gate.set()
     await seeding
     await closing
-    assert provider.stopped == ["sandbox-0"] and not resource._episodes and "session-one" in resource._closed
+    assert provider.stopped == ["sandbox-0"] and not resource._episodes and "session-one" in resource._fences
     with pytest.raises(api.HTTPException) as refused:
         await resource.seed_session(SimpleNamespace(session={}), seed_request(task))
     assert refused.value.status_code == 409 and len(provider.specs) == 1
@@ -577,7 +581,7 @@ def test_the_sandboxed_example_runs_the_example_backend_on_the_example_tasks():
 
 
 def test_the_sandboxed_example_config_starts_and_gym_validates_its_rows(monkeypatch):
-    from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+    from nemo_gym.data import TaskDataValidator, load_task_data_schema
 
     monkeypatch.setattr(tool_sandbox, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
     config = api.MockToolsServerConfig.model_validate(

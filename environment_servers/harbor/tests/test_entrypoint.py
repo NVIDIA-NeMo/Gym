@@ -40,8 +40,8 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.verifier import _verifier_image, _verifier_runs_task_image, _verifier_start
 from nemo_gym.core import failure_kinds
+from nemo_gym.data.tasks.harbor import load_task
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.tasks.harbor import load_task
 
 
 BUILT_IMAGE = "registry.example/ds-hello:abc"
@@ -204,8 +204,7 @@ def build_mode(task, *, record: dict | None = ENTRYPOINT_CONFIG, image: str = BU
     ``record`` is the built image's recorded configuration (``None``: nothing recorded, as for an image
     prepare did not inspect).
     """
-    from nemo_gym.tasks.harbor.digest import context_digest
-    from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+    from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
     (task.path / "environment" / "Dockerfile").write_text(
         'FROM ubuntu:24.04\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n'
@@ -1039,33 +1038,44 @@ class TestEntrypoint:
     async def test_numeric_image_user_without_a_name_stays_numeric_with_a_warning(self, tmp_path, monkeypatch, caplog):
         sandbox = EntrypointSandbox(passwd={"0": "root"})
         record = ENTRYPOINT_CONFIG | {"User": "1000"}
-        server, task, sandbox = self.entrypoint_server(tmp_path, monkeypatch, sandbox=sandbox, record=record)
+        server, task, sandbox = self.entrypoint_server(
+            tmp_path, monkeypatch, sandbox=sandbox, record=record, toml=HEALTHCHECK_TOML
+        )
         with caplog.at_level("WARNING", logger="environment_servers.harbor.users"):
             response = await run_episode(server, task)
         assert response.failure is None, response.failure
-        assert sandbox.launch()["user"] == "1000"
+        assert sandbox.launch()["user"] == 1000 and sandbox.default_user == 1000
+        (check,) = [r for r in sandbox.execs if r["command"] == "test -f /app/ready.txt"]
+        assert check["user"] == 1000
+        (seed,) = [kwargs["json"] for _, path, kwargs in server.server_client.calls if path == "/v1/agent_sessions"]
+        assert seed["sandbox_access"]["user"] == 1000
+        assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
         warnings = [r.getMessage() for r in caplog.records if "USER 1000 names no user" in r.getMessage()]
         assert len(warnings) == 1
 
-    async def test_resolved_dockerfile_workdir_is_created_for_the_entrypoint(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("image_user,startup_user", [("agent", "agent"), ("12345", 12345)])
+    async def test_resolved_dockerfile_workdir_is_created_for_the_entrypoint(
+        self, tmp_path, monkeypatch, image_user, startup_user
+    ):
         # A trailing WORKDIR with no RUN after it: `docker build` would have created it in the image, and so does
         # the overlay (after its last RUN line), before the task's workdir, which task.toml points elsewhere.
-        dockerfile = "FROM debian:bookworm-slim\nRUN useradd agent\nUSER agent\nWORKDIR /app\n"
+        dockerfile = f"FROM debian:bookworm-slim\nRUN useradd agent\nUSER {image_user}\nWORKDIR /app\n"
         config = {"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entrypoint.sh"]}
         toml = TASK_TOML.replace("storage_mb = 10240", 'storage_mb = 10240\nworkdir = "/work"')
         sandbox = EntrypointSandbox()
         server, task, _, _ = make_server(
             tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=config, toml=toml
         )
-        assert (task.workdir, task.entrypoint_workdir, task.entrypoint_user) == ("/work", "/app", "agent")
+        assert (task.workdir, task.entrypoint_workdir, task.entrypoint_user) == ("/work", "/app", image_user)
 
         response = await run_episode(server, task)
 
         assert response.failure is None, response.failure
-        made = sandbox.index_of("test -d /app || (mkdir -p /app && chown agent /app)")
+        made = sandbox.index_of(f"test -d /app || (mkdir -p /app && chown {image_user} /app)")
         assert made < sandbox.index_of("mkdir -p /work") < sandbox.index_of(f"sh {ENTRYPOINT_DIR}/run.sh")
         assert sandbox.execs[made]["user"] == "root"
-        assert sandbox.launch()["cwd"] == "/app" and sandbox.dirs["/app"] == "agent"
+        assert sandbox.launch()["cwd"] == "/app" and sandbox.dirs["/app"] == image_user
+        assert sandbox.launch()["user"] == startup_user and sandbox.default_user == startup_user
 
     # -- the separate verifier's start -------------------------------------------------------
 

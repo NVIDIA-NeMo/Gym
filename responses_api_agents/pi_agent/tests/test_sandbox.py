@@ -29,13 +29,15 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    is_harness_termination_failure,
     parse_cleanup_receipt,
+    raises_agent_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.tasks.harbor.materialize import materialize_task
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, TaskId
+from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
 
 
@@ -535,7 +537,7 @@ def test_no_session_keeps_existing_local_path(setup):
     agent, sandbox = setup
     with patch.object(agent, "_create_episode", AsyncMock(side_effect=RuntimeError("legacy path reached"))) as legacy:
         with TestClient(agent.setup_webserver()) as client:
-            with pytest.raises(RuntimeError, match="legacy path reached"):
+            with raises_agent_failure(RuntimeError, match="legacy path reached"):
                 client.post("/v1/responses", json={"input": "task"})
         legacy.assert_awaited_once()
     sandbox.launch.assert_not_awaited()
@@ -938,8 +940,9 @@ async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as failure:
         await task
+    assert is_harness_termination_failure(failure.value)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert agent._session_records[session_id].state is None
     sandbox.disconnect.assert_awaited_once()
@@ -1113,7 +1116,7 @@ def test_close_retry_and_stale_activation_do_not_run_host_pi(setup):
     assert all(record.state is None for record in agent._session_records.values())
 
 
-async def test_concurrent_closes_share_receipt(setup):
+async def test_concurrent_closes_share_the_saved_reply(setup):
     agent, sandbox = setup
     request = Request({"type": "http", "session": {}})
     session_id = (await agent.seed_agent_session(request, seed())).agent_session_id
@@ -1361,7 +1364,7 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         SingleAgentTurnEnvironmentServerConfig,
     )
     from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
-    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.server_runtime import SingleAgentTurnRequest
 
     agent, sandbox = setup
@@ -2191,8 +2194,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     gaps = [gap.code for gap in close.agent_observations.gaps]
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
-        from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.trajectory import join_agent_model_calls
+        from nemo_gym.trajectory import ModelCallRecord, join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -2365,6 +2367,220 @@ def test_sandbox_source_controls_ownership_and_session_routing(setup, owned):
         )
 
 
+def owned_seed_with_search_grant() -> AgentSeedSessionRequest:
+    body = seed_with_tools(mcp_grant("search", required=False))
+    body.sandbox_access = None
+    return body
+
+
+@pytest.mark.parametrize(
+    ("network_access", "allowed"),
+    [
+        ("inherit", None),
+        ("model_only", ["model.example"]),
+        ("model_and_tools", ["model.example", "resources.example"]),
+    ],
+)
+async def test_owned_sandbox_egress_allows_only_model_and_granted_tool_hosts(setup, network_access, allowed):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = network_access
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), owned_seed_with_search_grant())
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+async def test_network_access_with_borrowed_sandbox_is_rejected(setup, network_access):
+    agent, sandbox = setup
+    agent.config.network_access = network_access
+    with pytest.raises(HTTPException) as rejected:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    assert rejected.value.status_code == 422
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "provider_options", "reason"),
+    [
+        ("opensandbox", {"network_policy": {}}, "not both"),
+        ("docker", {}, "requires the OpenSandbox network-policy provider"),
+    ],
+)
+def test_unenforceable_network_access_is_a_terminal_seed_refusal(setup, provider_name, provider_options, reason):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "provider_options": provider_options}
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
+    body = owned_seed_with_search_grant()
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    # A configuration another attempt cannot fix: HTTP 422 fails the episode once instead of a retried 500.
+    assert refused.status_code == 422, refused.text
+    assert reason in refused.json()["detail"]
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
+
+
+async def test_tool_egress_leaves_out_the_mcp_grants_pi_skips(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.start = AsyncMock()
+    skipped = mcp_grant("resources.mcp", required=False)
+    skipped["connection"]["url"] = "http://127.0.0.1:7000/mcp"
+    body = seed_with_tools(mcp_grant("resources"), skipped)
+    body.sandbox_access = None
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    # The optional grant Pi leaves out at activation neither blocks the seed nor opens its loopback host.
+    policy = sandbox.start.await_args.args[0].provider_options["network_policy"]
+    assert policy == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
+
+
+@pytest.mark.parametrize(
+    ("reported", "return_code"),
+    [("0.80.2", 0), ("0.79.0", 0), ("0.80.20", 0), ("0.80.2", 1)],
+    ids=["pinned", "other_version", "version_prefix", "failed_run"],
+)
+async def test_preinstalled_runtime_is_checked_instead_of_installed(setup, reported, return_code):
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_dir = "/opt"
+    execute = sandbox.exec.side_effect
+
+    async def report_version(command, **kwargs):
+        if command.endswith("/dist/cli.js --version"):
+            return SimpleNamespace(return_code=return_code, error_type=None, stdout=f"{reported}\n", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = report_version
+    request = Request({"type": "http", "session": {}})
+    if reported != agent.config.pi_version or return_code != 0:
+        # Another version fails the same way on every attempt, so the seed is refused with a terminal 422.
+        with pytest.raises(AgentSeedRejectedError, match="does not run pi_version 0.80.2") as refused:
+            await agent.seed_agent_session(request, seed())
+        assert refused.value.status_code == 422
+        return
+    await agent.seed_agent_session(request, seed())
+    state = agent._session_records["pi-session"].state
+    assert state.runtime == "/opt"
+    assert not any(path.endswith("/install_pi_runtime.sh") for path in sandbox.files)
+    commands = [call.args[0] for call in sandbox.exec.await_args_list]
+    assert "/opt/node/bin/node /opt/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js --version" in commands
+
+
+def test_required_tool_grant_under_model_only_is_a_terminal_seed_refusal(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    body = seed_with_tools(mcp_grant("search", required=True))
+    body.sandbox_access = None
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        refused = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    # model_only blocks the grant's host, so the session would fail only after the sandbox and runtime exist.
+    assert refused.status_code == 422, refused.text
+    assert "model_and_tools" in refused.json()["detail"]
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+    assert body.agent_session_id not in agent._session_records
+
+
+async def test_failure_to_resolve_the_model_url_closes_the_provider(setup):
+    agent, _ = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_only"
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    body = owned_seed_with_search_grant()
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox") as factory,
+        patch(f"{module}.create_provider", return_value=provider),
+        patch.object(PiAgent, "resolve_model_base_url", side_effect=RuntimeError("model server unknown")),
+        pytest.raises(RuntimeError, match="model server unknown"),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    factory.assert_not_called()
+    provider.aclose.assert_awaited_once()
+
+
+async def test_preinstalled_runtime_check_that_cannot_run_stays_retryable(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_runtime_dir = "/opt"
+    execute = sandbox.exec.side_effect
+
+    async def time_out(command, **kwargs):
+        if command.endswith("/dist/cli.js --version"):
+            return SimpleNamespace(return_code=None, error_type="timeout", stdout="", stderr="")
+        return await execute(command, **kwargs)
+
+    sandbox.exec.side_effect = time_out
+    # A transport failure or timeout may pass on another attempt, so it is not a seed refusal.
+    with pytest.raises(RuntimeError, match="could not check the runtime") as failed:
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), seed())
+    assert not isinstance(failed.value, AgentSeedRejectedError)
+
+
+async def test_tool_egress_ignores_optional_grants_that_are_not_mcp(setup):
+    agent, sandbox = setup
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    agent.config.network_access = "model_and_tools"
+    sandbox.start = AsyncMock()
+    direct = {"kind": "direct_http", "name": "unused", "base_url": "http://direct.example", "required": False}
+    body = seed_with_tools(mcp_grant("resources"), direct)
+    body.sandbox_access = None
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), body)
+    # Pi uses only MCP grants, so an optional direct HTTP grant opens no host.
+    policy = sandbox.start.await_args.args[0].provider_options["network_policy"]
+    assert policy == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": host} for host in ["model.example", "resources.example"]],
+    }
+
+
+def test_runtime_dir_must_be_absolute():
+    with pytest.raises(ValidationError):
+        PiAgentConfig(name="pi", host="localhost", port=8001, entrypoint="app.py", sandbox_runtime_dir="opt")
+
+
 def test_owned_stop_failure_blocks_close_until_retry(setup):
     agent, sandbox = setup
     agent.config.sandbox_provider = "agent-provider"
@@ -2422,7 +2638,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         patch("responses_api_agents.pi_agent.app.AsyncSandbox", return_value=sandbox),
         TestClient(agent.setup_webserver()) as client,
     ):
-        with pytest.raises(RuntimeError) as error:
+        with raises_agent_failure(RuntimeError) as error:
             client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
@@ -2447,7 +2663,7 @@ def test_borrow_connection_failure_never_creates_replacement(setup):
         TestClient(agent.setup_webserver()) as client,
     ):
         factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
-        with pytest.raises(RuntimeError, match="borrow failed"):
+        with raises_agent_failure(RuntimeError, match="borrow failed"):
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         factory.assert_not_called()
         sandbox.stop.assert_not_awaited()

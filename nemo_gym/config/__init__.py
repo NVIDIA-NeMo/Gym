@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         ResourcesServerRef,
         ResourcesServerTypeConfig,
         ResponsesAPIAgentServerTypeConfig,
+        RunExportConfig,
         is_almost_server,
         maybe_get_server_instance_config,
     )
@@ -100,6 +101,7 @@ _PUBLIC_API = {
     "ResourcesServerRef": "config_types",
     "ResourcesServerTypeConfig": "config_types",
     "ResponsesAPIAgentServerTypeConfig": "config_types",
+    "RunExportConfig": "config_types",
     "SKILLS_REF_KEY_NAME": "global_config",
     "SKIP_VERIFICATION_KEY_NAME": "global_config",
     "SKIP_VERIFICATION_REWARD_KEY_NAME": "global_config",
