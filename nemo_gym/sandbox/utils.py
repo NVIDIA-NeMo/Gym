@@ -25,7 +25,19 @@ from shlex import quote
 import anyio
 
 from nemo_gym.core.media import MediaFile
-from nemo_gym.sandbox.api import AsyncSandbox
+from typing import Protocol
+
+from nemo_gym.sandbox.providers.base import SandboxExecResult
+
+
+class _SandboxFileTransfer(Protocol):
+    async def upload(self, local_path: Path | str, remote_path: str) -> None: ...
+
+    async def download(self, remote_path: str, local_path: Path | str) -> None: ...
+
+    async def exec(
+        self, command: str, *, cwd: str | None = None, timeout_s: int | float | None = 180
+    ) -> SandboxExecResult: ...
 
 
 LOGGER = logging.getLogger(__name__)
@@ -64,12 +76,12 @@ CPU_CAP_ENV_VARS: tuple[str, ...] = (
 )
 
 
-async def upload_bytes(sandbox: AsyncSandbox, *, path: str, data: bytes) -> None:
+async def upload_bytes(sandbox: _SandboxFileTransfer, *, path: str, data: bytes) -> None:
     """Upload bytes unchanged through file transfer without shell interpolation."""
     await _upload(sandbox, path=path, data=data, readable_by_all=False)
 
 
-async def _upload(sandbox: AsyncSandbox, *, path: str, data: bytes, readable_by_all: bool) -> None:
+async def _upload(sandbox: _SandboxFileTransfer, *, path: str, data: bytes, readable_by_all: bool) -> None:
     with tempfile.TemporaryDirectory(prefix="sandbox-upload-") as directory:
         source = Path(directory) / "payload"
         source.write_bytes(data)
@@ -79,12 +91,12 @@ async def _upload(sandbox: AsyncSandbox, *, path: str, data: bytes, readable_by_
         await sandbox.upload(source, path)
 
 
-async def upload_text(sandbox: AsyncSandbox, *, path: str, text: str) -> None:
+async def upload_text(sandbox: _SandboxFileTransfer, *, path: str, text: str) -> None:
     """Upload UTF-8 text through file transfer without shell interpolation."""
     await upload_bytes(sandbox, path=path, data=text.encode("utf-8"))
 
 
-async def download_bytes(sandbox: AsyncSandbox, *, path: str) -> bytes:
+async def download_bytes(sandbox: _SandboxFileTransfer, *, path: str) -> bytes:
     """Download a file's bytes unchanged through file transfer."""
     with tempfile.TemporaryDirectory(prefix="sandbox-download-") as directory:
         destination = Path(directory) / "payload"
@@ -92,7 +104,7 @@ async def download_bytes(sandbox: AsyncSandbox, *, path: str) -> bytes:
         return destination.read_bytes()
 
 
-async def read_text(sandbox: AsyncSandbox, *, path: str) -> str:
+async def read_text(sandbox: _SandboxFileTransfer, *, path: str) -> str:
     """Download UTF-8 text, replacing invalid bytes in partial process output.
 
     Line endings become ``\\n``, as when reading a file in text mode.
@@ -115,7 +127,7 @@ def media_path(file: MediaFile) -> str:
     return f"{MEDIA_DIRECTORY}/{hashlib.sha256(file.data).hexdigest()}.{file.extension}"
 
 
-async def stage_media(sandbox: AsyncSandbox, files: Iterable[MediaFile]) -> list[str]:
+async def stage_media(sandbox: _SandboxFileTransfer, files: Iterable[MediaFile]) -> list[str]:
     """Write each media file to its ``media_path`` and return the paths, in order.
 
     Harness CLIs read media from files, so an agent decodes prompt media with ``nemo_gym.core.split_text_and_media``,
@@ -164,7 +176,7 @@ def _rename_command(partial: str, path: str) -> str:
     )
 
 
-async def _run_media_command(sandbox: AsyncSandbox, command: str, *, action: str) -> None:
+async def _run_media_command(sandbox: _SandboxFileTransfer, command: str, *, action: str) -> None:
     # Imported here so that importing nemo_gym.sandbox, which loads this module eagerly, does not load transfer.
     from nemo_gym.sandbox.transfer import SandboxTransferError, SandboxUnavailableError
 
@@ -177,7 +189,7 @@ async def _run_media_command(sandbox: AsyncSandbox, command: str, *, action: str
         raise SandboxTransferError(f"Cannot {action} in {MEDIA_DIRECTORY}: {result.stderr or result.stdout or ''}")
 
 
-async def _remove_partial_media(sandbox: AsyncSandbox, partials: Iterable[str]) -> None:
+async def _remove_partial_media(sandbox: _SandboxFileTransfer, partials: Iterable[str]) -> None:
     """Remove partial uploads after a failure, so a borrowed sandbox does not keep them."""
     command = "rm -f -- " + " ".join(quote(partial) for partial in partials)
     try:

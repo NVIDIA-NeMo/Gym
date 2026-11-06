@@ -43,9 +43,7 @@ if TYPE_CHECKING:
         maybe_get_server_instance_config,
     )
     from nemo_gym.config.global_config import (
-        AGENT_REF_KEY_NAME,
         AGENT_SESSION_AGENT_TYPES,
-        ATTEMPT_INDEX_KEY_NAME,
         CACHE_DIR_KEY_NAME,
         DISALLOWED_PORTS_KEY_NAME,
         HF_TOKEN_KEY_NAME,
@@ -53,13 +51,10 @@ if TYPE_CHECKING:
         MODEL_SAMPLING_KEY_NAME,
         OBSERVABILITY_ENABLED_KEY_NAME,
         RESULTS_DIR_KEY_NAME,
-        ROLLOUT_ID_KEY_NAME,
-        ROLLOUT_INDEX_KEY_NAME,
         SKILLS_REF_KEY_NAME,
         SKIP_TOKEN_CAPTURE_KEY_NAME,
         SKIP_VERIFICATION_KEY_NAME,
         SKIP_VERIFICATION_REWARD_KEY_NAME,
-        TASK_INDEX_KEY_NAME,
         TASK_SOURCE_KEY_NAME,
         TOKEN_CAPTURE_BLOCK,
         GlobalConfigDictParser,
@@ -71,15 +66,22 @@ if TYPE_CHECKING:
         maybe_get_global_config_dict,
         taskset_environment_server_name,
     )
+    from nemo_gym.config.keys import (
+        AGENT_REF_KEY_NAME,
+        ATTEMPT_INDEX_KEY_NAME,
+        ROLLOUT_ID_KEY_NAME,
+        ROLLOUT_INDEX_KEY_NAME,
+        TASK_INDEX_KEY_NAME,
+    )
     from nemo_gym.config.server_metadata import ServerMetadata, visit_agent_server, visit_resources_server
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
-    "AGENT_REF_KEY_NAME": "global_config",
+    "AGENT_REF_KEY_NAME": "keys",
     "AGENT_SESSION_AGENT_TYPES": "global_config",
-    "ATTEMPT_INDEX_KEY_NAME": "global_config",
+    "ATTEMPT_INDEX_KEY_NAME": "keys",
     "AgentServerRef": "config_types",
     "AggregateMetrics": "config_types",
     "AggregateMetricsRequest": "config_types",
@@ -100,8 +102,8 @@ _PUBLIC_API = {
     "ModelServerRef": "config_types",
     "OBSERVABILITY_ENABLED_KEY_NAME": "global_config",
     "RESULTS_DIR_KEY_NAME": "global_config",
-    "ROLLOUT_ID_KEY_NAME": "global_config",
-    "ROLLOUT_INDEX_KEY_NAME": "global_config",
+    "ROLLOUT_ID_KEY_NAME": "keys",
+    "ROLLOUT_INDEX_KEY_NAME": "keys",
     "ROLLOUT_PATH_PREFIX": "config_types",
     "ResourcesServerRef": "config_types",
     "ResourcesServerTypeConfig": "config_types",
@@ -112,7 +114,7 @@ _PUBLIC_API = {
     "SKIP_VERIFICATION_KEY_NAME": "global_config",
     "SKIP_VERIFICATION_REWARD_KEY_NAME": "global_config",
     "ServerMetadata": "server_metadata",
-    "TASK_INDEX_KEY_NAME": "global_config",
+    "TASK_INDEX_KEY_NAME": "keys",
     "TASK_SOURCE_KEY_NAME": "global_config",
     "TOKEN_CAPTURE_BLOCK": "global_config",
     "TOKEN_CAPTURE_PATH_SEGMENT": "config_types",

@@ -18,7 +18,7 @@ import sys
 import textwrap
 import threading
 from argparse import ArgumentParser
-from collections import Counter, defaultdict
+from collections import defaultdict
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
@@ -33,7 +33,7 @@ from pathlib import Path
 from platform import python_version
 from random import randint
 from socket import gethostbyname, gethostname, socket
-from typing import Any, ClassVar, Dict, Iterable, List, Mapping, Optional, Set, Tuple, Type
+from typing import Any, ClassVar, Dict, List, Mapping, Optional, Set, Tuple, Type
 
 import hydra
 import rich
@@ -68,8 +68,24 @@ from nemo_gym.config.config_types import (
     is_server_ref,
     maybe_get_server_instance_config,
 )
+from nemo_gym.config.keys import AGENT_REF_KEY_NAME as AGENT_REF_KEY_NAME
+from nemo_gym.config.keys import AGENT_SERVER_TYPE_KEY_NAME as AGENT_SERVER_TYPE_KEY_NAME
+from nemo_gym.config.keys import ATTEMPT_INDEX_KEY_NAME as ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.config.keys import ENTRYPOINT_KEY_NAME as ENTRYPOINT_KEY_NAME
+from nemo_gym.config.keys import ENVIRONMENT_SERVER_STAMP_KEY_NAME as ENVIRONMENT_SERVER_STAMP_KEY_NAME
+from nemo_gym.config.keys import ENVIRONMENT_SERVER_TYPE_KEY_NAME as ENVIRONMENT_SERVER_TYPE_KEY_NAME
+from nemo_gym.config.keys import MODEL_SERVER_TYPE_KEY_NAME as MODEL_SERVER_TYPE_KEY_NAME
+from nemo_gym.config.keys import RESOURCES_SERVER_TYPE_KEY_NAME as RESOURCES_SERVER_TYPE_KEY_NAME
+from nemo_gym.config.keys import ROLLOUT_ID_KEY_NAME as ROLLOUT_ID_KEY_NAME
+from nemo_gym.config.keys import ROLLOUT_INDEX_KEY_NAME as ROLLOUT_INDEX_KEY_NAME
+from nemo_gym.config.keys import SERVER_TYPE_KEYS as SERVER_TYPE_KEYS
+from nemo_gym.config.keys import TASK_INDEX_KEY_NAME as TASK_INDEX_KEY_NAME
+from nemo_gym.config.provider_metadata import plugin_distributions
+from nemo_gym.config.rollout_keys import label_runs as label_runs
+from nemo_gym.config.rollout_keys import rollout_agent_label as rollout_agent_label
+from nemo_gym.config.rollout_keys import rollout_run_key as rollout_run_key
+from nemo_gym.config.rollout_keys import rollout_run_labels as rollout_run_labels
 from nemo_gym.config.secret_utils import recursively_hide_secrets
-from nemo_gym.sandbox.providers.registry import plugin_distributions
 from nemo_gym.server_runtime._checkpoint.settings import CHECKPOINT_BLOCK
 from nemo_gym.telemetry.setup import (
     TELEMETRY_KEY_NAME,
@@ -99,7 +115,6 @@ _SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
-ENTRYPOINT_KEY_NAME = "entrypoint"
 DEFAULT_HOST_KEY_NAME = "default_host"
 HEAD_SERVER_KEY_NAME = "head_server"
 DISALLOWED_PORTS_KEY_NAME = "disallowed_ports"
@@ -217,10 +232,8 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     ENVIRONMENT_ROUTING_MODE_KEY_NAME,
 ]
 
-AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # The field an environment server names its agent in.
 AGENT_SERVER_REF_KEY_NAME = "agent_server"
-ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # Agent types whose servers implement agent sessions (`_seed_agent_session_state`), so an environment server
 # such as `single_agent_turn_legacy` can drive them. Config composition cannot import agent apps to ask,
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
@@ -276,16 +289,6 @@ _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets
 ALLOWED_AGENTS_KEY_NAME = "allowed_agents"
 # Declared on a resources server: the model adapter types that can carry its workload. Absent means any adapter.
 ALLOWED_MODEL_TYPES_KEY_NAME = "allowed_model_types"
-MODEL_SERVER_TYPE_KEY_NAME = "responses_api_models"
-RESOURCES_SERVER_TYPE_KEY_NAME = "resources_servers"
-
-# Public config-group keys, in discovery order, for Gym and downstream integrations.
-SERVER_TYPE_KEYS: Tuple[str, ...] = (
-    RESOURCES_SERVER_TYPE_KEY_NAME,
-    AGENT_SERVER_TYPE_KEY_NAME,
-    MODEL_SERVER_TYPE_KEY_NAME,
-    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
-)
 
 
 def environment_server_agent_refs(server: DictConfig) -> list[DictConfig]:
@@ -338,17 +341,6 @@ class _AgentInstance:
     server_config: DictConfig
 
 
-# Data keys
-TASK_INDEX_KEY_NAME = "_ng_task_index"
-ROLLOUT_INDEX_KEY_NAME = "_ng_rollout_index"
-# Resume re-dispatch attempt counter (0 on the first attempt); distinguishes retries of the same
-# (task, rollout) so their captured model calls stay separable.
-ATTEMPT_INDEX_KEY_NAME = "_ng_attempt_index"
-# An explicit capture id replaces the task and rollout derivation.
-# Set it when dispatches reuse task and rollout indices.
-# Otherwise two dispatches would share one capture key.
-# The suffix "-a<N>" is reserved for attempt-qualified ids, so a dataset row's id must not end with it.
-ROLLOUT_ID_KEY_NAME = "_ng_rollout_id"
 # Sampling values a training framework sets for one rollout's trained agent; see nemo_gym/core/model_call_sampling.py.
 MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 # A training framework sets it to true on a rollout it does not train on, such as a validation rollout, so none of
@@ -356,9 +348,6 @@ MODEL_SAMPLING_KEY_NAME = "_ng_model_sampling"
 SKIP_TOKEN_CAPTURE_KEY_NAME = "_ng_skip_token_capture"
 RESPONSES_CREATE_PARAMS_KEY_NAME = "responses_create_params"
 RESPONSE_KEY_NAME = "response"
-AGENT_REF_KEY_NAME = "agent_ref"
-# Stamped by rollout collection on every record: the Environment Server that ran the rollout.
-ENVIRONMENT_SERVER_STAMP_KEY_NAME = "_ng_environment_server"
 # The config instance that declares the row's dataset (a resources server normally; the agent
 # itself for self-contained environments). Stamped into derived artifacts at collate/load time;
 # resolved to an agent at dispatch time. See the dataset-decoupling RFC.
@@ -388,66 +377,6 @@ def get_hf_token() -> Optional[str]:  # pragma: no cover
 # OmegaConf new resolvers
 OmegaConf.register_new_resolver("inherit_from", lambda a: f"${{inherit_from:{a}}}")
 OmegaConf.register_new_resolver("copy", lambda a: f"${{copy:{a}}}")
-
-
-def rollout_run_key(row: Mapping[str, Any]) -> Optional[str]:
-    """Identify what ran a rollout, for grouping: its Environment Server.
-
-    Records written before rollout collection stamped the Environment Server fall back to their agent.
-    """
-    server = row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
-    if server is not None:
-        return server
-    return (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-
-
-def label_runs(agent_by_key: Mapping[str, Optional[str]]) -> Dict[str, str]:
-    """Label each run key by its agent's name when that name identifies exactly one run, else by the key.
-
-    A run with one Environment Server per agent keeps its agent's name, so existing labels do not change.
-    Every run of an agent that several Environment Servers front is labelled by its own Environment Server.
-    A label that would still repeat, because one server's name equals another run's agent name, also falls back
-    to the key. The result depends only on the mapping, not on its order, and every label is unique.
-    """
-    keys_by_agent: Dict[str, set] = defaultdict(set)
-    for key, agent_name in agent_by_key.items():
-        if agent_name is not None:
-            keys_by_agent[agent_name].add(key)
-    labels = {
-        key: agent_name if agent_name is not None and len(keys_by_agent[agent_name]) == 1 else key
-        for key, agent_name in agent_by_key.items()
-    }
-    while True:
-        counts = Counter(labels.values())
-        clashing = [key for key, label in labels.items() if counts[label] > 1 and label != key]
-        if not clashing:
-            return labels
-        for key in clashing:
-            labels[key] = key
-
-
-def rollout_run_labels(rows: Iterable[Mapping[str, Any]]) -> Dict[str, str]:
-    """Label each ``rollout_run_key`` for reports, the same way rollout collection labels aggregate metrics.
-
-    See ``label_runs``. A row without an ``agent_ref`` is labelled by its Environment Server.
-    """
-    agent_by_key: Dict[str, Optional[str]] = {}
-    for row in rows:
-        key = rollout_run_key(row)
-        if key is not None and key not in agent_by_key:
-            agent_by_key[key] = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-    return label_runs(agent_by_key)
-
-
-def rollout_agent_label(row: Mapping[str, Any]) -> Optional[str]:
-    """Name the agent that acted in one rollout, for per-rollout output such as trajectories and debug lines.
-
-    Rows without an ``agent_ref``, such as episode rows, use their Environment Server.
-    """
-    agent_name = (row.get(AGENT_REF_KEY_NAME) or {}).get("name")
-    if agent_name is not None:
-        return agent_name
-    return row.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
 
 
 class GlobalConfigDictParserConfig(BaseModel):

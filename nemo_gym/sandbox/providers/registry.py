@@ -35,6 +35,8 @@ from collections.abc import Callable, Mapping
 from importlib.metadata import EntryPoint, entry_points
 from typing import Any, TypeAlias
 
+from nemo_gym.config.provider_metadata import ENTRY_POINT_GROUP
+from nemo_gym.config.provider_metadata import plugin_distributions as plugin_distributions
 from nemo_gym.sandbox.providers.base import SandboxProvider
 
 
@@ -43,7 +45,6 @@ LOGGER = logging.getLogger(__name__)
 ProviderClass: TypeAlias = type[SandboxProvider]
 ProviderLoader: TypeAlias = Callable[[], ProviderClass]
 
-ENTRY_POINT_GROUP = "nemo_gym.sandbox_providers"
 
 _PROVIDER_REGISTRY: dict[str, ProviderClass] = {}
 _BUILTIN_PROVIDER_LOADERS: dict[str, ProviderLoader] = {}
@@ -82,11 +83,6 @@ def _entry_point_loaders() -> dict[str, ProviderLoader]:
             dist_by_name[ep.name] = dist_name
         _ENTRY_POINT_LOADERS = loaders
     return _ENTRY_POINT_LOADERS
-
-
-def plugin_distributions() -> list[str]:
-    """Names of the installed distributions that publish providers as entry points."""
-    return sorted({ep.dist.name for ep in entry_points(group=ENTRY_POINT_GROUP) if getattr(ep, "dist", None)})
 
 
 def register_provider(name: str, provider_class: ProviderClass, *, override: bool = False) -> None:

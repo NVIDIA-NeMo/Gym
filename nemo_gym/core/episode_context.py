@@ -68,8 +68,7 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     Reused task and rollout indices produce a repeated capture key.
     Use an explicit id when numbering restarts across dispatches.
     """
-    # Imported here because global_config imports feature modules that import the episode identity.
-    from nemo_gym.config.global_config import (
+    from nemo_gym.config.keys import (
         ATTEMPT_INDEX_KEY_NAME,
         ROLLOUT_ID_KEY_NAME,
         ROLLOUT_INDEX_KEY_NAME,
