@@ -1,22 +1,34 @@
-# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025 Mohammad Tavakoli
+# Originally MIT License: https://github.com/mohammadtavakoli78/BEAM/blob/b2da22eac88bb0874c64665f13457eb99835774a/LICENSE
+# Adapted from https://github.com/mohammadtavakoli78/BEAM, src/beam/main.py (answer_generation,
+# ConversationSummaryBuffer) at commit b2da22eac88bb0874c64665f13457eb99835774a.
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy of the original software
+# and associated documentation files, to deal in the Software without restriction, including without
+# limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+# of the Software, subject to the following conditions: the above copyright notice and this permission
+# notice shall be included in all copies or substantial portions of the Software. THE SOFTWARE IS
+# PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED.
+#
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
+# NVIDIA modifications to this file are licensed under the Apache License,
+# Version 2.0 (the "License"); you may not use this file except in compliance
+# with the License. You may obtain a copy of the License at
 #
-# http://www.apache.org/licenses/LICENSE-2.0
+#     http://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License.
+# limitations under the License. The original BEAM-authored portions of this
+# file remain subject to the MIT license referenced above.
 
 """BEAM's long-conversation simulation, independent of Gym's server plumbing.
 
-A port of ``answer_generation`` and ``ConversationSummaryBuffer`` from BEAM
-(https://github.com/mohammadtavakoli78/BEAM, ``src/beam/main.py`` at commit b2da22e, MIT):
+A port of ``answer_generation`` and ``ConversationSummaryBuffer`` from BEAM (see the header):
 for each pre-generated user message an assistant model answers from a summary-plus-recent-turns
 memory; a yes/no check decides whether the assistant asked the user something, in which case a
 user model answers (at most twice); another check decides whether the user follows up (at most
@@ -164,9 +176,22 @@ class SummaryMemory:
         self.max_summary_tokens = max_summary_tokens
         self.messages: list[dict[str, str]] = []
         self.summary = ""
+        # Token counts by text, so each message is encoded once rather than on every add().
+        self._token_counts: dict[str, int] = {}
+
+    def tokens(self, text: str) -> int:
+        if text not in self._token_counts:
+            self._token_counts[text] = self.count(text)
+        return self._token_counts[text]
 
     def total_tokens(self) -> int:
-        return sum(self.count(m["content"]) for m in self.messages) + self.count(self.summary)
+        return sum(self.tokens(m["content"]) for m in self.messages) + self.tokens(self.summary)
+
+    def snapshot(self) -> tuple[list[dict[str, str]], str]:
+        return list(self.messages), self.summary
+
+    def restore(self, state: tuple[list[dict[str, str]], str]) -> None:
+        self.messages, self.summary = list(state[0]), state[1]
 
     async def add(self, role: str, content: str) -> None:
         self.messages.append({"role": role, "content": content})
@@ -174,21 +199,30 @@ class SummaryMemory:
             if self.total_tokens() <= self.max_tokens:
                 return
             if self.messages:
-                await self._compress_messages()
+                if not await self._compress_messages():
+                    # Only the newest message is left and it alone exceeds the budget: shrink the
+                    # summary once instead of looping on a budget that cannot be met.
+                    if self.summary:
+                        await self._compress_summary_further()
+                    return
             elif self.summary:
                 await self._compress_summary_further()
             else:
                 return
         LOG.warning("could not reduce memory below %d tokens after 10 attempts", self.max_tokens)
 
-    async def _compress_messages(self) -> None:
+    async def _compress_messages(self) -> bool:
+        """Summarize all but the recent messages that fit; False if there was nothing to summarize.
+        The newest message is always kept verbatim (when any are kept), even if it alone exceeds
+        the budget, so the model always sees the turn it is answering."""
         available = self.max_tokens - self.max_summary_tokens - 400
         kept: list[dict[str, str]] = []
         summarize: list[dict[str, str]] = []
         cumulative = 0
         for message in reversed(self.messages):
-            tokens = self.count(message["content"])
-            if cumulative + tokens <= available and len(kept) < self.recent_messages_count:
+            tokens = self.tokens(message["content"])
+            newest = not kept and not summarize and self.recent_messages_count > 0
+            if newest or (cumulative + tokens <= available and len(kept) < self.recent_messages_count):
                 kept.insert(0, message)
                 cumulative += tokens
             else:
@@ -203,9 +237,15 @@ class SummaryMemory:
                     self.summary = combined
             else:
                 self.summary = new_summary
-            if self.count(self.summary) > self.max_summary_tokens:
+            if self.tokens(self.summary) > self.max_summary_tokens:
                 self.summary = self._truncate_summary(self.summary)
         self.messages = kept
+        self._token_counts = {
+            text: self._token_counts[text]
+            for text in [m["content"] for m in kept] + [self.summary]
+            if text in self._token_counts
+        }
+        return bool(summarize)
 
     async def _ask(self, prompt: str) -> str:
         return (await self.call("helper", [{"role": "user", "content": prompt}])).strip()
@@ -256,7 +296,7 @@ class SummaryMemory:
         except Exception:
             self.summary = self._truncate_summary(self.summary, target)
             return
-        if self.count(compressed) < self.count(self.summary):
+        if self.count(compressed) < self.tokens(self.summary):
             self.summary = compressed
         else:
             self.summary = self._truncate_summary(self.summary, target)
@@ -304,6 +344,10 @@ class Settings:
     assistant_context_tokens: int = 28000
     assistant_recent_messages: int = 10
     assistant_summary_tokens: int = 1000
+    # The assistant memory gets assistant_context_tokens minus the system prompt, which grows with the
+    # previous plans; this floor keeps late batches of the 500K/1M sizes from a budget near zero.
+    # BEAM's 100K settings stay above it, so they behave as in BEAM.
+    assistant_min_memory_tokens: int = 8000
     user_memory_tokens: int = 19000
     user_recent_messages: int = 10
     user_summary_tokens: int = 2000
@@ -327,6 +371,8 @@ class SimulationResult:
     chat: list[list[dict[str, Any]]] = field(default_factory=list)
     batches_requested: int = 0
     skipped_questions: list[dict[str, Any]] = field(default_factory=list)
+    # Questions whose main answer was recorded but whose clarification or follow-up failed.
+    interrupted_turns: list[dict[str, Any]] = field(default_factory=list)
     stopped_at_batch: int | None = None
 
 
@@ -445,7 +491,7 @@ async def simulate(
         assistant_memory = SummaryMemory(
             call,
             count,
-            settings.assistant_context_tokens - count(system_prompt),
+            max(settings.assistant_context_tokens - count(system_prompt), settings.assistant_min_memory_tokens),
             settings.assistant_recent_messages,
             settings.assistant_summary_tokens,
         )
@@ -483,7 +529,20 @@ async def simulate(
             history.append({"role": "user", "id": message_id, "question_type": question_type, "content": text})
             message_id += 1
 
+        def checkpoint() -> tuple[Any, ...]:
+            return assistant_memory.snapshot(), user_memory.snapshot(), len(history), message_id
+
+        def rollback(state: tuple[Any, ...]) -> None:
+            nonlocal message_id
+            assistant_memory.restore(state[0])
+            user_memory.restore(state[1])
+            del history[state[2] :]
+            message_id = state[3]
+
         for question_index, question in enumerate(batch.messages):
+            # A failed turn is rolled back to the last complete exchange, so memories and the
+            # transcript never hold a question without its answer (unlike BEAM, which kept them).
+            start, committed = checkpoint(), None
             try:
                 index = bullet_index(question)
                 await user_memory.add("user", question)
@@ -499,6 +558,7 @@ async def simulate(
                 message_id += 1
                 history.append({"role": "assistant", "id": message_id, "content": answer})
                 message_id += 1
+                committed = checkpoint()
 
                 asked = await includes_question(call, prompts, answer, count, settings)
                 rounds = 0
@@ -506,6 +566,7 @@ async def simulate(
                     await user_turn(prompts.user_answer_question, answer, "answer_ai_question")
                     answer = await assistant_turn()
                     await record_assistant(answer)
+                    committed = checkpoint()
                     asked = await includes_question(call, prompts, answer, count, settings)
                     rounds += 1
 
@@ -517,6 +578,7 @@ async def simulate(
                     await user_turn(prompts.user_followup_question, answer, "followup_question")
                     answer = await assistant_turn()
                     await record_assistant(answer)
+                    committed = checkpoint()
                     rounds += 1
                     follow = await needs_followup(
                         call, prompts, answer, user_memory.messages_for_llm(), topic, theme, count, settings
@@ -525,8 +587,15 @@ async def simulate(
                 raise
             except Exception as error:
                 reason = describe(error)
-                LOG.warning("batch %d question %d skipped: %s", batch_index, question_index, reason)
-                result.skipped_questions.append({"batch": batch_index, "question": question_index, "error": reason})
+                record = {"batch": batch_index, "question": question_index, "error": reason}
+                if committed is None:
+                    rollback(start)
+                    LOG.warning("batch %d question %d skipped: %s", batch_index, question_index, reason)
+                    result.skipped_questions.append(record)
+                else:
+                    rollback(committed)
+                    LOG.warning("batch %d question %d cut short: %s", batch_index, question_index, reason)
+                    result.interrupted_turns.append(record)
 
         needed = len(batch.messages) * 2 - settings.batch_shortfall_allowance
         if history and len(history) >= needed:

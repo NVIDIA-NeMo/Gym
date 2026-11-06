@@ -239,6 +239,14 @@ def test_is_transient() -> None:
     assert is_transient(ClientResponseError(request_info=None, history=(), status=429))
     assert not is_transient(ClientResponseError(request_info=None, history=(), status=400))
     assert not is_transient(ValueError("x"))
+    # Wrapped errors count by their cause or context, and a cyclic chain terminates.
+    wrapped = RuntimeError("wrapper")
+    wrapped.__cause__ = ClientResponseError(request_info=None, history=(), status=503)
+    assert is_transient(wrapped)
+    cyclic = ValueError("a")
+    cyclic.__context__ = ValueError("b")
+    cyclic.__context__.__context__ = cyclic
+    assert not is_transient(cyclic)
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,8 @@
 One rollout plays out one long, multi-session user/assistant conversation for synthetic
 long-context data. It ports the conversation loop of
 [BEAM](https://github.com/mohammadtavakoli78/BEAM) (`answer_generation` and
-`ConversationSummaryBuffer` in `src/beam/main.py`, commit `b2da22e`, MIT):
+`ConversationSummaryBuffer` in `src/beam/main.py`, commit
+`b2da22eac88bb0874c64665f13457eb99835774a`, MIT; see the header of `simulation.py`):
 
 1. The task holds the conversation's sessions (`batches`), each with its pre-generated user
    messages, the session's plan and the plans of earlier sessions.
@@ -12,7 +13,9 @@ long-context data. It ports the conversation loop of
 3. The helper model answers yes/no checks: did the assistant ask the user something? If so, the
    **user model** answers it (at most twice). Should the user follow up? If so, the user model
    asks (at most twice).
-4. A question whose turn fails is skipped. A session that ends more than
+4. A question whose turn fails is skipped and rolled back, so no unanswered message stays in the
+   memories or the transcript; if only its clarification or follow-up fails, the turn keeps its
+   last complete exchange. A session that ends more than
    `batch_shortfall_allowance` messages short of two per question stops the conversation; earlier
    sessions are kept.
 
@@ -47,8 +50,8 @@ assistant calls) and `reward`:
 - `chat`: one list of messages per completed session, in BEAM's `chat.pickle` layout:
   `{"role", "id", "content"}`, plus `index`, `question_type` (`main_question`,
   `answer_ai_question`, `followup_question`) on user messages and `time_anchor` on the first.
-- `simulation`: sessions requested and completed, where it stopped, skipped questions, and call
-  and failure counts per role.
+- `simulation`: sessions requested and completed, where it stopped, skipped questions, turns cut
+  short after their main answer (`interrupted_turns`), and call and failure counts per role.
 
 A rollout that completes no session fails, so Gym retries it.
 
@@ -63,8 +66,9 @@ from `policy_model`: `conversation_assistant_model`, `conversation_user_model` a
 | `*_prompt_fpath` | required | BEAM's `ai_assistant_llm_template`, `check_include_question_template`, `check_need_followup_template`, `user_llm_answer_question_template`, `user_llm_ask_followup_question_template` |
 | `tiktoken_encoding` | `cl100k_base` | Token estimate for memory budgets; characters // 3 when the encoding cannot load (BEAM's fallback) |
 | `call_timeout_seconds` | 1800 | Per model call; vLLM model servers set no timeout of their own |
-| `max_call_retries` | 3 | Retries for timeouts, connection errors, HTTP 408/409/425/429/5xx and empty output |
+| `max_call_retries` | 3 | Retries for timeouts, connection errors, HTTP 408/409/425/429/5xx and empty output, also when wrapped in another exception |
 | `assistant_context_tokens` and the other memory fields | BEAM's values | Memory and prompt budgets of `answer_generation` |
+| `assistant_min_memory_tokens` | 8000 | Floor for the assistant memory, which gets `assistant_context_tokens` minus the system prompt. Late sessions of the 500K and 1M sizes would otherwise leave almost nothing; the 100K sizes stay above it |
 
 Empty model output counts as a failure because a vLLM model server answers a context overflow
 with an empty completion unless `propagate_context_overflow_errors` is set.

@@ -342,6 +342,79 @@ async def test_failed_question_is_skipped_and_short_batch_stops_the_conversation
 
 
 @pytest.mark.asyncio
+async def test_a_failed_turn_leaves_no_trace_in_memory_or_transcript() -> None:
+    class FailingFollowup(Script):
+        async def __call__(self, role, messages):
+            if role == "assistant" and messages[-1]["content"].startswith("user says followup"):
+                raise RuntimeError("model down")
+            return await super().__call__(role, messages)
+
+    # The main answer is kept; the follow-up whose answer failed is rolled back and not double counted.
+    script = FailingFollowup(follows=1)
+    result = await simulate(script, PROMPTS, [batch("q ->-> 1,1", "next ->-> 1,2")], "T", "H", count=COUNT)
+    history = result.chat[0]
+    assert [m.get("question_type") for m in history if m["role"] == "user"] == ["main_question", "main_question"]
+    assert [m["id"] for m in history] == [0, 1, 2, 3]
+    assert result.skipped_questions == []
+    assert result.interrupted_turns == [{"batch": 0, "question": 0, "error": "RuntimeError: model down"}]
+    # The next question's assistant call sees alternating roles: no dangling follow-up message.
+    last_call = [m for r, m in script.calls if r == "assistant"][-1]
+    assert [m["role"] for m in last_call[1:]] == ["user", "assistant", "user"]
+
+    # A failed main question is skipped entirely, and the next question starts from a clean memory.
+    script = Script(fail_on="bad")
+    result = await simulate(script, PROMPTS, [batch("bad ->-> 1,1", "ok ->-> 1,2")], "T", "H", count=COUNT)
+    assert [m["content"] for m in result.chat[0]] == ["ok ->-> 1,2", "answer 1"]
+    assert result.skipped_questions[0]["question"] == 0 and result.interrupted_turns == []
+    ok_call = [m for r, m in script.calls if r == "assistant"][-1]
+    assert [m["content"] for m in ok_call[1:]] == ["ok ->-> 1,2" + ENGLISH_SUFFIX]
+
+
+@pytest.mark.asyncio
+async def test_memory_keeps_the_newest_message_when_the_budget_is_too_small() -> None:
+    script = Script()
+    # max_tokens below max_summary_tokens + 400: BEAM's budget for recent messages is negative.
+    memory = SummaryMemory(script, COUNT, max_tokens=300, recent_messages_count=10, max_summary_tokens=100)
+    await memory.add("user", "a" * 600)
+    await memory.add("assistant", "b" * 600)
+    await memory.add("user", "the question " * 80)
+    assert memory.messages == [{"role": "user", "content": "the question " * 80}]
+    assert memory.summary == "a summary"
+    # Nothing is left to summarize, so add() stops instead of making ten more summary calls.
+    calls = len(script.calls)
+    await memory.add("assistant", "z" * 3000)
+    assert memory.messages[-1]["content"] == "z" * 3000 and len(script.calls) - calls <= 2
+
+
+@pytest.mark.asyncio
+async def test_assistant_memory_budget_has_a_floor() -> None:
+    script = Script()
+    long_plans = Batch(messages=["q ->-> 2,1"], current_plan="PLAN", previous_plans="p" * 120000)
+    settings = Settings(assistant_context_tokens=28000, assistant_min_memory_tokens=8000)
+    await simulate(script, PROMPTS, [batch("a ->-> 1,1"), long_plans], "T", "H", settings=settings, count=COUNT)
+    # The system prompt alone is ~40K tokens, yet the question is still sent verbatim.
+    last = [m for r, m in script.calls if r == "assistant"][-1]
+    assert last[-1]["content"] == "q ->-> 2,1" + ENGLISH_SUFFIX
+
+
+@pytest.mark.asyncio
+async def test_memory_encodes_each_message_once() -> None:
+    encoded: list[str] = []
+
+    class Counting(TokenCounter):
+        def __call__(self, text):
+            encoded.append(text)
+            return super().__call__(text)
+
+    memory = SummaryMemory(
+        Script(), Counting(None), max_tokens=10**6, recent_messages_count=10, max_summary_tokens=100
+    )
+    for index in range(20):
+        await memory.add("user", f"message {index}")
+    assert sorted(encoded) == sorted({*(f"message {i}" for i in range(20)), ""})
+
+
+@pytest.mark.asyncio
 async def test_needs_followup_formats_history_like_beam_and_trims_to_budget() -> None:
     script = Script(follows=1)
     history = [{"role": "user", "content": "hello"}, {"role": "assistant", "content": "hi"}]

@@ -75,6 +75,7 @@ class LongConversationSimulationAgentConfig(BaseResponsesAPIAgentConfig):
     assistant_context_tokens: int = 28000
     assistant_recent_messages: int = 10
     assistant_summary_tokens: int = 1000
+    assistant_min_memory_tokens: int = 8000
     user_memory_tokens: int = 19000
     user_recent_messages: int = 10
     user_summary_tokens: int = 2000
@@ -86,9 +87,20 @@ class LongConversationSimulationAgentConfig(BaseResponsesAPIAgentConfig):
 
 
 def is_transient(error: BaseException) -> bool:
-    if isinstance(error, (asyncio.TimeoutError, ClientConnectionError, EmptyOutputError)):
-        return True
-    return isinstance(error, ClientResponseError) and (error.status in (408, 409, 425, 429) or error.status >= 500)
+    """A timeout, connection error, empty output or retryable HTTP status, here or anywhere in the
+    exception's __cause__/__context__ chain."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (asyncio.TimeoutError, ClientConnectionError, EmptyOutputError)):
+            return True
+        if isinstance(current, ClientResponseError) and (
+            current.status in (408, 409, 425, 429) or current.status >= 500
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 class LongConversationSimulationAgent(SimpleResponsesAPIAgent):
@@ -203,6 +215,7 @@ class LongConversationSimulationAgent(SimpleResponsesAPIAgent):
                 batches_completed=len(result.chat),
                 stopped_at_batch=result.stopped_at_batch,
                 skipped_questions=result.skipped_questions,
+                interrupted_turns=result.interrupted_turns,
                 calls=dict(calls),
                 failed_calls=dict(failed),
             ),

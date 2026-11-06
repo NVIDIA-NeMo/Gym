@@ -52,6 +52,7 @@ class SimulationStats(BaseModel):
     batches_completed: int
     stopped_at_batch: int | None = None
     skipped_questions: list[dict[str, Any]] = Field(default_factory=list)
+    interrupted_turns: list[dict[str, Any]] = Field(default_factory=list)
     calls: dict[str, int] = Field(default_factory=dict)
     failed_calls: dict[str, int] = Field(default_factory=dict)
 
