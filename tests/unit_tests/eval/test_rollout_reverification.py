@@ -967,6 +967,12 @@ class TestIsJudgeFailure:
         """v2 marks judge failures only via _ng_failure_class; the older boolean is ignored."""
         assert _is_judge_failure({"_ng_failure_judge_failed": True}) is False
 
+    @pytest.mark.parametrize("fields", [{"failure_outcome_action": "fail"}, {"_ng_failure_terminal": True}])
+    def test_saved_final_failure_excluded_from_judge_only_recovery(self, fields):
+        row = {NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS, **fields}
+        assert not _is_judge_failure(row)
+        assert not _recovery_rollout_predicate()(row)
+
 
 class TestRecoveryRolloutPredicate:
     def _row(self, task: int, rollout: int = 0, failure_class: str | None = JUDGE_FAILED_FAILURE_CLASS) -> dict:

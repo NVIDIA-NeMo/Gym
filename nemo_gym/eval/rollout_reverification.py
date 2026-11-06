@@ -545,12 +545,21 @@ def summarize_cache_usage(cache: CacheKeysByStatus, all_payloads: List[Dict], fi
 # ---------------------------------------------------------------------------
 
 
+def _saved_failure_is_final(row: Dict[str, Any]) -> bool:
+    """Automatic recovery preserves the producing boundary's final ungraded disposition."""
+    return row.get("failure_outcome_action") == "fail" or row.get("_ng_failure_terminal") is True
+
+
 def _is_judge_failure(row: Dict[str, Any]) -> bool:
     """Whether a failures-sidecar row is a judge failure, the class `--judge-failed-only` recovers.
 
     A ``record_omitted_rollouts`` row records a rollout that produced no result, so there is nothing to judge.
     """
-    return matches_failure_class(row, {JUDGE_FAILED_FAILURE_CLASS}) and not is_omitted_rollout_row(row)
+    return (
+        matches_failure_class(row, {JUDGE_FAILED_FAILURE_CLASS})
+        and not is_omitted_rollout_row(row)
+        and not _saved_failure_is_final(row)
+    )
 
 
 def _recovery_rollout_predicate(
@@ -1363,7 +1372,7 @@ def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
     """Whether a selected saved result is graded again from its saved answer (``reverification_cause``)."""
     from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
 
-    return reverification_cause(saved_row_evidence(row)) is not None
+    return not _saved_failure_is_final(row) and reverification_cause(saved_row_evidence(row)) is not None
 
 
 def bind_judge_failures(
@@ -1398,7 +1407,7 @@ def bind_judge_failures(
     spent = set()
     for row in store.failures():
         identity = logical_rollout_id(row)
-        if row.get("_ng_failure_class") == "judge_failed" and store._state.failure_count(identity) >= cap:
+        if _is_judge_failure(row) and store._state.failure_count(identity) >= cap:
             if not skip_spent:
                 raise ConfigError(
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
@@ -1413,7 +1422,7 @@ def bind_judge_failures(
         "failures": {
             logical_rollout_id(row): row
             for row in store.failures()
-            if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
+            if _is_judge_failure(row) and logical_rollout_id(row) not in spent
         }
         | saved_results,
         "saved_results": set(saved_results),
