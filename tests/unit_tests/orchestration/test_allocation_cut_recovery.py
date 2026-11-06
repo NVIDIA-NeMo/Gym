@@ -376,9 +376,19 @@ _INSTALL_LOG = (
 )
 _DRIVER_FAILURE_STOPS = {
     "provider_credentials_rejected": (
-        "Previous job 100 ended FAILED: provider_credentials_rejected: the sandbox provider refused the "
+        "Previous job 100 ended FAILED: provider_credentials_rejected: the provider refused the "
         "credentials; the chain does not retry it; fix the credentials, then continue with gym eval resubmit "
         "--recover"
+    ),
+    "provider_quota_exhausted": (
+        "Previous job 100 ended FAILED: provider_quota_exhausted: the grading provider's quota is exhausted; the "
+        "chain does not retry it; after the reset continue with gym eval resubmit --recover (re-judges the saved "
+        "answers, no model calls)"
+    ),
+    "environment_protocol_violation": (
+        "Previous job 100 ended FAILED: environment_protocol_violation: an environment server answered with a reply "
+        "the collector cannot use; the chain does not retry it; fix the server or the benchmark pairing, then gym "
+        "eval submit again"
     ),
     "server_spinup_timeout": (
         "Previous job 100 ended FAILED: server_spinup_timeout: the Gym servers did not become ready within "

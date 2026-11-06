@@ -15,7 +15,12 @@ from nemo_gym.server_runtime._checkpoint.control import (
     RetireRequest,
 )
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.errors import (
+    AdmissionClosedError,
+    ControlError,
+    ExportFailedError,
+    StaleAttemptError,
+)
 
 
 TASK = {"task_id": "t"}
@@ -601,3 +606,43 @@ async def test_after_a_restore_a_late_start_of_the_replaced_attempt_is_refused(t
             restored.begin(late, TASK, None)
     restored.begin(EpisodeId(rollout_id="r", attempt=1), TASK, None)
     assert restored.steps.keys() == ["r-a1"]
+
+
+async def test_an_expired_retire_cannot_be_exported_by_a_later_checkpoint(tmp_path: Path) -> None:
+    participant = EnvironmentParticipant(mode="exported")
+    controller = controller_for(participant)
+    episode_id = EpisodeId(rollout_id="r")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def episode() -> None:
+        participant.begin(episode_id, TASK, None)
+        try:
+            await participant.boundary(episode_id, {"step": 1})
+            async with participant.step(episode_id, "replay"):
+                started.set()
+                await release.wait()
+        finally:
+            await participant.end(episode_id)
+
+    task = asyncio.create_task(episode())
+    await started.wait()
+    try:
+        # Marks are applied even when there is no budget left to stop the episode.
+        with pytest.raises(ControlError, match="deadline"):
+            await controller.retire(
+                RetireRequest(checkpoint_id="retire", deadline_ts=time.time() - 1, episode_ids=[episode_id])
+            )
+        assert not task.done()
+        await controller.prepare(CheckpointRequest(**request()))
+        commit = CommitRequest(**request(checkpoint_dir=str(tmp_path)))
+        failures = []
+        for _ in range(2):
+            with pytest.raises(ExportFailedError, match="resume, retry the retire") as caught:
+                await controller.commit(commit)
+            failures.append(str(caught.value))
+        assert failures[0] == failures[1]
+        assert not list(tmp_path.rglob("manifest.json"))
+    finally:
+        await controller.resume(CheckpointRequest(**request()))
+        release.set()
+        await task
