@@ -168,6 +168,8 @@ async def test_parallel_calls_cannot_bypass_budget() -> None:
     assert result.tool_trace[1]["output"]["error"].startswith("tool budget")
     # A call beyond the budget ends the episode unanswered: no further model call.
     assert len(seen) == 1 and result.reward == 0 and result.response.status == "incomplete"
+    # Running out of budget is not a length cut, so RL's overlong filtering keeps the zero.
+    assert result.response.incomplete_details is None and result.failure_reason == "missing_answer"
     # All tool replies precede new user messages, including over-budget replies.
     assert [item.type for item in result.response.output] == [
         "function_call",
@@ -204,7 +206,7 @@ async def test_round_budget_and_refusing_to_answer() -> None:
     result = await agent.run(request(), body())
     assert len(seen) == 2
     assert result.reward == 0
-    assert result.response.status == "incomplete"
+    assert result.response.status == "incomplete" and result.response.incomplete_details is None
     # The last allowed call is a normal call: its tool call runs, then the rounds are used up.
     assert result.successful_tool_calls == 1
 

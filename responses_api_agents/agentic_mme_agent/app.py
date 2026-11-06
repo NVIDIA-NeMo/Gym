@@ -257,10 +257,12 @@ class AgenticMMEAgent(SimpleResponsesAPIAgent):
             )
         result = generated.model_copy(update={"output": outputs, "usage": usage})
         if not finished and result.incomplete_details is None:
-            # No terminal answer must never accidentally score an earlier answer.
-            result = NeMoGymResponse.model_validate(
-                result.model_dump() | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
-            )
+            # An episode that ends without an answer (tool or round budget used up, or a context-limit
+            # refusal) is incomplete, but not a length cut: NeMo RL's overlong filtering and Gym's
+            # truncated_answer label read incomplete_details.reason == "max_output_tokens", and would
+            # drop the loss for running out of budget. The verifier scores it 0 as missing_answer, since
+            # no assistant message follows the last tool call.
+            result = NeMoGymResponse.model_validate(result.model_dump() | {"status": "incomplete"})
         return result, trace, cookies, policy_error, infrastructure_error
 
     async def responses(
