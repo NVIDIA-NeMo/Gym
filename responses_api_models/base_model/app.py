@@ -39,6 +39,7 @@ entries and some servers enforce it, so the default list is trimmable.
 
 import asyncio
 import json
+from collections.abc import Collection, Iterator
 from contextlib import nullcontext
 from time import time
 from typing import Any, Dict, List, Literal, Optional
@@ -232,36 +233,34 @@ def _loads(text: str) -> Any:
     return json.loads(text, strict=False)
 
 
-def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
-    """The `bash` tool calls in a base model's generation, at most `max_calls`.
+def _generated_calls(raw: str) -> Iterator[tuple[str, Dict[str, Any]]]:
+    """(name, arguments) for each call in the first JSON array of a generation.
 
-    The harness executes every call in a turn, in order, so all are returned --
-    capped, as the reference caps a base model's calls per turn at 3. Accepts
-    each call nested ({"function": {"name", "arguments"}}, the shape the
+    Accepts each call nested ({"function": {"name", "arguments"}}, the shape the
     transcript shows the model) or flat ({"name", "arguments"}), and arguments
-    as a JSON object or a JSON-encoded string. Empty list when none parse.
+    as a JSON object or a JSON-encoded string. Calls whose arguments are not an
+    object are skipped.
     """
     start = raw.find("[")
     if start < 0:
-        return []
+        return
     closed = close_json_prefix(raw[start:])
     if closed is None:
-        return []
+        return
     try:
         calls = _loads(closed)
     except json.JSONDecodeError:
-        return []
+        return
     if isinstance(calls, dict):
         calls = [calls]
     if not isinstance(calls, list):
-        return []
-    found: List[Dict[str, Any]] = []
+        return
     for call in calls:
         if not isinstance(call, dict):
             continue
         function = call["function"] if isinstance(call.get("function"), dict) else call
         name = function.get("name")
-        if not isinstance(name, str) or name.strip() != "bash":
+        if not isinstance(name, str):
             continue
         arguments = function.get("arguments")
         if isinstance(arguments, str):
@@ -269,11 +268,40 @@ def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
                 arguments = _loads(arguments)
             except json.JSONDecodeError:
                 continue
-        if not isinstance(arguments, dict):
-            continue
+        if isinstance(arguments, dict):
+            yield name.strip(), arguments
+
+
+def parse_bash_tool_calls(raw: str, max_calls: int = 3) -> List[Dict[str, Any]]:
+    """The `bash` tool calls in a base model's generation, at most `max_calls`.
+
+    The harness executes every call in a turn, in order, so all are returned --
+    capped, as the reference caps a base model's calls per turn at 3. Only the
+    `command` argument is kept, and a call without a non-blank one is dropped.
+    Empty list when none parse.
+    """
+    found: List[Dict[str, Any]] = []
+    for name, arguments in _generated_calls(raw):
         command = arguments.get("command")
-        if isinstance(command, str) and command.strip():
+        if name == "bash" and isinstance(command, str) and command.strip():
             found.append({"name": "bash", "arguments": {"command": command}})
+            if len(found) >= max_calls:
+                break
+    return found
+
+
+def parse_tool_calls(raw: str, tool_names: Collection[str], max_calls: int = 3) -> List[Dict[str, Any]]:
+    """The calls in a base model's generation that name one of `tool_names`, at most `max_calls`.
+
+    For tool sets other than mini-swe-agent's `bash` (e.g. AutomationBench's
+    api_search / api_fetch / base64_encode): arguments are passed through as
+    the model wrote them, since only the tool knows its own schema. Calls to
+    other names are dropped. Empty list when none parse.
+    """
+    found: List[Dict[str, Any]] = []
+    for name, arguments in _generated_calls(raw):
+        if name in tool_names:
+            found.append({"name": name, "arguments": arguments})
             if len(found) >= max_calls:
                 break
     return found
@@ -310,6 +338,11 @@ class BaseModelServerConfig(BaseResponsesAPIModelConfig):
     # at 3; the harness executes every call it keeps.
     max_tool_calls_per_turn: int = 3
 
+    # The tools a function-calling turn may name. None is mini-swe-agent's wire:
+    # `bash` only, keeping just its `command`. A list accepts calls to any of
+    # those names with whatever JSON-object arguments the model wrote.
+    tool_names: Optional[List[str]] = None
+
     max_tokens: int = 1024
     temperature: float = 0.6
     top_p: Optional[float] = None
@@ -343,6 +376,8 @@ class BaseModelServer(SimpleResponsesAPIModel):
     def _parse_calls(self, text: str) -> List[Dict[str, Any]]:
         if self.config.wire != "function_calling":
             return []
+        if self.config.tool_names is not None:
+            return parse_tool_calls(text, self.config.tool_names, self.config.max_tool_calls_per_turn)
         return parse_bash_tool_calls(text, self.config.max_tool_calls_per_turn)
 
     def build_prompt(self, messages: List[Dict[str, Any]]) -> str:

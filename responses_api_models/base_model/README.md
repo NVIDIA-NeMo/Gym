@@ -11,7 +11,7 @@ instead of writing prose. Their defaults depend on the wire:
 | `wire` | the model writes | returned as |
 |---|---|---|
 | `backticks` (default) | one bash command in a ```` ```mswea_bash_command ```` fence (mini-swe-agent's text protocol) | assistant text |
-| `function_calling` | a JSON array of `bash` tool calls, following the schema in `tool_definitions_json` | `tool_calls` on the assistant message |
+| `function_calling` | a JSON array of tool calls, following the schema in `tool_definitions_json`: `bash` by default, or the tools in `tool_names` | `tool_calls` on the assistant message |
 
 The wire must match the one the trajectories were captured on, not the benchmark: crossed, every turn is a well-formed
 action the agent cannot execute. On `function_calling` no stop list is sent, because tool-call arguments routinely
@@ -33,6 +33,7 @@ against a path that does not exist, which scores as a quiet 0.
 | `steer`, `primer`, `prefill`, `stop` | per wire | each can be overridden; `stop: []` sends no stop list |
 | `tool_definitions_json` | none | the tool schema as a JSON string, rendered verbatim into the prompt |
 | `max_tool_calls_per_turn` | 3 | calls beyond this in one turn are dropped |
+| `tool_names` | none | `function_calling` only. None: `bash` calls, keeping just `command` (mini-swe-agent). A list: calls to any of these tools, with whatever JSON-object arguments the model wrote (e.g. AutomationBench's `api_search`, `api_fetch`, `base64_encode`) |
 | `max_tokens`, `temperature`, `top_p` | 1024, 0.6, none | sampling |
 
 `configs/base_model.yaml` defines `policy_model`, which reads `policy_base_url` and `policy_model_name` from

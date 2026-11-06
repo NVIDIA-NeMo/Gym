@@ -191,6 +191,49 @@ class TestParseBashToolCall:
         assert BM.parse_bash_tool_calls("I think the fix is to edit foo.py") == []
 
 
+class TestParseToolCalls:
+    """The generic parser, for tool sets other than `bash` (here AutomationBench's)."""
+
+    NAMES = ("api_search", "api_fetch", "base64_encode")
+
+    def test_calls_to_any_listed_tool_are_kept_in_order(self):
+        raw = (
+            '[{"name": "api_search", "arguments": {"query": "gmail send"}}, '
+            '{"function": {"name": "api_fetch", "arguments": "{\\"method\\": \\"GET\\", \\"url\\": \\"https://x\\"}"}}]'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES) == [
+            {"name": "api_search", "arguments": {"query": "gmail send"}},
+            {"name": "api_fetch", "arguments": {"method": "GET", "url": "https://x"}},
+        ]
+
+    def test_arguments_pass_through_unchanged(self):
+        # Nested objects and empty objects are the tool's business, not the parser's.
+        raw = (
+            '[{"name": "api_fetch", "arguments": {"method": "POST", "url": "u", "params": {}, "body": {"a": [1, 2]}}}]'
+        )
+        assert BM.parse_tool_calls(raw, self.NAMES)[0]["arguments"] == {
+            "method": "POST",
+            "url": "u",
+            "params": {},
+            "body": {"a": [1, 2]},
+        }
+
+    def test_unlisted_tool_is_dropped(self):
+        raw = '[{"name": "bash", "arguments": {"command": "ls"}}, {"name": "api_search", "arguments": {"query": "q"}}]'
+        assert [c["name"] for c in BM.parse_tool_calls(raw, self.NAMES)] == ["api_search"]
+
+    def test_non_object_arguments_are_dropped(self):
+        assert BM.parse_tool_calls('[{"name": "api_search", "arguments": "not json"}]', self.NAMES) == []
+
+    def test_truncated_inside_a_string_fails(self):
+        assert BM.parse_tool_calls('[{"name": "api_fetch", "arguments": {"url": "https://x', self.NAMES) == []
+
+    def test_cap_applies(self):
+        raw = "[" + ", ".join(f'{{"name": "api_search", "arguments": {{"query": "q{i}"}}}}' for i in range(6)) + "]"
+        assert len(BM.parse_tool_calls(raw, self.NAMES)) == 3
+        assert len(BM.parse_tool_calls(raw, self.NAMES, max_calls=6)) == 6
+
+
 class TestCloseJsonPrefix:
     def test_cuts_at_first_complete_value(self):
         assert BM.close_json_prefix("[1, 2] trailing [3]") == "[1, 2]"
@@ -295,6 +338,14 @@ class TestFunctionCallingWire:
             '\nAssistant (tool call): [{"function": {"arguments": "{\\"command\\": \\"ls\\"}", "name": "bash"}, '
             '"id": "c", "type": "function"}]'
         )
+
+    def test_tool_names_select_the_generic_parser(self):
+        raw = '[{"name": "api_search", "arguments": {"query": "q"}}, {"name": "bash", "arguments": {"command": "ls"}}]'
+        generic = self._server(tool_names=["api_search"], max_tool_calls_per_turn=8)
+        assert generic._parse_calls(raw) == [{"name": "api_search", "arguments": {"query": "q"}}]
+        # Unset, the wire stays mini-swe-agent's: bash only.
+        bash_only = self._server(tool_names=None, max_tool_calls_per_turn=3)
+        assert bash_only._parse_calls(raw) == [{"name": "bash", "arguments": {"command": "ls"}}]
 
 
 @pytest.fixture
