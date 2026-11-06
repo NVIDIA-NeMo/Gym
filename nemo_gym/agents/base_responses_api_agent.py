@@ -1218,14 +1218,15 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
         ``rollout_correlation`` adds the prefix without any capture, e.g. so a model server can route by rollout.
         Training capture requires ``token_id_capture.enabled``.
-        It also requires the static agent flag or run-level ``all_agents``, and a rollout that does not skip capture.
+        It also requires the static agent flag or run-level ``all_agents``.
+        A rollout that skips capture keeps its correlation and drops only the training tag.
         Partial-rollout checkpointing also needs it for this agent.
         Missing global configuration disables correlation.
         """
         return (
             self._model_call_capture_enabled()
             or self._rollout_correlation_enabled()
-            or self._token_id_capture_enabled()
+            or self._token_id_capture_configured()
             # Checkpointing keys a legacy /run by its rollout, so its self-dispatch must carry the rollout.
             or self._checkpoint_participant is not None
             or self._restart_only is not None
@@ -1251,8 +1252,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         The agent must opt in (or the run sets ``all_agents``), and the request's rollout must not skip capture:
         a ``/run`` with ``_ng_skip_token_capture: true``, or an activation on a rollout path without the training tag.
         """
-        if current_rollout_skips_token_capture():
-            return False
+        return not current_rollout_skips_token_capture() and self._token_id_capture_configured()
+
+    def _token_id_capture_configured(self) -> bool:
+        """Whether the run's configuration has this agent capture training tokens, whatever the request."""
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return False
