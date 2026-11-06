@@ -883,3 +883,9 @@ class TestApp:
         assert result.step_environment_results == [{"py_a": False, "py_b": True}, {"py_a": False, "py_b": False}]
         assert [o["environment"] for o in result.step_outputs] == ["py_b", "py_b"]
         assert [o["passed"] for o in result.step_outputs] == [True, False]
+
+
+def test_a_saved_answer_can_be_graded_again():
+    from resources_servers.scicode.app import ScicodeResourcesServerConfig
+
+    assert ScicodeResourcesServerConfig.REVERIFY_MODE.value == "stateless"

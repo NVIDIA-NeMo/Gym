@@ -885,6 +885,6 @@ async def test_run_masks_the_row_when_verify_fails_and_keeps_the_answer():
     with patch.object(app, "raise_for_status", _raise_for_status), RequestFailureLog.capture() as log:
         result = await agent.run(_FakeRequest(), _run_request(problem_id="1", n_steps=1))
 
-    assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, True, "agent_route_failed")
+    assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, True, "judge_failed")
     assert set(result["solutions"]) == {"1.1"}
     assert "verifier_error" in {event.failure_kind for event in log.report.events.values()}

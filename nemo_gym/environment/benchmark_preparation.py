@@ -84,10 +84,15 @@ class PreparationFailedError(RuntimeError):
     failure_kind = ENVIRONMENT_PREPARE_FAILED
 
     def __init__(self, module: str, action: str, reason: str) -> None:
+        self._init_args = (module, action, reason)
         super().__init__(
             f"EVAL STOPPED: data preparation failed for {module} ({action}: {reason}); another attempt cannot "
             "succeed until the preparation is fixed. Fix it, then continue with gym eval resubmit --recover."
         )
+
+    def __reduce__(self):
+        # RuntimeError pickles only its message, so a preparation worker's error could not be rebuilt in the parent.
+        return (type(self), self._init_args)
 
 
 def _multiprocess_benchmark_prepare_fn(args):
@@ -401,7 +406,7 @@ def prepare_datasets(datasets: Sequence[BenchmarkConfig], prepare_benchmark_conf
         raise ConfigError(errors_to_print)
 
     # Prepare after all validations pass
-    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:  # pragma: no cover
+    if prepare_benchmark_config.num_prepare_benchmark_processes > 1:
         with Pool(processes=prepare_benchmark_config.num_prepare_benchmark_processes) as pool:
             results = pool.imap_unordered(_multiprocess_benchmark_prepare_fn, validated)
             list(tqdm(results, total=len(validated)))

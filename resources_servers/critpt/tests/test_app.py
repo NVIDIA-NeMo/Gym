@@ -1041,3 +1041,9 @@ class TestGraderFailureTyping:
             _stop_patches(patches)
         for r in results:
             assert r.reward == 0.25 and r.timeout_rate == 0.5
+
+
+def test_a_saved_answer_can_be_graded_again():
+    from resources_servers.critpt.app import CritPtResourcesServerConfig
+
+    assert CritPtResourcesServerConfig.REVERIFY_MODE.value == "stateless"

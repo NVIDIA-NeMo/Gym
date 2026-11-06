@@ -429,3 +429,56 @@ def test_an_in_process_preparer_that_raises_is_a_typed_terminal_stop(tmp_path) -
 
     assert "ValueError: bad row" in str(stopped.value)
     assert stopped.value.stop_exit_code == 76
+
+
+def test_a_preparation_stop_survives_pickling_across_a_worker_boundary() -> None:
+    import pickle
+
+    original = benchmark_preparation.PreparationFailedError("benchmarks.example.prepare", "prepare", "KeyError: 'foo'")
+
+    restored = pickle.loads(pickle.dumps(original))
+
+    assert type(restored) is benchmark_preparation.PreparationFailedError
+    assert str(restored) == str(original)
+    assert (restored.failure_kind, restored.stop_exit_code) == ("environment_prepare_failed", 76)
+
+
+def test_a_failing_worker_in_the_parallel_pool_stops_with_76_instead_of_hanging(tmp_path, monkeypatch) -> None:
+    import threading
+
+    from nemo_gym.cli.utils import exit_cleanly_on_config_error
+    from nemo_gym.config.config_types import BenchmarkDatasetConfig
+
+    benchmarks = []
+    for name in ("first", "second"):
+        script = tmp_path / f"{name}_prepare.py"
+        script.write_text(
+            """
+def prepare(**kwargs):
+    raise ValueError("bad row")
+"""
+        )
+        dataset = BenchmarkDatasetConfig(
+            name=name, type="benchmark", jsonl_fpath=tmp_path / f"{name}.jsonl", prepare_script=script
+        )
+        benchmarks.append(SimpleNamespace(name=name, dataset=dataset))
+    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(tmp_path / "driver_failure"))
+    settings = benchmark_preparation.PrepareBenchmarkConfig(uv_venv_dir=tmp_path, num_prepare_benchmark_processes=2)
+    outcome: dict = {}
+
+    @exit_cleanly_on_config_error
+    def prepare() -> None:
+        benchmark_preparation.prepare_datasets(benchmarks, settings)
+
+    def run() -> None:
+        try:
+            prepare()
+        except SystemExit as exited:
+            outcome["code"] = exited.code
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=60)
+
+    assert not worker.is_alive(), "the parent waits forever for a result the pool could not deliver"
+    assert outcome["code"] == 76

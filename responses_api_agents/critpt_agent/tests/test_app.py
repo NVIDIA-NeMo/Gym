@@ -404,6 +404,6 @@ async def test_run_masks_the_row_when_verify_fails_and_keeps_the_answer():
     with RequestFailureLog.capture() as log:
         result = await server.run(MagicMock(cookies={}), _make_run_body())
 
-    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "agent_route_failed")
+    assert (result.reward, result.mask_sample, result.failure_kind) == (0.0, True, "judge_failed")
     assert result.response.output  # the generated answer survives for a later grade
     assert {"agent_route_failed", "verifier_error"} <= {event.failure_kind for event in log.report.events.values()}

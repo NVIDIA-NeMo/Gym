@@ -22,7 +22,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, ClassVar, Dict, List, Optional, Union
 
 from fastapi import FastAPI
 from pydantic import Field, field_validator
@@ -35,6 +35,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.verification import judge_provider_stopped, reraise_judge_errors
@@ -225,6 +226,10 @@ class CritPtAccessDenied(RuntimeError):
 
 
 class CritPtResourcesServerConfig(BaseResourcesServerConfig):
+    # Grading depends only on the request; a replay joins a batch like any submission, and a batch that cannot fill
+    # fails closed as a typed, re-gradeable mask, so grading a saved answer again is safe.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     api_url: str = "https://artificialanalysis.ai/api/v2/critpt/evaluate"
     # One AA key, or a list of keys for in-process rotation on HTTP 429.
     api_key: Union[str, List[str]]
