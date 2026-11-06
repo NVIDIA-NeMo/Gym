@@ -206,11 +206,13 @@ hle_tools:
 | `max_page_chars` | 1,000,000 | a fetched page longer than this (the provider's Markdown, before anything is removed or cut) is refused unread as `oversized_page` |
 | `max_cached_pages`, `max_cached_page_chars` | 128, 500,000 | the fetched-page cache: at most this many pages, and a page longer than this is served but not cached |
 | `max_http_attempts`, `http_timeout_s` | 3, 60 | the retry budget per call and the timeout per attempt |
+| `tavily_base_url` | `https://api.tavily.com` | the Tavily API base URL, for a proxy or a stub |
 
 Run the server single-worker (leave `num_workers` unset): seeded questions, session bindings and the page
 cache live in the process, so with `num_workers > 1` a rollout's seed and its searches could reach different
 workers. The server says so through `multiple_workers_unsupported_reason`, so a launch with `num_workers > 1`
-is refused before uvicorn starts, dry runs included (`hle_tools needs num_workers=1: ...`).
+is refused before uvicorn starts, dry runs included (`<instance name> needs num_workers=1: ...`, for the
+Diamond preset `hle_tools needs num_workers=1: ...`).
 
 `verify` is a stub: this is a tool server. A preset pairs it through the agent's `tool_servers` and
 grades the rollout with its own `resources_server` (for HLE-Diamond, the equivalence judge). Should
@@ -219,8 +221,8 @@ grades the rollout with its own `resources_server` (for HLE-Diamond, the equival
 ## Use in a preset
 
 `benchmarks/hle_diamond/opencode_hle_tools.yaml` runs the OpenCode harness with this server as its only
-tool server. The checks below need `TAVILY_API_KEY` in the environment of the process that starts the
-servers and are described in that benchmark's README.
+tool server. Live runs of that preset need `TAVILY_API_KEY` in the environment of the process that starts
+the servers; see that benchmark's README.
 
 ## Example data
 
