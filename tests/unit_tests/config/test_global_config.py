@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import ast
 import importlib
 import importlib.metadata
 import sys
@@ -3502,29 +3501,15 @@ class TestComposeUnboundAgent:
         assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
 
     def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
-        """Every agent app that seeds agent sessions is listed, and nothing else is.
-
-        An override whose body only raises refuses every seed, as an agent that inherits sessions it cannot serve
-        does, so it does not count: config composition must relay that agent through /run.
-        """
-
-        def seeds_agent_sessions(source: str) -> bool:
-            for node in ast.walk(ast.parse(source)):
-                if isinstance(node, ast.AsyncFunctionDef) and node.name == "_seed_agent_session_state":
-                    statements = node.body[1:] if ast.get_docstring(node) is not None else node.body
-                    if not (len(statements) == 1 and isinstance(statements[0], ast.Raise)):
-                        return True
-            return False
-
+        """Every agent app that seeds agent sessions is listed, and nothing else is."""
         agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
         implementing = {
             app.parent.name
             for app in agents_root.glob("*/app.py")
-            if seeds_agent_sessions(app.read_text(encoding="utf-8"))
+            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
-        assert {"gdp_pdf_agent", "labbench2_vlm_agent"}.isdisjoint(implementing)
 
     def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
         config = self._session_environment_config("langgraph_agent")

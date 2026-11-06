@@ -104,7 +104,7 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
 class LabbenchVLMAgent(SimpleAgent):
     config: LabbenchVLMAgentConfig
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NoReturn:
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> NoReturn:
         # run() embeds the images named by the row's verifier_metadata.media_dir. An agent session receives no task
         # data, so the inherited Simple Agent session would ask the model about images it never sees.
         raise AgentSeedRejectedError(

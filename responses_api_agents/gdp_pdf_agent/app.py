@@ -479,7 +479,7 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
 class GdpPdfAgent(SimpleAgent):
     config: GdpPdfAgentConfig
 
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NoReturn:
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> NoReturn:
         # run() builds the model input from the row's document manifest. An agent session receives no task data,
         # so the inherited Simple Agent session would answer from the bare prompt without the document.
         raise AgentSeedRejectedError(
