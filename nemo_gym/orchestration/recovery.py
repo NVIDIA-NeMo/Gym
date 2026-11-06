@@ -557,6 +557,7 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
     )
     default_action: OutcomeAction = OutcomeAction.RETRY
     classification: FailureClassificationConfig = Field(default_factory=FailureClassificationConfig)
+    saved_answer_default_action: Literal[OutcomeAction.VERIFY, OutcomeAction.FAIL] = OutcomeAction.VERIFY
 
     supported_actions = frozenset({OutcomeAction.VERIFY, OutcomeAction.RETRY, OutcomeAction.FAIL})
 
@@ -664,7 +665,12 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
 
 
 def _recovery_action(
-    row: Mapping[str, Any], kind: str, policy: RecoveryOutcomePolicyConfig, *, http_status: int | None
+    row: Mapping[str, Any],
+    kind: str,
+    policy: RecoveryOutcomePolicyConfig,
+    *,
+    http_status: int | None,
+    saved_answer: bool = False,
 ) -> OutcomeAction:
     """Apply recovery rules to shared classification without changing the selected evidence or budgets."""
     classification = _applied_class(row)
@@ -672,6 +678,8 @@ def _recovery_action(
         classification = classify_failure(
             failure_kind=kind, stage=_policy_stage(row), http_status=http_status, config=policy.classification
         )
+    if saved_answer:
+        policy = policy.model_copy(update={"default_action": policy.saved_answer_default_action})
     return choose_action(failure_kind=kind, http_status=http_status, failure_class=classification, config=policy)
 
 
@@ -697,13 +705,15 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
     return has_saved_generation({"response": answer, **stage})
 
 
-def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
+def _judge_state(
+    row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig", *, fallback_kind: str = JUDGE_FAILED
+) -> "IdentityState":
     """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
     ungraded; any other action would run the policy again, so it stops."""
-    if row.get(TERMINAL) is True:
+    if row.get(TERMINAL) is True or row.get("failure_outcome_action") == OutcomeAction.FAIL:
         return IdentityState.TERMINAL
     kind, status = _policy_evidence(row)
-    action = _recovery_action(row, kind or JUDGE_FAILED, policy, http_status=status)
+    action = _recovery_action(row, kind or fallback_kind, policy, http_status=status, saved_answer=True)
     if action == OutcomeAction.VERIFY:
         return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
     return IdentityState.TERMINAL if action == OutcomeAction.FAIL else IdentityState.UNKNOWN
@@ -973,12 +983,20 @@ def decide_recovery(
                 # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
                 # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
                 fact = managed[identity]
+                # This is existing recovery-derived evidence, not a new producer failure kind.
+                # Keep clean agent_timeout overrides separate; class/default rules configure this context.
+                action = _recovery_action(row, AGENT_TIMEOUT_INFRASTRUCTURE, policy, http_status=None)
+                if action == OutcomeAction.FAIL:
+                    state = IdentityState.TERMINAL
+                    policy_stopped = True
+                elif action == OutcomeAction.RETRY:
+                    state = IdentityState.RETRYABLE if fact.attempts < fact.max_attempts else IdentityState.EXHAUSTED
+                else:
+                    state = IdentityState.UNKNOWN
                 evidence.append(
                     IdentityEvidence(
                         identity=identity,
-                        state=IdentityState.RETRYABLE
-                        if fact.attempts < fact.max_attempts
-                        else IdentityState.EXHAUSTED,
+                        state=state,
                         failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE,
                         attempts=fact.attempts,
                         max_attempts=fact.max_attempts,
@@ -1007,11 +1025,14 @@ def decide_recovery(
                     continue
                 if reverification_cause(row) is not None:
                     # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
-                    saved_results.add(identity)
+                    state = _judge_state(row, policy)
+                    policy_stopped |= state == IdentityState.TERMINAL
+                    if state == IdentityState.JUDGE_RECOVERABLE:
+                        saved_results.add(identity)
                     evidence.append(
                         IdentityEvidence(
                             identity=identity,
-                            state=IdentityState.JUDGE_RECOVERABLE,
+                            state=state,
                             failure_kind=row.get("failure_kind"),
                             events=_events(row),
                         )
@@ -1096,11 +1117,14 @@ def decide_recovery(
             if not judge and reverification_cause(row) == REVERIFY_JUDGE:
                 # Scored, but its reward is no grade: the judge gave no verdict or the grading did not resolve. Its
                 # saved answer is judged again, never rerun.
-                saved_results.add(identity)
+                state = _judge_state(row, policy, fallback_kind=JUDGE_UNPARSEABLE)
+                policy_stopped |= state == IdentityState.TERMINAL
+                if state == IdentityState.JUDGE_RECOVERABLE:
+                    saved_results.add(identity)
                 evidence.append(
                     IdentityEvidence(
                         identity=identity,
-                        state=IdentityState.JUDGE_RECOVERABLE,
+                        state=state,
                         failure_kind=JUDGE_UNPARSEABLE,
                         events=_events(row),
                         reason=SCORED_UNPARSEABLE_REASON,
