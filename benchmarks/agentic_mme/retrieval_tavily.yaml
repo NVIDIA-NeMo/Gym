@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Overlay on benchmarks/agentic_mme/config.yaml: live web search through tavily.
+# Key read from the environment (TAVILY_API_KEY); fetch_webpage uses Jina Reader (JINA_API_KEY if set; anonymous otherwise is rate-limited).
+# tavily has no reverse image search, so google_lens_search is not offered.
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      retrieval:
+        mode: live
+        search_provider: tavily
+        tavily_api_key: ${oc.env:TAVILY_API_KEY,""}
+        jina_api_key: ${oc.env:JINA_API_KEY,""}

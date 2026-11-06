@@ -1,0 +1,77 @@
+# Agentic-MME benchmark
+
+Multimodal agentic reasoning: the policy answers image questions using atomic image tools and, with a
+retrieval overlay, web search. This benchmark reports **task-only accuracy** (Track B), not the paper's
+process (S/V) scores. Components: resources server [`agentic_mme`](../../resources_servers/agentic_mme/README.md)
+(scoring) and agent [`agentic_mme_agent`](../../responses_api_agents/agentic_mme_agent/README.md) (harness, tools,
+retrieval).
+
+## Provenance
+
+| | |
+|---|---|
+| Paper | [arXiv:2604.03016](https://arxiv.org/abs/2604.03016) |
+| Data | [Crystal1047/Agentic-MME](https://huggingface.co/datasets/Crystal1047/Agentic-MME) at revision `b9ea9d3f68ff896d83fec666b6143da594c054a8` |
+| Reference harness | [ChoS3nE11ven/Agentic-MME](https://github.com/ChoS3nE11ven/Agentic-MME/tree/5e5dfbdc7b40b53dea17d5ce754c14034acb185b) (interface reference only; nothing vendored) |
+| Split | The release has one split, named `train`; it is an evaluation set. Do not train on it. |
+| Tasks | 418, all tasks in the release; no filtering or synthetic data |
+| Licenses | Dataset: Apache-2.0 (dataset card). Gym code: Apache-2.0. The reference harness declares no code license, so the tools are an independent implementation. |
+
+## Task contract
+
+`prepare.py` converts each task into one row:
+
+- **Model-visible input:** a fixed system prompt (tool conventions and the `<answer>...</answer>` format) and a
+  user message with the task images, labelled `Image 0`, `Image 1`, ..., followed by the question. Images are embedded
+  as data URLs and downscaled to at most 2048×2048 pixels, as in the reference harness.
+- **Hidden from the model:** task ID, level, domain, the gold answer and its match type, and process checkpoints, all
+  in `verifier_metadata`.
+- **Tools:** 14 image tools (crop, rotate, flip, resize, enhance, grayscale, autocontrast, blur, sharpen, denoise,
+  edge_detect, invert, equalize, threshold). Each successful operation appends an image the model sees in its next
+  turn. Retrieval (google_search, google_lens_search, fetch_webpage) is off in `config.yaml` and enabled by the
+  `retrieval_*.yaml` overlays, which need provider keys.
+- **Prompting:** prompts are prepared (`prompt_source: prepared`); the harness appends tool results and new images
+  to the history and never rewrites earlier turns.
+
+## Scoring and run conditions
+
+- **Reward:** 1 if the final answer is correct, else 0. Higher is better; the aggregate metric is `mean/reward`.
+- **Judge:** `config.yaml` binds an LLM correctness judge (default `gpt-4o-mini` through an OpenAI-compatible
+  endpoint; override with `agentic_mme_judge_base_url` and `agentic_mme_judge_model_name`). The judge sees the
+  question text, the gold answer, and the model's final text, not the images. The released evaluator's string match
+  (`exact` / `contains` / `numeric`) is reported alongside as `string_match_reward`.
+- **Answers:** only the terminal assistant message counts. A truncated response or a model-call failure (HTTP error,
+  timeout, unparseable response) scores 0 and is recorded in `failure_reason` / `policy_error`; no rollout is dropped.
+- **Budgets:** `config.yaml` sets no round or tool-call limit (`max_rounds: null`, `max_tool_calls: null`): the
+  episode ends when the model answers without a tool call or when a model call fails. Set both to restore the
+  component default of 15.
+- **Sampling:** taken from the run (`responses_create_params`); the agent sets no temperature. One repeat by default.
+
+## Prepare and run
+
+```bash
+gym eval prepare --benchmark agentic_mme   # or AGENTIC_MME_DATASET_ROOT=<local snapshot>
+gym env validate agentic_mme
+gym env test agentic_mme
+```
+
+Run against an OpenAI-compatible policy endpoint (the judge reads `OPENAI_API_KEY`):
+
+```bash
+gym eval run --model-type vllm_model \
+    "+config_paths=[benchmarks/agentic_mme/config.yaml]" \
+    +split=benchmark +output_jsonl_fpath=results/agentic_mme.jsonl \
+    +policy_base_url=<url> "+policy_api_key=\${oc.env:POLICY_API_KEY}" +policy_model_name=<model> \
+    +responses_create_params.max_output_tokens=32768
+```
+
+To add web retrieval, append one overlay to `config_paths`, for example
+`benchmarks/agentic_mme/retrieval_serpapi.yaml`; see the agent README for providers, the shared cache, and the
+benchmark-contamination guard.
+
+## Limitations
+
+- Task-only accuracy: process (S/V) scoring is not implemented, so results are not comparable to the paper's Track A.
+- Judge-based reward: scores depend on the judge model; `string_match_reward` gives a judge-free reference.
+- Retrieval results change over time; use `retrieval.mode: replay` or the shared cache for repeatable runs.
+- `experimental: true`: no published result has been reproduced with this integration yet.

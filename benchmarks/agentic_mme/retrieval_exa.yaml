@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Overlay on benchmarks/agentic_mme/config.yaml: live web search through exa.
+# Key read from the environment (EXA_API_KEY); fetch_webpage reads pages through Exa /contents too, so Exa is the only text provider (no Jina).
+# exa has no reverse image search, so google_lens_search is not offered.
+agentic_mme_agent:
+  responses_api_agents:
+    agentic_mme_agent:
+      retrieval:
+        mode: live
+        search_provider: exa
+        fetch_provider: exa
+        exa_api_key: ${oc.env:EXA_API_KEY,""}
