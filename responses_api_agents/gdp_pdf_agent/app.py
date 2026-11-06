@@ -54,6 +54,7 @@ from PIL import Image, ImageDraw
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents.agent_outcome import policy_timeout_failure
 from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import (
@@ -566,24 +567,16 @@ class GdpPdfAgent(SimpleAgent):
                     limit, image_cap = _input_limit(error)
                     if limit is not None and delivery.adapt(limit, image_cap, min_dpi=self.config.min_dpi):
                         continue
-                    if error.status in (401, 403, 429):
-                        # Systemic (auth/rate-limit), not per-document -- every other row would
-                        # fail identically, so surface it loudly rather than silently zeroing
-                        # the whole run one row at a time.
+                    if limit is None:
+                        # Not a limit of the document: a policy call that failed is the evaluation's fault, not a model
+                        # zero. A confirmed response timeout is typed as the policy's; any other failure (5xx, 429,
+                        # 401/403, transport) leaves with its typed model failure, so the agent boundary masks the
+                        # row and Collection retries it within its budget.
+                        timeout = policy_timeout_failure(error)
+                        if timeout is not None:
+                            raise timeout from error
                         raise
-                    terminal_limit = limit or f"unclassified_http_{error.status}"
-                    model_response = _terminal_failure_response(self.config.model_server.name)
-                    break
-                except Exception as error:  # noqa: BLE001
-                    # A rare, per-document failure (e.g. an upstream multimodal-processor bug
-                    # unrelated to input size, observed in vLLM itself: "AssertionError: Expected
-                    # a cached item for mm_hash=..." and "Failed to apply NanoNemotronVLProcessor
-                    # on data=...") must not take the whole evaluation run down over one document.
-                    # Score this row as a zero attempt instead, same as a terminal input-limit.
-                    print(
-                        f"[gdp_pdf_agent] WARNING: unclassified failure on {manifest_relpath}: {error!r}", flush=True
-                    )
-                    terminal_limit = f"unclassified_{type(error).__name__}"
+                    terminal_limit = limit
                     model_response = _terminal_failure_response(self.config.model_server.name)
                     break
                 else:
