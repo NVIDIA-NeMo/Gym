@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List, Tuple
 
 from nemo_gym import _resolve_under_cwd_or_install
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides
 from nemo_gym.eval.comparison.diff import compare_runs
 from nemo_gym.eval.comparison.loading import (
@@ -160,3 +161,6 @@ def run_comparison(config: ComparisonConfig, command: str) -> Tuple[ComparisonRe
     """Build the comparison and write its report artifacts."""
     result = build_comparison_result(config, command)
     return result, write_reports(result, resolve_output_dir(config), config.report_format)
+
+
+__getattr__ = moved_names_getattr(__name__)
