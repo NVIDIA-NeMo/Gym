@@ -420,7 +420,7 @@ def _producer_entry(*, offset: float, with_perf: bool, scored_repeats: tuple[int
 
 
 @pytest.mark.parametrize("with_perf", [False, True])
-@pytest.mark.parametrize("scored_repeats", [(0, 1, 2), (0, 1)])
+@pytest.mark.parametrize("scored_repeats", [(0, 1, 2), (0, 2)])
 def test_producer_token_accounting_does_not_change_pooled_quality_samples(
     tmp_path: Path, with_perf: bool, scored_repeats: tuple[int, ...]
 ) -> None:
@@ -454,6 +454,19 @@ def test_producer_token_accounting_does_not_change_pooled_quality_samples(
     if with_perf:
         tokens = next(row for row in comparison.metrics if row.metric == "mean_completion_tokens")
         assert tokens.baseline.value == tokens.candidates[0].value == 20
+        token_values = [10, 20, 30] * 2
+        token_se = sqrt(variance(token_values) / len(token_values))
+        assert tokens.baseline.se_across_repeats == pytest.approx(token_se)
+        assert tokens.candidates[0].se_across_repeats == pytest.approx(token_se)
+        if len(scored_repeats) < 3:
+            for path in (*config.baseline_rollouts_jsonl_fpaths, *config.pooled_candidate_rollouts_jsonl_fpaths):
+                assert any(
+                    str(aggregate_metrics_path_for(Path(path))) in note
+                    and "agent 'agent'" in note
+                    and "local repeats [1]" in note
+                    and "excluded from quality" in note
+                    for note in comparison.notes
+                )
     assert all(path.read_bytes() == contents for path, contents in source_bytes.items())
 
 

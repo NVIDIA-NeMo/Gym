@@ -250,6 +250,14 @@ def pool_loaded_runs(runs: Sequence[LoadedRun], *, source_labels: Sequence[str])
             "available token accounting is retained. Quality confidence intervals describe the scored observations "
             "and may be affected by incomplete task coverage."
         )
+    if quality_names:
+        for run, label, source_rows in zip(runs, source_labels, rows_by_source, strict=True):
+            skipped = sorted(row[ROLLOUT_INDEX_KEY_NAME] for row in source_rows if _token_only(row))
+            if skipped:
+                notes.append(
+                    f"Source '{label}' for agent '{run.agent_name}': local repeats {skipped} contain only "
+                    "token accounting and are excluded from quality estimates."
+                )
     if omitted:
         notes.append(
             "Whole-run metrics without complete repeat-level samples were omitted from the pooled side: "
