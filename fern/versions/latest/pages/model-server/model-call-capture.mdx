@@ -148,7 +148,8 @@ ordinary rollout output for framework reconstruction instead of Gym's single-cha
 | Responses history item kinds | `message`, `reasoning`, `function_call`, and `function_call_output`. |
 | Other Responses history items, including `web_search_call`, `custom_tool_call`, `custom_tool_call_output`, and opaque `compaction` | Refused with HTTP 422 before capture intent. |
 | Chat Completions with explicit history | Supported, including buffered SSE; one choice. Omitted or null `n` means one. |
-| `/v1/messages` | Refused with HTTP 422. |
+| Messages with explicit history | Supported, including buffered SSE. |
+| Messages content block kinds | `text`, `image`, `tool_use`, `tool_result`, `thinking`, and `redacted_thinking`, converted to Responses history items. Other block kinds, such as `server_tool_use`, are unsupported. |
 | Responses `previous_response_id` or `conversation` | Refused with HTTP 422; full input must be visible. |
 | Chat `n` other than null or 1 | Refused with HTTP 422. |
 

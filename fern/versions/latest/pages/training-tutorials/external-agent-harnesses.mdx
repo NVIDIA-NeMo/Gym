@@ -410,7 +410,7 @@ For compaction-aware training with a compatible framework worker, enable
 See [Source-history continuity and context compaction](/main/model-server/model-call-capture#source-history-continuity-and-context-compaction)
 for configuration prerequisites, supported APIs, measurement, and admission closure.
 
-The harness keeps using rollout-correlated Responses or Chat requests with explicit history.
+The harness keeps using rollout-correlated Responses, Chat, or Messages requests with explicit history.
 It owns compaction of the next input and needs no special parent header or segment definition.
 Return the complete accepted execution history or existing call references, including actions
 before compaction. The shortened next input alone is not that history. NeMo RL joins the returned

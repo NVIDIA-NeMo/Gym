@@ -15,11 +15,12 @@ from nemo_gym.models.token_capture.staging.records import CompletionStatus, Outp
 
 
 def completion_replay_items(response: dict[str, Any]) -> list[dict]:
-    """Represent served Messages content exactly as its next converted request.
+    """Return the served completion as the request items its echo converts to at ingress.
 
-    Messages ingress resolves source continuity after the shared Anthropic
-    converter. Reuse that converter for the echoed assistant turn as well;
-    generic response evidence uses a different text/tool block representation.
+    Messages ingress uses the shared Anthropic converter, so the served assistant
+    turn goes through the same converter. Other dialects use token-free Responses
+    output items. Replay digests match the next request's prefix when the client
+    echoes the served turn unchanged, apart from fields ignored by the converter.
     """
     if response.get("type") == "message" and response.get("role") == "assistant":
         params = AnthropicConverter().anthropic_request_to_responses(
@@ -31,7 +32,7 @@ def completion_replay_items(response: dict[str, Any]) -> list[dict]:
         )
         assert isinstance(params.input, list)
         return [item.model_dump(mode="json") for item in params.input]
-    return response_to_output_items(response)
+    return strip_token_fields(response_to_output_items(response))[0]
 
 
 def completion_items(response: dict[str, Any]) -> list[dict]:

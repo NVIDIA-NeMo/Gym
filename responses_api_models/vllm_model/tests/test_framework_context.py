@@ -1571,16 +1571,23 @@ def test_retired_capture_refuses_dispatch_and_measurement(monkeypatch, tmp_path,
 
 @pytest.mark.parametrize("tool", [False, True])
 @pytest.mark.parametrize("stream", [False, True])
-def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatch, tmp_path, tool, stream):
-    harness = make_capture_harness(monkeypatch, tmp_path, reasoning=False)
+@pytest.mark.parametrize("reasoning", [False, True])
+def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatch, tmp_path, tool, stream, reasoning):
+    harness = make_capture_harness(monkeypatch, tmp_path, reasoning=reasoning)
     worker = NeMoGymAsyncOpenAI.create_chat_completion
 
     async def tool_worker(client, **body):
         payload = await worker(client, **body)
         if tool:
+            reasoning_fields = {
+                key: payload["choices"][0]["message"][key]
+                for key in ("reasoning_content", "reasoning")
+                if key in payload["choices"][0]["message"]
+            }
             payload["choices"][0].update(
                 finish_reason="tool_calls",
                 message={
+                    **reasoning_fields,
                     "role": "assistant",
                     "content": "delegating",
                     "tool_calls": [
@@ -1625,10 +1632,14 @@ def test_messages_replay_keeps_continuations_and_roots_edited_history(monkeypatc
     }
     post(continued)
     manifest = harness.manifest("attempt")
+    if reasoning:
+        assert any(block["type"] == "thinking" for block in first["content"])
     assert harness.worker_calls[1][0].mode == "candidate"
+    assert harness.worker_calls[1][0].requires_empty_tool_content_equivalence is False
     assert harness.worker_calls[1][0].parent_call_id == manifest.records[0].model_call_id
     post({**continued, "system": "rewritten context"})
     assert harness.worker_calls[2][0].mode == "text"
+    assert harness.worker_calls[2][0].root_reason == "no_prefix_match"
     final = harness.manifest("attempt")
     assert len(final.records) == 3
     assert not final.failures and not final.pending_call_ids

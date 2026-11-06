@@ -36,7 +36,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
@@ -852,18 +852,6 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
-        if (
-            capture_wanted
-            and self._parent_resolution_mode == "source_history"
-            and dialect is not None
-            and dialect not in ("responses", "chat", "messages")
-        ):
-            await Response(
-                content='{"detail":"Source-history capture requires Responses, Chat, or Messages"}',
-                status_code=422,
-                media_type="application/json",
-            )(scope, receive, send)
-            return
         if token_capture_requested and dialect is None and token_sink is not None:
             marked_incomplete = False
             response_started = False
