@@ -405,7 +405,9 @@ class SwebenchResourcesServer(SandboxSessionResourcesServer):
     def _make_test_spec(self, body: SWEBenchInstanceRequest) -> TestSpec:
         test_spec = make_test_spec(
             # This accepts a SWEbenchInstance which is identically our body.
-            body.model_dump(),
+            # SWE-bench's JavaScript harness reads image_assets whenever the key is present,
+            # so a null one must not reach it.
+            body.model_dump(exclude={"image_assets"} if body.image_assets is None else None),
             namespace="swebench",  # Dockerhub namespace
             instance_image_tag=LATEST,
             env_image_tag=LATEST,
