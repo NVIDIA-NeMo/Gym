@@ -22,6 +22,12 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
+from nemo_gym.config.keys import (
+    ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+)
 from nemo_gym.core.episode_types import EpisodeId
 
 
@@ -68,13 +74,6 @@ def maybe_rollout_id_from_run_body(body: BaseModel | Mapping[str, Any] | None) -
     Reused task and rollout indices produce a repeated capture key.
     Use an explicit id when numbering restarts across dispatches.
     """
-    from nemo_gym.config.keys import (
-        ATTEMPT_INDEX_KEY_NAME,
-        ROLLOUT_ID_KEY_NAME,
-        ROLLOUT_INDEX_KEY_NAME,
-        TASK_INDEX_KEY_NAME,
-    )
-
     if not isinstance(body, (BaseModel, Mapping)):
         return None
 
