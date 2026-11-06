@@ -341,6 +341,14 @@ class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
         default_factory=list,
         description="In sandbox mode, networks (CIDR) besides this node whose callers reach every route",
     )
+    close_tools_on_task_end: bool = Field(
+        default=False,
+        description=(
+            "Refuse a tool call on any surface (409) once a call has returned with the episode's task ended (GET "
+            "/task_state), so the calls a turn makes after the one that ended it change nothing; the Environment "
+            "Server that ends episodes there sets it"
+        ),
+    )
 
 
 class OfficeEnvSeedSessionRequest(BaseSeedSessionRequest):
@@ -370,6 +378,12 @@ class OfficeEnvVerifyRequest(BaseVerifyRequest):
 
 class OfficeEnvVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
+
+
+class OfficeEnvTaskState(BaseModel):
+    """``GET /task_state``: whether the episode's task has ended (``complete_task`` succeeded, either status)."""
+
+    task_ended: bool
 
 
 class OfficeEnvLengthPenaltyVerifyResponse(BaseMultiRewardVerifyResponse):
@@ -1629,6 +1643,9 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     # Episodes by Gym's session ID, which an Environment Server's seed sets to its resources_session_id.
     service: EpisodeService = Field(default_factory=EpisodeService)
     _episodes: dict[str, _Episode] = PrivateAttr(default_factory=dict)
+    # Whether each session's task had ended when its last tool call returned (GET /task_state,
+    # close_tools_on_task_end). Published once a whole call is over, so no read sees a state the same call reverses.
+    _task_ends: dict[str, bool] = PrivateAttr(default_factory=dict)
     _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
     # Sandbox mode only: episodes by file API token, a lock per episode for the awaits on its sandbox (kept while a
     # request holds or awaits it, so a closed episode, or an ID never seeded, leaves none), whether shutdown has
@@ -1686,6 +1703,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
         app.get("/officeenv/apps")(self.list_apps)
+        app.get("/task_state")(self.task_state)
         if self.config.sandbox_provider is not None:
             self._setup_sandbox_routes(app)
         app.post("/{tool_name}")(self.tool_call)  # registered last: fixed routes win
@@ -2094,6 +2112,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         """Free a session's world without grading it."""
         self.service.store.sessions.pop(session_id, None)
         self.service.notes.pop(session_id, None)
+        self._task_ends.pop(session_id, None)
 
     async def tool_call(self, request: Request, tool_name: str) -> Response:
         # app-level errors are tool outputs the model sees (200); only a body that is no JSON
@@ -2117,6 +2136,24 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             )
         return Response(content=text, media_type="application/json", status_code=reply.status)
 
+    async def task_state(self, request: Request) -> OfficeEnvTaskState:
+        """Whether the session's task has ended, for the Environment Server that ends its episode there."""
+        self._require_gym_caller(request)
+        session_id = request.session.get(SESSION_ID_KEY)
+        if session_id is None or self.service.store.get(session_id) is None:
+            raise ResourcesSessionLostError("This session has ended.")
+        return OfficeEnvTaskState(task_ended=self._task_ends.get(session_id, False))
+
+    def _task_ended(self, session_id: str) -> bool:
+        """Whether the episode's task has ended: the user app's task row left ``pending`` (``complete_task``
+        succeeded, either status). The row is read rather than the tool name, because every exposure reaches the op
+        its own way (``user_complete_task``, ``api_call``, ``run_command``, ``call_tool``)."""
+        session = self.service.store.get(session_id)
+        if session is None or "user" not in session.apps:
+            return False
+        rows = session.world.collection("user", "tasks").rows.values()
+        return any(row.get("status", "pending") != "pending" for row in rows)
+
     @staticmethod
     def _require_open(episode: _Episode | None) -> None:
         """Refuse a call of an episode whose verification has started, from which point its tools are closed."""
@@ -2131,18 +2168,25 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         with the workspace files it attaches read from the sandbox before it (``_read_attachments``) and the files its
         downloads saved written there after it (``_save_downloads``). Verification stops the sandbox under the same
         lock: a call under way when verification begins finishes first, and one that comes later is refused. A call
-        that raises saves nothing."""
+        that raises saves nothing. The task state the call leaves is published once the whole call is over
+        (``_task_ends``), and with ``close_tools_on_task_end`` a call after a published end is refused."""
         async with self._locks.setdefault(session_id, asyncio.Lock()):
-            self._require_open(episode)
-            attached = await self._read_attachments(session_id, episode, tool_name, body)
-            self._require_open(episode)  # verification may have begun while the call's attachments were read
             try:
-                reply = self._attaching(episode, attached, call)
-            except Exception:
-                if episode is not None:
-                    episode.saves.clear()
-                raise
-            await self._save_downloads(session_id, episode)
+                self._require_open(episode)
+                if self.config.close_tools_on_task_end and self._task_ends.get(session_id, False):
+                    raise HTTPException(status_code=409, detail="The task has ended: its tools are closed")
+                attached = await self._read_attachments(session_id, episode, tool_name, body)
+                self._require_open(episode)  # verification may have begun while the call's attachments were read
+                try:
+                    reply = self._attaching(episode, attached, call)
+                except Exception:
+                    if episode is not None:
+                        episode.saves.clear()
+                    raise
+                await self._save_downloads(session_id, episode)
+            finally:
+                if self.service.store.get(session_id) is not None:
+                    self._task_ends[session_id] = self._task_ended(session_id)
         return reply
 
     async def _read_attachments(
@@ -2221,6 +2265,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_before_grading(session_id)
         result = self.service.verify(session_id)
+        self._task_ends.pop(session_id, None)  # verification releases the world, and its tools are closed
         episode = self._episodes.get(session_id) if self.config.sandbox_provider is not None else None
         if episode is not None:  # what the sandboxed episode moved through its workspace instead of the conversation
             result = result | episode.usage()

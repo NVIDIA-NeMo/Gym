@@ -30,7 +30,7 @@ from officeenv.apps import available
 from officeenv.artifacts import externalize
 from officeenv.emit import gym_row
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
 from nemo_gym.server_runtime import (
     NEMO_GYM_MCP_SESSION_TOKEN_HEADER,
@@ -196,6 +196,102 @@ def test_every_exposure_reaches_the_apps_through_the_tool_route(client: TestClie
     assert completed.status_code == 200, completed.text
     verified = client.post("/verify", json=dict(row, response=RESPONSE), cookies=seeded.cookies).json()
     assert verified["reward"] == 1.0 and verified["policy_calls"] == 1.0, verified["officeenv_checks"]
+
+
+# The user app beside SPEC's Slack, without its fault: a task the model ends with user_complete_task.
+DONE_SPEC = {**SPEC, "apps": {**SPEC["apps"], "user": {}}, "faults": []}
+
+
+@pytest.mark.parametrize("mode", ["tools", "api_search", "cli", "mcp"])
+def test_the_task_state_says_when_complete_task_ended_the_task(client: TestClient, mode: str) -> None:
+    seeded = client.post("/seed_session", json=gym_row({**DONE_SPEC, "exposure": {"mode": mode}}, PROMPT))
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
+
+    tool, args = _user_op(mode, "complete_task", {"answer": "done"})
+    assert client.post(f"/{tool}", json=args, cookies=seeded.cookies).status_code == 200
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": True}
+
+
+def test_a_task_without_the_user_app_never_ends_before_verification(client: TestClient) -> None:
+    seeded = client.post("/seed_session", json=gym_row(SPEC, PROMPT))
+    client.post("/slack_post_message", json=POST, cookies=seeded.cookies)
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
+
+
+def test_the_task_state_of_a_session_the_server_does_not_hold_is_refused(client: TestClient) -> None:
+    seed = seed_request()
+    seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+    client.post("/close_session", json=close_body(seed), cookies=seeded.cookies)
+    assert client.get("/task_state", cookies=seeded.cookies).status_code == 404
+    assert client.get("/task_state").status_code == 404
+
+
+def test_the_task_state_is_published_when_the_whole_call_is_over() -> None:
+    # A call that ends the task and reopens it before returning (as a requester who wakes on complete_task and asks
+    # one more thing will) never shows the end: neither to a read during the call nor after it, nor to tool closing.
+    server = make_server(close_tools_on_task_end=True)
+    client = TestClient(server.setup_webserver(), cookies=StatelessCookieJar())
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+    (session_id,) = server.service.store.sessions
+    run = server.service.call
+    seen_during: list[bool] = []
+
+    def complete_then_reopen(session: str, tool: str, body: bytes | str) -> Any:
+        reply = run(session, tool, body)
+        assert server._task_ended(session)  # the op itself ended the task ...
+        seen_during.append(_run_now(server.task_state(_request(session))).task_ended)
+        for row in server.service.store.get(session).world.collection("user", "tasks").rows.values():
+            row["status"] = "pending"  # ... and the rest of the call reopens it
+        return reply
+
+    server.service.call = complete_then_reopen
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+    server.service.call = run
+    assert seen_during == [False]
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": False}
+    assert client.post("/slack_post_message", json=POST, cookies=seeded.cookies).json()["ok"] is True
+    assert session_id in server._task_ends
+
+    # the published end, then nothing kept once verification has released the world
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+    assert client.get("/task_state", cookies=seeded.cookies).json() == {"task_ended": True}
+    client.post("/verify", json=dict(gym_row(DONE_SPEC, PROMPT), response=RESPONSE), cookies=seeded.cookies)
+    assert session_id not in server._task_ends
+
+
+def _run_now(coroutine: Any) -> Any:
+    """The result of a handler that awaits nothing, run from inside a call the event loop is already running."""
+    try:
+        coroutine.send(None)
+    except StopIteration as stop:
+        return stop.value
+    raise AssertionError("the handler awaited")
+
+
+def _request(session_id: str) -> Any:
+    """A request from Gym's node whose session names ``session_id``, for calling a handler directly."""
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: session_id}
+    request.client.host = "127.0.0.1"
+    return request
+
+
+@pytest.mark.parametrize("close_tools", [False, True])
+def test_tools_close_once_the_task_has_ended_only_when_configured(close_tools: bool) -> None:
+    client = TestClient(
+        make_server(close_tools_on_task_end=close_tools).setup_webserver(), cookies=StatelessCookieJar()
+    )
+    seeded = client.post("/seed_session", json=gym_row(DONE_SPEC, PROMPT))
+    assert client.post("/slack_post_message", json=POST, cookies=seeded.cookies).json()["ok"] is True
+    assert client.post("/user_complete_task", json={"answer": "done"}, cookies=seeded.cookies).status_code == 200
+
+    after = client.post("/slack_post_message", json=POST, cookies=seeded.cookies)
+    if close_tools:
+        assert after.status_code == 409 and after.json()["detail"] == "The task has ended: its tools are closed"
+    else:
+        assert after.status_code == 200 and after.json()["ok"] is True
+    verified = client.post("/verify", json=dict(gym_row(DONE_SPEC, PROMPT), response=RESPONSE), cookies=seeded.cookies)
+    assert verified.json()["policy_calls"] == (2.0 if close_tools else 3.0)
 
 
 @pytest.mark.parametrize("forbidden", [False, True])

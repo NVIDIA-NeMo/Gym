@@ -137,7 +137,8 @@ An Environment Server (for example `single_agent_turn`) seeds with a `ResourcesS
 whose `task_data` holds the row's fields other than `responses_create_params`. The OfficeEnv
 session takes the request's `resources_session_id`, which the seed's session cookie also names;
 the agent calls the same `POST /<tool_name>` routes with that cookie, and `/verify` grades the
-episode as for an Agent. Seeding the same ID again for the same episode returns the same session,
+episode as for an Agent. `GET /task_state` (`{"task_ended": ...}`) says whether the session's task
+has ended: the user app's task row left `pending`. Seeding the same ID again for the same episode returns the same session,
 and `/close_session` releases a world that verification has not. After a close, a seed of the same
 ID is refused for `session_close_retry_window_seconds`. These seeds carry no tool list, so they
 report no `tool_drift`.
