@@ -91,3 +91,38 @@ def test_mcp_seed_preserves_cookie_arm_validator(body: dict) -> None:
         assert TOKEN_HEADER in typed.json()["resources_tools"]["headers"]
         assert len(server.seeded) == 2
         assert server.seeded[-1] == "session"
+
+
+def _reject_negative(value: object) -> object:
+    if isinstance(value, dict) and value.get("value", 0) < 0:
+        raise ValueError("value must not be negative")
+    return value
+
+
+class NonNegativeSeed(BaseSeedSessionRequest):
+    value: int = 0
+
+
+class DirectlyAnnotatedBodyServer(ValidatedSeedServer):
+    async def seed_session(
+        self, request: Request, body: Annotated[NonNegativeSeed, BeforeValidator(_reject_negative)]
+    ) -> BaseSeedSessionResponse:
+        self.seeded.append(request.session[SESSION_ID_KEY])
+        return BaseSeedSessionResponse()
+
+
+def test_mcp_seed_keeps_a_validator_annotated_directly_on_the_body() -> None:
+    server = DirectlyAnnotatedBodyServer(
+        config=BaseResourcesServerConfig(
+            name="direct", host="127.0.0.1", port=0, entrypoint="app.py", expose_tools_over_mcp=True
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        assert client.post("/seed_session", json={"value": -1}).status_code == 422
+        assert server.seeded == []
+        ok = client.post("/seed_session", json={"value": 1})
+        assert ok.status_code == 200, ok.text
+        assert TOKEN_HEADER in ok.json()["mcp"]["headers"]
