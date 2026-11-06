@@ -8,7 +8,13 @@ import pytest
 
 from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_runtime.base_server import ServerClient
-from resources_servers.agentic_mme.app import AgenticMMEConfig, AgenticMMEServer, AgenticMMEVerifyRequest
+from nemo_gym.verification import exercise_verifier_fixture
+from resources_servers.agentic_mme.app import (
+    VERIFIER_FIXTURE,
+    AgenticMMEConfig,
+    AgenticMMEServer,
+    AgenticMMEVerifyRequest,
+)
 
 
 def response(text: str = "", output: list | None = None) -> NeMoGymResponse:
@@ -236,3 +242,9 @@ async def test_judge_sees_numeric_tolerance(judged_server, monkeypatch, golden, 
         assert shown in seen["user"]
     else:
         assert "Tolerance:" not in seen["user"]
+
+
+async def test_verifier_fixture() -> None:
+    await exercise_verifier_fixture(
+        VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="unknown"
+    )

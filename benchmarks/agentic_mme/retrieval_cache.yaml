@@ -9,10 +9,12 @@
 # runs, with a strict threshold; a fuzzy hit tells the model which query it matched. Set
 # cache_write: false to only read. Rebuild master.db between runs:
 # python -m responses_api_agents.agentic_mme_agent.search_cache <cache dir>
+# AGENTIC_MME_SEARCH_CACHE is required: with no default, a run that lists this overlay but misses the
+# variable fails at configuration time instead of silently sending every query to the provider.
 agentic_mme_agent:
   responses_api_agents:
     agentic_mme_agent:
       retrieval:
-        cache_root: ${oc.env:AGENTIC_MME_SEARCH_CACHE,""}
+        cache_root: ${oc.env:AGENTIC_MME_SEARCH_CACHE}
         cache_fuzzy_threshold: 0
         cache_write: true
