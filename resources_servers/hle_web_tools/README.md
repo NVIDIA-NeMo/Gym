@@ -70,8 +70,10 @@ of `/` collapsed, the fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./
 Beyond the families, the protocol's own refusals:
 
 - **Queries** are refused (each check runs on the query as written and NFKC-folded, with format
-  characters such as zero-width spaces, soft hyphens and word joiners read both as removed and as a
-  space) when they match `url_patterns` or
+  characters such as zero-width spaces, soft hyphens and word joiners, and every other default-ignorable
+  code point such as variation selectors and Hangul fillers, read three ways: all removed, all as a space,
+  and as Unicode word segmentation reads them, where a zero-width space separates words and the others are
+  removed) when they match `url_patterns` or
   `patterns_case_sensitive`, when a `site:`
   operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
   site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; typographic quotes
@@ -84,7 +86,7 @@ Beyond the families, the protocol's own refusals:
   query that contains **8 consecutive words of the question** (`verbatim_span_words`, default 8), where
   words are case-folded maximal runs of letters and digits after that folding and with combining marks
   removed, so punctuation, case, whitespace, underscores, full-width or mathematical letters, zero-width
-  characters and accents do not evade the rule. Letters from another script that look alike (a Cyrillic
+  and other default-ignorable characters read in any of those three ways, and accents do not evade the rule. Letters from another script that look alike (a Cyrillic
   `о` for a Latin `o`) are not folded. A question shorter than the threshold is protected as a whole. The question
   reaches the server through `/seed_session`: an Agent seeds its tool servers with its run request,
   whose extra fields are the task row (`question` for the HLE presets, configurable as

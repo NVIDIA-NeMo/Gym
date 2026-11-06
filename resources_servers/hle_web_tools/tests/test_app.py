@@ -244,6 +244,12 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
         ("how many odd spi\u0301n structures admit a nonvanishing", "question_span"),  # combining mark
         ("how_many_odd_spin_structures_admit_a_nonvanishing", "question_span"),  # underscore-joined
         ("humanity\u00ads last exam answers", "url_patterns"),  # soft hyphen inside a blocked phrase
+        # A zero-width space between words and a soft hyphen inside one, read as word segmentation reads them.
+        ("How\u200bmany odd spin structures admit a no\u00adnvanishing", "question_span"),
+        ("H\u00adLE\u200bleaderboard", "patterns_case_sensitive"),
+        # A Hangul filler (default-ignorable, category Lo) inside a word.
+        ("How many odd spin structures admit a no\u3164nvanishing", "question_span"),
+        ("Hum\u3164anity's Last Exam", "url_patterns"),
     ],
     ids=[
         "full-width",
@@ -252,6 +258,10 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
         "combining-mark",
         "underscore-joined",
         "soft-hyphen-pattern",
+        "mixed-format-characters",
+        "mixed-format-pattern",
+        "hangul-filler",
+        "hangul-filler-pattern",
     ],
 )
 async def test_presentation_variants_of_a_blocked_query_are_refused(server, caplog, query, family):

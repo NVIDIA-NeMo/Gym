@@ -436,9 +436,9 @@ class Blocklist:
     def query_block(self, query: str, question_spans: Optional["QuestionSpans"]) -> Optional[Block]:
         """The protocol's query refusals: blocked patterns, a blocked ``site:`` domain, a verbatim question span.
 
-        The patterns and ``site:`` operands are checked on the query as written and as ``fold_text`` reads it.
+        The patterns and ``site:`` operands are checked on the query as written and in each ``fold_text`` reading.
         """
-        forms = list(dict.fromkeys((query, fold_text(query), fold_text(query, " "))))
+        forms = list(dict.fromkeys((query, *(fold_text(query, reading) for reading in IGNORABLE_READINGS))))
         for form in forms:
             block = self.text_block(form, "query")
             if block is not None:
@@ -592,23 +592,46 @@ def markdown_heading_title(markdown: str) -> str:
     return ""
 
 
-def fold_text(text: str, format_chars: str = "") -> str:
-    """NFKC with each format character (category Cf: zero-width space, soft hyphen, word joiner) replaced by
-    ``format_chars``: the spelling search engines index, so full-width, mathematical and zero-width variants read
-    as the plain text. Whether an engine drops a format character or splits words at it is not known, so the
-    checks read text both ways: removed (``sp<ZWSP>in`` is ``spin``) and as a space (``How<WJ>many`` is two words).
+# Default_Ignorable_Code_Point (Unicode DerivedCoreProperties) outside category Cf: shown as nothing, and dropped by
+# NFKC_Casefold, among them variation selectors and the Hangul fillers (category Lo; NFKC maps U+3164 and U+FFA0 to
+# U+1160, which is listed too). Python's ``unicodedata`` has no such property, so the ranges are listed as that
+# file lists them.
+_DEFAULT_IGNORABLE_RANGES = (
+    "00AD 034F 061C 115F..1160 17B4..17B5 180B..180F 200B..200F 202A..202E 2060..206F 3164 FE00..FE0F FEFF "
+    "FFA0 FFF0..FFF8 1BCA0..1BCA3 1D173..1D17A E0000..E0FFF"
+)
+_DEFAULT_IGNORABLE = frozenset(
+    chr(code)
+    for first, _, last in (item.partition("..") for item in _DEFAULT_IGNORABLE_RANGES.split())
+    for code in range(int(first, 16), int(last or first, 16) + 1)
+)
+# Whether an engine drops an ignorable character or splits words at it is not known, so the checks read text three
+# ways: every one removed (``sp<SHY>in`` is ``spin``), every one as a space (``How<WJ>many`` is two words), and as
+# Unicode word segmentation (UAX #29) reads them, where a zero-width space separates words and every other one is
+# removed (``How<ZWSP>many no<SHY>nvanishing`` is ``How many nonvanishing``).
+IGNORABLE_READINGS = ("removed", "space", "word_break")
+
+
+def fold_text(text: str, reading: str = "removed") -> str:
+    """NFKC with each ignorable character (category Cf, such as a zero-width space, soft hyphen or word joiner, or
+    any other default-ignorable code point, such as a variation selector or a Hangul filler) read as ``reading``
+    says (``IGNORABLE_READINGS``): the spelling search engines index, so full-width, mathematical and zero-width
+    variants read as the plain text.
     """
     if text.isascii():
         return text
-    return "".join(
-        format_chars if unicodedata.category(ch) == "Cf" else ch for ch in unicodedata.normalize("NFKC", text)
-    )
+    folded = []
+    for ch in unicodedata.normalize("NFKC", text):
+        if ch in _DEFAULT_IGNORABLE or unicodedata.category(ch) == "Cf":
+            ch = " " if reading == "space" or (reading == "word_break" and ch == "\u200b") else ""
+        folded.append(ch)
+    return "".join(folded)
 
 
-def question_words(text: str, format_chars: str = "") -> Tuple[str, ...]:
+def question_words(text: str, reading: str = "removed") -> Tuple[str, ...]:
     """Case-folded maximal runs of letters and digits after ``fold_text`` and with combining marks removed
     (``holomorphíc`` is ``holomorphic``): the unit of the verbatim-span rule."""
-    text = fold_text(text, format_chars)
+    text = fold_text(text, reading)
     if not text.isascii():
         decomposed = unicodedata.normalize("NFD", text)
         text = unicodedata.normalize("NFC", "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn"))
@@ -627,7 +650,8 @@ class QuestionSpans:
         self.digest = hashlib.sha256("\x1f".join(words).encode()).hexdigest()
         self.span_words = min(span_words, len(words)) if words else 0
         n = self.span_words
-        readings = (words, question_words(question, " ")) if n else ()
+        other_readings = (question_words(question, reading) for reading in IGNORABLE_READINGS[1:])
+        readings = dict.fromkeys((words, *other_readings)) if n else ()
         self.ngrams = frozenset(reading[i : i + n] for reading in readings for i in range(len(reading) - n + 1))
 
     def longest_shared_span(self, query: str) -> Optional[int]:
@@ -635,7 +659,7 @@ class QuestionSpans:
         n = self.span_words
         if not n:
             return None
-        for words in dict.fromkeys((question_words(query), question_words(query, " "))):
+        for words in dict.fromkeys(question_words(query, reading) for reading in IGNORABLE_READINGS):
             if any(words[i : i + n] in self.ngrams for i in range(len(words) - n + 1)):
                 return n
         return None
