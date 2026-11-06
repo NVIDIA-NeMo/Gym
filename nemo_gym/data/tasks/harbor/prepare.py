@@ -81,6 +81,7 @@ from nemo_gym.data.tasks.harbor.manifest import (
     report_rewrite,
 )
 from nemo_gym.data.tasks.harbor.materialize import (
+    ENVIRONMENT_SERVER_INSTANCE,
     run_config,
     write_rows,
 )
@@ -102,6 +103,8 @@ logger = logging.getLogger(__name__)
 DEFAULT_OUTPUT_ROOT = Path("results/harbor")
 IMAGES_FILE = "images.json"
 ENVIRONMENT_SERVER_CONFIG = "environment_servers/harbor/configs/harbor.yaml"
+# The benchmark config key that hands `gym eval prepare/run --benchmark` to a Harbor target (see `harbor_benchmark`).
+HARBOR_TARGET_KEY = "harbor_target"
 ORACLE_AGENT = "harbor_oracle_agent"
 # A harness that calls the Gym model server from inside the task sandbox, where 127.0.0.1 is the container
 # itself, needs the model server to advertise the node's IP (`use_absolute_ip`). The harness declares that on
@@ -934,6 +937,66 @@ def resolve_agent(agent: str) -> AgentSelection:
         instance_name=instances[0],
         impl_name=impls[0],
         runs_in_sandbox=runs_in_sandbox(impls[0], impls_config[impls[0]]),
+    )
+
+
+@dataclass(frozen=True)
+class HarborBenchmark:
+    """A benchmark config backed by a Harbor target: ``gym eval run --benchmark`` runs ``target`` with ``agent``."""
+
+    config_path: Path
+    target: str
+    agent: AgentSelection
+
+
+def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
+    """Read a benchmark config's ``harbor_target``; ``None`` for a benchmark that composes its own servers.
+
+    A Harbor-backed benchmark config names its target (a task folder, a committed entry such as
+    ``terminal_bench_4``, or a ``harbor:`` reference) and defines exactly one agent instance: the harness the
+    benchmark runs by default, with its benchmark settings. The run config's agent inherits that instance, as
+    it inherits the shipped config ``--agent`` names. Beside it the config may set top-level keys, such as the
+    shipped ``harbor_environment_server`` instance's settings; another server instance would start beside the
+    taskset's and is refused.
+    """
+    path = Path(config_path)
+    config = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(config, dict) or HARBOR_TARGET_KEY not in config:
+        return None
+    target = config[HARBOR_TARGET_KEY]
+    if not isinstance(target, str) or not target.strip():
+        raise ValueError(f"{path}: `{HARBOR_TARGET_KEY}` must name a Harbor task folder, entry or reference")
+    agents = [name for name, value in config.items() if isinstance(value, dict) and "responses_api_agents" in value]
+    if len(agents) != 1:
+        raise ValueError(
+            f"{path} sets `{HARBOR_TARGET_KEY}`, so it must define exactly one responses_api_agents instance "
+            f"(the harness the benchmark runs); found {len(agents)}"
+        )
+    servers = [
+        name
+        for name, value in config.items()
+        if isinstance(value, dict)
+        and name != ENVIRONMENT_SERVER_INSTANCE
+        and any(key in value for key in ("resources_servers", "environment_servers"))
+    ]
+    if servers:
+        raise ValueError(
+            f"{path} sets `{HARBOR_TARGET_KEY}`: the run composes the Harbor environment server, so it cannot "
+            f"define {', '.join(servers)}"
+        )
+    impls = config[agents[0]]["responses_api_agents"]
+    if not isinstance(impls, dict) or len(impls) != 1:
+        raise ValueError(f"{path} must define exactly one agent implementation under {agents[0]}")
+    impl_name, impl_config = next(iter(impls.items()))
+    return HarborBenchmark(
+        config_path=path.resolve(),
+        target=target.strip(),
+        agent=AgentSelection(
+            config_path=path.resolve(),
+            instance_name=agents[0],
+            impl_name=impl_name,
+            runs_in_sandbox=runs_in_sandbox(impl_name, impl_config),
+        ),
     )
 
 

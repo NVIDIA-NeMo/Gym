@@ -159,12 +159,28 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
             "then": {"properties": {field: nonempty_string for field in fields}, "required": list(fields)},
         }
 
+    # A Harbor-backed manifest's rows come from its target, so it declares no datasets of its own.
+    no_harbor_target = {"harbor_target": {"type": "null"}}
     return [
         {
+            "if": {"properties": no_harbor_target},
+            "then": {"properties": {"datasets": nonempty_datasets}, "required": ["datasets"]},
+            "else": {
+                "properties": {
+                    "datasets": {"maxItems": 0, "type": "array"},
+                    "prompt_source": {"enum": [PromptSource.PREPARED.value, PromptSource.AGENT.value]},
+                },
+                "required": ["prompt_source"],
+            },
+        },
+        {
             "if": {"properties": {"kind": {"const": "benchmark"}}, "required": ["kind"]},
+            "then": {"properties": {"canonical_split": nonempty_string}, "required": list(_BENCHMARK_REQUIRED_FIELDS)},
+        },
+        {
+            "if": {"properties": {"kind": {"const": "benchmark"}, **no_harbor_target}, "required": ["kind"]},
             "then": {
                 "properties": {
-                    "canonical_split": nonempty_string,
                     "datasets": {
                         **nonempty_datasets,
                         "contains": {
@@ -173,7 +189,6 @@ def _profile_schema_conditions() -> list[dict[str, Any]]:
                         },
                     },
                 },
-                "required": list(_BENCHMARK_REQUIRED_FIELDS),
             },
         },
         {
@@ -245,10 +260,16 @@ class EnvironmentManifest(_ManifestModel):
     determinism: Determinism = Determinism.UNKNOWN
 
     config_path: NonEmptyString = Field(default="config.yaml", description="Config path relative to the manifest.")
+    harbor_target: NonEmptyString | None = Field(
+        default=None,
+        description="Harbor task folder, entry or reference the config's harbor_target names; its tasks are the rows.",
+    )
     dataset_owner: NonEmptyString | None = None
     resources_server: NonEmptyString | None
     agent_server: NonEmptyString
-    datasets: list[ManifestDataset] = Field(min_length=1)
+    datasets: list[ManifestDataset] = Field(
+        default_factory=list, description="Required unless harbor_target is set, whose tasks are the rows."
+    )
     model_server: NonEmptyString | None = None
     rollout_driver: PythonCallable | None = None
     grading_mode: NonEmptyString | None = None
@@ -289,12 +310,22 @@ class EnvironmentManifest(_ManifestModel):
         missing = [
             field for field in _PROFILE_REQUIRED_FIELDS[self.integration_profile] if getattr(self, field) is None
         ]
+        if self.harbor_target is None and not self.datasets:
+            missing.append("datasets")
         if self.kind == EnvironmentKind.BENCHMARK:
             missing.extend(field for field in _BENCHMARK_REQUIRED_FIELDS if getattr(self, field) is None)
             if self.prompt_source == PromptSource.TEMPLATE and self.standard_prompt_config is None:
                 missing.append("standard_prompt_config")
         if missing:
             raise ValueError("manifest requires: " + ", ".join(dict.fromkeys(missing)))
+        if self.harbor_target is not None:
+            if self.datasets:
+                raise ValueError("a manifest with harbor_target declares no datasets: its rows are the target's tasks")
+            if self.prompt_source == PromptSource.TEMPLATE:
+                raise ValueError(
+                    "a manifest with harbor_target needs prompt_source prepared or agent: "
+                    "its rows carry each task's instruction"
+                )
         if self.prompt_source == PromptSource.PREPARED and self.standard_prompt_config is not None:
             raise ValueError("standard_prompt_config is forbidden for prepared prompts")
         if self.prompt_source != PromptSource.TEMPLATE and any(
@@ -306,8 +337,10 @@ class EnvironmentManifest(_ManifestModel):
         names = [dataset.name for dataset in self.datasets]
         if len(names) != len(set(names)):
             raise ValueError("dataset names must be unique")
-        if self.kind == EnvironmentKind.BENCHMARK and not any(
-            dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets
+        if (
+            self.kind == EnvironmentKind.BENCHMARK
+            and self.harbor_target is None
+            and not any(dataset.type == DatasetKind.BENCHMARK for dataset in self.datasets)
         ):
             raise ValueError("a benchmark manifest requires a benchmark dataset")
         return self

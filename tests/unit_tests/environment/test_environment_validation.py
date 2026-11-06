@@ -28,6 +28,7 @@ from nemo_gym.environment.validation import (
     "name",
     [
         "terminal_bench_4/miniswe",
+        "terminal_bench_4/miniswe_run",
         "terminal_bench_science/miniswe",
         "terminal_bench_science/codex",
         "deepsearchqa",
@@ -671,3 +672,54 @@ def test_custom_driver_is_checked_without_scaffolding(tmp_path: Path) -> None:
     driver_path.unlink()
     with pytest.raises(EnvironmentValidationError, match="Rollout driver module was not found"):
         validate_environment(manifest_path)
+
+
+def _harbor_asset(tmp_path: Path, *, config_target: str, manifest_target: str | None = None) -> Path:
+    directory = tmp_path / "benchmarks" / "harbor_demo"
+    directory.mkdir(parents=True)
+    config = {
+        "harbor_target": config_target,
+        "config_paths": ["responses_api_agents/miniswe_sandboxed_agent/configs/miniswe_sandboxed_agent.yaml"],
+        "miniswe_sandboxed_agent": {
+            "responses_api_agents": {"miniswe_sandboxed_agent": {"harness": {"step_limit": 500}}}
+        },
+    }
+    (directory / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    manifest = _manifest(kind="benchmark", profile="custom-gym-agent-loop")
+    manifest.update(
+        name="harbor_demo",
+        harbor_target=manifest_target or config_target,
+        resources_server=None,
+        agent_server="miniswe_sandboxed_agent",
+        datasets=[],
+        prompt_source="agent",
+        grading_mode=None,
+    )
+    manifest.pop("standard_prompt_config")
+    path = directory / "manifest.yaml"
+    path.write_text(dump_manifest(manifest), encoding="utf-8")
+    return path
+
+
+def test_harbor_backed_manifest_validates_its_harness_and_target(tmp_path: Path) -> None:
+    report = validate_environment(_harbor_asset(tmp_path, config_target="terminal_bench_4"))
+    assert report.datasets == ()
+    assert [(c.role, c.name) for c in report.components] == [
+        ("agent_server", "miniswe_sandboxed_agent"),
+        ("model_server", "policy_model"),
+    ]
+    assert report.components[0].implementation == "miniswe_sandboxed_agent"
+
+
+def test_harbor_target_is_mirrored_from_the_config(tmp_path: Path) -> None:
+    path = _harbor_asset(tmp_path, config_target="terminal_bench_4", manifest_target="terminal_bench_2_1")
+    with pytest.raises(EnvironmentValidationError, match="harbor_target"):
+        validate_environment(path)
+
+
+def test_harbor_target_must_resolve_without_a_fetch(tmp_path: Path) -> None:
+    with pytest.raises(EnvironmentValidationError, match="not an entry under environments/harbor/"):
+        validate_environment(_harbor_asset(tmp_path, config_target="no_such_harbor_entry"))
+    folder = tmp_path / "tasks"
+    folder.mkdir()
+    assert validate_environment(_harbor_asset(tmp_path / "local", config_target=str(folder))).datasets == ()

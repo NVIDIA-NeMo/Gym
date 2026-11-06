@@ -91,7 +91,7 @@ def test_explicit_names_and_invalid_selections(tmp_path, monkeypatch):
 )
 def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps, timeout):
     root = Path(preparation.__file__).resolve().parents[2]
-    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe.yaml"), overrides)
+    config = OmegaConf.merge(OmegaConf.load(root / "benchmarks/terminal_bench_4/miniswe_run.yaml"), overrides)
     agent = config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent
     harness = agent.harness
     assert harness.step_limit == steps
@@ -109,5 +109,26 @@ def test_benchmark_limits_resolve_defaults_and_client_overrides(overrides, steps
     ],
 )
 def test_agent_artifacts_follow_run_directory_unless_overridden(overrides, expected):
-    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe.yaml"), overrides)
+    config = OmegaConf.merge(OmegaConf.load(preparation.BENCHMARK_DIR / "miniswe_run.yaml"), overrides)
     assert config.terminal_bench_4_miniswe.responses_api_agents.miniswe_sandboxed_agent.artifacts_dir == expected
+
+
+@pytest.mark.parametrize(
+    "overrides,steps,timeout,episode",
+    [
+        ({}, 500, 30, 54000),
+        ({"tb4_max_steps": 0, "tb4_step_timeout_sec": 45, "tb4_episode_timeout_sec": 60000}, 0, 45, 60000),
+    ],
+)
+def test_harbor_profile_runs_the_entry_at_the_benchmark_settings(overrides, steps, timeout, episode):
+    from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+
+    path = preparation.BENCHMARK_DIR / "miniswe.yaml"
+    benchmark = harbor_benchmark(path)
+    assert benchmark.target == "terminal_bench_4"
+    assert (benchmark.agent.instance_name, benchmark.agent.impl_name) == ("miniswe_sandboxed_agent",) * 2
+    config = OmegaConf.merge(OmegaConf.load(path), overrides)
+    harness = config.miniswe_sandboxed_agent.responses_api_agents.miniswe_sandboxed_agent.harness
+    assert (harness.step_limit, harness.step_timeout_sec) == (steps, timeout)
+    harbor = config.harbor_environment_server.environment_servers.harbor
+    assert harbor.default_episode_timeout_seconds == episode
