@@ -3,11 +3,13 @@
 """How /verify reports faults: judge failures, per-reference isolation, and what counts as the model result."""
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
+from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.verification import judge_failsafe
 from resources_servers.aa_briefcase_lite.tests.conftest import (
     NO_SESSION,
@@ -184,3 +186,23 @@ async def test_a_check_is_judged_when_its_own_file_was_submitted(make_server, tm
     assert row["rubric_passed"] == 1
     assert row["rubric_total"] == 2
     assert row["reward"] == 0.5
+
+
+async def test_a_skipped_reference_is_logged_and_counted(make_server, tmp_path: Path, monkeypatch, caplog) -> None:
+    server = make_server(reward_mode="pairwise")
+    (tmp_path / "ref_b" / "task_w1_t1" / "repeat_0" / "report.md").unlink()
+    (tmp_path / "ref_b" / "task_w1_t1" / "repeat_0").rmdir()
+    monkeypatch.setattr(
+        "resources_servers.aa_briefcase_lite.app.run_trials", lambda **kwargs: pairwise_result(wins=1, losses=1)
+    )
+
+    with caplog.at_level(logging.WARNING):
+        row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    assert "skipped pairwise reference ref_b" in caplog.text
+    assert row["pairwise_references_skipped"] == 1
+    assert row["judge_response"]["pairwise_skipped_references"] == [
+        {"reference_id": "ref_b", "reason": "no_submission_for_task"}
+    ]
+    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[row]))
+    assert metrics.key_metrics["aa_lite/pairwise_references_skipped"] == 1

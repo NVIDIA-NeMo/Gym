@@ -237,6 +237,8 @@ class AABriefcaseLiteVerifyResponse(AABriefcaseLiteVerifyRequest, BaseVerifyResp
     pairwise_wins: int = 0
     pairwise_losses: int = 0
     pairwise_ties: int = 0
+    # References that were not judged for this task; their votes are absent from the counts above.
+    pairwise_references_skipped: int = 0
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -775,6 +777,12 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             if not ref_source.is_dir():
                 # Not every shipped reference covers every task (o3 has no w1_t1).
                 results.append(_skipped_reference(reference_id, reference, "no_submission_for_task"))
+                logger.warning(
+                    "AA-Briefcase-Lite task %s: skipped pairwise reference %s (no submission at %s)",
+                    body.task_id,
+                    reference_id,
+                    ref_source,
+                )
                 continue
             ref_stage, ref_missing = _stage_submission(
                 str(ref_source), filenames, stack, carry_renders=self._carry_renders
@@ -783,6 +791,11 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             matchup_judges = _judges_for_reference(reference, resolved_judges)
             if not matchup_judges:
                 results.append(_skipped_reference(reference_id, reference, "exclusion_empties_panel"))
+                logger.warning(
+                    "AA-Briefcase-Lite task %s: skipped pairwise reference %s (its excluded judges leave no judge)",
+                    body.task_id,
+                    reference_id,
+                )
                 continue
             modalities = dir_media_modalities(eval_stage) | dir_media_modalities(ref_stage)
             if modalities:
@@ -954,6 +967,11 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             "binary_results": binary_results,
             "pairwise_score": pairwise_reward if pairwise_results else None,
             "pairwise_results": pairwise_results,
+            "pairwise_skipped_references": [
+                {"reference_id": item["reference_id"], "reason": item["skipped_reason"]}
+                for item in pairwise_results
+                if "skipped_reason" in item
+            ],
             "pairwise_warning": (
                 "Local diagnostic only: AA has not released its production pairwise prompt "
                 "or private comparison graph."
@@ -973,6 +991,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             pairwise_wins=wins,
             pairwise_losses=losses,
             pairwise_ties=ties,
+            pairwise_references_skipped=sum(1 for item in pairwise_results if "skipped_reason" in item),
         )
 
     def _resolved_references(self) -> Dict[str, AABriefcaseReference]:
@@ -999,6 +1018,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         wins = sum(int(row.get("pairwise_wins", 0)) for row in valid)
         losses = sum(int(row.get("pairwise_losses", 0)) for row in valid)
         ties = sum(int(row.get("pairwise_ties", 0)) for row in valid)
+        skipped_references = sum(int(row.get("pairwise_references_skipped", 0)) for row in valid)
         judged = wins + losses + ties
         extra: dict[str, Any] = {
             "aa_lite/rows_total": len(body.verify_responses),
@@ -1010,6 +1030,7 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             "aa_lite/pairwise_losses": losses,
             "aa_lite/pairwise_ties": ties,
             "aa_lite/pairwise_judged": judged,
+            "aa_lite/pairwise_references_skipped": skipped_references,
             "aa_lite/pairwise_win_rate": (wins + 0.5 * ties) / judged if judged else 0.0,
             # Numeric for downstream metric serializers. Always false for Lite.
             "aa_lite/official_leaderboard_comparable": 0.0,
