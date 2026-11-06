@@ -28,7 +28,9 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
+from collections.abc import Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal, NotRequired, Optional, TypedDict
@@ -47,6 +49,14 @@ from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
 from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
+)
+from nemo_gym.models.capture_format import (
+    BLOB_DIR_NAME,
+    CAPTURE_FORMAT_KEY,
+    CaptureDecodeError,
+    CaptureFormat,
+    CaptureReader,
+    DeltaCaptureWriter,
 )
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
@@ -119,6 +129,9 @@ class ModelCallCaptureConfig(BaseModel):
     observability_enabled: bool = False
     trajectory_schema_version: Literal["1.0", "2.0"] = "1.0"
     model_call_capture_dir: Optional[Path] = None
+    # How a capture file stores each call: ``full`` lines (the default), or ``delta`` lines that store only what
+    # earlier calls of the rollout did not already hold. See ``nemo_gym/models/capture_format.py``.
+    model_call_capture_format: CaptureFormat = "full"
 
     @model_validator(mode="after")
     def validate_capture_dir(self) -> "ModelCallCaptureConfig":
@@ -147,12 +160,19 @@ def _validate_rollout_id(rollout_id: str) -> str:
 
 
 class CaptureStore:
-    """Append-only, rollout-keyed JSONL sink for model exchanges."""
+    """Append-only, rollout-keyed JSONL sink for model exchanges.
 
-    def __init__(self, root: str | Path, *, create: bool = True) -> None:
+    ``capture_format`` chooses how this store writes (``full`` or ``delta``, see ``capture_format.py``). Readers
+    accept both formats, line by line, and always return full exchanges.
+    """
+
+    def __init__(self, root: str | Path, *, create: bool = True, capture_format: CaptureFormat = "full") -> None:
         self._root = Path(root)
         if create:
             self._root.mkdir(parents=True, exist_ok=True)
+        if capture_format not in ("full", "delta"):
+            raise ValueError(f"Unknown model-call capture format: {capture_format!r}")
+        self._delta_writer = DeltaCaptureWriter(self._root / BLOB_DIR_NAME) if capture_format == "delta" else None
 
     @property
     def root(self) -> Path:
@@ -160,6 +180,10 @@ class CaptureStore:
 
     def path_for(self, rollout_id: str) -> Path:
         return self._root / f"{_validate_rollout_id(rollout_id)}.capture.jsonl"
+
+    def blob_dir_for(self, rollout_id: str) -> Path:
+        """Where the delta format keeps this rollout's large data URLs, one file per content hash."""
+        return self._root / BLOB_DIR_NAME / _validate_rollout_id(rollout_id)
 
     def incomplete_path_for(self, rollout_id: str) -> Path:
         return self._root / f"{_validate_rollout_id(rollout_id)}.capture.incomplete"
@@ -199,70 +223,129 @@ class CaptureStore:
         for marker in self._root.glob(pattern):
             marker.unlink(missing_ok=True)
 
+    def delete(self, rollout_id: str) -> None:
+        """Remove a rollout's capture file, its markers and its blobs."""
+        self.path_for(rollout_id).unlink(missing_ok=True)
+        self.incomplete_path_for(rollout_id).unlink(missing_ok=True)
+        self.clear_all_pending(rollout_id)
+        shutil.rmtree(self.blob_dir_for(rollout_id), ignore_errors=True)
+
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
         """Append one exchange and fsync (durable across a killed box).
 
         ``flock`` serializes appends to the same rollout across worker processes and threads while
         allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
+        In the delta format, the blobs a line names are written durably before the line.
         """
-        line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
-        with path.open("ab") as handle:
+        writer = self._delta_writer
+        prepared = writer.prepare(exchange) if writer is not None else None
+        # The delta writer reads back the head of its base line, so it needs a readable handle.
+        with path.open("ab" if writer is None else "a+b") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
             try:
+                if writer is None:
+                    line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
+                else:
+                    assert prepared is not None
+                    offset = os.fstat(handle.fileno()).st_size
+                    line = writer.encode(rollout_id, prepared, handle.fileno())
                 handle.write(line)
                 handle.flush()
                 os.fsync(handle.fileno())
+                if writer is not None:
+                    writer.remember(rollout_id, prepared, offset)
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
-    def read(self, rollout_id: str) -> list[dict[str, Any]]:
+    def _raw_lines(self, rollout_id: str) -> Iterator[bytes]:
+        """The lines of a rollout's capture as stored, line endings included, read under a shared lock."""
         path = self.path_for(rollout_id)
         if not path.exists():
-            return []
-        exchanges: list[dict[str, Any]] = []
-        # Stream line-by-line; a capture can be large (token-ids / logprobs).
+            return
         with path.open("rb") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
             try:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    exchanges.append(orjson.loads(stripped))
+                yield from handle
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    def _lines(self, rollout_id: str) -> Iterator[bytes]:
+        """The non-empty lines of a rollout's capture, stripped."""
+        for line in self._raw_lines(rollout_id):
+            stripped = line.strip()
+            if stripped:
+                yield stripped
+
+    def iter_available(
+        self, rollout_id: str, *, payloads: bool = True
+    ) -> Iterator[tuple[int, Optional[dict[str, Any]]]]:
+        """Yield ``(capture_index, exchange)`` for each line in append order, one at a time.
+
+        ``capture_index`` is the line's position, as in ``read_available``. ``exchange`` is ``None`` for a line
+        that cannot be read: damaged JSON, or a delta line whose base call or blob cannot be resolved. Without
+        ``payloads`` each exchange is a metadata view: its request keeps its small fields but not its history,
+        and ``request_raw`` is dropped, so memory stays flat however long the conversation grew. Treat yielded
+        exchanges as read-only: later calls of the same rollout can share their objects.
+        """
+        reader = CaptureReader(self.blob_dir_for(rollout_id), payloads=payloads)
+        for capture_index, line in enumerate(self._lines(rollout_id)):
+            try:
+                parsed = orjson.loads(line)
+            except orjson.JSONDecodeError:
+                yield capture_index, None
+                continue
+            if not isinstance(parsed, dict):
+                yield capture_index, None
+                continue
+            try:
+                yield capture_index, reader.decode(parsed)
+            except CaptureDecodeError:
+                logger.debug("Model-call capture line %d of rollout %s cannot be rebuilt.", capture_index, rollout_id)
+                yield capture_index, None
+
+    def read(self, rollout_id: str) -> list[dict[str, Any]]:
+        """Every exchange of a rollout; raises on a line that cannot be read."""
+        reader = CaptureReader(self.blob_dir_for(rollout_id))
+        exchanges: list[dict[str, Any]] = []
+        for line in self._lines(rollout_id):
+            parsed = orjson.loads(line)
+            exchanges.append(reader.decode(parsed) if isinstance(parsed, dict) else parsed)
         return exchanges
 
     def read_available(self, rollout_id: str) -> tuple[list[tuple[int, dict[str, Any]]], int]:
         """Read valid exchanges without letting one damaged line hide the rest."""
-        path = self.path_for(rollout_id)
-        if not path.exists():
-            return [], 0
         exchanges: list[tuple[int, dict[str, Any]]] = []
         invalid_count = 0
-        capture_index = 0
-        with path.open("rb") as handle:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-            try:
-                for line in handle:
-                    stripped = line.strip()
-                    if not stripped:
-                        continue
-                    try:
-                        exchange = orjson.loads(stripped)
-                    except orjson.JSONDecodeError:
-                        invalid_count += 1
-                    else:
-                        if isinstance(exchange, dict):
-                            exchanges.append((capture_index, exchange))
-                        else:
-                            invalid_count += 1
-                    capture_index += 1
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        for capture_index, exchange in self.iter_available(rollout_id):
+            if exchange is None:
+                invalid_count += 1
+            else:
+                exchanges.append((capture_index, exchange))
         return exchanges, invalid_count
+
+    def copy_full(self, rollout_id: str, destination: Path) -> None:
+        """Copy a rollout's capture to ``destination`` as full-format lines that need no blobs or other lines.
+
+        Full-format and unreadable lines are copied byte for byte; delta lines are written rebuilt.
+        """
+        reader = CaptureReader(self.blob_dir_for(rollout_id))
+        marker = orjson.dumps(CAPTURE_FORMAT_KEY)
+        with destination.open("wb") as output:
+            for line in self._raw_lines(rollout_id):
+                exchange = None
+                if marker in line:
+                    try:
+                        parsed = orjson.loads(line)
+                        if isinstance(parsed, dict) and CAPTURE_FORMAT_KEY in parsed:
+                            exchange = reader.decode(parsed)
+                    except (orjson.JSONDecodeError, CaptureDecodeError):
+                        exchange = None
+                if exchange is None:
+                    output.write(line)
+                else:
+                    output.write(orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE))
 
 
 # Request-state key under which the capture middleware leaves the agent instance the stripped prefix named.
@@ -367,7 +450,7 @@ def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]
     root = config.model_call_capture_dir
     assert root is not None  # enforced by ModelCallCaptureConfig
     try:
-        return CaptureStore(root)
+        return CaptureStore(root, capture_format=config.model_call_capture_format)
     except Exception:
         logger.warning("Could not initialize model-call capture at %s; disabling it.", root, exc_info=True)
         return None
