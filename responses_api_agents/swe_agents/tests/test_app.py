@@ -39,6 +39,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     rollout_context,
 )
+from responses_api_agents.cline_agent.parser import parse_cline_events
 from responses_api_agents.swe_agents.app import (
     EVAL_TIMEOUT,
     ActiveContainerCommand,
@@ -1692,6 +1693,101 @@ class TestMaybeBuildReplayMessages:
         assert result is not None
         messages = json.loads(result)
         assert any(m.get("role") == "assistant" and m.get("tool_calls") for m in messages)
+
+
+########################################
+# ClineHarnessProcessor tests
+########################################
+
+
+class TestClineHarnessProcessor:
+    """Cover the Cline harness path. Mirrors TestOpenCodeHarnessProcessor; only
+    the agent_framework + cline_setup_dir fields differ."""
+
+    def _cline_config(self, tmpdir, **overrides) -> SWEBenchWrapperInstanceConfig:
+        cline_setup_dir = Path(tmpdir) / "cline_setup"
+        cline_setup_dir.mkdir(parents=True, exist_ok=True)
+        return _make_instance_config(
+            tmpdir,
+            agent_framework="cline",
+            cline_setup_dir=cline_setup_dir,
+            **overrides,
+        )
+
+    @pytest.fixture
+    def _stub_model_server_lookup(self, monkeypatch):
+        """Stub get_first_server_config_dict so we don't need a live gym head server."""
+
+        def _fake(_global, name):
+            assert name == "test_model"
+            return type("Cfg", (), {"host": "test-host", "port": 12345, "model": "test-model"})()
+
+        monkeypatch.setattr(swe_app, "get_first_server_config_dict", _fake)
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+        return _fake
+
+    def test_parser_is_dependency_light(self) -> None:
+        """The harness reuses the Cline agent's parser rather than re-implementing it."""
+        records = "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "agent_event",
+                        "event": {"type": "content_end", "contentType": "text", "text": "fixed"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "run_result",
+                        "aggregateUsage": {"inputTokens": 3, "outputTokens": 2},
+                        "finishReason": "completed",
+                    }
+                ),
+            ]
+        )
+        items, metadata = parse_cline_events(records)
+        assert items[0].content[0].text == "fixed"
+        assert metadata["input_tokens"] == 3
+        assert metadata["output_tokens"] == 2
+
+    def test_get_run_command_writes_script(self, _stub_model_server_lookup) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._cline_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            result = swe_app.ClineHarnessProcessor(config=config).get_run_command()
+
+            assert isinstance(result, ExecuteContainerCommandArgs)
+            assert result.mode == "agent"
+            assert "timeout" in result.command  # wrapped with `timeout --signal=TERM`
+
+            script = (config.persistent_dir / f"cline_script_{config.agent_run_id}.sh").read_text()
+            # The pinned CLI is mounted at /cline_setup/deps and must be on PATH.
+            assert "/cline_setup/deps/bin" in script
+            # Headless, auto-approving JSONL run.
+            assert "cline --json" in script
+            assert "--auto-approve true" in script
+            # Authenticates the openai-compatible provider against the gym model server.
+            assert "cline auth openai-compatible" in script
+            assert "http://test-host:12345" in script
+            # The repository patch the evaluator consumes.
+            assert "git diff --binary" in script
+            assert config.problem_info["instance_id"] in script
+
+    def test_get_run_command_requires_a_model(self, monkeypatch) -> None:
+        """Without a resolvable model the harness fails fast rather than running Cline unauthenticated."""
+
+        def _fake(_global, name):
+            return type("Cfg", (), {"host": "test-host", "port": 12345})()
+
+        monkeypatch.setattr(swe_app, "get_first_server_config_dict", _fake)
+        monkeypatch.setattr(swe_app, "get_global_config_dict", MagicMock(return_value=OmegaConf.create({})))
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config = self._cline_config(tmpdir)
+            config.persistent_dir.mkdir(parents=True, exist_ok=True)
+            config.body.model = None
+            with pytest.raises(RuntimeError, match="requires a model name"):
+                swe_app.ClineHarnessProcessor(config=config).get_run_command()
 
 
 ########################################
