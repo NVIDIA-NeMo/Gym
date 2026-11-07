@@ -6,13 +6,14 @@ name = "gym-resources-servers-misalignment-monitor"
 version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev,sandbox]",
+    "nemo-gym[dev]",
     # The investigators' search: a timeout stops a regular expression that backtracks without end.
     "regex",
 ]
 # Not locked: `activation_source: reader` also needs jlens (the Apache-2.0 Jacobian lens reference implementation),
 # torch, transformers, accelerate and safetensors in this server's venv. They would double the lock for a mode that is
 # off by default; the engine mode reads inside vLLM and needs none of them here.
+# Also not locked: the sandbox provider SDKs (`nemo-gym[sandbox]`), needed only when `sandbox_provider` is set.
 
 [tool.uv]
 package = false

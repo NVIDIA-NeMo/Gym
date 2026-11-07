@@ -56,7 +56,8 @@ misalignment_monitor:
       jspace_top_k: 10
 
       # Layer 2: the security and alignment investigators. With a sandbox provider they can also run Python
-      # over the evidence. null leaves that tool out.
+      # over the evidence (install the provider's SDK in this server's venv first, `nemo-gym[sandbox]` is not
+      # locked). null leaves that tool out.
       investigator_max_steps: 16
       sandbox_provider: null
       sandbox_config:
