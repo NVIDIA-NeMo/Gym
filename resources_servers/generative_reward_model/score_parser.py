@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -86,7 +87,8 @@ def extract_scores(output: str) -> Optional[ParsedScores]:
 
     Returns:
         ParsedScores if exactly one JSON dict was found with valid overall
-        scores. None otherwise.
+        scores. None otherwise. A score or ranking that is not a finite
+        number (JSON allows NaN and Infinity) also counts as invalid.
     """
     parsed = _try_parse_json(output)
 
@@ -121,21 +123,34 @@ def extract_scores(output: str) -> Optional[ParsedScores]:
             rubric_scores.append(
                 RubricScores(
                     rubric_id=int(rs["rubric_id"]),
-                    score_1=float(rs["score_1"]),
-                    score_2=float(rs["score_2"]),
-                    ranking=float(rs["ranking"]),
+                    score_1=_finite_float(rs["score_1"]),
+                    score_2=_finite_float(rs["score_2"]),
+                    ranking=_finite_float(rs["ranking"]),
                 )
             )
 
         return ParsedScores(
-            score_1=float(overall["score_1"]),
-            score_2=float(overall["score_2"]),
-            ranking=float(overall["ranking"]),
+            score_1=_finite_float(overall["score_1"]),
+            score_2=_finite_float(overall["score_2"]),
+            ranking=_finite_float(overall["ranking"]),
             rubric_scores=rubric_scores,
         )
-    except (TypeError, ValueError, KeyError) as e:
+    except (TypeError, ValueError, KeyError, OverflowError) as e:
         logger.warning("Failed to extract scores (%s: %s) from GenRM output: %s", type(e).__name__, e, output)
         return None
+
+
+def _finite_float(value) -> float:
+    """Convert a score to float, rejecting NaN and +/-Infinity.
+
+    json.loads accepts the bare NaN, Infinity and -Infinity literals, and
+    float() accepts strings such as "nan" and "inf". A non-finite score
+    would make the L1 reward NaN or infinite, so treat it as a parse failure.
+    """
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError(f"score is not a finite number: {value!r}")
+    return number
 
 
 def _try_parse_json(output: str) -> Optional[dict]:
