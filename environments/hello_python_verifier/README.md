@@ -4,7 +4,7 @@ Hello Python Verifier lets you score an agent's work with familiar Python code a
 
 ## Concept
 
-Python is useful when scoring relies on existing validation code, structured data, or domain libraries that would be awkward to use from a shell script. A task defines one scoring entry point with either `tests/test.sh` or `tests/verifier.py`. For a Python verifier, NeMo Gym calls the file's `verify()` function and uses the number it returns as the reward. NeMo Gym handles the shell launcher and reward files: a `tests/test.sh` shim runs `verify()` inside the sandbox with the working directory as `workspace`, and `gym dataset publish --harbor` writes the same shim into the published task.
+Python is useful when scoring relies on existing validation code, structured data, or domain libraries that would be awkward to use from a shell script. A task defines one scoring entry point with either `tests/test.sh` or `tests/verifier.py`. For a Python verifier, NeMo Gym calls the file's `verify()` function and uses the number it returns as the reward. NeMo Gym handles the shell launcher and reward files: a `tests/test.sh` shim runs `verify()` inside the sandbox with the working directory as `workspace`.
 
 For definitions of task, software environment, sandbox, verifier, and reward, see [Terms used in these examples](../hello_world/README.md#terms-used-in-these-examples).
 
@@ -34,13 +34,22 @@ On a cluster, pass `--sandbox opensandbox` instead.
 
 ## Check the result
 
-TODO: After runtime integration is available, add the literal successful CLI output and identify the exact result fields and artifacts a user should inspect to verify the score.
+`gym dataset validate` ends with one line per task:
+
+```text
+task_id	status	reward	verify_s	network
+hello_python_verifier [repeat 0]	oracle solved	1.0	0.9	public
+```
+
+The task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
+
+Each command writes its results to its own folder: `results/harbor/validation/hello_python_verifier/` for validate and `results/harbor/hello_python_verifier/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show the reward `verify()` returned and the verifier's output.
 
 ## Other examples
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained directory task.
+- [Hello World](../hello_world/README.md): Define one self-contained task folder.
 - [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
 
 ### Add tools

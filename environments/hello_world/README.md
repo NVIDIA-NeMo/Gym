@@ -4,7 +4,7 @@ Hello World gives you a minimal starting point for creating your first NeMo Gym 
 
 ## Concept
 
-A directory task keeps the instruction, execution environment, scoring logic, and resource requirements together, making the complete task easy to inspect, share, and run. NeMo Gym adopts Harbor's task format for directory tasks, so compatible Harbor tasks can run directly in NeMo Gym.
+A task folder keeps the instruction, execution environment, scoring logic, and resource requirements together, making the complete task easy to inspect, share, and run. Task folders written for Harbor also run in NeMo Gym as they are.
 
 ### Terms used in these examples
 
@@ -22,7 +22,7 @@ A directory task keeps the instruction, execution environment, scoring logic, an
 - `tests/test.sh` checks the file and returns `1` when its contents are correct.
 - `task.toml` identifies the task and declares its resource requirements.
 
-These files form one complete task directory.
+These files form one complete task folder.
 
 ## Run it
 

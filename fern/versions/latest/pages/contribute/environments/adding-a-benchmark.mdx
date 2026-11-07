@@ -4,8 +4,6 @@ description: "Prepare, declare, and validate a reproducible benchmark using reus
 position: 3
 ---
 
-# Add a benchmark
-
 A benchmark contribution should let any user prepare the same tasks, run them under a stated configuration, and understand what the score measures.
 
 When onboarding a benchmark, it is important to keep the task contract independent of the harness wherever possible. The task defines the inputs, tools, state, required artifacts, and scoring rules; the harness chooses how to solve it. If the harness itself is part of the subject being measured, this must be stated explicitly. See [Component Ownership](/main/contribute/environments/new-environment#component-ownership) for the agent/environment separation design and the current implementation boundaries.

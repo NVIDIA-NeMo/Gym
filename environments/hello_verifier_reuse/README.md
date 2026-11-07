@@ -14,7 +14,7 @@ For definitions of task, software environment, sandbox, verifier, and reward, se
 
 ## In this example
 
-This example is one dataset with two complete task directories at its root:
+This example is one dataset with two complete task folders at its root:
 
 ```text
 hello_verifier_reuse/
@@ -59,13 +59,23 @@ On a cluster, pass `--sandbox opensandbox` instead.
 
 ## Check the result
 
-TODO: After runtime integration is available, add the literal successful CLI output and identify the exact result fields and artifacts a user should inspect to verify the score.
+`gym dataset validate` ends with one line per task:
+
+```text
+task_id	status	reward	verify_s	network
+exact-greeting [repeat 0]	oracle solved	1.0	0.9	public
+uppercase-greeting [repeat 0]	oracle solved	1.0	0.9	public
+```
+
+Each task passed when its line reads `oracle solved` and reward `1.0`; the command then exits 0.
+
+Each command writes its results to its own folder: `results/harbor/validation/hello_verifier_reuse/` for validate and `results/harbor/hello_verifier_reuse/` for the agent run. In either folder, `rollouts_run_summary.json` lists each task's `status` and `reward`, and the paths of its verifier logs, where `reward.txt` and `test-stdout.txt` show the reward each task's `verify()` returned and the verifier's output.
 
 ## Other examples
 
 ### Tasks and datasets
 
-- [Hello World](../hello_world/README.md): Define one self-contained directory task.
+- [Hello World](../hello_world/README.md): Define one self-contained task folder.
 - [Hello Dataset](../hello_dataset/README.md): Run multiple distinct tasks as one dataset.
 
 ### Add tools
