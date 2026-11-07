@@ -221,6 +221,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
     {
         "browsecomp_agent",
         "claude_code_agent",
+        "cline_agent",
         "codex_agent",
         "harbor_oracle_agent",
         "hermes_agent",
