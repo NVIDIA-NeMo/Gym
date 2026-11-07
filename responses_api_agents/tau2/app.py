@@ -132,6 +132,11 @@ def _validate_tool_call_arguments(response: Mapping[str, Any]) -> None:
             raise Tau2MalformedToolCallError(
                 f"tool call {index} function.arguments is invalid JSON at character {error.pos}"
             ) from error
+        except (ValueError, RecursionError) as error:
+            # Valid JSON the decoder still refuses: an integer over Python's digit limit, or nesting too deep.
+            raise Tau2MalformedToolCallError(
+                f"tool call {index} function.arguments cannot be decoded: {error}"
+            ) from error
         if not isinstance(parsed_arguments, dict):
             raise Tau2MalformedToolCallError(
                 f"tool call {index} function.arguments must decode to an object, got {type(parsed_arguments).__name__}"

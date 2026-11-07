@@ -75,6 +75,7 @@ from nemo_gym.core import (
 from nemo_gym.rollouts import NG_TERMINAL_KEY
 from nemo_gym.rollouts.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
@@ -268,7 +269,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             for output_function_call in all_fn_calls:
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
-                except (json.JSONDecodeError, TypeError) as e:
+                except (ValueError, TypeError, RecursionError) as e:
                     # Malformed arguments go back to the service as a tool error output
                     # instead of crashing the rollout; repr(e) keeps the exception type
                     # even when str(e) is empty.
@@ -316,7 +317,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         remote_url = f"{self.config.agent_base_url}/v1/responses"
         # exclude_unset keeps the wire payload to the fields the dataset row (and the loop)
         # actually set, never materialized None defaults.
-        data = orjson.dumps(new_body.model_dump(exclude_unset=True))
+        data = dumps_json(new_body.model_dump(exclude_unset=True))
         headers = {"Content-Type": "application/json"}
         timeout = ClientTimeout(total=self.config.remote_responses_timeout_secs)
 
@@ -385,7 +386,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
                 + f": {content[:500].decode(errors='replace')}"
             )
         try:
-            result = orjson.loads(content)
+            result = loads_json(content)
         except orjson.JSONDecodeError as e:
             raise RemoteAgentError(f"response is not valid JSON: {e}") from e
         if not isinstance(result, dict):

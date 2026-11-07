@@ -480,9 +480,18 @@ class TestAgentToolLoop:
         second_input = service.received[1]["payload"]["input"]
         assert "Not Found" in second_input[-1]["output"]
 
-    async def test_malformed_arguments_fed_back(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            pytest.param("not json", id="malformed"),
+            # Valid JSON that json.loads refuses with a plain ValueError: Python's integer digit limit is 4,300.
+            pytest.param('{"count": ' + "9" * 5000 + "}", id="integer-over-digit-limit"),
+            pytest.param("[" * 100_000 + "]" * 100_000, id="nesting-over-recursion-limit"),
+        ],
+    )
+    async def test_malformed_arguments_fed_back(self, monkeypatch: pytest.MonkeyPatch, arguments: str) -> None:
         service = scripted_service(
-            traj([fn_call("c1", "increment_counter", "not json")]),
+            traj([fn_call("c1", "increment_counter", arguments)]),
             traj([msg("ok")]),
         )
         agent, _, server_client = make_wired_agent(monkeypatch, service, tool_handler=self.counter_tool_handler)

@@ -16,7 +16,6 @@ from os import environ
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
-import orjson
 import wandb
 import wandb.util
 from omegaconf import DictConfig, OmegaConf
@@ -26,6 +25,7 @@ from nemo_gym.artifacts.exporters.base import BaseExporter
 from nemo_gym.artifacts.exporters.wandb_config import WandbExportConfig
 from nemo_gym.config.config_types import RunExportConfig, WANDBConfig
 from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
+from nemo_gym.utils.json_codec import dumps_json
 
 
 # Increase row limit since some of our rollouts are pretty hefty
@@ -91,5 +91,5 @@ class WandbExporter(BaseExporter):
 
     def _log_rollouts(self, rollouts: list[dict[str, Any]]) -> None:
         # One JSON blob per row: rollouts have no stable column set across environments.
-        rows = [[orjson.dumps(rollout)] for rollout in rollouts]
+        rows = [[dumps_json(rollout)] for rollout in rollouts]
         self._active_run().log({self.ROLLOUTS_TABLE_KEY: Table(data=rows, columns=["Rollout"])})

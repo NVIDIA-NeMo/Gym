@@ -32,6 +32,7 @@ from nemo_gym.rollouts.rollout_records import (
     materialized_path_for,
     prepare_append,
     read_records,
+    rejudge_predecessor_id,
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
@@ -355,6 +356,29 @@ def test_duplicate_delivery_is_idempotent_but_conflicting_payloads_are_rejected(
         RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
 
 
+def test_values_orjson_rejects_are_written_and_read_back_exactly(run):
+    output, manifest, rows = run
+    # A verifier can echo model-written tool arguments into its result.
+    arguments = {"n": 2**70, "m": -(2**63) - 1, "s": "a\ud800", "f": float("nan")}
+    result = dict(rows[0], **{RUN_ID_KEY: manifest.run_id}, reward=1.0, response={"arguments": arguments})
+    failure = dict(rows[1], **{RUN_ID_KEY: manifest.run_id}, _ng_failure_class="verifier_error", detail=arguments)
+    with writer(run) as history:
+        history.record_dispatches(rows[:2])
+        history.record_outcome(result)
+        history.record_outcome(failure)
+
+    recovered = RolloutRecords.load(output, RunManifest.model_validate_json(manifest_path_for(output).read_bytes()))
+
+    exact = {"n": 2**70, "m": -(2**63) - 1, "s": "a\ud800", "f": None}
+    (saved,) = recovered.selected("success")
+    assert saved["response"] == {"arguments": exact}
+    assert type(saved["response"]["arguments"]["n"]) is int
+    (saved_failure,) = recovered.selected("failure")
+    assert saved_failure["detail"] == exact
+    # The digest a re-judgment names its predecessor by is the same whether taken before the write or after the read.
+    assert rejudge_predecessor_id(saved) == rejudge_predecessor_id(dict(result, response={"arguments": exact}))
+
+
 def test_terminal_skip_is_a_durable_omission(run):
     output, manifest, rows = run
     row = dict(rows[0], _ng_failure_terminal=True)
@@ -464,7 +488,7 @@ async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, fail
     target = source.with_name("combined.jsonl")
     target.write_bytes(b'{"old": true}\n')
     before = {path.name: path.read_bytes() for path in source.parent.iterdir()}
-    dumps = orjson.dumps
+    dumps = collection.dumps_json
     replace = Path.replace
 
     def serialize(row, *args, **kwargs):
@@ -479,7 +503,7 @@ async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, fail
             raise OSError("interrupted publication")
         return replace(path, destination)
 
-    monkeypatch.setattr(collection.orjson, "dumps", serialize)
+    monkeypatch.setattr(collection, "dumps_json", serialize)
     if failure == "publication":
         monkeypatch.setattr(Path, "replace", publish)
     aggregate = AsyncMock()

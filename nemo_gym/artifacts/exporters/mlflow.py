@@ -67,6 +67,7 @@ from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,7 @@ class MLflowExporter(BaseExporter):
 
     @staticmethod
     def _payload_digest(payload: Any) -> bytes:
-        return hashlib.sha256(orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)).digest()
+        return hashlib.sha256(dumps_json(payload, option=orjson.OPT_SORT_KEYS)).digest()
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
         client, run_id = self._active()
@@ -286,10 +287,10 @@ class MLflowExporter(BaseExporter):
                 return
         # One JSON blob per row, matching the W&B rollouts table: rollouts have no stable column
         # set across environments. `log_table` appends when the artifact already exists.
-        rows = [orjson.dumps(rollout).decode() for rollout in rollouts]
+        rows = [dumps_json(rollout).decode() for rollout in rollouts]
         client.log_table(run_id, data={"Rollout": rows}, artifact_file=self.ROLLOUTS_ARTIFACT_FILE)
         # log_table uploads synchronously. Record only the exact serialized payload acknowledged by that call.
-        self._delivered_rollouts.update(self._payload_digest(orjson.loads(row)) for row in rows)
+        self._delivered_rollouts.update(self._payload_digest(loads_json(row)) for row in rows)
 
     def _retain_operation(self, operation: Any) -> None:
         if operation is not None:
@@ -341,7 +342,7 @@ class MLflowExporter(BaseExporter):
                 from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
                 with artifacts.rollouts_jsonl_fpath.open("rb") as stream:
-                    rows = (orjson.loads(line) for line in stream if line.strip())
+                    rows = (loads_json(line) for line in stream if line.strip())
                     expected = Counter(
                         self._payload_digest(_rollout_for_export(row))
                         for row in rows
@@ -354,7 +355,7 @@ class MLflowExporter(BaseExporter):
                 raise RuntimeError("Tracking service returned a different run.")
             health_version = health_source_artifacts(artifacts, version)
             metrics = flatten_aggregate_metrics(
-                orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
+                loads_json(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
             )
             if not metrics:
                 raise RuntimeError("Final aggregate has no delivery evidence.")
@@ -379,7 +380,7 @@ class MLflowExporter(BaseExporter):
                 raise RuntimeError("Run artifacts changed during live delivery verification.")
             _write_marker_atomically(
                 marker,
-                orjson.dumps(
+                dumps_json(
                     {
                         "version": 1,
                         "run_id": run_id,
@@ -404,7 +405,7 @@ class MLflowExporter(BaseExporter):
                 Path(client.download_artifacts(run_id, self.ROLLOUTS_ARTIFACT_FILE, tmpdir)).read_text()
             )
         column = table["columns"].index("Rollout")
-        rollouts = (orjson.loads(row[column]) for row in table["data"])
+        rollouts = (loads_json(row[column]) for row in table["data"])
         return {_rollout_key(rollout) for rollout in rollouts if _landed(rollout)}
 
 

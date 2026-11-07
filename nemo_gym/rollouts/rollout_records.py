@@ -64,6 +64,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     observed_elapsed,
     saved_failure_classification,
 )
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
@@ -190,7 +191,7 @@ class RolloutRecord:
             if row is None:
                 raise ConfigError(f"Saved record at byte {self.offset} of {self.path} is incomplete.")
         else:
-            row = orjson.loads(file.read(self.length))
+            row = loads_json(file.read(self.length))
         if self.legacy_attempt_index is not None:
             row[ATTEMPT_INDEX_KEY_NAME] = self.legacy_attempt_index
         if self.expected_identity is not None:
@@ -350,7 +351,7 @@ def _read_row(file: BinaryIO, limit: int | None, skip_keys: frozenset[str]) -> t
         return None, consumed
     if not ended:
         raise _IncompleteRow(consumed)
-    value = orjson.loads(raw)
+    value = loads_json(raw)
     for key in skip_keys if projector is not None else ():
         value.pop(key, None)
     return value, consumed
@@ -403,7 +404,7 @@ def _indexed_records(
                 if not raw.strip():
                     continue
                 try:
-                    value = orjson.loads(raw)
+                    value = loads_json(raw)
                 except orjson.JSONDecodeError as error:
                     if not raw.endswith(b"\n"):
                         warnings.warn(f"Ignoring incomplete final record in {path} at line {number}.", stacklevel=2)
@@ -443,7 +444,7 @@ def prepare_append(path: Path) -> None:
         file.seek(start)
         tail = file.read(end - start)
         try:
-            orjson.loads(tail)
+            loads_json(tail)
         except orjson.JSONDecodeError:
             file.truncate(start)
             warnings.warn(f"Removed {end - start} bytes of incomplete final JSON from {path}.", stacklevel=2)
@@ -473,7 +474,7 @@ def rejudge_predecessor_id(row: dict) -> str | None:
     if row.get("_ng_failure_class") is not None:
         failure_id = row.get("_ng_failure_id")
         return failure_id if isinstance(failure_id, str) and failure_id else None
-    return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+    return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(dumps_json(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
 def rejudgment_admission_closed_by(
@@ -497,7 +498,7 @@ def rejudgment_admission_closed_by(
             return (
                 logical_rollout_id(row) == identity
                 and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == outcome.get(ATTEMPT_INDEX_KEY_NAME, 0)
-                and hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+                and hashlib.sha256(dumps_json(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
                 == pending.predecessor_sha256
             )
     return False

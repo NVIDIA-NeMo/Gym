@@ -42,6 +42,8 @@ from typing import Any
 
 import orjson
 
+from nemo_gym.utils.json_codec import dumps_json
+
 
 # Increment when fingerprint canonicalization or hash layout changes.
 # Resolvers ignore entries stamped with a different version.
@@ -279,26 +281,10 @@ def _tool_results_of(message: dict) -> list[tuple[str, str]]:
 
 def _canonical_json(value: Any) -> str:
     """Serialize JSON-compatible prompt content without losing structure."""
+    # The shared encoder refuses non-string object keys, so 1 and "1" never collapse into the same fingerprint.
     try:
-        return orjson.dumps(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
-    except (TypeError, orjson.JSONEncodeError):
-        pass
-    # Valid JSON can contain integers beyond orjson's 64-bit range. Keep
-    # the fast path unchanged, but do not let the fallback coerce object
-    # keys (e.g. 1 and "1") into the same fingerprint.
-    try:
-        encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
-        pending = [value]
-        while pending:
-            item = pending.pop()
-            if isinstance(item, dict):
-                if any(not isinstance(key, str) for key in item):
-                    raise ValueError("JSON object keys must be strings")
-                pending.extend(item.values())
-            elif isinstance(item, (list, tuple)):
-                pending.extend(item)
-        return encoded
-    except (TypeError, ValueError) as error:
+        return dumps_json(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+    except orjson.JSONEncodeError as error:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 
 

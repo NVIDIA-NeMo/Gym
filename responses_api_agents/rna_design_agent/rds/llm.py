@@ -194,8 +194,8 @@ class GatewayProvider:
             arguments, error = {}, ""
             try:
                 arguments = json.loads(raw) if isinstance(raw, str) else dict(raw)
-            except json.JSONDecodeError as exc:
-                error = f"the arguments were not valid JSON: {exc}"
+            except (ValueError, RecursionError) as exc:
+                error = f"the arguments were not valid JSON: {exc!r}"
             calls.append(ToolCall(call.get("id", ""), function.get("name", ""), arguments, error))
         text = message.get("content") or ""
         if not calls:
@@ -234,7 +234,7 @@ def _tool_calls_in_text(text: str) -> list[ToolCall]:
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
                 continue
         calls.append(ToolCall(id=f"text-{index}", name=name, arguments=dict(arguments)))
     return calls

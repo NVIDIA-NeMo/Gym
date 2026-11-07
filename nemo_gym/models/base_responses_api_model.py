@@ -30,7 +30,6 @@ from contextlib import asynccontextmanager
 from typing import Any, ClassVar, Iterable, Optional
 from uuid import uuid4
 
-import orjson
 from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
@@ -99,6 +98,7 @@ from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.utils.json_codec import dumps_json
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -216,7 +216,7 @@ def _plain(value: Any) -> Any:
 
 
 def _orjson_dispatch_response(content: Any) -> Any:
-    """Serialize a completed non-streaming model response with orjson.
+    """Serialize a completed non-streaming model response with orjson, or the standard library for what it rejects.
 
     FastAPI serializes a bare dictionary or Pydantic model with ``jsonable_encoder``.
     That function recursively visits every token ID and log probability before standard-library ``json.dumps`` runs.
@@ -229,7 +229,7 @@ def _orjson_dispatch_response(content: Any) -> Any:
         return content
     if isinstance(content, BaseModel):
         content = content.model_dump(mode="json", by_alias=True)
-    return Response(content=orjson.dumps(content), media_type="application/json")
+    return Response(content=dumps_json(content), media_type="application/json")
 
 
 class ModelCheckpointConfig(BaseModel):

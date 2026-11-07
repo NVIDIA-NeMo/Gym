@@ -66,6 +66,7 @@ from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
 from nemo_gym.server_runtime._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym.server_runtime._checkpoint.telemetry import operation as checkpoint_operation
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 LOGGER = logging.getLogger(__name__)
@@ -379,7 +380,7 @@ async def _fan_out(
     replies: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
     # Encoded once for every participant: a commit or restore scope of many episodes is megabytes of JSON.
-    data = orjson.dumps(body)
+    data = dumps_json(body)
 
     async def call(member: Participant) -> None:
         try:
@@ -413,13 +414,13 @@ async def _payload(response: Any) -> dict[str, Any]:
     content = await response.read()
     if response.status != 200:
         raise _ParticipantError(response.status, content)
-    return orjson.loads(content)
+    return loads_json(content)
 
 
 class _ParticipantError(Exception):
     def __init__(self, status: int, content: bytes) -> None:
         try:
-            error = orjson.loads(content).get("error") or {}
+            error = loads_json(content).get("error") or {}
         except (orjson.JSONDecodeError, AttributeError):
             error = {}
         self.code: Optional[str] = error.get("code") if isinstance(error, dict) else None
