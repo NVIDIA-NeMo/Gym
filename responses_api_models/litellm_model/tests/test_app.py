@@ -246,6 +246,25 @@ class TestNormalizeToResponse:
         assert result["output"][0]["content"][0]["text"] == "Hybrid text!"
         assert result["usage"]["input_tokens"] == 8
 
+    @pytest.mark.parametrize(
+        "finish_reason,reason",
+        [("length", "max_output_tokens"), ("content_filter", "content_filter")],
+    )
+    def test_chat_completion_truncated_marked_incomplete(self, finish_reason: str, reason: str) -> None:
+        """A truncated/filtered chat.completion is reported as an incomplete Response."""
+        data = deepcopy(CHAT_COMPLETION_RESPONSE)
+        data["choices"][0]["finish_reason"] = finish_reason
+        result = _normalize_to_response(data)
+        assert result["status"] == "incomplete"
+        assert result["incomplete_details"] == {"reason": reason}
+        validated = NeMoGymResponse.model_validate(result)
+        assert validated.incomplete_details.reason == reason
+
+    def test_chat_completion_stop_has_no_incomplete_details(self) -> None:
+        result = _normalize_to_response(deepcopy(CHAT_COMPLETION_RESPONSE))
+        assert result.get("status", "completed") == "completed"
+        assert result.get("incomplete_details") is None
+
     def test_chat_completion_empty_content(self) -> None:
         """chat.completion with empty content produces empty text."""
         data = deepcopy(CHAT_COMPLETION_RESPONSE)
