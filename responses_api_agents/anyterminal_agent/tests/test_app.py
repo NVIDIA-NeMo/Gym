@@ -815,6 +815,7 @@ class TestProcessSingleDatapoint:
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["agent_timed_out"] is True
         assert metrics["mask_sample"] is True
+        assert metrics["failure_kind"] == "agent_timeout"
 
     async def test_container_killed_mid_run_sets_flag_and_masks(self, tmp_path: Path) -> None:
         # exec() on a container the TTL already removed returns error_type="sandbox" without
@@ -834,6 +835,7 @@ class TestProcessSingleDatapoint:
         assert metrics["agent_timed_out"] is True
         assert metrics["sandbox_failed"] is False
         assert metrics["mask_sample"] is True
+        assert metrics["failure_kind"] == "provider_unavailable"
 
     async def test_sandbox_start_failure_is_isolated(self, tmp_path: Path) -> None:
         cfg = _make_instance_config(tmp_path)
@@ -849,6 +851,8 @@ class TestProcessSingleDatapoint:
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["sandbox_failed"] is True
         assert metrics["mask_sample"] is True
+        assert metrics["failure_kind"] == "provider_unavailable"
+        assert "boom" in metrics["failure_reason"]
         sandbox.stop.assert_awaited_once()
 
     async def test_remote_provider_stages_and_collects(self, tmp_path: Path) -> None:
@@ -915,6 +919,7 @@ class TestProcessSingleDatapoint:
 
         metrics = json.loads(cfg.metrics_fpath.read_text())
         assert metrics["container_timed_out"] is True
+        assert metrics["failure_kind"] == "anyterminal_agent:eval_timeout"
         sandbox.stop.assert_awaited_once()
 
 
