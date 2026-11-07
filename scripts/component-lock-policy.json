@@ -28,6 +28,11 @@
       "protobuf==6.33.6"
     ]
   },
+  "resources_servers/model_identity": {
+    "override-dependencies": [
+      "pyarrow>=25.0.1,<26"
+    ]
+  },
   "resources_servers/nemo_user_sim": {
     "override-dependencies": [
       "pyarrow>=25.0.1,<26"
