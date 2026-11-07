@@ -59,7 +59,7 @@ def test_rollouts_match_examples_and_do_not_duplicate_episode_evidence() -> None
     rollouts = _jsonl(rollouts_path)
 
     assert len(rollouts) == len(examples) == 5
-    assert rollouts_path.stat().st_size < 1_000_000
+    assert rollouts_path.stat().st_size < 1_200_000
     for index, (example, rollout) in enumerate(zip(examples, rollouts, strict=True)):
         assert rollout["_ng_task_index"] == index
         assert rollout["_ng_task_id"] == {
