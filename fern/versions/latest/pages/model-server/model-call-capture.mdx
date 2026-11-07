@@ -362,6 +362,7 @@ The CLI workflow above sets these top-level fields in Gym's [global config](/mai
 | `model_call_capture_dir` | `str` | — | Absolute shared capture directory used by model servers and rollout collection. Required when `observability_enabled` is true. |
 | `model_call_capture_format` | `str` | `full` | `full` stores each exchange whole. `delta` stores each request's history as the items earlier calls of the rollout did not hold, and large `data:` URLs once per rollout under `blobs/`. See [Store long sessions](#store-long-sessions). |
 | `model_call_payloads` | `str` | `inline` | What rollout rows copy from the capture. `inline` copies requests and responses, `reference` copies responses and names each request's capture line in `payload_ref`, `none` keeps call metadata only. |
+| `row_media` | `str` | `inline` | Where rollout rows keep large `data:` URLs, such as screenshots. `inline` keeps them in place. `reference` stores each one once per rollout and lists where it was under `ng_row_media`. See [Store long sessions](#store-long-sessions). |
 
 You can put the same settings in a YAML config instead:
 
@@ -403,13 +404,14 @@ separate capture directory for concurrent collection jobs whose indices can over
 
 An agent re-sends its whole conversation on every call, so a capture in the `full` format grows with the square of
 the session. A Codex session that re-sends its screenshots can write tens of gigabytes per hour, and rows that copy
-every request grow the same way. For long agentic runs, set both opt-in fields:
+every request grow the same way. For long agentic runs, set the opt-in fields:
 
 ```yaml
 observability_enabled: true
 model_call_capture_dir: /absolute/path/to/model-calls
 model_call_capture_format: delta
 model_call_payloads: reference
+row_media: reference
 ```
 
 With `delta`, each line keeps a `capture_format` key that names an earlier line of the same file
@@ -425,6 +427,17 @@ With `reference`, `ng_trajectory.model_calls[].request` and `turns[].question` a
 `nemo_gym.rollouts.resolve_model_call_payloads(trajectory, [capture_dir])`. Keep the capture directory with the
 rows. `delete_model_call_capture` needs `inline`, and ATIF export needs the rows resolved first. The design and
 measurements are in [Linear Model-Call Capture](/main/infrastructure/engineering-notes/linear-model-call-capture).
+
+A Codex row can still hold every screenshot three times: in the agent's observation records, in the trajectory's
+invocation conversation, and in its tool call outputs. With `row_media: reference`, those places hold `null` instead,
+and the row lists each one under `ng_row_media` with the image's SHA-256. The image is stored once in the capture
+directory's `blobs/<rollout_id>/`. With the `delta` format, that directory already holds every image the model was
+sent, so the row adds no image bytes.
+A run without a capture directory keeps them in `<rollouts stem>_blobs/` next to the rollouts file. The harness output
+(`response`) and the task input stay inline. Restore a row with
+`nemo_gym.trajectory.restore_row_media(row, capture_dirs=[capture_dir], rollouts_dir=rollouts_file.parent)`;
+`nemo_gym.trajectory.row_media_dirs(rollouts_file)` finds both directories from the run's saved config. ATIF export
+and the harness conformance bundle check restore rows themselves. `delete_model_call_capture` needs `inline`.
 
 ## If you build a custom agent
 
