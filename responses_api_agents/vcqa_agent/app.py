@@ -722,7 +722,7 @@ class VcqaAgent(SimpleResponsesAPIAgent):
             for fn_call in all_fn_calls:
                 try:
                     parsed_arguments = json.loads(fn_call.arguments) if fn_call.arguments else {}
-                except (ValueError, TypeError) as e:
+                except (ValueError, TypeError, RecursionError) as e:
                     new_outputs.append(
                         NeMoGymFunctionCallOutput(
                             type="function_call_output",

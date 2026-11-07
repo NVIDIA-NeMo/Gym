@@ -42,7 +42,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -239,7 +239,7 @@ def _canonical_task_bytes(row: Mapping[str, Any]) -> bytes:
             if not metadata:
                 response_params.pop("metadata")
 
-    return dumps_json_bytes(task, option=orjson.OPT_SORT_KEYS)
+    return dumps_json(task, option=orjson.OPT_SORT_KEYS)
 
 
 def observe_materialized_rows(rows: Sequence[Mapping[str, Any]]) -> Dict[str, ObservedBatchMember]:
@@ -312,7 +312,7 @@ def observe_materialized_rows(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Ob
         seeded = bool(seed_presence and all(seed_presence))
         if seeded:
             for task_index, seeds in seeds_by_task.items():
-                serialized_seeds = {dumps_json_bytes(seed, option=orjson.OPT_SORT_KEYS) for seed in seeds}
+                serialized_seeds = {dumps_json(seed, option=orjson.OPT_SORT_KEYS) for seed in seeds}
                 if len(serialized_seeds) != len(seeds):
                     errors.append(f"agent '{agent_name}' repeats task {task_index!r} with duplicate seeds")
 
@@ -405,7 +405,7 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with temporary.open("wb") as output:
-            output.write(dumps_json_bytes(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n")
+            output.write(dumps_json(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n")
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)

@@ -344,7 +344,7 @@ class SimpleAgentWithCompaction(SimpleResponsesAPIAgent):
                     started_monotonic = perf_counter()
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
-                except (ValueError, TypeError) as e:
+                except (ValueError, TypeError, RecursionError) as e:
                     tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
                     if collect_trajectory:
                         error_type = type(e).__name__

@@ -79,7 +79,7 @@ from nemo_gym.rollouts.health.types import (
 from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, resolve_rollout_path
 from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore, logical_rollout_id
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import (
     aggregation_sources_path_for,
     failures_path_for,
@@ -927,7 +927,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
     verdicts_path = output_dir / ROLLOUT_VERDICTS_FILENAME
-    summary_path.write_bytes(dumps_json_bytes(summary, option=orjson.OPT_INDENT_2))
+    summary_path.write_bytes(dumps_json(summary, option=orjson.OPT_INDENT_2))
     with verdicts_path.open("wb") as handle:
         for digest in sorted(digests, key=_sort_key):
             findings = [
@@ -944,7 +944,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
             }
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index
-            handle.write(dumps_json_bytes(row, option=orjson.OPT_APPEND_NEWLINE))
+            handle.write(dumps_json(row, option=orjson.OPT_APPEND_NEWLINE))
     return summary_path, verdicts_path
 
 
@@ -1248,7 +1248,7 @@ def write_disabled_summary(rollout_paths: Sequence[Path], output_dir: Path) -> P
     run = {"artifacts": artifacts, QUALITY_SUMMARY_SOURCES_KEY: _report_sources(rollout_paths, output_dir)}
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
     try:
-        summary_path.write_bytes(dumps_json_bytes({"run": run}, option=orjson.OPT_INDENT_2))
+        summary_path.write_bytes(dumps_json({"run": run}, option=orjson.OPT_INDENT_2))
         (output_dir / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     except OSError:
         logger.exception("Writing the disabled quality summary failed.")
@@ -1298,7 +1298,7 @@ def write_provisional_summary(
         "findings": [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings],
         QUALITY_SUMMARY_SOURCES_KEY: _report_sources([rollout_path], rollout_path.parent),
     }
-    summary_path.write_bytes(dumps_json_bytes({"run": run}, option=orjson.OPT_INDENT_2))
+    summary_path.write_bytes(dumps_json({"run": run}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     return summary_path
 
@@ -1589,7 +1589,7 @@ def health_check_run_dir(
             stacklevel=2,
         )
     if json_output:
-        print(dumps_json_bytes(result.summary).decode())
+        print(dumps_json(result.summary).decode())
     else:
         print(format_health_report(result))
     return result

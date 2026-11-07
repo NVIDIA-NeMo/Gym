@@ -18,6 +18,10 @@
 string holding a lone surrogate, and it reads such an integer back as a float without an error. Both can come from a
 model: tool call arguments are model-written JSON. These helpers keep ``orjson`` for the common case and use the
 standard library only for the values ``orjson`` would reject or change.
+
+One exception to "exact": NaN and infinity are written as ``null``, as ``orjson`` writes them. Values ``orjson``
+accepts must keep their bytes, so the fallback follows the same rule rather than make a body's meaning depend on
+whether it also holds a wide integer.
 """
 
 import json
@@ -35,20 +39,26 @@ LOG = logging.getLogger(__name__)
 _SUPPORTED_OPTIONS = orjson.OPT_SORT_KEYS | orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE
 
 # ``orjson`` reads integers in [-2**63, 2**64) exactly and anything wider as a float, so a lossy literal has at least
-# 19 digits. The check maps each byte to its class, "0" for a digit, "." for itself and "x" for anything else, then
-# looks for 19 digits that start a number: a run that follows "." is a fraction, which ``orjson`` reads exactly.
-# Shortest float text has at most 17 significant digits and switches to an exponent from 1e16, so floats written by
-# ``orjson``, ``json`` or Pydantic never match; a 19-digit integer that fits, or a long digit string inside a JSON
-# string, does, and costs only a standard library parse of that body.
-_BYTE_CLASSES = bytes(
+# 19 digits. Each check maps bytes to classes and searches for 19 digits that start a number.
+#
+# The first check is cheap: "0" for a digit, "." for itself and "x" for anything else. A run that follows "." is a
+# fraction, which ``orjson`` reads exactly, and shortest float text from Python writers has at most 17 significant
+# digits before switching to an exponent, so logprobs and token IDs never match.
+_DIGIT_RUN_CLASSES = bytes(
     ord("0") if byte in b"0123456789" else byte if byte == ord(".") else ord("x") for byte in range(256)
 )
-_INTEGER_START = b"x" + b"0" * 19
+_DIGIT_RUN = b"x" + b"0" * 19
+# The second runs only when the first matches, since spaces make its search slower: a JSON number can only follow
+# the start of the input, whitespace, "[", ",", ":" or "-", marked "s". It drops most matches inside strings, such as
+# IDs and timestamps in paths. What still matches, such as a 19-digit integer that fits, costs a standard library
+# parse of that body, which gives the same values as ``orjson`` would.
+_NUMBER_START_CLASSES = bytes(
+    ord("0") if byte in b"0123456789" else ord("s") if byte in b" \t\n\r[,:-" else ord("x") for byte in range(256)
+)
+_NUMBER_START = b"s" + b"0" * 19
 
 
-def dumps_json_bytes(
-    value: object, *, default: Callable[[Any], Any] | None = None, option: int | None = None
-) -> bytes:
+def dumps_json(value: object, *, default: Callable[[Any], Any] | None = None, option: int | None = None) -> bytes:
     """Serialize ``value`` like ``orjson.dumps``, falling back to the standard library for what ``orjson`` rejects.
 
     A value ``orjson`` accepts keeps its exact ``orjson`` bytes, so existing records and hashes do not change. The
@@ -58,10 +68,12 @@ def dumps_json_bytes(
 
     ``option`` takes ``orjson`` flags; the fallback supports ``OPT_SORT_KEYS``, ``OPT_INDENT_2`` and
     ``OPT_APPEND_NEWLINE``. Object keys must be strings: the fallback refuses other keys rather than coerce them,
-    which could merge two keys into one.
+    which could merge two keys into one. The fallback accepts only the types ``orjson`` accepts, and calls
+    ``default`` again for the others, so ``default`` must not depend on how often it runs.
 
     Raises:
-        orjson.JSONEncodeError: ``value`` holds something neither encoder can write exactly.
+        orjson.JSONEncodeError: ``value`` holds something neither encoder can write exactly, or ``orjson`` rejects
+            it while ``option`` holds a flag the fallback cannot honor.
     """
     try:
         return orjson.dumps(value, default=default, option=option)
@@ -77,46 +89,47 @@ def dumps_json_bytes(
 def loads_json(data: bytes | bytearray | memoryview | str) -> Any:
     """Parse JSON like ``orjson.loads``, but read integers wider than 64 bits and lone surrogates exactly.
 
-    The common case costs one byte translation and a substring search on top of ``orjson``. A body that holds a run
-    of digits long enough to overflow ``orjson`` is parsed with the standard library instead, as is a body ``orjson``
-    rejects (such as an escaped lone surrogate). The fallback refuses ``NaN``, ``Infinity`` and numbers that overflow
-    a float, as ``orjson`` does.
+    The common case costs one byte translation and a substring search on top of ``orjson``. A body that may hold an
+    integer literal ``orjson`` would read as a float is parsed with the standard library instead, as is a body
+    ``orjson`` rejects but the standard library reads exactly: an escaped lone surrogate, or nesting deeper than
+    ``orjson`` allows. The fallback refuses ``NaN``, ``Infinity`` and numbers that overflow a float, as ``orjson``
+    does. A whole number of 19 or more digits with no fraction or exponent reads as an ``int``, as the standard
+    library reads it, even where a JavaScript or Go writer meant a float.
 
     Raises:
-        orjson.JSONDecodeError: ``data`` is not valid JSON. A body both parsers reject raises ``orjson``'s error.
+        orjson.JSONDecodeError: ``data`` is not valid JSON, or not a contiguous bytes-like object or ``str``. A body
+            both parsers reject raises ``orjson``'s error.
     """
     if type(data) is bytes:
         # Replies and record lines arrive as bytes: check them inline, without the type dispatch below.
-        classes = data.translate(_BYTE_CLASSES)
-        wide = classes.rfind(_INTEGER_START) >= 0 or classes.startswith(_INTEGER_START[1:])
+        wide = data.translate(_DIGIT_RUN_CLASSES).rfind(_DIGIT_RUN) >= 0 or data[:19].isdigit()
+        wide = wide and _starts_a_wide_number(data)
+    elif isinstance(data, (bytearray, str)) or (isinstance(data, memoryview) and data.contiguous):
+        wide = _starts_a_wide_number(data.encode("utf-8", "surrogatepass") if isinstance(data, str) else bytes(data))
     else:
-        wide = _may_hold_wide_integer(data)
+        return orjson.loads(data)  # ``orjson`` raises its own error, before ``bytes()`` copies or allocates anything
     if wide:
         return _loads_stdlib(data, None)
     try:
         return orjson.loads(data)
     except orjson.JSONDecodeError as error:
-        if not isinstance(data, (bytes, bytearray, memoryview, str)):
-            raise  # ``bytes()`` would take a list of byte values, or allocate an integer's worth of zeros
         return _loads_stdlib(data, error)
 
 
-def _may_hold_wide_integer(data: bytes | bytearray | memoryview | str) -> bool:
-    """Whether ``data`` holds an integer literal ``orjson`` would read as a float, allowing false positives."""
-    if not isinstance(data, (bytes, bytearray, memoryview, str)):
-        return False  # ``orjson`` raises its own error for the type
-    if isinstance(data, str):
-        data = data.encode("utf-8", "surrogatepass")
-    classes = (bytes(data) if isinstance(data, memoryview) else data).translate(_BYTE_CLASSES)
+def _starts_a_wide_number(data: bytes | bytearray) -> bool:
+    """Whether ``data`` may hold an integer literal ``orjson`` would read as a float, allowing false positives."""
+    classes = data.translate(_NUMBER_START_CLASSES)
     # ``rfind`` rather than ``find``: CPython's forward search barely skips for a needle that starts with a common
     # byte, while its reverse search keys on that first byte and skips the whole needle on a miss.
-    return classes.startswith(_INTEGER_START[1:]) or classes.rfind(_INTEGER_START) >= 0
+    return classes.startswith(_NUMBER_START[1:]) or classes.rfind(_NUMBER_START) >= 0
 
 
 def _loads_stdlib(data: bytes | bytearray | memoryview | str, orjson_error: orjson.JSONDecodeError | None) -> Any:
     try:
         text = data if isinstance(data, str) else bytes(data).decode("utf-8")
-        return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+        value = json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+        LOG.debug("Decoded a JSON body with the standard library: orjson would change or reject it")
+        return value
     except (ValueError, TypeError, RecursionError) as error:
         if orjson_error is not None:
             raise orjson_error from None

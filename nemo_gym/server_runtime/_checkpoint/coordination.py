@@ -66,7 +66,7 @@ from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import CHECKPOINT_ROUTE_PREFIX, CheckpointMode, next_attempt
 from nemo_gym.server_runtime._checkpoint.telemetry import OperationSpan, checkpoint_span
 from nemo_gym.server_runtime._checkpoint.telemetry import operation as checkpoint_operation
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 LOGGER = logging.getLogger(__name__)
@@ -380,7 +380,7 @@ async def _fan_out(
     replies: dict[str, dict[str, Any]] = {}
     failures: dict[str, str] = {}
     # Encoded once for every participant: a commit or restore scope of many episodes is megabytes of JSON.
-    data = dumps_json_bytes(body)
+    data = dumps_json(body)
 
     async def call(member: Participant) -> None:
         try:

@@ -99,7 +99,7 @@ def _normalize_tool_call(tool_call: Any) -> dict:
     if isinstance(tool_call, str):
         try:
             return json.loads(tool_call)
-        except json.JSONDecodeError:
+        except (ValueError, RecursionError):
             return {"arguments": tool_call}
     return tool_call
 

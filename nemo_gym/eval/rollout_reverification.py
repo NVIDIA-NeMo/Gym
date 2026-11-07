@@ -94,7 +94,7 @@ from nemo_gym.trajectory.atif_reverification import (
     load_atif_manifest,
     project_atif_manifest_entries,
 )
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -625,7 +625,7 @@ def _seed_output_with_successes(
     with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
         selected = (
             (
-                dumps_json_bytes(_project_reverification_row(record.read())) + b"\n"
+                dumps_json(_project_reverification_row(record.read())) + b"\n"
                 for record in source_store.selected_records("success").values()
             )
             if source_store is not None
@@ -797,9 +797,7 @@ def _rescoring_source_answer(row: Dict, run_id: str) -> dict[str, str | int]:
         "attempt": row.get(ATTEMPT_INDEX_KEY_NAME, 0),
         "task_index": row[TASK_INDEX_KEY_NAME],
         "rollout_index": row[ROLLOUT_INDEX_KEY_NAME],
-        "answer_sha256": hashlib.sha256(
-            dumps_json_bytes(_rollout_response(row), option=orjson.OPT_SORT_KEYS)
-        ).hexdigest(),
+        "answer_sha256": hashlib.sha256(dumps_json(_rollout_response(row), option=orjson.OPT_SORT_KEYS)).hexdigest(),
     }
 
 
@@ -1170,7 +1168,7 @@ async def _call_aggregate_metrics(
 
     # Write single file with all agents
     metrics_fpath = aggregate_metrics_path_for(output_fpath)
-    metrics_fpath.write_bytes(dumps_json_bytes(all_agent_metrics, option=orjson.OPT_INDENT_2))
+    metrics_fpath.write_bytes(dumps_json(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
     return metrics_fpath
 
@@ -2002,7 +2000,7 @@ class RolloutReverificationHelper(BaseModel):
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
 
-                serialized = dumps_json_bytes(result)
+                serialized = dumps_json(result)
 
                 # ATIF writes kill-shaped diagnostics to its sidecar too.
                 if not sources_dropped and (not no_persist or config.input_format == "atif"):
@@ -2021,7 +2019,7 @@ class RolloutReverificationHelper(BaseModel):
                     # contaminates the score.
                     failure_class = failure_class or ATIF_NO_PERSIST_FAILURE_CLASS
                     result[NG_FAILURE_CLASS_KEY] = failure_class
-                    serialized = dumps_json_bytes(result)
+                    serialized = dumps_json(result)
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, as in rollout collection.
                     detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]

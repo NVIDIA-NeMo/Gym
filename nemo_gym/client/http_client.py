@@ -60,7 +60,7 @@ from nemo_gym.telemetry.connection_pool import (
 from nemo_gym.telemetry.observer import request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.server_process import (
     get_nemo_gym_fastapi_num_workers,
     is_nemo_gym_fastapi_worker,
@@ -440,7 +440,7 @@ async def request(
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
         # A model can write an integer wider than 64 bits or a lone surrogate into a tool argument.
-        kwargs["data"] = dumps_json_bytes(kwargs.pop("json"))
+        kwargs["data"] = dumps_json(kwargs.pop("json"))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 

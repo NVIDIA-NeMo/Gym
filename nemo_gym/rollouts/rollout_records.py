@@ -64,7 +64,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     observed_elapsed,
     saved_failure_classification,
 )
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
@@ -474,7 +474,7 @@ def rejudge_predecessor_id(row: dict) -> str | None:
     if row.get("_ng_failure_class") is not None:
         failure_id = row.get("_ng_failure_id")
         return failure_id if isinstance(failure_id, str) and failure_id else None
-    return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(dumps_json_bytes(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+    return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(dumps_json(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
 
 
 def rejudgment_admission_closed_by(
@@ -498,7 +498,7 @@ def rejudgment_admission_closed_by(
             return (
                 logical_rollout_id(row) == identity
                 and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == outcome.get(ATTEMPT_INDEX_KEY_NAME, 0)
-                and hashlib.sha256(dumps_json_bytes(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+                and hashlib.sha256(dumps_json(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
                 == pending.predecessor_sha256
             )
     return False

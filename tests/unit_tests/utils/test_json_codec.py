@@ -26,7 +26,8 @@ import uvicorn
 from fastapi import Body, FastAPI
 
 from nemo_gym.client.http_client import get_response_json, request
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils import json_codec
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 WIDE = 2**70
@@ -43,7 +44,7 @@ NAN = float("nan")
     ],
 )
 def test_values_orjson_accepts_keep_their_orjson_bytes(value: object, option: int | None) -> None:
-    assert dumps_json_bytes(value, option=option) == orjson.dumps(value, option=option)
+    assert dumps_json(value, option=option) == orjson.dumps(value, option=option)
 
 
 @pytest.mark.parametrize(
@@ -75,7 +76,7 @@ def test_values_orjson_rejects_round_trip_exactly(value: object, encoded: str, d
     with pytest.raises(orjson.JSONEncodeError):
         orjson.dumps(value)
 
-    data = dumps_json_bytes(value)
+    data = dumps_json(value)
 
     assert data == encoded.encode("utf-8")
     data.decode("utf-8")  # valid UTF-8, even with a lone surrogate in the value
@@ -87,7 +88,7 @@ def test_fallback_honors_sort_keys_indent_and_newline() -> None:
     value = {"b": WIDE, "a": {"d": 1, "c": [2]}}
     option = orjson.OPT_SORT_KEYS | orjson.OPT_INDENT_2 | orjson.OPT_APPEND_NEWLINE
 
-    data = dumps_json_bytes(value, option=option)
+    data = dumps_json(value, option=option)
 
     narrow = {"b": 1, "a": {"d": 1, "c": [2]}}
     assert data == orjson.dumps(narrow, option=option).replace(b'"b": 1', b'"b": ' + str(WIDE).encode())
@@ -96,8 +97,8 @@ def test_fallback_honors_sort_keys_indent_and_newline() -> None:
 
 def test_fallback_writes_other_types_as_orjson_does() -> None:
     at = datetime.datetime(2026, 11, 6, 12, 0)
-    assert dumps_json_bytes({"n": WIDE, "at": at}) == b'{"n":1180591620717411303424,"at":"2026-11-06T12:00:00"}'
-    assert dumps_json_bytes({"n": WIDE, "x": object()}, default=lambda _: "custom") == (
+    assert dumps_json({"n": WIDE, "at": at}) == b'{"n":1180591620717411303424,"at":"2026-11-06T12:00:00"}'
+    assert dumps_json({"n": WIDE, "x": object()}, default=lambda _: "custom") == (
         b'{"n":1180591620717411303424,"x":"custom"}'
     )
 
@@ -107,7 +108,7 @@ def test_nesting_deeper_than_orjson_allows_round_trips() -> None:
     for _ in range(300):
         value = [value]
 
-    assert loads_json(dumps_json_bytes(value)) == value
+    assert loads_json(dumps_json(value)) == value
 
 
 @pytest.mark.parametrize(
@@ -120,7 +121,7 @@ def test_nesting_deeper_than_orjson_allows_round_trips() -> None:
 )
 def test_values_neither_encoder_writes_exactly_raise_orjsons_error(value: object) -> None:
     with pytest.raises(orjson.JSONEncodeError):
-        dumps_json_bytes(value)
+        dumps_json(value)
 
 
 _Pair = collections.namedtuple("_Pair", "a b")
@@ -138,17 +139,17 @@ def test_types_orjson_refuses_are_refused_with_or_without_a_wide_integer(value: 
         orjson.dumps(value)
 
     with pytest.raises(orjson.JSONEncodeError):
-        dumps_json_bytes(value)
+        dumps_json(value)
     with pytest.raises(orjson.JSONEncodeError):
-        dumps_json_bytes({"n": WIDE, "v": value})
-    assert dumps_json_bytes({"n": WIDE, "v": value}, default=repr) == (
+        dumps_json({"n": WIDE, "v": value})
+    assert dumps_json({"n": WIDE, "v": value}, default=repr) == (
         b'{"n":1180591620717411303424,"v":"%s"}' % repr(value).encode()
     )
 
 
 def test_an_option_the_fallback_cannot_honor_raises_instead_of_dropping_it() -> None:
     with pytest.raises(orjson.JSONEncodeError, match="64-bit"):
-        dumps_json_bytes({"n": WIDE}, option=orjson.OPT_NON_STR_KEYS)
+        dumps_json({"n": WIDE}, option=orjson.OPT_NON_STR_KEYS)
 
 
 @pytest.mark.parametrize(
@@ -189,6 +190,22 @@ def test_long_digit_runs_that_are_not_wide_integers_decode_as_orjson_does(data: 
     assert loads_json(data) == orjson.loads(data)
 
 
+@pytest.mark.parametrize(
+    "data",
+    [
+        b'{"id": "msg_12345678901234567890123", "path": "/tmp/run_1762400000123456789/out"}',
+        b'{"sha": "0000000000000000000000000000000000000000", "logprob": -0.000321865081787109375}',
+    ],
+)
+def test_long_digit_runs_inside_strings_stay_on_orjson(data: bytes, monkeypatch: pytest.MonkeyPatch) -> None:
+    def no_fallback(*args: object) -> object:
+        raise AssertionError("parsed with the standard library")
+
+    monkeypatch.setattr(json_codec, "_loads_stdlib", no_fallback)
+
+    assert loads_json(data) == orjson.loads(data)
+
+
 def test_an_escaped_lone_surrogate_decodes() -> None:
     with pytest.raises(orjson.JSONDecodeError):
         orjson.loads(b'{"s": "\\ud800"}')
@@ -214,7 +231,7 @@ def test_bodies_orjson_rejects_still_raise_its_decode_error(data: bytes) -> None
         loads_json(data)
 
 
-@pytest.mark.parametrize("data", [None, 10**12, {"a": 1}, list(b"[1]")])
+@pytest.mark.parametrize("data", [None, 10**12, {"a": 1}, list(b"[1]"), memoryview(b"[x1x,x2x]x")[0::2]])
 def test_input_of_the_wrong_type_raises_orjsons_decode_error(data: object) -> None:
     # ``bytes()`` would decode a list of byte values as JSON, or allocate an integer's worth of zeros first.
     with pytest.raises(orjson.JSONDecodeError, match="Input must be bytes"):
