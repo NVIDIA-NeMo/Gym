@@ -208,7 +208,9 @@ a rollout stop does the same and adds its `ng_rollout_stop` marker. A final answ
 `incomplete` with `max_output_tokens`. A failed model request answers `failed` with `ng_agent_outcome` naming
 `model_request_error` and its status; a transport failure names `model_transport_error`; an answer with neither text
 nor a tool call, which CrewAI asks for once more before it raises `EmptyLLMResponseError`, names
-`agent_invalid_output`; any other CrewAI error is `unknown`. CrewAI does not run a failed task again
+`agent_invalid_output`. An unclassified CrewAI exception returns `failed` with
+`ng_agent_outcome.failure_kind="unknown"`; the default Environment Server outcome policy retries that episode.
+CrewAI does not run a failed task again
 (`max_retry_limit=0`): the Environment Server's outcome policy decides whether the episode is verified or retried.
 When CrewAI reaches `max_iter` it asks the model for a final answer, and the run counts as completed, as CrewAI counts
 it.

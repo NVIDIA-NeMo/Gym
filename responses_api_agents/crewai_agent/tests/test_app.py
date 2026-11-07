@@ -823,3 +823,49 @@ async def test_confirmed_deadline_retains_provider_timeout_and_replays_it_on_clo
     with RequestFailureLog.capture() as close_log:
         await agent._close_agent_session_state(state)
     assert close_log.reply_report(None) == saved
+
+
+async def test_unclassified_crew_exception_returns_failed_unknown_and_survives_close(monkeypatch, tmp_path):
+    from responses_api_agents.crewai_agent import crew
+    from responses_api_agents.crewai_agent.sandbox import CrewAISessionState
+    from responses_api_agents.crewai_agent.sandbox_runner import run
+
+    build = MagicMock(side_effect=RuntimeError("unexpected crew failure"))
+    monkeypatch.setattr(crew, "build_crew", build)
+    session = SimpleNamespace(
+        artifacts=None,
+        workdir=str(tmp_path),
+        stop_request_path=str(tmp_path / "stop.request"),
+        expired=False,
+        execution_oom=None,
+        sandbox_stopped=False,
+        cleanup_confirmed=True,
+    )
+    state = CrewAISessionState(request=_seed(sandbox_access=_access(str(tmp_path))), session=session, grants=[])
+
+    async def execute(self, payload, *, timeout, close_timeout):
+        self.session.artifacts = await run(payload, scratch=tmp_path, task_environment={})
+        return self.session.artifacts
+
+    monkeypatch.setattr(CrewAISessionState, "execute", execute)
+    close_state = AsyncMock()
+    monkeypatch.setattr(CrewAISessionState, "close", close_state)
+    monkeypatch.setattr(CrewAIAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    agent, body = _agent(), _body()
+    state.activation_request = body
+
+    response = await agent._activate(state, agent._instruction(state, body))
+    close = await agent._close_agent_session_state(state)
+
+    build.assert_called_once()
+    assert response.status == "failed"
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    assert response.error.message == "RuntimeError: unexpected crew failure"
+    assert state.session.artifacts["model_failure"] is None
+    assert state.session.artifacts["infrastructure_error"] is None
+    [invocation] = _records(close, "agent_invocation")
+    [sandbox] = _records(close, "sandbox")
+    assert (invocation.status, invocation.error_type, invocation.model_calls) == ("failed", "RuntimeError", [])
+    assert (sandbox.outcome, sandbox.error_type) == ("failed", "RuntimeError")
+    assert close.cleanup_confirmed is True
+    close_state.assert_awaited_once_with(agent.config.session_close_timeout_seconds)
