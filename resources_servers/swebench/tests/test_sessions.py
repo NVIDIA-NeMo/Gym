@@ -440,8 +440,17 @@ def _extraction_result(task: MagicMock, result: SandboxExecResult) -> None:
 
 
 def _start_through_the_real_create_sandbox(server, monkeypatch: pytest.MonkeyPatch, box: MagicMock) -> None:
-    """Run the real ``_create_sandbox`` (the fixture stubs it) against a provider-level fake ``box``."""
+    """Run the real ``_create_sandbox`` (the fixture stubs it) against a provider-level fake ``box``.
+
+    ``box`` stands in for the task sandbox too, which the real path registers through ``new_task_sandbox``.
+    """
     server._create_sandbox = type(server)._create_sandbox.__get__(server)
+
+    def task_sandbox(session_id: str, spec: object) -> MagicMock:
+        server._session_id_to_sandbox[session_id] = box
+        return box
+
+    object.__setattr__(server, "new_task_sandbox", task_sandbox)
     server._make_test_spec.return_value = SimpleNamespace(
         repo="repo", base_commit="base", instance_id="task", instance_image_key="image:key"
     )
