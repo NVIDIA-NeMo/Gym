@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# LAB protocol source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# f46ef86e4788545622db25dcffa3aebb7a139929/harness/agent_loop.py
 """Harbor agent adapter for Legal Agent Bench inside NeMo Gym."""
 
 from __future__ import annotations
@@ -10,11 +16,13 @@ import json
 import logging
 import re
 import shlex
-import sys
 import time
 from pathlib import Path
 from typing import Any
 
+from resources_servers.legal_agent_bench.harness.adapters.base import ModelResponse
+from resources_servers.legal_agent_bench.harness.adapters.openai_compatible import OpenAICompatibleAdapter
+from resources_servers.legal_agent_bench.lab_harbor.tools import CONTAINER_TOOL_RUNNER_PATH, get_all_tool_definitions
 from resources_servers.legal_agent_bench.prepare import (
     DEFAULT_SKILLS_DIR,
     discover_harness_skills,
@@ -24,17 +32,10 @@ from resources_servers.legal_agent_bench.prepare import (
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_VENDOR_ROOT = _PACKAGE_DIR / "vendor" / "harvey_labs"
-if str(_VENDOR_ROOT) not in sys.path:
-    sys.path.insert(0, str(_VENDOR_ROOT))
-
-from harness.adapters.base import ModelResponse  # noqa: E402
-from harness.adapters.openai_compatible import OpenAICompatibleAdapter  # noqa: E402
-from lab_harbor.tools import CONTAINER_TOOL_RUNNER_PATH, get_all_tool_definitions  # noqa: E402
-
 
 try:  # pragma: no cover - Harbor is installed in the Harbor agent server venv.
     from harbor.agents.base import BaseAgent
+    from harbor.agents.capabilities import AgentCapabilities
     from harbor.environments.base import BaseEnvironment
     from harbor.models.agent.context import AgentContext
 except ImportError:  # pragma: no cover
@@ -45,6 +46,9 @@ except ImportError:  # pragma: no cover
             self.model_name = model_name
             self.logger = logger or logging.getLogger(__name__)
 
+    from types import SimpleNamespace
+
+    AgentCapabilities = SimpleNamespace
     BaseEnvironment = Any  # type: ignore
     AgentContext = Any  # type: ignore
 
@@ -54,7 +58,7 @@ AGENT_VERSION = "0.1.0"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
 REQUIRED_TASK_KEYS = {"title", "instructions", "criteria"}
 REQUIRED_CRITERION_KEYS = {"id", "title", "match_criteria"}
-SYSTEM_PROMPT_PATH = _VENDOR_ROOT / "harness" / "system-prompt.md"
+SYSTEM_PROMPT_PATH = _PACKAGE_DIR / "harness" / "system-prompt.md"
 SYSTEM_PROMPT_PREAMBLE = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
@@ -201,6 +205,8 @@ class HarborToolExecutor:
 class LegalAgentBenchHarborAgent(BaseAgent):
     """NeMo Gym-specific Harbor agent for Legal Agent Bench."""
 
+    capabilities = AgentCapabilities(atif=True)
+
     def __init__(
         self,
         logs_dir: Path,
@@ -312,6 +318,8 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         )
         _write_agent_error_flags(Path(self.logs_dir), metrics)
         _populate_context(context, result, metrics, task_id, self.agent_id, artifact_dir)
+        if result.get("model_error") is not None:
+            raise RuntimeError(f"LAB model request failed: {result['model_error']}")
 
     async def _hydrate_environment(self, environment: BaseEnvironment, docs_dir: Path) -> None:
         validate_harness_skills(self.skills_dir)
@@ -340,7 +348,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             base_url=base_url,
             api_key=kwargs.pop("agent_model_api_key", None),
             temperature=self.temperature,
-            max_tokens=int(kwargs.pop("agent_model_max_tokens", 32768)),
+            max_tokens=int(kwargs.pop("agent_model_max_tokens", 65536)),
             reasoning_effort=self.reasoning_effort,
             timeout_seconds=kwargs.pop("agent_model_timeout_seconds", None),
             omit_temperature=kwargs.pop("agent_model_omit_temperature", None),
@@ -407,7 +415,7 @@ async def _run_agent_async(
                 if _is_context_overflow_error(err_msg):
                     context_overflow = True
                     break
-                model_error = err_msg
+                model_error = err_msg or type(exc).__name__
                 break
 
             messages.append(response.message)
@@ -602,6 +610,7 @@ def _log_tool(f, turn: int, tool_call_id: str, name: str, arguments: str, result
         "tool_name": name,
         "arguments": arguments if isinstance(arguments, str) else str(arguments),
         "result_preview": result[:1000],
+        "result": result,
     }
     f.write(json.dumps(entry) + "\n")
     f.flush()
@@ -654,7 +663,10 @@ def _write_trajectory(
                     "arguments": _parse_tool_arguments(tc.get("arguments")),
                 }
             )
-        observations = [{"content": t.get("result_preview", "")} for t in tool_entries_by_turn.get(turn, [])]
+        observations = [
+            {"source_call_id": t.get("tool_call_id"), "content": t.get("result", t.get("result_preview", ""))}
+            for t in tool_entries_by_turn.get(turn, [])
+        ]
         step: dict[str, Any] = {
             "step_id": len(steps) + 1,
             "source": "agent",
