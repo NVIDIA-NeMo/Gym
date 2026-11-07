@@ -47,7 +47,7 @@ warmup:
 run:
   env:
     _copy: shared_run_warmup_env_vars
-    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-nvfp4
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-mambakerneltuning
     SBATCH_TIMELIMIT: "01:30:00"
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
