@@ -86,6 +86,6 @@ def test_resources_servers_close_through_the_base_route() -> None:
                 and not any(isinstance(base, ast.Name) and base.id in closing_bases for base in cls.bases)
             ):
                 violations.append(
-                    f"{_location(path, cls)} accepts a typed seed but does not override close_resources_session"
+                    f"{_location(path, cls)} accepts an episode seed but does not override close_resources_session"
                 )
     assert not violations, "\n".join(violations)

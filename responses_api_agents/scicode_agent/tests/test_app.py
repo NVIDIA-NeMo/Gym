@@ -13,15 +13,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import statistics
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import ClientResponseError
 from fastapi import Response
 
 import responses_api_agents.scicode_agent.app as app
 from nemo_gym.client import ServerClient
+from nemo_gym.client import raise_for_status as real_raise_for_status
 from nemo_gym.config import AggregateMetricsRequest
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    FailureBoundary,
+    FailureHeader,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    RequestFailureLog,
+    failure_report_for,
+)
 from nemo_gym.metrics import compute_aggregate_metrics
 from responses_api_agents.scicode_agent.app import (
     TOKEN_USAGE_VERSION,
@@ -833,3 +843,48 @@ class TestStepStopMetadata:
         for i in (0, 2, 3):
             assert "response_status" not in row["step_usage"][i]
             assert "response_id" not in row["step_usage"][i]
+
+
+def _failed_verify_reply() -> MagicMock:
+    """A 500 /verify reply whose failure report names the resources server's verifier error, as on the wire."""
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="verifier_error",
+        failure_reason="Verification failed: ScicodeError",
+        operation="verify",
+        stage="verification",
+        http_status=500,
+    )
+    request_info = SimpleNamespace(url="http://server", method="POST", headers={}, real_url="http://server")
+    error = ClientResponseError(
+        request_info,
+        (),
+        status=500,
+        message="Internal Server Error",
+        headers=FailureHeader.encode(failure_report_for(failure)),
+    )
+    reply = MagicMock(status=500, ok=False, cookies={})
+    reply.content.read = AsyncMock(return_value=b"Internal Server Error")
+    reply.raise_for_status = MagicMock(side_effect=error)
+    return reply
+
+
+@pytest.mark.asyncio
+async def test_run_masks_the_row_when_verify_fails_and_keeps_the_answer():
+    agent = _agent()
+    failed = _failed_verify_reply()
+
+    def _post(server_name, url_path, json, cookies):
+        return _Resp(_model_json("x = 1")) if url_path == "/v1/responses" else failed
+
+    async def _raise_for_status(response):
+        if not isinstance(response, _Resp):
+            await real_raise_for_status(response)
+
+    agent.server_client.post = AsyncMock(side_effect=_post)
+    with patch.object(app, "raise_for_status", _raise_for_status), RequestFailureLog.capture() as log:
+        result = await agent.run(_FakeRequest(), _run_request(problem_id="1", n_steps=1))
+
+    assert (result["reward"], result["mask_sample"], result["failure_kind"]) == (0.0, True, "judge_failed")
+    assert set(result["solutions"]) == {"1.1"}
+    assert "verifier_error" in {event.failure_kind for event in log.report.events.values()}

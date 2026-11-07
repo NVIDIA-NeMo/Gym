@@ -23,7 +23,6 @@ agent_server: opencode_agent
 datasets:
 - name: swebench_multimodal
   type: benchmark
-  taskset: swebench:multimodal
   jsonl_fpath: benchmarks/swebench/data/swebench_multimodal_benchmark.jsonl
   prepare_script: benchmarks/swebench/multimodal/prepare.py
   num_repeats: 3
