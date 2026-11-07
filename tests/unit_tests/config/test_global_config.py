@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib
 import importlib.metadata
+import re
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
@@ -36,6 +37,7 @@ from nemo_gym.config.config_types import (
     ConfigMissingValuesError,
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
+    LegacyAgentWithoutRunError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerRefNotFoundError,
@@ -47,6 +49,7 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     AGENT_SESSION_AGENT_TYPES,
+    AGENT_TYPES_WITHOUT_RUN,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
@@ -2335,6 +2338,54 @@ class TestConfigLoadErrors:
         assert config["mcqa_environment_server"] == {"note": "an unrelated top-level entry"}
         assert _environment_servers_by_agent(config) == {"mcqa_simple_agent": ["mcqa_simple_agent_environment_server"]}
 
+    @staticmethod
+    def _environment_server(server_type: str) -> dict:
+        return {
+            "environment_servers": {
+                server_type: {
+                    "entrypoint": "app.py",
+                    "agent_server": {"type": "responses_api_agents", "name": "mcqa_simple_agent"},
+                }
+            }
+        }
+
+    def test_legacy_agent_naming_an_agent_without_run_is_rejected(self, monkeypatch: MonkeyPatch) -> None:
+        # Every episode the relay sent to /run would fail, so the config fails before anything starts.
+        monkeypatch.setattr(nemo_gym.config.global_config, "AGENT_TYPES_WITHOUT_RUN", frozenset({"simple_agent"}))
+        config = self._agent_without_environment_server_config(mcqa_served=self._environment_server("legacy_agent"))
+
+        with raises(LegacyAgentWithoutRunError) as exc_info:
+            GlobalConfigDictParser()._reject_legacy_agent_without_run(config)
+
+        assert "mcqa_served -> mcqa_simple_agent (simple_agent)" in str(exc_info.value)
+        assert "single_agent_turn" in str(exc_info.value)
+
+    def test_generated_relay_for_an_agent_without_run_is_rejected(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.config.global_config, "AGENT_TYPES_WITHOUT_RUN", frozenset({"simple_agent"}))
+        parse_config = GlobalConfigDictParserConfig(
+            initial_global_config_dict=self._agent_without_environment_server_config(),
+            skip_load_from_cli=True,
+            skip_load_from_dotenv=True,
+        )
+
+        with raises(LegacyAgentWithoutRunError) as exc_info:
+            GlobalConfigDictParser().parse(parse_config)
+
+        assert "mcqa_environment_server -> mcqa_simple_agent (simple_agent)" in str(exc_info.value)
+
+    def test_agent_without_run_behind_a_session_environment_server_is_accepted(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(nemo_gym.config.global_config, "AGENT_TYPES_WITHOUT_RUN", frozenset({"simple_agent"}))
+        config = self._agent_without_environment_server_config(
+            mcqa_served=self._environment_server("single_agent_turn")
+        )
+
+        GlobalConfigDictParser()._reject_legacy_agent_without_run(config)
+
+    def test_legacy_agent_naming_an_agent_with_run_is_accepted(self) -> None:
+        config = self._agent_without_environment_server_config(mcqa_served=self._environment_server("legacy_agent"))
+
+        GlobalConfigDictParser()._reject_legacy_agent_without_run(config)
+
     def _agent_with_environment_server_config(self, **extra) -> DictConfig:
         return OmegaConf.merge(
             GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
@@ -3510,6 +3561,24 @@ class TestComposeUnboundAgent:
         }
 
         assert implementing == AGENT_SESSION_AGENT_TYPES
+
+    def test_agent_types_without_run_match_the_agent_apps(self) -> None:
+        """An agent app is listed exactly when neither it nor the agent app it subclasses defines run()."""
+        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        sources = {app.parent.name: app.read_text(encoding="utf-8") for app in agents_root.glob("*/app.py")}
+
+        def defines_run(agent_type: str) -> bool:
+            source = sources[agent_type]
+            if re.search(r"^    async def run\(", source, re.M):
+                return True
+            parent = re.search(r"^from responses_api_agents\.(\w+)\.app import", source, re.M)
+            return parent is not None and parent.group(1) in sources and defines_run(parent.group(1))
+
+        without_run = {agent_type for agent_type in sources if not defines_run(agent_type)}
+
+        assert without_run == AGENT_TYPES_WITHOUT_RUN
+        # An agent with neither its own /run nor agent sessions could not run an episode at all.
+        assert AGENT_TYPES_WITHOUT_RUN <= AGENT_SESSION_AGENT_TYPES
 
     def test_langgraph_swap_keeps_unrelated_session_tool_grants(self) -> None:
         config = self._session_environment_config("langgraph_agent")
