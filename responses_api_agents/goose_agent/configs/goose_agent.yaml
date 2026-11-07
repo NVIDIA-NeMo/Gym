@@ -29,3 +29,4 @@ goose_agent:
       # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
       sandbox_provider: null
       sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host

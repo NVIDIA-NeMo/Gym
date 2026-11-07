@@ -60,6 +60,7 @@ gym eval run --no-serve \
 | `sandbox_install_timeout_seconds` | `900` | Bound on session setup, including installation. |
 | `session_close_timeout_seconds` | `60` | Bound on each supervised close phase. |
 | `sandbox_provider`, `sandbox_config` | `null`, `{}` | Agent-owned sandbox, only when Resources supplies no `SandboxAccess`. |
+| `network_access` | `inherit` | Egress of an agent-owned sandbox; `model_only` allows only the model server's host. |
 
 ## Runtime and sandbox setup
 
@@ -74,6 +75,12 @@ config, sessions and state live under `GOOSE_PATH_ROOT` in a private session dir
 task's `HOME` and `XDG_*` directories. `SandboxAccess.env` is forwarded, except `GOOSE_*` and `OPENAI_*` variables,
 which could redirect Goose's configuration or model calls. Close removes only the session directory; the Resources
 Server destroys a borrowed sandbox, and the agent stops a sandbox it owns.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model server's host (every port). The
+agent server uploads Goose, so setup needs no other host. The OpenSandbox policy is set when the sandbox is created, so
+a session that borrows a task sandbox rejects any value other than `inherit`, as does a provider without network
+policies or an explicit `sandbox_config.provider_options.network_policy`. Goose uses no tool grants, so
+`model_and_tools` is rejected. Each refusal fails the seed with HTTP 422.
 
 ## Requests, results and outcomes
 

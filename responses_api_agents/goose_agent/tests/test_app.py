@@ -9,6 +9,7 @@ import shlex
 import shutil
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -190,6 +191,44 @@ def test_unsupported_seeds_are_final_refusals(request_seed, reason):
     server = agent()
     assert check_agent_seed_rejected(server.setup_webserver(), request_seed) == reason
     assert not server._session_records
+
+
+@pytest.mark.parametrize(
+    ("network_access", "borrowed", "reason"),
+    [
+        ("model_only", True, "Goose network_access applies only to a sandbox it creates, not a borrowed one"),
+        ("model_and_tools", False, "Goose uses no tool grants; set network_access to model_only or inherit"),
+    ],
+)
+def test_network_access_refusals(network_access, borrowed, reason):
+    server = agent(network_access=network_access, sandbox_provider="sandbox")
+    assert check_agent_seed_rejected(server.setup_webserver(), seed(borrowed=borrowed)) == reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network_access", ["inherit", "model_only"])
+async def test_owned_sandbox_egress_allows_only_the_model_server(monkeypatch, network_access):
+    import responses_api_agents.goose_agent.app as module
+
+    remote = MagicMock(
+        sandbox_id="owned", start=AsyncMock(), exec=AsyncMock(return_value=SandboxExecResult("", "", 0))
+    )
+    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(
+        module, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    )
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "resolve_provider_metadata", lambda *args: {})
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(GooseSession, "install", AsyncMock())
+    server = agent(network_access=network_access, sandbox_provider="sandbox")
+    monkeypatch.setattr(GooseAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model.example:9000/v1")
+    await server._seed_agent_session_state(seed(borrowed=False))
+    policy = remote.start.await_args.args[0].provider_options.get("network_policy")
+    if network_access == "inherit":
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": "model.example"}]}
 
 
 def test_request_mapping_and_refusals():
