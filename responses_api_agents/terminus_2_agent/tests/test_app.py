@@ -8,21 +8,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import HTTPException
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
+from pydantic import ValidationError
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.terminus_2_agent.app import (
-    LocalEnvironment,
-    LocalTmuxSession,
-    StandaloneTerminus2,
     Terminus2Agent,
     Terminus2AgentConfig,
     _extract_instruction,
 )
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
+from responses_api_agents.terminus_2_agent.terminus import LocalEnvironment, LocalTmuxSession, StandaloneTerminus2
 
 
 def _config(**kwargs) -> Terminus2AgentConfig:
@@ -83,6 +83,20 @@ class TestLocalEnvironment:
         assert result.return_code == 124
         assert "timed out" in (result.stderr or "")
 
+    @pytest.mark.asyncio
+    async def test_a_removed_workspace_moves_default_commands_to_the_root(self, tmp_path: Path) -> None:
+        workspace = tmp_path / "task"
+        workspace.mkdir()
+        environment = LocalEnvironment(workspace, command_timeout_sec=5)
+        # A command typed in the terminal can move the workspace away; Terminus's own tmux commands must still run.
+        workspace.rename(tmp_path / "task.bak")
+
+        result = await environment.exec("pwd")
+
+        assert (result.return_code, result.stdout.strip()) == (0, "/")
+        with pytest.raises(FileNotFoundError, match="does not exist"):
+            await environment.exec("pwd", cwd=str(workspace))
+
 
 class TestLocalTmuxSession:
     def test_macos_launcher_does_not_use_linux_script_flags(self, tmp_path: Path) -> None:
@@ -93,7 +107,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "darwin"):
+        with patch("responses_api_agents.terminus_2_agent.terminus.sys.platform", "darwin"):
             command = session._tmux_start_session
         assert "script -qc" not in command
         assert "tmux new-session" in command
@@ -106,7 +120,7 @@ class TestLocalTmuxSession:
             local_asciinema_recording_path=None,
             remote_asciinema_recording_path=None,
         )
-        with patch("responses_api_agents.terminus_2_agent.app.sys.platform", "linux"):
+        with patch("responses_api_agents.terminus_2_agent.terminus.sys.platform", "linux"):
             command = session._tmux_start_session
         assert "script -qc" in command
 
@@ -215,6 +229,10 @@ class TestResponses:
             ],
         )
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
+            with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+                await agent.responses(request=None, body=body.model_copy(update={"max_output_tokens": 32}))
+            assert refused.value.status_code == 422
+            agent._run_terminus.assert_not_awaited()
             response = await agent.responses(request=None, body=body)
 
         assert response.model == "test-model"
@@ -265,6 +283,13 @@ class TestConfig:
         assert config.concurrency == 1
         assert config.record_terminal_session is False
         assert config.trajectory_config == {"raw_content": False}
+
+    @pytest.mark.parametrize("field", ["timeout", "model_timeout_sec", "command_timeout_sec"])
+    @pytest.mark.parametrize("value", [0, -1, float("inf"), float("nan")])
+    def test_timeouts_must_be_positive_and_finite(self, field: str, value: float) -> None:
+        # The run timeout sets the supervisor's deadline and an owned sandbox's TTL.
+        with pytest.raises(ValidationError, match=field):
+            _config(**{field: value})
 
     @pytest.mark.parametrize(
         "relative_path,config_name",

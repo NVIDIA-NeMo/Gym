@@ -86,6 +86,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "claude_code_agent",
         "osworld_agent",
         "harbor_oracle_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
         "miniswe_sandboxed_agent",
     ],
@@ -269,14 +270,15 @@ def test_hermes_overlay_keeps_its_inherited_resources_binding(tmp_path: Path) ->
     assert resolved.renamed_agent.responses_api_agents.hermes_agent.resources_server.name == "my_resources"
 
 
-def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
-    config = tmp_path / "hermes.yaml"
-    default = SCRIPT.parents[1] / "responses_api_agents/hermes_agent/configs/hermes_agent.yaml"
+@pytest.mark.parametrize("agent", ["hermes_agent", "terminus_2_agent"])
+def test_default_session_harness_composes_with_exactly_one_session_environment(tmp_path: Path, agent: str) -> None:
+    config = tmp_path / f"{agent}.yaml"
+    default = SCRIPT.parents[1] / f"responses_api_agents/{agent}/configs/{agent}.yaml"
     config.write_text(default.read_text())
     composition = tmp_path / "run.yaml"
     composition.write_text(
         "policy_model_name: test-model\n"
-        + _server_fronting("hermes_agent", name="session_environment", server_type="single_agent_turn_legacy")
+        + _server_fronting(agent, name="session_environment", server_type="single_agent_turn_legacy")
     )
     before = config.read_text()
 
@@ -285,8 +287,8 @@ def test_default_hermes_composes_with_exactly_one_session_environment(tmp_path: 
 
     assert config.read_text() == before
     resolved = _parse(config, composition, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"hermes_agent": ["session_environment"]}
-    assert resolved.hermes_agent.responses_api_agents.hermes_agent.resources_server is None
+    assert _environment_servers_by_agent(resolved) == {agent: ["session_environment"]}
+    assert resolved[agent].responses_api_agents[agent].resources_server is None
 
 
 def test_check_reports_without_writing(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:

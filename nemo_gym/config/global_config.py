@@ -234,6 +234,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "pool_agent",
         "simple_agent",
         "stirrup_agent",
+        "terminus_2_agent",
         "terminus_2_sandboxed_agent",
     }
 )
