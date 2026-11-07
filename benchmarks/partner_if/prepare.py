@@ -22,11 +22,11 @@ OUTPUT_FPATH = DATA_DIR / "partner_if_benchmark.jsonl"
 TOOLS_FPATH = DATA_DIR / "partner_if_tools.jsonl"
 
 DATASET_NAME = "partner_if"
-VERSION = "2.1.4"
+VERSION = "2.1.5"
 ARTIFACT = "partner_if.jsonl"
 # The registry download neither checks the HTTP status nor verifies content, so the digest guards both.
-SHA256 = "de0a0da01eb32eff7bac4275b866f6733895e65d0b617372d2eb52dda00fbbb6"  # pragma: allowlist secret
-ROW_COUNT = 25
+SHA256 = "e8f955f70805ace306757ead831aa10f9aabd5d481bb80c3d878be0ccfd42d2f"  # pragma: allowlist secret
+ROW_COUNT = 27
 
 
 def has_tool_backend(line: str) -> bool:

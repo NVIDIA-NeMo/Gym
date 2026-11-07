@@ -78,6 +78,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "langgraph_agent",
         "hermes_agent",
         "pi_agent",
+        "prime_agent",
         "pool_agent",
         "codex_agent",
         "openclaw_agent",
@@ -98,7 +99,12 @@ def test_migration_respects_agent_session_templates(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "child_app.py" if agent_type == "prime_agent" else "app.py",
+                            "resources_server": resources,
+                        }
+                    }
                 }
             }
         )
@@ -111,11 +117,18 @@ def test_migration_respects_agent_session_templates(
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
 
 
+def test_prime_host_entrypoint_still_requires_a_legacy_relay() -> None:
+    assert migration.needs_environment_server(
+        {"responses_api_agents": {"prime_agent": {"entrypoint": "app.py", "resources_server": None}}}
+    )
+
+
 @pytest.mark.parametrize(
     "agent_type",
     [
         "hermes_agent",
         "pi_agent",
+        "prime_agent",
         "pool_agent",
         "codex_agent",
         "openclaw_agent",

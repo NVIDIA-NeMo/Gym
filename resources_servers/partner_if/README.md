@@ -27,6 +27,16 @@ needs; omit it to require all), `text_contains_v1` (`source`: `answer` or
 `artifact:<name>`; `literal`) and `text_no_uuid_v1` (fails if the answer or any assistant
 message contains a UUID; tool calls, tool results and context are not checked).
 
+`single_advertised_tool_call_v1` takes no parameters and requires exactly one new
+function call to a name in the request's advertised function registry, with JSON-object
+arguments satisfying that function's parameter schema. Use `tool_call_response` to
+grade an unexecuted next call. Supplied history stays context; prose and reasoning
+mentions do not count as calls. No call, multiple calls, an unlisted name, or malformed
+arguments fail. Python syntax, `await` usage and execution are not assessed. An invalid
+or missing registry, unresolved schema reference, or incomplete trajectory is
+unscorable. Schema references are resolved locally without network retrieval. This
+checker measures the one-call reproduction contract, not every IF-TOOLGROUND scenario.
+
 The fixed output checks in `fixed_checks.py` take no parameters. They parse the answer as
 CommonMark with `markdown-it-py`, so code blocks, code spans and quotes don't count as the
 answer's own structure:
@@ -207,3 +217,20 @@ Data: Apache 2.0
 
 Dependencies
 - nemo_gym: Apache 2.0
+
+## Prime child repository episodes
+
+`prime_app.py` owns a sandbox containing a pinned repository and supplies it to
+Prime's SDK child entrypoint. The agent closes and the supervisor confirms termination
+before verification reads its capture. A successful native IPython tool result must
+contain a parent-send receipt whose ID also appears in the receiving controller's
+delivery log. Only those delivered messages become `artifact:parent_reports`; the
+unscored delivery prerequisite reads `artifact:parent_send`. Drafts and final chat
+text do not count as delivery. The shared verifier registry, rubric judge, receipt
+format, and IF aggregation then apply unchanged.
+
+A complete run or exhausted turn budget without delivery is a scored failure.
+Missing captures, provider errors without delivery evidence, and judge errors are
+unscorable. This server reports reverify unsupported because its sandbox capture
+is not in the registry row. Its resource sessions are process-local and restart on
+checkpoint recovery; they cannot resume a partially executed child.
