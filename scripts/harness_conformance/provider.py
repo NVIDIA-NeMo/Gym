@@ -52,6 +52,10 @@ SUMMARY_PROMPTS = (
     "The context window is approaching its limit. Please create a concise summary",
     "Create a structured handoff summary for a later assistant",
 )
+CONVERSATION_SUMMARY_PROMPTS = (
+    "The messages above are a conversation to summarize.",
+    "This is the PREFIX of a turn that was too large to keep.",
+)
 
 
 def is_compaction_request(body: dict) -> bool:
@@ -59,7 +63,19 @@ def is_compaction_request(body: dict) -> bool:
     if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
         return False
     last = messages[-1]
-    return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(SUMMARY_PROMPTS)
+    if last.get("role") != "user":
+        return False
+    content = message_content_to_text(last.get("content"))
+    if content.startswith(SUMMARY_PROMPTS):
+        return True
+    # Pi places the instruction after the quoted history. Text inside that
+    # history must not turn an ordinary policy request into a helper request.
+    history, separator, instruction = content.rpartition("</conversation>")
+    return bool(
+        separator
+        and history.startswith("<conversation>")
+        and instruction.strip().startswith(CONVERSATION_SUMMARY_PROMPTS)
+    )
 
 
 @dataclass
@@ -80,6 +96,7 @@ class Probe:
         default_factory=lambda: f"COMPACTION_SUMMARY_{uuid4().hex}: continue the shell checks."
     )
     compaction_response_ids: list[str] = field(default_factory=list)
+    compaction_overflow_after: int | None = None
 
     def save(self) -> None:
         """Persist independent observations even if collection fails."""
@@ -99,6 +116,7 @@ class Probe:
             witness["compaction"] = {
                 "summary": self.compaction_summary,
                 "response_ids": self.compaction_response_ids,
+                "overflow_after": self.compaction_overflow_after,
             }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
 
@@ -233,13 +251,28 @@ class Probe:
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
         compacting = self.scenario.compaction is not None and is_compaction_request(body)
+        overflow = (
+            self.scenario.compaction is True
+            and self.compaction_overflow_after is not None
+            and index == self.compaction_overflow_after
+            and not compacting
+            and not self.compaction_response_ids
+        )
+        if overflow:
+            status = 400
         if status != 200:
             payload = {
-                "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
+                "error": {
+                    "message": "This model's maximum context length is 32768 tokens."
+                    if overflow
+                    else "controlled model failure",
+                    "type": "conformance_error",
+                    "code": str(status),
+                }
             }
         else:
             try:
-                if self.finished:
+                if self.finished and not compacting:
                     raise ValueError("unexpected model request after the scripted final answer")
                 # A summary can cover only older history. Policy requests must still
                 # show every executed result before receiving the next scripted action.
@@ -315,7 +348,13 @@ class Probe:
                         "content": None if calls_tool else output[0]["content"][0]["text"],
                     }
                     if not compacting:
-                        message["reasoning_content"] = "Perform the prescribed check."
+                        # Overflow recovery also needs history outside Pi's 20k
+                        # retained tail; reported usage alone cannot supply it.
+                        message["reasoning_content"] = (
+                            "Retain the completed shell checks. " * 500
+                            if self.compaction_overflow_after is not None and not self.compaction_response_ids
+                            else "Perform the prescribed check."
+                        )
                     if calls_tool:
                         message["tool_calls"] = [
                             {
