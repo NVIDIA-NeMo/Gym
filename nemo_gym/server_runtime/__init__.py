@@ -46,11 +46,18 @@ if TYPE_CHECKING:
         GenerationCutReceipt,
     )
     from nemo_gym.server_runtime._checkpoint.resources import ResourcesParticipant
+    from nemo_gym.server_runtime._checkpoint.sandbox import (
+        SandboxCheckpointConfig,
+        SandboxSessionCheckpointer,
+        checkpoint_state_dir,
+    )
+    from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
     from nemo_gym.server_runtime._checkpoint.steps import (
         CHECKPOINT_CLOSE_FOLLOWS_HEADER,
         StepType,
         seed_rebinds_tool_accesses,
         seed_restarts,
+        seed_restores_before_agent_close,
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
@@ -122,6 +129,12 @@ if TYPE_CHECKING:
         SingleAgentTurnResult,
         SingleAgentTurnTaskInput,
     )
+    from nemo_gym.server_runtime.testing.checkpoint_conformance import (
+        FakeSandboxProvider,
+        FakeSnapshotProvider,
+        check_sandbox_session_checkpoints,
+        checkpointing_config,
+    )
     from nemo_gym.server_runtime.testing.session_conformance import check_resources_session_contract
     from nemo_gym.server_runtime.tool_access import (
         DirectHTTPToolAccess,
@@ -168,6 +181,8 @@ _PUBLIC_API = {
     "DirectHTTPToolAccess": "tool_access",
     "EnvironmentParticipant": "_checkpoint.environment",
     "EpisodeRecord": "_checkpoint.environment",
+    "FakeSandboxProvider": "testing.checkpoint_conformance",
+    "FakeSnapshotProvider": "testing.checkpoint_conformance",
     "GenerationCutInventory": "_checkpoint.generation_cut",
     "GenerationCutPrefixAck": "_checkpoint.generation_cut",
     "GenerationCutReceipt": "_checkpoint.generation_cut",
@@ -198,6 +213,8 @@ _PUBLIC_API = {
     "RolloutContextMiddleware": "request_handling.rollout_context",
     "RolloutIdRequiredError": "_checkpoint.errors",
     "SESSION_OWNER_HEADER": "request_handling.session_routing",
+    "SandboxCheckpointConfig": "_checkpoint.sandbox",
+    "SandboxSessionCheckpointer": "_checkpoint.sandbox",
     "SimpleResourcesServer": "base_resources_server",
     "SimpleServer": "base_server",
     "SingleAgentTurnAgentContext": "single_agent_turn_types",
@@ -211,6 +228,10 @@ _PUBLIC_API = {
     "TOKEN_HEADER": "mcp_auto_exposure",
     "ToolAccess": "tool_access",
     "check_resources_session_contract": "testing.session_conformance",
+    "check_sandbox_session_checkpoints": "testing.checkpoint_conformance",
+    "checkpoint_settings": "_checkpoint.settings",
+    "checkpoint_state_dir": "_checkpoint.sandbox",
+    "checkpointing_config": "testing.checkpoint_conformance",
     "dependency_failure": "base_environment_server",
     "entrypoint_ray_enabled": "ray_support",
     "handled_episode_failure": "base_environment_server",
@@ -231,6 +252,7 @@ _PUBLIC_API = {
     "require_rollout": "_checkpoint.agent",
     "seed_rebinds_tool_accesses": "_checkpoint.steps",
     "seed_restarts": "_checkpoint.steps",
+    "seed_restores_before_agent_close": "_checkpoint.steps",
     "seed_verify_step_type": "_checkpoint.steps",
     "task_digest": "_checkpoint.environment",
     "write_participant_state": "_checkpoint.store",
