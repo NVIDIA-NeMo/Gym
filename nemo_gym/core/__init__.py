@@ -23,9 +23,12 @@ from nemo_gym._public_api import lazy_exports
 if TYPE_CHECKING:
     from nemo_gym.core.episode_context import (
         current_rollout_id,
+        current_rollout_skips_token_capture,
         current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
         rollout_context,
+        skip_token_capture_context,
+        skips_token_capture,
         verifier_invocation_context,
     )
     from nemo_gym.core.episode_types import (
@@ -262,6 +265,7 @@ _PUBLIC_API = {
     "agent_route_failure": "typed_exceptions",
     "choose_action": "outcome_policy",
     "current_rollout_id": "episode_context",
+    "current_rollout_skips_token_capture": "episode_context",
     "current_verifier_invocation_id": "episode_context",
     "failure_report_for": "typed_exceptions",
     "is_namespaced": "failure_kinds",
@@ -273,6 +277,8 @@ _PUBLIC_API = {
     "report_for_current_request": "failure_transport",
     "rollout_context": "episode_context",
     "sdk_error_details": "typed_exceptions",
+    "skip_token_capture_context": "episode_context",
+    "skips_token_capture": "episode_context",
     "validate_failure_kind": "failure_kinds",
     "verifier_invocation_context": "episode_context",
 }

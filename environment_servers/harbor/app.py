@@ -2079,8 +2079,11 @@ class HarborEnvironmentServer(
             self.server_client.global_config_dict,
             self.config.agent_server.name,
         )
-        token_capture = bool(block.get("enabled", False)) and (
-            bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
+        # A request whose rollout skips capture (a validation rollout) activates the agent without the tag.
+        token_capture = (
+            not request.skip_token_capture
+            and bool(block.get("enabled", False))
+            and (bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False)))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
