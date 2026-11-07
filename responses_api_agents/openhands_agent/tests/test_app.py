@@ -17,6 +17,7 @@ from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
     AGENT_SESSION_COOKIE_KEY,
     ROLLOUT_STOP_METADATA_KEY,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     OutcomeAction,
@@ -105,6 +106,9 @@ def mcp_grant(*, required):
         # Provider blocks that resolve but cannot build a provider.
         (agent(), seed(provider="misspelled_sandbox"), "typo_provider"),
         (agent(sandbox_provider="malformed_sandbox"), seed(borrowed=False), "must be a mapping"),
+        # A borrowed sandbox keeps its owner's network, and only OpenSandbox enforces a network policy.
+        (agent(network_access="model_only"), seed(), "not a borrowed one"),
+        (agent(sandbox_provider="sandbox", network_access="model_only"), seed(borrowed=False), "OpenSandbox"),
     ],
 )
 def test_unservable_seeds_are_final_refusals(instance, body, reason):
@@ -198,6 +202,46 @@ async def test_an_owned_sandbox_expires_and_carries_provider_and_session_labels(
         "gym-rollout": "rollout",
     }
     assert instance.config.sandbox_config == configured
+
+
+MODEL_HOST_ONLY = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.5"}]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "network_access,tool_accesses,policy",
+    [
+        ("inherit", [], None),
+        ("model_only", [], MODEL_HOST_ONLY),
+        # OpenHands keeps no tool grants, so an optional grant's host stays closed.
+        ("model_and_tools", [mcp_grant(required=False)], MODEL_HOST_ONLY),
+    ],
+)
+async def test_network_access_limits_an_owned_sandbox_to_the_model_host(
+    monkeypatch, network_access, tool_accesses, policy
+):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
+    monkeypatch.setattr(app, "prepare_runtime", AsyncMock(return_value=adapter.INTERPRETER))
+    instance = agent(sandbox_provider="remote_sandbox", network_access=network_access)
+    await instance._seed_agent_session_state(seed(borrowed=False, tool_accesses=tool_accesses))
+    (spec,) = remote.start.await_args.args
+    assert (spec.provider_options or {}).get("network_policy") == policy
+
+
+@pytest.mark.asyncio
+async def test_an_unenforceable_network_access_closes_the_provider_before_any_sandbox(monkeypatch):
+    constructor = MagicMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    explicit = {"provider_options": {"network_policy": {"defaultAction": "allow"}}}
+    instance = agent(sandbox_provider="remote_sandbox", network_access="model_only", sandbox_config=explicit)
+    with pytest.raises(AgentSeedRejectedError, match="not both"):
+        await instance._seed_agent_session_state(seed(borrowed=False))
+    constructor.assert_not_called()
+    provider.aclose.assert_awaited_once()
 
 
 @pytest.mark.asyncio

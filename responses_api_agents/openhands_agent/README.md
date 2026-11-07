@@ -55,6 +55,7 @@ Terminal-Bench 2.1 does not list `openhands_agent` in `allowed_agents` yet; star
 | `system_prompt` | Text appended to OpenHands' own system prompt, before the request's `instructions` and system message. |
 | `llm_settings` | OpenHands SDK `LLM` settings, limited to the names in `SUPPORTED_LLM_SETTINGS` in `app.py`. |
 | `sandbox_provider`, `sandbox_config` | Only for an agent-owned sandbox, when Resources supplies no `sandbox_access`. `ttl_s` defaults to `sandbox_install_timeout_seconds + timeout + 600`. `metadata` is the provider block's `default_metadata`, then `sandbox_config.metadata`, then the adapter's `gym-agent`, `gym-session` and `gym-rollout` labels. |
+| `network_access` | `inherit` (default), `model_only` or `model_and_tools`: egress of an agent-owned sandbox. `inherit` keeps the provider's network; the other two allow only the Model Server's host, because OpenHands keeps no tool grants. OpenSandbox only; a session that borrows a sandbox rejects any value other than `inherit`, as does one whose `sandbox_config.provider_options` sets its own `network_policy`. The Agent Server builds the runtime and uploads it, so a restricted sandbox needs no network for setup. |
 | `sandbox_install_timeout_seconds` | Budget for runtime installation at seed. |
 | `session_close_timeout_seconds` | Budget for each phase of close: stopping the harness, copying its artifacts, and releasing the sandbox. |
 
@@ -167,9 +168,9 @@ invocation. Gaps name what the events do not show, such as token counts around a
 ## Limits
 
 - Resources Server tool grants (MCP or direct HTTP) are not supported; required grants are refused.
-- The adapter has no `network_access` setting. An agent-owned sandbox keeps its provider's network policy, so
-  its egress is open unless `sandbox_config.provider_options` restricts it (for example OpenSandbox's
-  `network_policy`). A borrowed sandbox keeps the network its Resources Server gave it.
+- `network_access` restricts only an agent-owned OpenSandbox sandbox. With the default `inherit`, an owned
+  sandbox's egress is open unless its provider limits it. A borrowed sandbox keeps the network its Resources
+  Server gave it.
 - The first seed for each glibc level builds the runtime on the Agent Server host, which needs `uv` and
   access to PyPI and GitHub (python-build-standalone) or mirrors of them.
 - Tool commands run as the task's user and can see the runtime. In the TB2.1 smoke, the agent found the

@@ -28,10 +28,12 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
@@ -139,6 +141,15 @@ class OpenHandsAgentConfig(BaseResponsesAPIAgentConfig):
     # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
     sandbox_provider: Optional[str] = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox OpenHands creates: `model_only` allows only the model server's host. OpenHands keeps "
+            "no tool grants, so `model_and_tools` allows the same. A borrowed task sandbox keeps its owner's network, "
+            "so a session that borrows one rejects any other value than `inherit`. The Agent Server builds the runtime "
+            "and uploads it, so a restricted sandbox needs no network for setup."
+        ),
+    )
     sandbox_install_timeout_seconds: float = Field(default=1200, gt=0, allow_inf_nan=False)
 
     @field_validator("llm_settings")
@@ -203,6 +214,10 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(access.connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("OpenHands supports only direct sandbox connections")
+            if self.config.network_access != "inherit":
+                raise AgentSeedRejectedError(
+                    "OpenHands network_access applies only to a sandbox it creates, not a borrowed one"
+                )
             workdir, provider_ref = access.workdir, access.connection.provider_config_ref
         # A workdir that is not a string (sandbox_config is untyped) is refused like an empty one.
         path = PurePosixPath(workdir if isinstance(workdir, str) else "")
@@ -214,40 +229,42 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         ):
             raise AgentSeedRejectedError("OpenHands sandbox workdir must be absolute and separate from its own files")
         try:
+            model_base_url = self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key)
             provider_config = resolve_provider_config(provider_ref, global_config)
             # The runner calls the Model Server from inside the sandbox, where loopback is the sandbox itself.
-            assert_model_url_reachable_from_sandbox(
-                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-                provider_name=next(iter(provider_config), None),
-            )
+            assert_model_url_reachable_from_sandbox(model_base_url, provider_name=next(iter(provider_config), None))
             # An unknown provider name or malformed provider settings fail here, before any sandbox exists.
             provider = create_provider(provider_config)
         except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
 
-        if owns_sandbox:
-            sandbox = AsyncSandbox(provider)
-        else:
-            try:
+        try:
+            if owns_sandbox:
+                # OpenHands keeps no tool grants (required ones were refused above), so only the model's host opens.
+                spec = restrict_sandbox_network(
+                    spec, network_access=self.config.network_access, provider=provider, model_base_url=model_base_url
+                )
+                sandbox = AsyncSandbox(provider)
+            else:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
-            except BaseException:
-                try:
-                    await provider.aclose()
-                except BaseException as cleanup_error:
-                    LOG.exception("OpenHands provider cleanup failed after connect failed")
-                    if isinstance(cleanup_error, NgFailureEvent):
-                        observe_failure(cleanup_error)
-                    else:
-                        cleanup_failure = NgFailureEvent(
-                            boundary="sandbox",
-                            failure_kind="session_release_failed",
-                            failure_reason=f"OpenHands provider cleanup failed: {type(cleanup_error).__name__}",
-                            operation="aclose",
-                            stage="cleanup",
-                        )
-                        cleanup_failure.__cause__ = cleanup_error
-                        observe_failure(cleanup_failure)
-                raise
+        except BaseException:
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("OpenHands provider cleanup failed before the sandbox was ready")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason=f"OpenHands provider cleanup failed: {type(cleanup_error).__name__}",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
+            raise
         directory = f"{SESSION_ROOT}/{uuid4().hex}"
         state = OpenHandsSandboxSession(
             request=body,
