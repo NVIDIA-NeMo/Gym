@@ -12,12 +12,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import collections
 import datetime
 import json
 import threading
 import time
 from collections.abc import Iterator
 
+import numpy as np
 import orjson
 import pytest
 import uvicorn
@@ -121,6 +123,29 @@ def test_values_neither_encoder_writes_exactly_raise_orjsons_error(value: object
         dumps_json_bytes(value)
 
 
+_Pair = collections.namedtuple("_Pair", "a b")
+
+
+class _Float(float):
+    pass
+
+
+@pytest.mark.parametrize(
+    "value", [_Pair(1, 2), _Float(1.5), np.float64(1.5)], ids=["namedtuple", "float-subclass", "numpy-float"]
+)
+def test_types_orjson_refuses_are_refused_with_or_without_a_wide_integer(value: object) -> None:
+    with pytest.raises(orjson.JSONEncodeError):
+        orjson.dumps(value)
+
+    with pytest.raises(orjson.JSONEncodeError):
+        dumps_json_bytes(value)
+    with pytest.raises(orjson.JSONEncodeError):
+        dumps_json_bytes({"n": WIDE, "v": value})
+    assert dumps_json_bytes({"n": WIDE, "v": value}, default=repr) == (
+        b'{"n":1180591620717411303424,"v":"%s"}' % repr(value).encode()
+    )
+
+
 def test_an_option_the_fallback_cannot_honor_raises_instead_of_dropping_it() -> None:
     with pytest.raises(orjson.JSONEncodeError, match="64-bit"):
         dumps_json_bytes({"n": WIDE}, option=orjson.OPT_NON_STR_KEYS)
@@ -189,8 +214,9 @@ def test_bodies_orjson_rejects_still_raise_its_decode_error(data: bytes) -> None
         loads_json(data)
 
 
-@pytest.mark.parametrize("data", [None, 1, {"a": 1}])
+@pytest.mark.parametrize("data", [None, 10**12, {"a": 1}, list(b"[1]")])
 def test_input_of_the_wrong_type_raises_orjsons_decode_error(data: object) -> None:
+    # ``bytes()`` would decode a list of byte values as JSON, or allocate an integer's worth of zeros first.
     with pytest.raises(orjson.JSONDecodeError, match="Input must be bytes"):
         loads_json(data)  # type: ignore[arg-type]
 
