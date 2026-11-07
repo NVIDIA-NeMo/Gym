@@ -12,16 +12,15 @@
 #   setup      bash code run first, before env is applied
 #   unset_env  array of extglob patterns naming inherited variables to drop
 #   events     file receiving each JSON object line of stdout as [seen_at, object]
-#   MODEL_RELAY_PORT, MODEL_RELAY_ENDPOINT, MODEL_RELAY_STATUS, MODEL_RELAY_SCRIPT
-#              run model_relay.py (MODEL_RELAY_SCRIPT) on 127.0.0.1:MODEL_RELAY_PORT for the command's model calls,
-#              on the first Python 3.6+ found, restarted on the same port if it dies, and export
-#              NEMO_GYM_MODEL_RELAY=1. MODEL_RELAY_SESSION_DIR (default: the directory of PARAMS) holds the
-#              supervisor's pause and continue requests; MODEL_RELAY_PYTHONS (array) overrides the interpreters
-#              tried. MODEL_RELAY_COMMAND (array: a program and its leading arguments, such as a harness binary and
-#              model_relay.mjs) runs the relay instead of a Python, with MODEL_RELAY_COMMAND_ENV (array of
-#              KEY=VALUE) set for the relay alone. Without a usable Python or program, or when the relay does not
-#              come up, the runner writes "unavailable" beside MODEL_RELAY_STATUS, exports MODEL_RELAY_FALLBACK_ENV
-#              (array of KEY=VALUE, such as a direct model URL) and runs the command without a relay.
+#   MODEL_RELAY_PORT, MODEL_RELAY_ENDPOINT, MODEL_RELAY_STATUS, MODEL_RELAY_COMMAND
+#              run the model relay with MODEL_RELAY_COMMAND (array: a program and its leading arguments, such as a
+#              Bun-based harness binary and model_relay.mjs) on 127.0.0.1:MODEL_RELAY_PORT for the command's model
+#              calls, restarted on the same port if it dies, and export NEMO_GYM_MODEL_RELAY=1.
+#              MODEL_RELAY_COMMAND_ENV (array of KEY=VALUE) is set for the relay alone. MODEL_RELAY_SESSION_DIR
+#              (default: the directory of PARAMS) holds the supervisor's pause and continue requests. When the
+#              program cannot run, or the relay does not come up, the runner writes "unavailable" beside
+#              MODEL_RELAY_STATUS, exports MODEL_RELAY_FALLBACK_ENV (array of KEY=VALUE, such as a direct model URL)
+#              and runs the command without a relay.
 # Writes runtime.json beside PARAMS. Exits with the command's status, 125 when the runner fails before
 # starting it (including an exit from setup), or 126 or 127 when the command could not be started.
 
@@ -31,8 +30,7 @@ IFS=$' \t\n'
 shopt -s extglob
 # Inherited variables with these names must not configure the runner or leak into the CLI.
 unset -v cwd command env stdin stdout stderr setup unset_env events MODEL_RELAY_PORT MODEL_RELAY_ENDPOINT \
-    MODEL_RELAY_STATUS MODEL_RELAY_SCRIPT MODEL_RELAY_SESSION_DIR MODEL_RELAY_PYTHONS MODEL_RELAY_FALLBACK_ENV \
-    MODEL_RELAY_COMMAND MODEL_RELAY_COMMAND_ENV
+    MODEL_RELAY_STATUS MODEL_RELAY_SESSION_DIR MODEL_RELAY_FALLBACK_ENV MODEL_RELAY_COMMAND MODEL_RELAY_COMMAND_ENV
 trap 'exit 125' EXIT
 source "$1" || exit
 printf '{"hostname": "%s", "pid": %d}\n' "$HOSTNAME" "$$" >"$(dirname "$1")/runtime.json"
@@ -51,17 +49,6 @@ running() {
     IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
     stat=${stat##*) }
     [[ ${stat:0:1} != [ZX] ]]
-}
-
-# The first interpreter that is Python 3.6 or later, as the binary it runs, in relay_python.
-find_relay_python() {
-    local candidates=(python3 python /usr/local/bin/python3 /usr/bin/python3 /usr/bin/python) candidate
-    ((${#MODEL_RELAY_PYTHONS[@]})) && candidates=("${MODEL_RELAY_PYTHONS[@]}")
-    for candidate in "${candidates[@]}"; do
-        command -v "$candidate" >/dev/null 2>&1 || continue
-        relay_python=$("$candidate" -I -c 'import os, sys; assert sys.version_info >= (3, 6); print(os.readlink("/proc/self/exe"))' 2>/dev/null) && [[ -n $relay_python ]] && return 0
-    done
-    return 1
 }
 
 # The port the relay's status file names, in port, when it names one.
@@ -118,13 +105,8 @@ start_relay() {
     relay_link=$(dirname "$MODEL_RELAY_STATUS")/gym-model-relay
     read_clock
     last=$clock
-    if ((${#MODEL_RELAY_COMMAND[@]})); then
-        [[ -x ${MODEL_RELAY_COMMAND[0]} ]] && ln -sfn "${MODEL_RELAY_COMMAND[0]}" "$relay_link" || return 1
-        relay_args=("${MODEL_RELAY_COMMAND[@]:1}")
-    else
-        find_relay_python && ln -sfn "$relay_python" "$relay_link" || return 1
-        relay_args=(-I "$MODEL_RELAY_SCRIPT")
-    fi
+    [[ -x ${MODEL_RELAY_COMMAND[0]-} ]] && ln -sfn "${MODEL_RELAY_COMMAND[0]}" "$relay_link" || return 1
+    relay_args=("${MODEL_RELAY_COMMAND[@]:1}")
     rm -f "$MODEL_RELAY_STATUS"
     relay_watchdog 2>>"$relay_log" &
     watchdog=$!

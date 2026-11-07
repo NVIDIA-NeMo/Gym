@@ -1,18 +1,29 @@
 // SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 /**
- * Model relay uploaded into a task sandbox, on a JavaScript runtime: model_relay.py's protocol for images without
- * Python.
+ * Model relay uploaded into a task sandbox: a harness's model calls go through it to Gym's model server.
  *
- * A harness built on Bun runs it on its own binary (``BUN_BE_BUN=1 <harness> model_relay.mjs ...``), so the relay
- * needs nothing from the task image. It uses only ``node:`` modules, so Node 18+ runs it as well.
+ * A sandbox restored from a memory snapshot still runs the harness, whose model client was configured for the model
+ * server of the job that took the snapshot. Pointing the client at this relay instead lets the restoring job re-point
+ * the calls: it writes the new model server into the endpoint file, and every call the relay has not yet answered goes
+ * to the new server, byte for byte as the harness sent it. The harness sees a slow call, not an error.
  *
- * The behavior is model_relay.py's, which documents it: the endpoint file is read on every request and every 200 ms;
- * new requests wait while the supervisor's pause request is ahead of its continue request; a request is kept until
- * its response starts and is sent again when the endpoint's ``gen`` changes, while a response already started is cut;
- * an unreachable upstream is retried with backoff for up to ``--hold-timeout-s``, then answered with a 502; the
- * status file ``{"pid", "start", "port", "gen", "held", "inflight", "resent"}`` is written about every second, in
- * the same layout, because harness_runner.sh and supervisor_client.py read it with patterns.
+ * - Endpoint file (``--endpoint``): ``{"gen": N, "upstream": URL}``. Read on every request and every 200 ms. A request
+ *   for ``/v1/<rest>`` goes to ``<upstream>/<rest>``; Gym's model base URLs end in ``/v1``.
+ * - Hold: while the supervisor's pause request in ``--session-dir`` names a later sequence number than its continue
+ *   request (``pause.request`` and ``continue.request``, see supervisor_client.py), new requests wait unsent.
+ * - Re-send: a request is kept until its response starts, and the response's headers reach the harness only together
+ *   with its first body byte. When the endpoint's ``gen`` changes, every request sent under an earlier one that has
+ *   not started its response is sent again to the new upstream; a response already started is cut with a reset.
+ * - An upstream that cannot be reached, or resets a request before its response starts, is retried with backoff
+ *   while the endpoint stays the same, for up to ``--hold-timeout-s``; then the harness gets a 502. Error replies of
+ *   the model server reach the harness as they are.
+ * - Status file (``--status``): ``{"pid", "start", "port", "gen", "held", "inflight", "resent"}``, about every second;
+ *   ``start`` is the process start time from /proc, so a reader can tell a restarted relay from the one it knew.
+ *   harness_runner.sh and supervisor_client.py read it with patterns, so its layout is fixed.
+ *
+ * It needs nothing from the task image: a harness built on Bun runs it on its own binary
+ * (``BUN_BE_BUN=1 <harness> model_relay.mjs ...``). It uses only ``node:`` modules, so Node 18+ runs it as well.
  *
  * usage: model_relay.mjs --port PORT --endpoint ENDPOINT_JSON --session-dir DIR --status STATUS_JSON
  *                        [--hold-timeout-s SECONDS]
@@ -551,7 +562,7 @@ class Relay {
   }
 
   writeStatus() {
-    // model_relay.py's json.dump layout ("key": value, ", " between items): readers match it with patterns.
+    // A fixed layout ("key": value, ", " between items): readers match it with patterns.
     const status = {
       pid: process.pid,
       start: this.start,

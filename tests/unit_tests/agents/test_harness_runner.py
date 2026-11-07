@@ -229,19 +229,41 @@ while time.time() < deadline:
 """
 
 
-def _relay_params(tmp_path: Path, script: str, **values) -> tuple[Path, Path]:
-    from nemo_gym.agents.utils.model_relay import __file__ as relay_script
+# A stand-in relay for the runner's tests, so they need no JavaScript runtime: it listens on the port it is given and
+# writes the relay's status layout, which is all the runner reads.
+STUB_RELAY = r"""
+import argparse, os, signal, socket
+parser = argparse.ArgumentParser()
+for name in ("--port", "--endpoint", "--session-dir", "--status"):
+    parser.add_argument(name)
+args = parser.parse_args()
+server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+server.bind(("127.0.0.1", int(args.port)))
+server.listen()
+stat = open("/proc/self/stat").read()
+status = {"pid": os.getpid(), "start": int(stat[stat.rindex(")") + 2 :].split()[19]), "port": server.getsockname()[1]}
+with open(args.status + ".tmp", "w") as handle:
+    handle.write("{" + ", ".join('"%s": %d' % item for item in status.items()) + "}")
+os.replace(args.status + ".tmp", args.status)
+signal.signal(signal.SIGTERM, lambda *_: os._exit(0))
+while True:
+    server.accept()[0].close()
+"""
 
+
+def _relay_params(tmp_path: Path, script: str, **values) -> tuple[Path, Path]:
     (tmp_path / "relay").mkdir()
     status = tmp_path / "relay" / "status.json"
+    stub = tmp_path / "stub_relay.py"
+    stub.write_text(STUB_RELAY)
     (tmp_path / "endpoint.json").write_text(json.dumps({"gen": 1, "upstream": "http://127.0.0.1:9/v1"}))
     defaults = {
         "command": [sys.executable, "-c", script, str(status)],
         "MODEL_RELAY_PORT": "0",
         "MODEL_RELAY_ENDPOINT": str(tmp_path / "endpoint.json"),
         "MODEL_RELAY_STATUS": str(status),
-        "MODEL_RELAY_SCRIPT": relay_script,
-        "MODEL_RELAY_PYTHONS": [sys.executable],
+        "MODEL_RELAY_COMMAND": [sys.executable, str(stub)],
     }
     return _params(tmp_path, **(defaults | values)), status
 
@@ -281,23 +303,6 @@ def test_a_relay_that_dies_is_restarted_on_the_same_port(tmp_path: Path) -> None
     assert "restarting it on port" in (tmp_path / "relay" / "relay.log").read_text()
 
 
-@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
-def test_without_a_usable_interpreter_the_command_runs_on_the_fallback_environment(tmp_path: Path) -> None:
-    script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
-    params, _ = _relay_params(
-        tmp_path,
-        script,
-        MODEL_RELAY_PYTHONS=[str(tmp_path / "missing" / "python3")],
-        MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
-    )
-
-    result = _run(params)
-
-    assert result.returncode == 0, result.stderr
-    assert (tmp_path / "stdout.log").read_text().split() == ["None", "http://model.example/v1"]
-    assert (tmp_path / "relay" / "unavailable").exists()
-
-
 @pytest.mark.skipif(not Path("/proc/uptime").exists(), reason="the runner times the relay start from /proc/uptime")
 def test_a_freeze_while_the_relay_starts_does_not_use_up_its_wait(tmp_path: Path) -> None:
     # A checkpoint can stop the runner while it starts the relay, for longer than the wait. The relay must still
@@ -310,7 +315,7 @@ def test_a_freeze_while_the_relay_starts_does_not_use_up_its_wait(tmp_path: Path
     params, _ = _relay_params(
         tmp_path,
         script,
-        MODEL_RELAY_PYTHONS=[str(slow_python)],
+        MODEL_RELAY_COMMAND=[str(slow_python), str(tmp_path / "stub_relay.py")],
         MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
     )
     runner = subprocess.Popen(
@@ -323,7 +328,7 @@ def test_a_freeze_while_the_relay_starts_does_not_use_up_its_wait(tmp_path: Path
     try:
         deadline = time.monotonic() + 10
         while not entered.exists():
-            assert time.monotonic() < deadline, "the runner never looked for an interpreter"
+            assert time.monotonic() < deadline, "the runner never started the relay"
             time.sleep(0.01)
         os.killpg(runner.pid, signal.SIGSTOP)
         time.sleep(11)
@@ -352,15 +357,7 @@ print(os.environ.get("NEMO_GYM_MODEL_RELAY"), comm, b"RELAY_ONLY=1" in relay_env
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
 def test_a_relay_command_runs_under_a_neutral_name_with_an_environment_of_its_own(tmp_path: Path) -> None:
     # A harness binary that runs the relay (OpenCode as Bun) needs a switch that must not reach the harness itself.
-    from nemo_gym.agents.utils.model_relay import __file__ as relay_script
-
-    params, status = _relay_params(
-        tmp_path,
-        RELAY_COMMAND_CHECK,
-        MODEL_RELAY_COMMAND=[sys.executable, relay_script],
-        MODEL_RELAY_COMMAND_ENV={"RELAY_ONLY": "1"},
-        MODEL_RELAY_PYTHONS=[str(tmp_path / "missing" / "python3")],
-    )
+    params, status = _relay_params(tmp_path, RELAY_COMMAND_CHECK, MODEL_RELAY_COMMAND_ENV={"RELAY_ONLY": "1"})
 
     result = _run(params)
 
@@ -401,13 +398,10 @@ print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.path.basename(argv0), comm)
 @pytest.mark.skipif(JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) on this machine")
 @pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
 def test_the_runner_starts_the_javascript_relay(tmp_path: Path) -> None:
-    from nemo_gym.agents.utils.model_relay import __file__ as relay_script
-
     params, status = _relay_params(
         tmp_path,
         JS_RELAY_CHECK,
-        MODEL_RELAY_COMMAND=[JS_RUNTIME, str(Path(relay_script).with_name("model_relay.mjs"))],
-        MODEL_RELAY_PYTHONS=[str(tmp_path / "missing" / "python3")],
+        MODEL_RELAY_COMMAND=[JS_RUNTIME, str(HARNESS_RUNNER_SCRIPT.with_name("model_relay.mjs"))],
     )
 
     result = _run(params)
