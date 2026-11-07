@@ -96,6 +96,8 @@ def loads_json(data: bytes | bytearray | memoryview | str) -> Any:
     try:
         return orjson.loads(data)
     except orjson.JSONDecodeError as error:
+        if not isinstance(data, (bytes, bytearray, memoryview, str)):
+            raise  # ``bytes()`` would take a list of byte values, or allocate an integer's worth of zeros
         return _loads_stdlib(data, error)
 
 
@@ -135,19 +137,14 @@ def _finite_float(literal: str) -> float:
 
 
 def _dumps_stdlib(value: object, *, default: Callable[[Any], Any] | None, option: int) -> bytes:
-    def fallback_default(item: Any) -> Any:
-        # A type the standard library cannot write (a datetime, a dataclass) is written as ``orjson`` would write it.
-        return orjson.loads(orjson.dumps(item, default=default))
-
     indent = 2 if option & orjson.OPT_INDENT_2 else None
     kwargs: dict[str, Any] = dict(
         sort_keys=bool(option & orjson.OPT_SORT_KEYS),
         indent=indent,
         separators=(",", ": ") if indent else (",", ":"),
         allow_nan=False,
-        default=fallback_default,
     )
-    plain = _json_ready(value)
+    plain = _json_ready(value, default)
     try:
         encoded = json.dumps(plain, ensure_ascii=False, **kwargs).encode("utf-8")
     except UnicodeEncodeError:
@@ -156,14 +153,27 @@ def _dumps_stdlib(value: object, *, default: Callable[[Any], Any] | None, option
     return encoded + b"\n" if option & orjson.OPT_APPEND_NEWLINE else encoded
 
 
-def _json_ready(value: Any) -> Any:
-    """Copy ``value`` with non-finite floats as ``None``, refusing object keys that are not strings."""
-    if isinstance(value, float):
+def _json_ready(value: Any, default: Callable[[Any], Any] | None) -> Any:
+    """Copy ``value`` as plain JSON types, accepting only the types ``orjson`` accepts.
+
+    The standard library also writes namedtuples, float and tuple subclasses and NumPy floats, which ``orjson``
+    refuses; they must not start encoding just because a wide integer sent the body here. Non-finite floats become
+    ``None`` and object keys that are not strings are refused.
+    """
+    if value is None or isinstance(value, (str, int)):  # ``orjson`` accepts str and int subclasses; bool is an int
+        return value
+    if type(value) is float:
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
         if any(not isinstance(key, str) for key in value):
             raise TypeError("Dict key must be str")
-        return {key: _json_ready(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_ready(item) for item in value]
-    return value
+        return {key: _json_ready(item, default) for key, item in value.items()}
+    if isinstance(value, list) or type(value) is tuple:
+        return [_json_ready(item, default) for item in value]
+    try:
+        # Other types ``orjson`` writes natively (datetime, UUID, enum, dataclass) are written as it writes them.
+        return orjson.loads(orjson.dumps(value))
+    except TypeError:
+        if default is None:
+            raise
+    return _json_ready(default(value), default)
