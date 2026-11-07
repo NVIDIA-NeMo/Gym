@@ -128,7 +128,7 @@ A failure reports what Gym observed and leaves the decision to you:
 
 | Field | Meaning |
 | --- | --- |
-| `kind`, `domain` | Gym's failure kind and, derived from it, the layer that observed it (the part of the kind before the first `_` or `:`, such as `agent`, `judge`, `session` or `provider`). When the reporter named no cause, the kind is `environment_server_failed`, `agent_run_error` (the request reached the agent) or `agent_request_failed` (it may not have). |
+| `kind`, `domain` | Gym's failure kind and, derived from it, the layer that observed it (the part of the kind before the first `_` or `:`, such as `agent`, `judge`, `session` or `provider`). When the reporter named no cause, the kind is `environment_server_failed` or `agent_request_failed`. |
 | `source` | Who reported it: `environment` or `collector`. |
 | `stage`, `terminal` | Where in the episode it happened, when known, and the reporter's statement that the episode must not be attempted again. |
 | `reason`, `http_status`, `exception_type` | Diagnostics. |

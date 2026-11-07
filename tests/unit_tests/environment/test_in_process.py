@@ -221,12 +221,12 @@ class TestFailedRuns:
         "source, delivery, kind",
         [
             ("environment", "delivered", "environment_server_failed"),
-            ("collector", "delivered", "agent_run_error"),
+            ("collector", "delivered", "agent_request_failed"),
             ("collector", "possibly_delivered", "agent_request_failed"),
             ("collector", "not_sent", "agent_request_failed"),
         ],
     )
-    async def test_a_failure_that_names_no_cause_gets_the_kind_for_who_reported_it_and_whether_it_was_delivered(
+    async def test_a_failure_that_names_no_cause_gets_the_kind_for_who_reported_it(
         self, monkeypatch: pytest.MonkeyPatch, source: str, delivery: str, kind: str
     ) -> None:
         runner = TaskRunner([_row("a")], registry_server=HEAD)

@@ -56,9 +56,6 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core.episode_types import is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
-    AGENT_REQUEST_FAILED,
-    AGENT_RUN_ERROR,
-    ENVIRONMENT_SERVER_FAILED,
     FailureStage,
 )
 from nemo_gym.data.task_selection import row_task_id, select_tasks
@@ -107,8 +104,8 @@ class TaskFailure:
     """What Gym observed when a rollout failed. It reports; what to do about it is the caller's decision.
 
     `kind` is Gym's failure kind: the cause when the reporter named one, else `environment_server_failed` (the
-    environment reported a failure without a kind), `agent_run_error` (the `/run` call failed and the request reached
-    the agent) or `agent_request_failed` (it failed and may not have). `domain` is derived from it.
+    environment reported a failure without a kind) or `agent_request_failed` (the `/run` call failed). `domain` is
+    derived from it.
 
     `source` says who reported the failure, `stage` is where in the episode it happened when the reporter knows, and
     `terminal` is the reporter's statement that the episode must not be attempted again. `reason`, `http_status` and
@@ -374,7 +371,7 @@ def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome
 
 
 def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
-    kind = record.failure.failure_kind or _fallback_kind(record)
+    kind = record.sidecar_failure_class
     return TaskFailure(
         kind=kind,
         source=record.source,
@@ -384,12 +381,6 @@ def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
         http_status=record.http_status,
         exception_type=record.exception_type,
     )
-
-
-def _fallback_kind(record: RolloutFailureRecord) -> str:
-    if record.source == "environment":
-        return ENVIRONMENT_SERVER_FAILED
-    return AGENT_RUN_ERROR if record.delivery == "delivered" else AGENT_REQUEST_FAILED
 
 
 def _first_row_of_each_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
