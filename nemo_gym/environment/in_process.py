@@ -68,6 +68,12 @@ from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.utils.decorators import experimental
 
 
+# The bounds `gym eval run` puts on a `/run` call: a connection that was made and dropped is sent twice, and one that
+# was refused is resent for a minute (`dispatch_connect_grace_s`). Without them a dead server is retried for ever.
+_MAX_RUN_TRIES = 2
+_CONNECT_GRACE_S = 60.0
+
+
 @dataclass(frozen=True)
 class PlannedBenchmark:
     """A prepared benchmark: its plan (task ids and input digests) and the collated rows to run."""
@@ -301,7 +307,8 @@ class TaskRunner:
         concurrent calls; a fresh one is made when it is None.
 
         A `/run` call that fails (a client error, a bad JSON body, a timeout or an unusable reply) does not raise: the
-        outcome has a `failure` and no reward. Any other exception, such as a programming error, and cancellation
+        outcome has a `failure` and no reward. A refused connection is resent for a minute, and one that dropped is sent
+        twice, as `gym eval run` does. Any other exception, such as a programming error, and cancellation
         propagate.
         """
         if task_id not in self._row_of_task:
@@ -309,7 +316,12 @@ class TaskRunner:
         with ignoring_command_line():
             rows = self._helper.preprocess_examples([self._row_of_task[task_id]], task_ids=[task_id], num_repeats=1)
         row = {**rows[0], "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
-        completions = self._helper.run_outcomes([row], head_server_config=self._registry_server)
+        completions = self._helper.run_outcomes(
+            [row],
+            head_server_config=self._registry_server,
+            max_num_tries=_MAX_RUN_TRIES,
+            connect_grace_s=_CONNECT_GRACE_S,
+        )
         try:
             (completion,) = completions
             _, result = await completion

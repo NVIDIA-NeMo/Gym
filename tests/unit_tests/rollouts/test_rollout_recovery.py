@@ -2400,3 +2400,20 @@ async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rol
     runner_config.resume_from_cache = True
     await RolloutCollectionHelper().run_from_config(runner_config)
     assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]
+
+
+def test_run_outcomes_forwards_the_connection_bounds_and_is_unbounded_without_them(monkeypatch):
+    seen = []
+
+    def fake(self, examples, **kwargs):
+        seen.append(kwargs)
+        return iter(())
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_examples_with_metadata", fake)
+    row = failing_row()
+
+    RolloutCollectionHelper().run_outcomes([row])
+    RolloutCollectionHelper().run_outcomes([row], max_num_tries=2, connect_grace_s=60.0)
+
+    assert (seen[0]["_max_num_tries"], seen[0]["_connect_grace_s"]) == (None, None)
+    assert (seen[1]["_max_num_tries"], seen[1]["_connect_grace_s"]) == (2, 60.0)
