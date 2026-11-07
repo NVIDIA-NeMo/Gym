@@ -17,6 +17,7 @@ deepswe_opencode_sandboxed_agent:
   _inherit_from: opencode_sandboxed_agent
   responses_api_agents:
     opencode_sandboxed_agent:
+      report_agent_sandbox_oom: true
       sandbox_timeout: 10800  # DeepSWE agent timeout override: 3 hours.
 
       resources_server:

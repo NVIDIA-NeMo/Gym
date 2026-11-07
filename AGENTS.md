@@ -17,6 +17,9 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
+- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
+  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
+  synonyms.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
@@ -201,6 +204,32 @@ gym dev test
 # Dump merged config
 gym env resolve --config ...
 ```
+
+## Where code and tests go
+
+- New library code goes into the package of `nemo_gym/` whose job it is, never at the `nemo_gym/` root. The root
+  holds only package-wide modules: `__init__.py`, `package_info.py`, `_public_api.py` and `_moved_paths.py`. A
+  helper that imports nothing from `nemo_gym` goes into `nemo_gym/utils/`.
+- Core unit tests mirror the package they test: a test of `nemo_gym/<package>/<module>.py` goes in
+  `tests/unit_tests/<package>/`, and a subpackage gets its own folder where it has many tests
+  (`tests/unit_tests/data/tasks/harbor/`). Put a test with the module it is about; when it exercises several, pick
+  the one the test is named for.
+- Two folders have no `nemo_gym` package. `tests/unit_tests/tooling/` holds tests of `scripts/`, `docker/`, packaging
+  and CI configuration; it cannot be named `scripts/`, because pytest's `norecursedirs` skips that name and the tests
+  would silently stop running. `tests/unit_tests/benchmarks/` holds core-suite tests of benchmark and resources server
+  code.
+- Only tests of the `nemo_gym/` root modules and repository-wide checks stay flat in `tests/unit_tests/`.
+- `tests/` itself holds only the suites (`unit_tests/`, `functional_tests/`, `e2e/`), the shared `conftest.py`, and
+  `tests/helpers/`: setup and assertions that tests in several places import, such as core unit tests and server
+  tests, or the tests of several servers. A helper used by one folder's tests stays beside them.
+- Every folder of test modules has an `__init__.py`, so pytest imports each test under its package name and test
+  modules in different folders can share a file name.
+- A fixture lives in a `fixtures/` folder beside the tests that read it. A fixture that tests in several packages
+  read stays in `tests/unit_tests/fixtures/`.
+- Tests find the repository root with `Path(__file__).resolve().parents[N]`, where N is the test's folder depth
+  under the repository root. When you move a test, update N, the test's imports from other tests, its fixture paths,
+  its key in `scripts/ci/core_test_durations.json`, and any path built from separate segments, such as
+  `root / "tests" / "unit_tests" / "fixtures"`.
 
 ## Imports from nemo_gym
 
