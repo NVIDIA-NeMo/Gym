@@ -1,0 +1,40 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Qwen Code borrows SandboxAccess from the Environment Server. The run configuration binds the
+# independent benchmark and agent; this config selects only the harness and model.
+qwen_code_agent:
+  responses_api_agents:
+    qwen_code_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      qwen_version: 0.25.1
+      concurrency: 32
+      # Seconds per activation, children included, enforced by the sandbox's process supervisor.
+      timeout: 3600
+      # Swarm knobs (see README): subagents false is the solo control.
+      subagents: true
+      subagent_model: null
+      subagent_model_server: null
+      max_subagent_depth: null
+      max_parallel_agents: null
+      agent_team: false
+      max_session_turns: null
+      max_tool_calls: null
+      approval_mode: yolo
+      system_prompt: null
+      exclude_tools: [web_fetch, web_search]
+      settings: {}
+      # Agent-server archive from build_runtime.sh, for sandboxes without internet access.
+      runtime_archive: null
+      sandbox_install_timeout_seconds: 900
+      session_close_timeout_seconds: 60
+      # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
+      sandbox_provider: null
+      sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host
