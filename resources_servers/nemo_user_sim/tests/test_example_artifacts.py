@@ -5,7 +5,12 @@ import json
 from pathlib import Path
 
 from nemo_gym.data import materialize_task
-from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, _row_digest, _validate_resolved_row
+from resources_servers.nemo_user_sim.app import (
+    UserSimResourcesServerConfig,
+    _row_digest,
+    _validate_resolved_row,
+    installed_usersim_revision,
+)
 from resources_servers.nemo_user_sim.task_data import TaskData
 
 
@@ -35,7 +40,7 @@ def test_examples_are_safe_task_rows_that_materialize_as_task_data() -> None:
         task = materialize_task(row, taskset="nemo_user_sim:example", task_index=index)
         assert task["task_id"] == {"taskset": "nemo_user_sim:example", "task_id": task_id}
         task_input = TaskData.model_validate(task["task_input"])
-        expected_revision = UserSimResourcesServerConfig.model_fields["usersim_revision"].default
+        expected_revision = installed_usersim_revision()
         expected_personas_version = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
         assert isinstance(expected_revision, str)
         assert isinstance(expected_personas_version, str)

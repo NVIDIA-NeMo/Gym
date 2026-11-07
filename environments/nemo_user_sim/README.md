@@ -3,7 +3,7 @@
 This environment runs population-grounded, multi-turn user simulation with
 NeMo User Sim. Its generated validation set includes one task for each
 built-in NeMo User Sim
-[probe](https://github.com/NVIDIA-NeMo/UserSim/blob/a5f676bf6dc5a73914c8a0860f97c10dd2c214ee/docs/probes.md):
+[probe](https://github.com/NVIDIA-NeMo/UserSim/blob/main/docs/probes.md):
 a scenario family, such as `tool_calling` or `financial_services`, that decides
 what the simulated User does and how the Assistant is scored.
 
@@ -25,9 +25,10 @@ run. NeMo User Sim owns persona, probe, theme, toolset, locale, configuration,
 trajectory identity, and provenance selection; Gym does not maintain sampling
 templates or persona panels.
 
-The preparation and runtime environments install public revision
-`a5f676bf6dc5a73914c8a0860f97c10dd2c214ee` from
-`github.com/NVIDIA-NeMo/UserSim`.
+The preparation and runtime environments install the public
+`github.com/NVIDIA-NeMo/UserSim` commit pinned in their `pyproject.toml` files.
+Preparation and the Resources Server read the revision from that pin, so a
+bump changes only the three `pyproject.toml` files and their `uv.lock` files.
 New rows store `usersim_provenance` as JSON text, including when
 `bank_version` is empty, so the rows remain Arrow- and Parquet-safe.
 

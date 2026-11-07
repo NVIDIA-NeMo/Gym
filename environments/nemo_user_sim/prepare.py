@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -17,7 +18,17 @@ ENVIRONMENT_DIR = Path(__file__).parent
 DATA_DIR = ENVIRONMENT_DIR / "data"
 TASKS_FPATH = DATA_DIR / "nemo_user_sim.jsonl"
 PREPARE_PROJECT_FPATH = ENVIRONMENT_DIR / "pyproject.toml"
-USERSIM_REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
+
+
+def _pinned_usersim_revision() -> str:
+    """Return the UserSim commit this project pins, in UserSim's 12-character form."""
+    match = re.search(r"UserSim\.git@([0-9a-f]{40})", PREPARE_PROJECT_FPATH.read_text())
+    if match is None:
+        raise RuntimeError(f"{PREPARE_PROJECT_FPATH} does not pin UserSim to a git commit")
+    return match.group(1)[:12]
+
+
+USERSIM_REVISION = _pinned_usersim_revision()
 NEMOTRON_PERSONAS_VERSION = "0.0.2"
 NEMOTRON_PERSONAS_SHA256 = (
     "0341192b00a376cf5643d98cb244e596529030fb3011694ca6ab381f149d3ae8"  # pragma: allowlist secret

@@ -24,6 +24,7 @@ from resources_servers.nemo_user_sim.app import (
     _ResourcesModelFacade,
     _scorer_for_row,
     _validate_resolved_row,
+    installed_usersim_revision,
 )
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimSimulationResult,
@@ -32,7 +33,7 @@ from resources_servers.nemo_user_sim.episode_contracts import (
 )
 
 
-REVISION = "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee"  # pragma: allowlist secret
+REVISION = installed_usersim_revision()
 PERSONAS_VERSION = "0.0.2"
 
 

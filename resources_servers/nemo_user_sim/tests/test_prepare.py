@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from environments.nemo_user_sim import prepare as prepare_module
 from nemo_gym.config import DatasetConfig
 from nemo_gym.data import materialize_task
-from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
+from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig, installed_usersim_revision
 from resources_servers.nemo_user_sim.task_data import TaskData
 
 
@@ -69,12 +69,13 @@ def test_usersim_revision_pins_are_aligned() -> None:
         assert match is not None, f"Missing UserSim revision in {path}"
         requirement_revisions.append(match.group(1))
 
+    # The pyproject pins are the only copies; preparation and the Resources Server derive theirs from them.
+    assert len(set(requirement_revisions)) == 1, requirement_revisions
+    assert prepare_module.USERSIM_REVISION == requirement_revisions[0][:12]
+    assert installed_usersim_revision() == prepare_module.USERSIM_REVISION
+
     resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
-    configured_revision = resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim.usersim_revision
-    server_default = UserSimResourcesServerConfig.model_fields["usersim_revision"].default
-    assert set(requirement_revisions + [prepare_module.USERSIM_REVISION, configured_revision, server_default]) == {
-        prepare_module.USERSIM_REVISION
-    }
+    assert "usersim_revision" not in resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim
     configured_personas_version = (
         resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim.nemotron_personas_version
     )

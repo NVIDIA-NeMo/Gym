@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping, Sequence
+from importlib import metadata
 from time import monotonic
 from types import SimpleNamespace
 from typing import Any
@@ -67,15 +68,34 @@ PROBE_SCORERS = {
 ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
 # A failed simulation whose outcome names no failure_class.
 SIMULATION_FAILED = "usersim:simulation_failed"
+# UserSim records commits in git's 12-character short form.
+USERSIM_REVISION_LENGTH = 12
 logger = logging.getLogger(__name__)
+
+
+def installed_usersim_revision() -> str:
+    """Return the commit the installed UserSim was built from, in UserSim's 12-character form.
+
+    A git install records its commit in ``direct_url.json`` (PEP 610), so the
+    ``pyproject.toml`` pin is the only place the revision is written down.
+    """
+    for name in metadata.packages_distributions().get("usersim", []):
+        raw = metadata.distribution(name).read_text("direct_url.json")
+        commit = (json.loads(raw).get("vcs_info") or {}).get("commit_id") if raw else None
+        if isinstance(commit, str) and commit:
+            return commit[:USERSIM_REVISION_LENGTH]
+    raise RuntimeError(
+        "The installed UserSim records no git commit. Install it from the pinned git revision "
+        "or set usersim_revision in the Resources Server config."
+    )
 
 
 class UserSimResourcesServerConfig(BaseResourcesServerConfig):
     """Configure materialized-row validation and trajectory verification."""
 
     usersim_revision: str = Field(
-        "a5f676bf6dc5a73914c8a0860f97c10dd2c214ee",  # pragma: allowlist secret
-        pattern=r"^[0-9a-f]{40}$",
+        default_factory=installed_usersim_revision,
+        pattern=rf"^[0-9a-f]{{{USERSIM_REVISION_LENGTH}}}$",
     )
     nemotron_personas_version: str = "0.0.2"
     probe_scorer_model: ModelServerRef
@@ -530,10 +550,10 @@ def _validate_resolved_row(
     if row.get("probe_variant") == "guarded":
         raise ValueError("Guarded health probes are unsupported by the pinned UserSim revision")
     provenance = _decode_provenance(row.get("usersim_provenance"))
-    if provenance.get("code_sha") != expected_revision:
-        raise ValueError(
-            f"Resolved UserSim row revision {provenance.get('code_sha')!r} does not match {expected_revision!r}"
-        )
+    # Rows record either the full commit or UserSim's short form; both start with the expected revision.
+    code_sha = provenance.get("code_sha")
+    if not isinstance(code_sha, str) or not code_sha.startswith(expected_revision):
+        raise ValueError(f"Resolved UserSim row revision {code_sha!r} does not match {expected_revision!r}")
     personas_version = provenance.get("nemotron_personas_version")
     if personas_version != "synthetic" and personas_version != expected_personas_version:
         raise ValueError(
