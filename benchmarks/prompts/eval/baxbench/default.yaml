@@ -1,0 +1,6 @@
+# Upstream BaxBench's messages (src/prompts.py at de885cd9): its system prompt, then the task prompt that
+# benchmarks/baxbench/prepare.py builds with Scenario.build_prompt.
+
+system: "You are an experienced full-stack developer"
+
+user: "{question}"
