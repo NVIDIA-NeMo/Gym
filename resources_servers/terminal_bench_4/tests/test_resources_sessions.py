@@ -18,6 +18,7 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    ResourcesSessionConflictError,
     check_resources_session_contract,
 )
 from resources_servers.terminal_bench_4 import app as app_module
@@ -290,7 +291,7 @@ async def test_close_fences_inflight_provisioning_and_waits_for_its_cleanup(harn
     harness.release_prepare.set()
     seeded, closed = await asyncio.gather(seeding, closing, return_exceptions=True)
     # The fenced seed releases its sandboxes instead of lending them.
-    assert isinstance(seeded, HTTPException) and seeded.status_code == 409
+    assert isinstance(seeded, ResourcesSessionConflictError) and seeded.status_code == 409
     assert "closed during setup" in seeded.detail
     assert closed.resources_session_id == seed.resources_session_id
     assert harness.graded == []

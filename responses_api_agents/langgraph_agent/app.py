@@ -26,6 +26,7 @@ from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
+    AgentSessionConflictError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     OrderedOperationLedger,
@@ -165,15 +166,15 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
             raise TypeError("Expected LangGraph session state")
         rollout_id = request.path_params.get("rollout_id")
         if rollout_id != state.request.episode_id.capture_key:
-            raise HTTPException(409, "Activation requires the seeded session's rollout path")
+            raise AgentSessionConflictError("Activation requires the seeded session's rollout path")
         if state.activation_path is None:
             state.activation_path = request.url.path
         elif state.activation_path != request.url.path:
-            raise HTTPException(409, "Activation path does not match the session's first activation")
+            raise AgentSessionConflictError("Activation path does not match the session's first activation")
         try:
             return await state.operations.execute(index=1, request=body, operation=operation)
         except ActivationConflictError as error:
-            raise HTTPException(409, str(error)) from error
+            raise AgentSessionConflictError(str(error)) from error
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, _LangGraphSession):
