@@ -174,6 +174,14 @@ async def test_exited_shell_recovery_discards_pending_input_and_reports_lost_sta
             f"mkdir {tmp_path}/sub; cd {tmp_path}/sub; unset PROMPT_COMMAND; set -e; {failing_command}\n",
             min_timeout_sec=0.2,
         )
+        # A slow login shell may not have read the command line yet. Ctrl-C
+        # would then discard the command itself instead of the queued input.
+        for _ in range(100):
+            current = await environment.exec("tmux display-message -p -t test '#{pane_current_command}'")
+            if current.stdout.strip() == "sleep":
+                break
+            await asyncio.sleep(0.1)
+        assert current.stdout.strip() == "sleep"
         await environment.exec("tmux paste-buffer -d -b queued -t test")
         if exit_trigger == "interrupt":
             await terminal.send_keys("C-c", min_timeout_sec=0.3)
