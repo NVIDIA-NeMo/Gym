@@ -878,7 +878,12 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 )
             session.harvested = True
             # The tarball is the only thing that survives; grading happens in a fresh stack.
-            await self._release_sandbox(session)
+            try:
+                await self._release_sandbox(session)
+            except Exception:
+                # The app is already out, so a failed stop must not cost its grade. The sandbox stays on the
+                # session, and close stops it, raising if that fails too so the caller can retry.
+                print("Failed to stop the build sandbox after the harvest", format_exc(), file=sys.stderr)
         return session.archive
 
     @staticmethod

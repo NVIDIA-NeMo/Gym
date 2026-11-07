@@ -534,6 +534,24 @@ def test_a_close_whose_stop_fails_is_an_error_and_can_be_retried(server, root, m
     assert server._sessions == {}
 
 
+def test_a_stop_that_fails_after_the_harvest_still_grades_and_close_stops_the_sandbox(
+    server, root, graded, monkeypatch
+):
+    client = TestClient(server.setup_webserver())
+    seed = _seed()
+    _post_seed(client, seed)
+    _build(root)
+    stop = AsyncMock(side_effect=[OSError("stop failed"), None])
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    verified = _verify(client)
+
+    assert (verified["reward"], verified["build_failed"], verified["mask_sample"]) == (1.0, False, False)
+    assert _close(client, seed).status_code == 200
+    assert stop.await_count == 2, "close stops the sandbox the verify could not"
+    assert server._sessions == {}
+
+
 def test_seeding_again_is_idempotent_for_its_episode_and_refused_for_another(server, root, stopped):
     client = TestClient(server.setup_webserver())
     seed = _seed()
