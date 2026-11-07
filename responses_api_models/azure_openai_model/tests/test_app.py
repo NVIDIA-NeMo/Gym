@@ -17,6 +17,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
+from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
 from openai.types.completion_usage import CompletionUsage
 from pytest import MonkeyPatch
 
@@ -95,17 +98,18 @@ class TestApp:
     ) -> None:
         server = self._setup_server()
         client = TestClient(server.setup_webserver())
-        completion = NeMoGymChatCompletion(
+        # The real AsyncAzureOpenAI client returns the plain openai ChatCompletion, not the NeMoGym subclass.
+        completion = ChatCompletion(
             id="chatcmpl-usage",
             created=FIXED_TIME,
             model="dummy_model",
             object="chat.completion",
             usage=CompletionUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10),
             choices=[
-                NeMoGymChoice(
+                Choice(
                     index=0,
                     finish_reason=finish_reason,
-                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                    message=ChatCompletionMessage(role="assistant", content="hi"),
                 )
             ],
         )

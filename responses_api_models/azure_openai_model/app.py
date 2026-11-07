@@ -65,7 +65,7 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
 
         return self._converter.chat_completion_to_response(
             responses_create_params=body.model_copy(update={"model": self.config.openai_model}),
-            chat_completion=chat_completion_response,
+            chat_completion=NeMoGymChatCompletion.model_validate(chat_completion_response.model_dump()),
         )
 
     async def chat_completions(
