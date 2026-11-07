@@ -26,42 +26,14 @@ from nemo_gym.sandbox import api as sandbox_api
 from nemo_gym.sandbox.api import AsyncSandbox, SandboxSpec
 from nemo_gym.telemetry import gym_metrics as telemetry_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
-from tests.unit_tests.test_sandbox import FakeSandboxProvider
+from tests.unit_tests.sandbox.test_sandbox import FakeSandboxProvider
+from tests.unit_tests.telemetry.in_memory_meter import collected_metrics  # noqa: F401 - fixture, re-exported
 
 
 pytest.importorskip("opentelemetry.sdk.metrics")
 
 PROVIDER_ATTR = telemetry_metrics.SANDBOX_PROVIDER_ATTRIBUTE
 ACTIVE = telemetry_metrics.SANDBOX_ACTIVE_INSTRUMENT
-
-
-@pytest.fixture
-def collected_metrics(monkeypatch):
-    """A live meter on an in-memory reader, installed as the process handle."""
-    from opentelemetry.sdk.metrics import MeterProvider
-    from opentelemetry.sdk.metrics.export import InMemoryMetricReader
-
-    reader = InMemoryMetricReader()
-    provider = MeterProvider(metric_readers=[reader])
-
-    class _Handle:
-        is_exporting = True
-        meter = provider.get_meter("test")
-
-    monkeypatch.setattr(telemetry_setup, "_TELEMETRY_HANDLE", _Handle())
-    telemetry_metrics._reset_for_testing()
-
-    def collect():
-        data = reader.get_metrics_data()
-        out = {}
-        # The reader hands back None when no instrument has recorded yet.
-        for resource_metric in data.resource_metrics if data is not None else ():
-            for scope_metric in resource_metric.scope_metrics:
-                for metric in scope_metric.metrics:
-                    out[metric.name] = list(metric.data.data_points)
-        return out
-
-    return collect
 
 
 def _active_by_provider(points) -> dict[str, int]:

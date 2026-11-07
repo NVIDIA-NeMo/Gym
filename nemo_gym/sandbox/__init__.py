@@ -104,6 +104,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+    from nemo_gym.sandbox.adapters.docker_compose import PLACEMENT_GROUP_KEY
     from nemo_gym.sandbox.compose_config import (
         adapt_non_root_sidecars,
         deployment_platform,
@@ -115,10 +116,10 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
     from nemo_gym.sandbox.config import SandboxConfig
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
-    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
+    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
-    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider, SandboxBackendUnreachableError
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
     from nemo_gym.sandbox.transfer import (
         TRANSFER_USER,
         SandboxProbeError,
@@ -138,6 +139,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "PLACEMENT_GROUP_KEY": "adapters.docker_compose",
     "ApptainerProvider": "providers.apptainer.provider",
     "CPU_CAP_ENV_VARS": "utils",
     "DirectSandboxConnection": "access",
@@ -147,7 +149,6 @@ _PUBLIC_API = {
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
     "SandboxAccess": "access",
-    "SandboxBackendUnreachableError": "providers.opensandbox.provider",
     "SandboxConfig": "config",
     "SandboxProbeError": "transfer",
     "SandboxTransferError": "transfer",
@@ -164,6 +165,7 @@ _PUBLIC_API = {
     "read_text": "utils",
     "remote_kind": "transfer",
     "resolve_compose": "compose_config",
+    "sandbox_credentials_rejected": "providers.base",
     "sandbox_platform": "compose_config",
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",

@@ -223,6 +223,15 @@ def test_stores_implement_capture_ledger(store):
     assert isinstance(store, CaptureLedger)
 
 
+async def test_ledger_methods_take_capture_keys_by_keyword(store):
+    await store.record_failure(capture_key="r1", model_call_id="c1", reason="worker_capture_failed")
+
+    manifest = RolloutManifest.model_validate(await store.manifest(capture_key="r1"))
+    assert [failure.model_call_id for failure in manifest.failures] == ["c1"]
+    assert await store.retire(capture_keys=["r1"]) == {"removed": ["r1"], "absent": []}
+    assert await store.delete(capture_keys=["r1"]) == {"removed": [], "absent": ["r1"]}
+
+
 @pytest.mark.asyncio
 async def test_ledger_row_round_trips_token_free_manifest(store):
     await _record_call_1(store)
@@ -330,7 +339,7 @@ async def test_has_rows_is_false_for_untouched_rollout(store):
 
 async def _admit(store, request_items, rollout_id="r1", model_call_id="c2"):
     context = CaptureContext(
-        rollout_id=rollout_id,
+        capture_key=rollout_id,
         model_call_id=model_call_id,
         token_sink=None,
         lineage_store=store,
@@ -752,7 +761,7 @@ async def test_file_store_delete_removes_every_ledger_and_fence_file(tmp_path):
 async def test_a_bare_rollout_id_string_is_rejected(store, method):
     """A string is a sequence of one-character IDs; treating it as a batch would remove the wrong rollouts."""
     await _record_call_1(store)
-    with pytest.raises(TypeError, match="sequence of rollout ids"):
+    with pytest.raises(TypeError, match="sequence of capture keys"):
         await getattr(store, method)("r1")
     assert await store.has_rows("r1")
 
@@ -937,7 +946,7 @@ async def test_retirement_fences_admission_and_closure_until_delete(store):
 
 @pytest.mark.asyncio
 async def test_checkpoint_restores_delivered_calls_without_dead_attempt_intents(tmp_path):
-    from nemo_gym.core.episode import EpisodeId
+    from nemo_gym.core.episode_types import EpisodeId
     from nemo_gym.models._checkpoint import export_model_records, import_model_records
 
     store = FileLineageStore(tmp_path / "source")
