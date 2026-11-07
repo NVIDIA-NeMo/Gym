@@ -158,15 +158,10 @@ RESUME_SCRIPT = Path(__file__).with_name("resume_opencode.sh")
 _INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
 _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
-# Looks for a Python the model relay can run on as harness_runner.sh's find_relay_python does: exit 0 when found.
-_RELAY_PYTHON_PROBE = (
-    "for p in python3 python /usr/local/bin/python3 /usr/bin/python3 /usr/bin/python; do "
-    'command -v "$p" >/dev/null 2>&1 && "$p" -I -c "import sys; assert sys.version_info >= (3, 6)" 2>/dev/null '
-    "&& exit 0; done; exit 1"
-)
-# Restore outcomes that are expected rather than faults: the launch ran without the relay, or the checkpoint froze it
-# before its relay started. They are logged at INFO; every other reason a launch cannot resume in place at WARNING.
-_EXPECTED_RESTORE_FALLBACKS = frozenset({"relay_unavailable", "relay_gone"})
+# Restore outcomes that are expected rather than faults: the checkpoint froze the launch before its relay started.
+# They are logged at INFO; every other reason a launch cannot resume in place, a launch without a relay included, at
+# WARNING: the relay runs on OpenCode's own binary, so every image can run it.
+_EXPECTED_RESTORE_FALLBACKS = frozenset({"relay_gone"})
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
 
@@ -1141,7 +1136,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 exported[key] |= {
                     "keeps_processes": True,
                     "relay_gen": state.relay_gen,
-                    "relay_python": state.relay_python,
                 }
         return exported
 
@@ -1170,7 +1164,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 restored=dict(saved),
                 keeps_processes=bool(saved.get("keeps_processes", False)),
                 relay_gen=int(saved.get("relay_gen") or 0),
-                relay_python=saved.get("relay_python"),
             )
         for key, state in restored.items():
             self._install_restored_session(key, state)
@@ -1267,15 +1260,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if isinstance(verdict, RestoredLaunch) or verdict.reason == "launch_finished":
             state.adoption = RestoredLaunch(pause_seq=pause_seq, identity=identity)
             return
-        detail = verdict.detail
-        if verdict.reason == "relay_unavailable" and state.relay_python is False:
-            detail = "no Python in the image"
         LOG.log(
             logging.INFO if verdict.reason in _EXPECTED_RESTORE_FALLBACKS else logging.WARNING,
             "OpenCode cannot resume in place: session %s, reason %s, detail %s; relaunching",
             state.request.agent_session_id,
             verdict.reason,
-            detail,
+            verdict.detail,
         )
         await self._abandon_restored_launch(state, identity, reason=verdict.reason)
 
@@ -1505,8 +1495,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             if self.config.session_import_path is not None:
                 await self._import_session(state)
-            if keeps_processes:
-                await self._check_relay_python(sandbox, state)
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -1614,29 +1602,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 raise AgentSeedRejectedError(f"Expected one imported root session, found {len(roots)}")
             state.harness_session_id = roots[0]
             state.message_ids = await asyncio.to_thread(stored_message_ids, database)
-
-    async def _check_relay_python(self, sandbox: AsyncSandbox, state: OpenCodeSandboxSession) -> None:
-        """Record whether the image has a Python for the model relay, and warn once when it has none; never fails.
-
-        Without one, every launch runs without the relay, so a restore cannot continue it in place: it is relaunched
-        from its saved conversation instead.
-        """
-        try:
-            result = await exec_idempotent(
-                sandbox, _RELAY_PYTHON_PROBE, what="Looking for the model relay's Python", cwd="/", timeout_s=30
-            )
-        except Exception:
-            LOG.warning("Could not look for the model relay's Python: session %s", state.request.agent_session_id)
-            return
-        state.relay_python = result.return_code == 0 and not result.error_type
-        if not state.relay_python:
-            LOG.warning(
-                "OpenCode session %s (task %s, sandbox %s): the image has no Python 3.6+ for the model relay; "
-                "its launches cannot resume in place after a restore",
-                state.request.agent_session_id,
-                state.request.task_id.task_id,
-                sandbox.sandbox_id,
-            )
 
     def _granted_mcp_servers(self, request: AgentSeedSessionRequest) -> tuple[dict[str, Any], dict[str, list[str]]]:
         """OpenCode ``mcp`` entries for a session's MCP tool grants, and the grant names by requirement.

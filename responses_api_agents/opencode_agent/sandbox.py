@@ -48,7 +48,9 @@ LOG = logging.getLogger(__name__)
 
 # The model relay a launch runs on a sandbox whose snapshots keep processes (harness_runner.sh starts it): the
 # script in the session root, and per launch directory its endpoint (``{"gen", "upstream"}``) and status files.
-MODEL_RELAY_SCRIPT = HARNESS_RUNNER_SCRIPT.with_name("model_relay.py")
+# OpenCode's own binary runs it as Bun (``BUN_BE_BUN=1``), so the relay needs nothing from the task image.
+MODEL_RELAY_SCRIPT = HARNESS_RUNNER_SCRIPT.with_name("model_relay.mjs")
+RELAY_RUNTIME_ENV = {"BUN_BE_BUN": "1"}
 RELAY_ENDPOINT_FILE = "relay-endpoint.json"
 RELAY_STATUS_FILE = "relay-status.json"
 
@@ -232,8 +234,6 @@ class OpenCodeSandboxSession(AgentSessionState):
     restored: dict[str, JsonValue] | None = None
     keeps_processes: bool = False
     relay_gen: int = 0
-    # Whether the image has a Python the model relay can run on (False: launches run without it); None: not checked.
-    relay_python: bool | None = None
     adoption: RestoredLaunch | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
@@ -507,7 +507,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
         relay = payload.get("relay")
         if relay is not None:
-            # The runner starts the relay; without one (no Python 3.6+ in the image) OpenCode calls the model
+            # The runner starts the relay on OpenCode's binary; if it does not come up, OpenCode calls the model
             # directly, under the fallback environment.
             await upload_text(
                 self.session.sandbox,
@@ -518,7 +518,12 @@ class OpenCodeSandboxSession(AgentSessionState):
                 "MODEL_RELAY_PORT": str(relay["port"]),
                 "MODEL_RELAY_ENDPOINT": f"{directory}/{RELAY_ENDPOINT_FILE}",
                 "MODEL_RELAY_STATUS": f"{directory}/{RELAY_STATUS_FILE}",
-                "MODEL_RELAY_SCRIPT": f"{self.persistent_directory}/{MODEL_RELAY_SCRIPT.name}",
+                "MODEL_RELAY_COMMAND": [
+                    f"{self.runtime}/opencode",
+                    f"{self.persistent_directory}/{MODEL_RELAY_SCRIPT.name}",
+                ],
+                # The relay's process alone: OpenCode itself would start as Bun with it.
+                "MODEL_RELAY_COMMAND_ENV": RELAY_RUNTIME_ENV,
                 "MODEL_RELAY_FALLBACK_ENV": relay["fallback_env"],
             }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))

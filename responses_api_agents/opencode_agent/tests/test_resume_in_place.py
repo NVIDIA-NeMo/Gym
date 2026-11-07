@@ -14,6 +14,7 @@ import http.server
 import json
 import logging
 import os
+import shutil
 import signal
 import socket
 import sys
@@ -21,13 +22,13 @@ import threading
 import time
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from nemo_gym.agents import AgentSeedSessionRequest, NotResumable, RestoredLaunch, SandboxSession
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.server_runtime import LocalExecProvider
 from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent.sandbox import RELAY_ENDPOINT_FILE, OpenCodeSandboxSession
@@ -43,19 +44,34 @@ def _control(checkpoint_id: str, **extra: Any) -> dict[str, Any]:
 
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
+JS_RUNTIME = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME") or shutil.which("node") or shutil.which("bun")
+# The relay is model_relay.mjs: a launch that resumes in place needs a JavaScript runtime to run it.
+needs_relay_runtime = pytest.mark.skipif(
+    JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) for the relay"
+)
 
-# ``run`` first asks the model through the URL in its config, and keeps the reply.
-MODEL_CALLING_OPENCODE = FAKE_OPENCODE.replace(
-    "import base64, http.server, json, os, pathlib, signal, sqlite3, sys, threading, time, urllib.parse",
-    "import base64, http.server, json, os, pathlib, signal, sqlite3, sys, threading, time, urllib.parse, "
-    "urllib.request",
-).replace(
-    """def run():
+# ``run`` first asks the model through the URL in its config, and keeps the reply. Like OpenCode's binary with
+# ``BUN_BE_BUN=1``, it runs a script instead (the model relay), here on this machine's JavaScript runtime.
+MODEL_CALLING_OPENCODE = (
+    FAKE_OPENCODE.replace(
+        "import base64, http.server, json, os, pathlib, signal, sqlite3, sys, threading, time, urllib.parse",
+        "import base64, http.server, json, os, pathlib, signal, sqlite3, sys, threading, time, urllib.parse, "
+        "urllib.request",
+    )
+    .replace(
+        "CONTROL = pathlib.Path({control!r})",
+        """if os.environ.get("BUN_BE_BUN") == "1":
+    os.execv({js_runtime!r}, [{js_runtime!r}, *sys.argv[1:]])
+
+CONTROL = pathlib.Path({control!r})""",
+    )
+    .replace(
+        """def run():
     prompt = sys.stdin.read()
     started("run")
     plugin_ready()
 """,
-    """def call_model():
+        """def call_model():
     config = json.loads(os.environ["OPENCODE_CONFIG_CONTENT"])
     base = config["provider"]["nemo_gym"]["options"]["baseURL"]
     body = json.dumps({{"model": "m", "messages": [{{"role": "user", "content": "one step"}}]}}).encode()
@@ -70,6 +86,7 @@ def run():
     plugin_ready()
     call_model()
 """,
+    )
 )
 assert "call_model()" in MODEL_CALLING_OPENCODE
 
@@ -120,11 +137,14 @@ class InPlaceFixture(OpenCodeFixture):
     def __init__(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         super().__init__(tmp_path, monkeypatch)
         self.binary.write_text(
-            MODEL_CALLING_OPENCODE.format(python=sys.executable, control=str(self.control), version="1.17.11")
+            MODEL_CALLING_OPENCODE.format(
+                python=sys.executable,
+                control=str(self.control),
+                version="1.17.11",
+                js_runtime=JS_RUNTIME or "",
+            )
         )
         self.provider = KeepingProvider()
-        # The relay needs a Python 3.6+ on the sandbox PATH.
-        (self.bin / "python3").symlink_to(sys.executable)
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.relay_port = probe.getsockname()[1]
@@ -195,6 +215,7 @@ async def _replacement(fixture: InPlaceFixture, config: dict[str, Any], state_di
     return agent, http
 
 
+@needs_relay_runtime
 async def test_a_restore_that_kept_the_processes_continues_the_same_launch_against_the_new_model_server(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -238,6 +259,7 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
             os.kill(pid, signal.SIGKILL)
 
 
+@needs_relay_runtime
 async def test_a_restored_launch_whose_supervisor_died_is_abandoned_and_relaunched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
@@ -407,9 +429,14 @@ async def test_staging_a_relayed_launch_writes_the_relay_endpoint_and_its_runner
     endpoint = json.loads((tmp_path / "s" / RELAY_ENDPOINT_FILE).read_text())
     assert endpoint == {"gen": 1, "upstream": payload["relay"]["upstream"]}
     params = (tmp_path / "s" / "params.sh").read_text()
-    for name in ("MODEL_RELAY_PORT", "MODEL_RELAY_ENDPOINT", "MODEL_RELAY_STATUS", "MODEL_RELAY_SCRIPT"):
+    for name in ("MODEL_RELAY_PORT", "MODEL_RELAY_ENDPOINT", "MODEL_RELAY_STATUS"):
         assert f"{name}=" in params
     assert "MODEL_RELAY_FALLBACK_ENV=(" in params
+    # The relay runs on OpenCode's own binary as Bun, whatever the image holds; the switch reaches the relay alone.
+    relay_command = f"MODEL_RELAY_COMMAND=({state.runtime}/opencode {state.persistent_directory}/model_relay.mjs)"
+    assert relay_command in params
+    assert "MODEL_RELAY_COMMAND_ENV=(BUN_BE_BUN=1)" in params
+    assert "BUN_BE_BUN" not in payload["env"] and "MODEL_RELAY_SCRIPT" not in params
 
 
 async def test_pointing_the_relay_raises_its_endpoint_generation(
@@ -432,30 +459,10 @@ async def test_pointing_the_relay_raises_its_endpoint_generation(
 # -- launches that cannot resume in place by design ------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("found", [True, False])
-async def test_a_seed_records_whether_the_image_has_a_python_for_the_relay(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, found: bool
-) -> None:
-    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
-    state = _restored_state(agent)
-    sandbox = MagicMock()
-    sandbox.sandbox_id = "sbx-1"
-    sandbox.exec = AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0 if found else 1))
-    caplog.set_level(logging.INFO)
-
-    await agent._check_relay_python(sandbox, state)
-
-    assert state.relay_python is found
-    warnings = [r for r in caplog.records if "no Python 3.6+ for the model relay" in r.getMessage()]
-    assert len(warnings) == (0 if found else 1)
-    if not found:
-        assert "task 0" in warnings[0].getMessage() and "sbx-1" in warnings[0].getMessage()
-
-
 @pytest.mark.parametrize(
     "verdict, level, detail",
     [
-        (NotResumable("relay_unavailable"), "INFO", "no Python in the image"),
+        (NotResumable("relay_unavailable"), "WARNING", "None"),
         (NotResumable("relay_gone"), "INFO", "None"),
         (NotResumable("pause_mismatch", "a continue was written"), "WARNING", "a continue was written"),
     ],
@@ -471,7 +478,6 @@ async def test_expected_restore_fallbacks_are_logged_at_info(
 ) -> None:
     agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
     state = _restored_state(agent)
-    state.relay_python = False
 
     async def check(sandbox: Any, session_dir: str, **kwargs: Any) -> Any:
         return verdict
