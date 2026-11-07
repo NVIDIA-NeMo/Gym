@@ -6,7 +6,7 @@
 # reuse one that already reports the pinned version. The task's own Node, npm and PATH are untouched: Qwen Code runs
 # as RUNTIME/bin/node RUNTIME/lib/node_modules/@qwen-code/qwen-code/cli-entry.js. The agent server uploads the
 # Node.js build (or a complete runtime archive from build_runtime.sh); npm installs Qwen Code from the registry.
-# Needs bash, sha256sum, tar, gzip and mktemp, plus a glibc image.
+# Needs bash, flock, sha256sum, tar, gzip and mktemp, plus a glibc image (the agent server checks it first).
 #
 # usage: install_qwen_runtime.sh RUNTIME QWEN_VERSION NODE_SHA256 NODE_ARCHIVE RUNTIME_ARCHIVE
 #   Exactly one of NODE_ARCHIVE and RUNTIME_ARCHIVE is nonempty.
@@ -17,17 +17,17 @@ node_sha256=$3
 node_archive=$4
 runtime_archive=$5
 cli=lib/node_modules/@qwen-code/qwen-code/cli-entry.js
+# The task image's Node settings must not reach the private Node.
+unset NODE_OPTIONS NODE_PATH
 
 # QWEN_HOME keeps the version check from writing Qwen Code state under the task's HOME.
 installed() { QWEN_HOME="$1/.version-home" "$1/bin/node" "$1/$cli" --version 2>/dev/null | tail -n 1; }
 
-[ -f "$runtime/ready" ] && [ "$(installed "$runtime")" = "$qwen_version" ] && exit 0
-# The official Node.js Linux builds need glibc.
-if ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
-    echo "Qwen Code's Node.js runtime needs a glibc sandbox image" >&2
-    exit 1
-fi
 mkdir -p "$(dirname "$runtime")"
+# Seeds sharing a sandbox install one at a time, so a ready runtime is never replaced while in use.
+exec 9>"$runtime.lock"
+flock 9
+[ -f "$runtime/ready" ] && [ "$(installed "$runtime")" = "$qwen_version" ] && exit 0
 staging=$(mktemp -d "$runtime.install.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 if [ -n "$runtime_archive" ]; then
@@ -43,8 +43,5 @@ else
 fi
 test "$(installed "$staging")" = "$qwen_version"
 touch "$staging/ready"
-# Publish with one rename; a concurrent seed that lost the race keeps the published runtime.
-rm -rf "$runtime.old"
-[ -d "$runtime" ] && mv "$runtime" "$runtime.old"
-mv "$staging" "$runtime" || [ -f "$runtime/ready" ]
-rm -rf "$runtime.old"
+rm -rf "$runtime"
+mv "$staging" "$runtime"

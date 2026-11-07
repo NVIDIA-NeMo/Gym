@@ -1,4 +1,7 @@
 ---
+# Copied from Qwen Code's built-in general-purpose subagent:
+# https://github.com/QwenLM/qwen-code/blob/c1a8218f38203e272e6e965778ed6a2795cfeed7/packages/core/src/subagents/builtin-agents.ts#L50-L68
+# Copyright 2025 Qwen, Apache-2.0. Changed: the model line, and ${ToolNames.READ_FILE} written out as read_file.
 name: general-purpose
 description: General-purpose agent for researching complex questions, searching for code, and executing multi-step tasks. When you are searching for a keyword or file and are not confident that you will find the right match in the first few tries use this agent to perform the search for you.
 model: {model}

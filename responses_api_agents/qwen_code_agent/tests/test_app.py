@@ -23,7 +23,6 @@ from nemo_gym.agents import (
     SandboxSession,
     check_agent_seed_rejected,
 )
-from nemo_gym.agents.base_responses_api_agent import ModelEndpoint
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -90,9 +89,11 @@ home = Path(os.environ["QWEN_HOME"])
 mode = os.environ.get("TEST_MODE", "normal")
 (home / "seen.json").write_text(json.dumps({
     "cli": sys.argv[1], "args": args, "prompt": sys.stdin.read(), "cwd": os.getcwd(),
-    "settings": json.loads((home / "settings.json").read_text()),
+    "settings": json.loads(Path(os.environ["QWEN_CODE_SYSTEM_SETTINGS_PATH"]).read_text()),
     "env": {k: v for k, v in os.environ.items() if k.startswith(("QWEN_", "NEMO_GYM_"))},
 }))
+if mode == "hang":
+    time.sleep(60)
 subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
 meta = home / "projects" / "p" / "subagents" / "s1" / "agent-0.meta.json"
 meta.parent.mkdir(parents=True, exist_ok=True)
@@ -104,8 +105,14 @@ for event in events[:-1]:
     print(json.dumps(event), flush=True)
 if mode == "sleep":
     time.sleep(60)
-result = dict(events[-1], is_error=mode == "error", subtype="error_during_execution" if mode == "error" else "success")
+failed = mode in ("error", "api_error", "loop")
+result = dict(events[-1], is_error=failed, subtype="error_during_execution" if failed else "success")
+if mode == "api_error":
+    result["error"] = {"message": "[API Error: 400 maximum context length exceeded]"}
+if mode == "loop":
+    result["error"] = {"message": "Loop detection halted the run."}
 print(json.dumps(result))
+sys.exit({"limit": 55, "loop": 1}.get(mode, 0))
 """.replace("__VERSION__", QWEN_VERSION).replace("__EVENTS__", repr(ROOT_EVENTS).replace("None", "None"))
 
 
@@ -224,6 +231,8 @@ def test_summarize_subagents_skips_truncated_and_corrupt_files():
         {"subagents": False, "agent_team": True},
         {"subagent_model_server": {"type": "responses_api_models", "name": "w"}},
         {"subagent_model": "policy"},
+        {"subagent_model": "worker"},
+        {"network_access": "model_only", "sandbox_provider": "sandbox"},
     ],
 )
 def test_invalid_subagent_settings(overrides):
@@ -235,12 +244,12 @@ def test_settings_route_every_model_through_the_rollout():
     server = agent(
         subagent_model="worker",
         subagent_model_server={"type": "responses_api_models", "name": "worker_model"},
-        settings={"modelProviders": {"openai": []}, "ui": {"theme": "x"}},
+        settings={"modelProviders": {"openai": []}, "ui": {"theme": "x"}, "model": {"generationConfig": {"x": 1}}},
     )
     state = MagicMock(request=seed())
 
     def endpoint(*, model_server, rollout_id):
-        return ModelEndpoint(base_url=f"http://{model_server.name}/ng-rollout/{rollout_id}/v1")
+        return SimpleNamespace(base_url=f"http://{model_server.name}/ng-rollout/{rollout_id}/v1")
 
     with patch.object(QwenCodeAgent, "model_endpoint", side_effect=endpoint):
         settings = server.qwen_settings(state, body(temperature=0.0, top_p=0.9))
@@ -248,7 +257,11 @@ def test_settings_route_every_model_through_the_rollout():
         "http://policy_model/ng-rollout/rollout-1/v1",
         "http://worker_model/ng-rollout/rollout-1/v1",
     ]
-    assert settings["model"]["generationConfig"] == {"samplingParams": {"temperature": 0.0, "top_p": 0.9}}
+    # Qwen Code applies only the selected route's generationConfig.
+    assert [route["generationConfig"] for route in settings["modelProviders"]["openai"]] == [
+        {"x": 1, "samplingParams": {"temperature": 0.0, "top_p": 0.9}}
+    ] * 2
+    assert settings["experimental"]["cron"] is False
     assert settings["ui"] == {"theme": "x"}
 
 
@@ -308,7 +321,7 @@ def test_unsupported_seeds_are_final_refusals(request_seed, reason):
     ],
 )
 def test_network_access_refusals(network_access, borrowed, reason):
-    server = agent(network_access=network_access, sandbox_provider="sandbox")
+    server = agent(network_access=network_access, sandbox_provider="sandbox", runtime_archive="runtime.tar.gz")
     assert check_agent_seed_rejected(server.setup_webserver(), seed(borrowed=borrowed)) == reason
 
 
@@ -352,7 +365,9 @@ async def test_owned_sandbox_egress_allows_only_the_model_host(owned_sandbox, ne
     subagent = (
         {"subagent_model_server": {"type": "responses_api_models", "name": subagent_server}} if subagent_server else {}
     )
-    server = agent(network_access=network_access, sandbox_provider="sandbox", subagent_model="child", **subagent)
+    if subagent_server:
+        subagent["subagent_model"] = "child"
+    server = agent(network_access=network_access, sandbox_provider="sandbox", runtime_archive="r.tar.gz", **subagent)
     await server._seed_agent_session_state(seed(borrowed=False))
     assert owned_sandbox.start.await_args.args[0].provider_options.get("network_policy") == policy
 
@@ -361,7 +376,11 @@ async def test_owned_sandbox_egress_allows_only_the_model_host(owned_sandbox, ne
 async def test_model_only_refuses_a_subagent_server_on_another_host(owned_sandbox):
     subagent = {"type": "responses_api_models", "name": "elsewhere"}
     server = agent(
-        network_access="model_only", sandbox_provider="sandbox", subagent_model="child", subagent_model_server=subagent
+        network_access="model_only",
+        sandbox_provider="sandbox",
+        runtime_archive="r.tar.gz",
+        subagent_model="child",
+        subagent_model_server=subagent,
     )
     with pytest.raises(AgentSeedRejectedError, match="subagent_model_server is on another"):
         await server._seed_agent_session_state(seed(borrowed=False))
@@ -420,7 +439,7 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
         await state.install(runtime_archive=None, timeout=10)
     assert download.await_args.args[0].startswith("https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-")
     state.activation_request = body(max_tool_calls=30)
-    endpoint = ModelEndpoint(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
+    endpoint = SimpleNamespace(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
     with patch.object(QwenCodeAgent, "model_endpoint", return_value=endpoint):
         response = await asyncio.wait_for(server._activate(state, state.activation_request), timeout=60)
     seen = json.loads((Path(state.qwen_home) / "seen.json").read_text())
@@ -456,18 +475,34 @@ async def test_real_run_maps_output_usage_and_keeps_the_task_environment(tmp_pat
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
-@pytest.mark.parametrize(("mode", "failure_kind"), [("error", "unknown"), ("silent", "agent_invalid_output")])
-async def test_failed_runs_report_an_outcome(tmp_path, mode, failure_kind):
+@pytest.mark.parametrize(
+    ("mode", "outcome"),
+    [
+        ("error", {"failure_kind": "unknown"}),
+        ("silent", {"failure_kind": "agent_invalid_output"}),
+        ("api_error", {"failure_kind": "model_request_error", "status_code": 400}),
+    ],
+)
+async def test_failed_runs_report_an_outcome(tmp_path, mode, outcome):
     response, close, _, _, _ = await activate(tmp_path, mode)
     assert response.status == "failed"
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == failure_kind
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
     assert close.cleanup_confirmed
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
-async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
-    response, close, _, state, _ = await activate(tmp_path, "sleep", timeout=3)
+@pytest.mark.parametrize("mode", ["limit", "loop"])
+async def test_qwen_limit_stops_are_graded_as_incomplete(tmp_path, mode):
+    response, _, _, _, _ = await activate(tmp_path, mode)
+    assert response.status == "incomplete" and AGENT_OUTCOME_METADATA_KEY not in response.metadata
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
+@pytest.mark.parametrize("mode", ["sleep", "hang"])
+async def test_timeout_is_incomplete_with_or_without_output(tmp_path, mode):
+    response, close, _, state, _ = await activate(tmp_path, mode, timeout=3)
     assert state.session.cleanup["timed_out"] and response.status == "incomplete"
     assert response.usage is None
     assert close.agent_observations.records[1].outcome == "timeout"

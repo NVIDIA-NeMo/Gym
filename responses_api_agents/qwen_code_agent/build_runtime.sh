@@ -27,18 +27,23 @@ qwen_version=${2:-0.25.1}
 arch=${3:-x64}
 node_version=22.23.2
 node="node-v${node_version}-linux-${arch}"
+# sha256 of the .tar.xz builds, from https://nodejs.org/dist/v22.23.2/SHASUMS256.txt.
+case "$arch" in
+  x64) node_sha256=d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307 ;; # pragma: allowlist secret
+  arm64) node_sha256=fff4078c5def658577f92c88db7db3bc0072924bfb93fe52c1e744a54e94abb8 ;; # pragma: allowlist secret
+  *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+esac
 
 # The unpacked runtime stays next to the archive for inspection.
 work="${out%.tar.gz}.build"
 mkdir -p "$work"
 cd "$work"
 curl -fsSLO "https://nodejs.org/dist/v${node_version}/${node}.tar.xz"
-curl -fsSLO "https://nodejs.org/dist/v${node_version}/SHASUMS256.txt"
-grep " ${node}.tar.xz\$" SHASUMS256.txt | { sha256sum -c - 2>/dev/null || shasum -a 256 -c -; }
+echo "${node_sha256}  ${node}.tar.xz" | { sha256sum -c - 2>/dev/null || shasum -a 256 -c -; }
 
 mkdir -p runtime
 tar xJf "${node}.tar.xz" -C runtime --strip-components=1
-npm install --global --prefix runtime --no-audit --no-fund --os linux --cpu "$arch" --libc glibc \
+npm install --global --prefix runtime --ignore-scripts --no-audit --no-fund --os linux --cpu "$arch" --libc glibc \
   "@qwen-code/qwen-code@${qwen_version}"
 test -e runtime/bin/qwen
 # Node headers and the bundled npm are not needed at run time.

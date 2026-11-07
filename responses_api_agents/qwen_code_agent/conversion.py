@@ -11,11 +11,11 @@ from typing import Any
 from fastapi import HTTPException
 
 from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
-from nemo_gym.models import ResponsesConverter
+from nemo_gym.models import ChatCompletionsConverter
 
 
 BRIDGE_TOOL = "tool_call"
-_CONVERTER = ResponsesConverter(return_token_id_information=False)
+_CONVERTER = ChatCompletionsConverter(return_token_id_information=False)
 
 
 def _text(content: Any) -> str:
@@ -75,7 +75,9 @@ def parse_stream(stdout: str) -> tuple[list[Any], dict[str, Any] | None]:
             elif event["type"] == "user" and kind == "tool_result":
                 items.append(
                     NeMoGymFunctionCallOutput(
-                        call_id=block.get("tool_use_id", ""), output=_text(block.get("content")), status="completed"
+                        call_id=block.get("tool_use_id", ""),
+                        output=_text(block.get("content")),
+                        status="incomplete" if block.get("is_error") else "completed",
                     )
                 )
     return items, result

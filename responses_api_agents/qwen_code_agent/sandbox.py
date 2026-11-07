@@ -12,6 +12,7 @@ from shlex import quote
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    AgentSeedRejectedError,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
@@ -66,6 +67,11 @@ class QwenSession(AgentSessionState):
         """QWEN_HOME: Qwen Code's settings, agents and session transcripts, outside the task repository and home."""
         return f"{self.session.session_dir}/qwen"
 
+    @property
+    def settings_path(self) -> str:
+        """Generated settings, loaded at Qwen Code's system scope through QWEN_CODE_SYSTEM_SETTINGS_PATH."""
+        return f"{self.session.session_dir}/system-settings.json"
+
     async def install(self, *, runtime_archive: str | None, timeout: float) -> None:
         """Create the session directory and install (or reuse) Node.js and the pinned Qwen Code package.
 
@@ -84,13 +90,20 @@ class QwenSession(AgentSessionState):
         if prepared.return_code != 0 or prepared.error_type:
             raise RuntimeError(f"Cannot prepare the Qwen Code session directory: {prepared.stderr or prepared.stdout}")
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+        # The runtime path names both versions, and ready is written only after the version check.
+        reuse = await sandbox.exec(f"test -f {quote(self.runtime)}/ready", cwd="/", timeout_s=60)
+        if reuse.return_code == 0 and not reuse.error_type:
+            return
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
-        arch = await sandbox.exec("uname -m", cwd="/", timeout_s=60)
-        arch_name = {"amd64": "x86_64", "arm64": "aarch64"}.get(
-            (arch.stdout or "").strip(), (arch.stdout or "").strip()
-        )
+        probe = await sandbox.exec("uname -m; getconf GNU_LIBC_VERSION", cwd="/", timeout_s=60)
+        arch, _, libc = (probe.stdout or "").strip().partition("\n")
+        arch_name = {"amd64": "x86_64", "arm64": "aarch64"}.get(arch, arch)
         if arch_name not in NODE_SHA256:
-            raise RuntimeError(f"No Node.js {NODE_VERSION} build for sandbox architecture {arch_name!r}")
+            raise AgentSeedRejectedError(f"No Node.js {NODE_VERSION} build for sandbox architecture {arch_name!r}")
+        # The official Node.js 22 Linux builds need glibc 2.28 or newer.
+        version = libc.removeprefix("glibc ").split(".")
+        if not libc.startswith("glibc ") or tuple(map(int, version[:2])) < (2, 28):
+            raise AgentSeedRejectedError(f"Qwen Code's Node.js runtime needs glibc 2.28 or newer, not {libc!r}")
         node, archive = "", ""
         if runtime_archive:
             # For sandboxes without internet access; the installer checks the version it reports.
@@ -122,15 +135,15 @@ class QwenSession(AgentSessionState):
         """Upload the task and Qwen Code's settings as files, never through shell interpolation."""
         directory = self.session.session_dir
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
-        await upload_text(self.session.sandbox, path=f"{self.qwen_home}/settings.json", text=settings)
+        await upload_text(self.session.sandbox, path=self.settings_path, text=settings)
         if subagent:
             await upload_text(self.session.sandbox, path=f"{self.qwen_home}/agents/general-purpose.md", text=subagent)
         params = {
             "cwd": self.session.workdir,
             "command": command,
             "env": env,
-            # Task-image settings must not redirect Qwen Code's configuration or model calls.
-            "unset_env": ["QWEN_*", "OPENAI_*", "NEMO_GYM_MODEL_API_KEY"],
+            # Task-image settings must not redirect Qwen Code's configuration, model calls or private Node.
+            "unset_env": ["QWEN_*", "OPENAI_*", "NEMO_GYM_MODEL_API_KEY", "NODE_OPTIONS", "NODE_PATH"],
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.jsonl",
             "stderr": f"{directory}/stderr.log",

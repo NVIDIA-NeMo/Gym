@@ -5,6 +5,7 @@
 import asyncio
 import json
 import logging
+import re
 from collections.abc import Mapping
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
@@ -36,6 +37,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -75,6 +77,8 @@ SUBAGENT_PROMPT = Path(__file__).with_name("general-purpose-agent.md")
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
 # harness_runner.sh exit statuses when Qwen Code itself never ran.
 RUNNER_FAILURES = (125, 126, 127)
+# Qwen Code's own limit stops: 53 is --max-session-turns, 55 is --max-tool-calls.
+LIMIT_EXITS = (53, 55)
 
 
 class QwenCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -92,17 +96,19 @@ class QwenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # A second route for the built-in general-purpose subagent. Forks and teammates keep the root model.
     subagent_model: str | None = None
     subagent_model_server: ModelServerRef | None = None
-    max_subagent_depth: int | None = Field(default=None, gt=0)
+    max_subagent_depth: int | None = Field(default=None, gt=0, le=100)
     max_parallel_agents: int | None = Field(default=None, gt=0)
     agent_team: bool = False
     max_session_turns: int | None = Field(default=None, gt=0)
+    # Qwen Code counts tool calls in the root session only, so subagent calls are not limited.
     max_tool_calls: int | None = Field(default=None, gt=0)
     # Headless runs cannot answer approval prompts.
     approval_mode: Literal["yolo", "auto-edit", "auto"] = "yolo"
     system_prompt: str | None = None
-    # Web tools are off so a task is solved from the sandbox, not looked up online.
+    # Web tools are off so a task is solved from the sandbox, not looked up online. A configured list replaces this one.
     exclude_tools: list[str] = Field(default_factory=lambda: ["web_fetch", "web_search"])
     # Merged under the generated settings.json, which keeps the model routes and settings it sets.
+    # model.generationConfig is copied into every model route, where Qwen Code reads it.
     settings: dict[str, JsonValue] = Field(default_factory=dict)
     # Agent-server tar.gz from build_runtime.sh, uploaded into sandboxes without internet access.
     runtime_archive: str | None = None
@@ -126,8 +132,14 @@ class QwenCodeAgentConfig(BaseResponsesAPIAgentConfig):
             raise ValueError("subagent_model and agent_team require subagents: true")
         if self.subagent_model_server and not self.subagent_model:
             raise ValueError("subagent_model_server requires subagent_model")
+        if self.subagent_model and not self.subagent_model_server:
+            raise ValueError(
+                "subagent_model requires subagent_model_server, since the policy server serves only its own model"
+            )
         if self.subagent_model == self.model:
             raise ValueError("subagent_model must differ from model; leave it null to inherit the root model")
+        if self.network_access == "model_only" and not self.runtime_archive:
+            raise ValueError("network_access model_only requires runtime_archive, since npm cannot reach its registry")
         return self
 
 
@@ -142,6 +154,10 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         self._sem = asyncio.Semaphore(self.config.concurrency)
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        # Qwen Code 0.25.1 reports a model HTTP error as "[API Error: <status> ...]" in the result event.
+        match = re.match(r"\[API Error: ([45]\d{2})\b", native_result.get("error_message", ""))
+        if match:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
         return AgentOutcome(failure_kind=native_result.get("failure_kind", "unknown"))
 
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
@@ -157,6 +173,8 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(f"Qwen Code sessions pin qwen_version {QWEN_VERSION}")
         access = body.sandbox_access
         owns_sandbox = access is None
+        if self.config.subagent_model_server and self._token_id_capture_enabled():
+            raise AgentSeedRejectedError("Qwen Code token capture is unsupported with subagent_model_server")
         if self.config.network_access == "model_and_tools":
             raise AgentSeedRejectedError("Qwen Code uses no tool grants; set network_access to model_only or inherit")
         if not owns_sandbox and self.config.network_access != "inherit":
@@ -311,31 +329,33 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         def base_url(server: ModelServerRef) -> str:
             return self.model_endpoint(model_server=server, rollout_id=rollout_id).base_url
 
-        routes = [{"id": self.config.model, "baseUrl": base_url(self.config.model_server)}]
-        if self.config.subagent_model:
-            server = self.config.subagent_model_server or self.config.model_server
-            routes.append({"id": self.config.subagent_model, "baseUrl": base_url(server)})
-        settings: dict[str, Any] = {
-            "modelProviders": {"openai": [route | {"envKey": API_KEY_ENV} for route in routes]},
-            "security": {"auth": {"selectedType": "openai"}},
-            "model": {"name": self.config.model},
-            "general": {"enableAutoUpdate": False},
-            "privacy": {"usageStatisticsEnabled": False},
-            # Background memory extraction makes extra model calls outside the task.
-            "memory": {"enableManagedAutoMemory": False},
-        }
-        # Request sampling controls apply to every model call.
+        # Qwen Code ignores top-level model.generationConfig for provider routes, so each route carries it.
+        generation = deepcopy((self.config.settings.get("model") or {}).get("generationConfig") or {})
         sampling = {
             key: value
             for key, value in (("temperature", body.temperature), ("top_p", body.top_p))
             if value is not None
         }
         if sampling:
-            settings["model"]["generationConfig"] = {"samplingParams": sampling}
+            _deep_merge(generation, {"samplingParams": sampling})
+        routes = [{"id": self.config.model, "baseUrl": base_url(self.config.model_server)}]
+        if self.config.subagent_model:
+            routes.append({"id": self.config.subagent_model, "baseUrl": base_url(self.config.subagent_model_server)})
+        settings: dict[str, Any] = {
+            "modelProviders": {
+                "openai": [route | {"envKey": API_KEY_ENV, "generationConfig": generation} for route in routes]
+            },
+            "security": {"auth": {"selectedType": "openai"}},
+            "model": {"name": self.config.model},
+            "general": {"enableAutoUpdate": False},
+            "privacy": {"usageStatisticsEnabled": False},
+            # Background memory extraction makes extra model calls outside the task.
+            "memory": {"enableManagedAutoMemory": False},
+            # A recurring cron job would keep a headless run alive until the timeout.
+            "experimental": {"cron": False, "agentTeam": self.config.agent_team},
+        }
         if self.config.max_parallel_agents:
             settings["agents"] = {"maxParallelAgents": self.config.max_parallel_agents}
-        if self.config.agent_team:
-            settings["experimental"] = {"agentTeam": True}
         return _deep_merge(deepcopy(self.config.settings), settings)
 
     def _command(self, state: QwenSession, system: str, max_tool_calls: int | None) -> list[str]:
@@ -361,7 +381,14 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
             if not key.startswith(("QWEN_", "OPENAI_")) and key != API_KEY_ENV
         }
         # Qwen Code's settings, agents and transcripts live in the session directory, so tool shells keep the task's HOME.
-        return env | {"QWEN_HOME": state.qwen_home, API_KEY_ENV: "EMPTY", "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1"}
+        return env | {
+            "QWEN_HOME": state.qwen_home,
+            # System scope outranks a task repository's .qwen/settings.json.
+            "QWEN_CODE_SYSTEM_SETTINGS_PATH": state.settings_path,
+            "QWEN_CODE_MODELS_DEV_REFRESH": "off",
+            API_KEY_ENV: "EMPTY",
+            "QWEN_CODE_SUPPRESS_YOLO_WARNING": "1",
+        }
 
     async def _stage(self, state: QwenSession, body: NeMoGymResponseCreateParamsNonStreaming) -> SandboxCommand:
         prompt, system = self._conversation(body)
@@ -443,12 +470,15 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         subagents = await asyncio.to_thread(summarize_subagents, artifacts.sessions) if artifacts.sessions else {}
 
         status, failure_kind, error_type = "completed", None, None
+        error = (result or {}).get("error")
+        error_message = str(error.get("message") or "") if isinstance(error, dict) else ""
         if timed_out:
-            if not output:
-                raise RuntimeError("Qwen Code timed out before any model response")
+            # Includes a deadline or rollout stop before any model output.
             status, error_type = "incomplete", "timeout"
+        elif return_code in LIMIT_EXITS or error_message.startswith("Loop detection halted the run"):
+            status, error_type = "incomplete", "agent_limit"
         elif return_code != 0 or result is None or result.get("is_error"):
-            # Qwen Code 0.25.1 reports no structured cause for a failed headless run; the episode may be retried.
+            # Unexplained endings, a bare exit 137 included, stay unknown. Model HTTP errors carry their status.
             status, failure_kind = "failed", "unknown"
             error_type = (result or {}).get("subtype") or f"exit_{return_code}"
         elif not any(getattr(item, "type", None) == "message" for item in output):
@@ -491,7 +521,7 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Qwen Code run failed (%s); stderr tail: %s", error_type, artifacts.stderr[-2048:])
-            return self.report_outcome(response, {"failure_kind": failure_kind})
+            return self.report_outcome(response, {"failure_kind": failure_kind, "error_message": error_message})
         return self.report_rollout_stop(response, state.session)
 
     async def responses(
