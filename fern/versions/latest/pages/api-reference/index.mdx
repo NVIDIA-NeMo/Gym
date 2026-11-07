@@ -121,7 +121,7 @@ names and fields so that a change is deliberate.
 
 `run_task` runs one rollout of a task and returns its typed `RolloutOutcome`: the `reward` (None when none
 exists, as for a failed `/run`), a `TaskFailure` when a failure was reported, whether it was `masked`, and the `prompt` and
-`output` as JSON text for display. A failed `/run` does not raise: the outcome has a `failure` and no reward.
+`output` as JSON text for display. A failed `/run` (a client error, a bad JSON body, a timeout or an unusable reply) does not raise: the outcome has a `failure` and no reward. Any other exception, such as a programming error, and cancellation propagate.
 
 A failure reports what Gym observed and leaves the decision to you:
 

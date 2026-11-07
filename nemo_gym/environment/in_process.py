@@ -300,16 +300,19 @@ class TaskRunner:
         `rollout_id` names the rollout for Gym's rollout correlation (e.g. verification events). It must differ between
         concurrent calls; a fresh one is made when it is None.
 
-        A `/run` call that fails does not raise: the outcome has a `failure` and no reward.
+        A `/run` call that fails (a client error, a bad JSON body, a timeout or an unusable reply) does not raise: the
+        outcome has a `failure` and no reward. Any other exception, such as a programming error, and cancellation
+        propagate.
         """
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
         with ignoring_command_line():
-            (row,) = self._helper.preprocess_examples([self._row_of_task[task_id]], task_ids=[task_id], num_repeats=1)
-        row = {**row, "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
+            rows = self._helper.preprocess_examples([self._row_of_task[task_id]], task_ids=[task_id], num_repeats=1)
+        row = {**rows[0], "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
         completions = self._helper.run_outcomes([row], head_server_config=self._registry_server)
         try:
-            [(_, result)] = [await rollout for rollout in completions]
+            (completion,) = completions
+            _, result = await completion
         finally:
             await completions.aclose()
         return _outcome(result)
