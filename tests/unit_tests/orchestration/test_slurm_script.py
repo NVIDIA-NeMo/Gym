@@ -3289,3 +3289,18 @@ def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: 
     cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
     assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
     assert cache.stat().st_mode & 0o777 == 0o700
+
+
+@pytest.mark.parametrize(
+    ("declared", "expected"),
+    [
+        pytest.param(None, "jobs/x/osworld/logs", id="the job's logs folder"),
+        pytest.param("lit:/scratch/logs", "/scratch/logs", id="driver.env wins"),
+    ],
+)
+def test_the_driver_is_told_where_the_jobs_step_logs_are(tmp_path, declared, expected):
+    env = {} if declared is None else {"NEMO_GYM_SERVICE_LOG_DIR": declared}
+    script = _render_command(tmp_path, "harness", env=env)
+
+    values = re.findall(r"\bNEMO_GYM_SERVICE_LOG_DIR=(\S*)", script)
+    assert values and all(value.endswith(expected) for value in values)
