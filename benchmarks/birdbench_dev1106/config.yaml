@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD dev 2025-11-06 text-to-SQL benchmark configuration.
+
+# Chain to the BIRD execution-based resource server + agent config.
+config_paths:
+  - resources_servers/bird_sql/configs/bird_sql.yaml
+
+# Forwarded as kwargs to benchmarks/birdbench_dev1106/prepare.py's prepare(). Same options and
+# defaults as benchmarks/birdbench/config.yaml; override with the Hydra `+` prefix, e.g.
+# `+prepare_script_args.include_evidence=false`.
+prepare_script_args:
+  include_evidence: true
+  dscp: name_or_col_dscp
+
+# Inherit-from directives isolate this benchmark config from the generic server config.
+birdbench_dev1106_bird_sql_resources_server:
+  _inherit_from: bird_sql_resources_server
+
+birdbench_dev1106_bird_sql_simple_agent:
+  _inherit_from: bird_sql_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: birdbench_dev1106_bird_sql_resources_server
+      datasets:
+        - name: birdbench_dev1106
+          type: benchmark
+          jsonl_fpath: benchmarks/birdbench_dev1106/data/birdbench_dev1106_benchmark.jsonl
+          # Shared with birdbench so scores on the two releases are comparable.
+          prompt_config: benchmarks/birdbench/prompts/default.yaml
+          prepare_script: benchmarks/birdbench_dev1106/prepare.py
+          num_repeats: 16
+
+birdbench_dev1106_bird_sql_environment_server:
+  _inherit_from: bird_sql_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: birdbench_dev1106_bird_sql_simple_agent

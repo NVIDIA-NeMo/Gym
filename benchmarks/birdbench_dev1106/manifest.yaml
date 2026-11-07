@@ -1,0 +1,32 @@
+name: birdbench_dev1106
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: coding
+description: Text-to-SQL with execution-based evaluation on BIRD dev 2025-11-06 (1534
+  SQLite tasks with revised questions, evidence, and gold SQL). Binary reward from unordered
+  result-set equality.
+modality: text
+licensing: CC-BY-SA-4.0
+authors:
+- yuvalshkolar
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: bird_sql
+agent_server: simple_agent
+datasets:
+- name: birdbench_dev1106
+  type: benchmark
+  jsonl_fpath: benchmarks/birdbench_dev1106/data/birdbench_dev1106_benchmark.jsonl
+  prepare_script: benchmarks/birdbench_dev1106/prepare.py
+  prompt_config: benchmarks/birdbench/prompts/default.yaml
+  num_repeats: 16
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/birdbench/prompts/default.yaml
+lifecycle: active
