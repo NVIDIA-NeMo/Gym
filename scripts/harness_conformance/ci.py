@@ -129,6 +129,9 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
+    if harness == "nooa":
+        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
+        return
     if harness == "crewai":
         _build_crewai_sandbox_runtime()
     if harness in ("hermes", "stirrup", "simple", "openclaw", "crewai"):
