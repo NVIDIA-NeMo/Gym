@@ -337,3 +337,84 @@ def test_a_freeze_while_the_relay_starts_does_not_use_up_its_wait(tmp_path: Path
     assert runner.returncode == 0, stderr
     assert (tmp_path / "stdout.log").read_text().split() == ["1", "None"]
     assert not (tmp_path / "relay" / "unavailable").exists()
+
+
+RELAY_COMMAND_CHECK = r"""
+import json, os, socket, sys
+status = json.load(open(sys.argv[1]))
+socket.create_connection(("127.0.0.1", status["port"]), timeout=5).close()
+comm = open("/proc/%d/comm" % status["pid"]).read().strip()
+relay_env = open("/proc/%d/environ" % status["pid"], "rb").read().split(b"\0")
+print(os.environ.get("NEMO_GYM_MODEL_RELAY"), comm, b"RELAY_ONLY=1" in relay_env, os.environ.get("RELAY_ONLY"))
+"""
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_a_relay_command_runs_under_a_neutral_name_with_an_environment_of_its_own(tmp_path: Path) -> None:
+    # A harness binary that runs the relay (OpenCode as Bun) needs a switch that must not reach the harness itself.
+    from nemo_gym.agents.utils.model_relay import __file__ as relay_script
+
+    params, status = _relay_params(
+        tmp_path,
+        RELAY_COMMAND_CHECK,
+        MODEL_RELAY_COMMAND=[sys.executable, relay_script],
+        MODEL_RELAY_COMMAND_ENV={"RELAY_ONLY": "1"},
+        MODEL_RELAY_PYTHONS=[str(tmp_path / "missing" / "python3")],
+    )
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().split() == ["1", "gym-model-relay", "True", "None"]
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_a_relay_command_that_cannot_run_leaves_the_command_on_the_fallback_environment(tmp_path: Path) -> None:
+    script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
+    params, _ = _relay_params(
+        tmp_path,
+        script,
+        MODEL_RELAY_COMMAND=[str(tmp_path / "missing" / "opencode"), "model_relay.mjs"],
+        MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
+    )
+
+    result = _run(params)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "stdout.log").read_text().split() == ["None", "http://model.example/v1"]
+    assert (tmp_path / "relay" / "unavailable").exists()
+
+
+JS_RUNTIME = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME") or shutil.which("node") or shutil.which("bun")
+
+JS_RELAY_CHECK = r"""
+import json, os, socket, sys
+status = json.load(open(sys.argv[1]))
+socket.create_connection(("127.0.0.1", status["port"]), timeout=5).close()
+argv0 = open("/proc/%d/cmdline" % status["pid"]).read().split("\0")[0]
+comm = open("/proc/%d/comm" % status["pid"]).read().strip()
+print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.path.basename(argv0), comm)
+"""
+
+
+@pytest.mark.skipif(JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) on this machine")
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_the_runner_starts_the_javascript_relay(tmp_path: Path) -> None:
+    from nemo_gym.agents.utils.model_relay import __file__ as relay_script
+
+    params, status = _relay_params(
+        tmp_path,
+        JS_RELAY_CHECK,
+        MODEL_RELAY_COMMAND=[JS_RUNTIME, str(Path(relay_script).with_name("model_relay.mjs"))],
+        MODEL_RELAY_PYTHONS=[str(tmp_path / "missing" / "python3")],
+    )
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    relayed, argv0, comm = (tmp_path / "stdout.log").read_text().split()
+    # Kills that match the runtime's name miss the relay. Bun keeps the link's name as the process name; Node names
+    # its main thread, so only the command line shows the link there.
+    assert relayed == "1" and argv0 == "gym-model-relay" and comm != Path(JS_RUNTIME).name
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"

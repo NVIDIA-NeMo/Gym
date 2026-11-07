@@ -1,6 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The model relay as a sandbox runs it: a separate process between a client and real local upstream servers."""
+"""The model relay as a sandbox runs it: a separate process between a client and real local upstream servers.
+
+Every behavior test runs against both implementations: model_relay.py on this Python, and model_relay.mjs on a
+JavaScript runtime (``NEMO_GYM_TEST_JS_RUNTIME``, else ``node`` or ``bun`` on PATH), which is skipped without one.
+"""
 
 import ast
 import asyncio
@@ -8,6 +12,7 @@ import glob
 import hashlib
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -19,6 +24,16 @@ from nemo_gym.agents.utils import model_relay
 
 
 RELAY = Path(model_relay.__file__)
+JS_RELAY = RELAY.with_name("model_relay.mjs")
+JS_RUNTIME = os.environ.get("NEMO_GYM_TEST_JS_RUNTIME") or shutil.which("node") or shutil.which("bun")
+PROGRAMS = [
+    pytest.param([sys.executable, str(RELAY)], id="python"),
+    pytest.param(
+        [JS_RUNTIME, str(JS_RELAY)],
+        id="javascript",
+        marks=pytest.mark.skipif(JS_RUNTIME is None, reason="no JavaScript runtime (node or bun) on this machine"),
+    ),
+]
 
 
 class Upstream:
@@ -95,7 +110,8 @@ class Upstream:
 
 
 class RelayProcess:
-    def __init__(self, tmp_path: Path, hold_timeout_s: float = 30.0) -> None:
+    def __init__(self, tmp_path: Path, program: list[str], hold_timeout_s: float = 30.0) -> None:
+        self.program = program
         self.endpoint = tmp_path / "endpoint.json"
         self.session = tmp_path / "session"
         self.session.mkdir(exist_ok=True)
@@ -115,7 +131,7 @@ class RelayProcess:
         return json.loads(self.status_path.read_text())
 
     async def start(self) -> "RelayProcess":
-        argv = [sys.executable, str(RELAY), "--port", "0", "--endpoint", str(self.endpoint)]
+        argv = [*self.program, "--port", "0", "--endpoint", str(self.endpoint)]
         argv += ["--session-dir", str(self.session), "--status", str(self.status_path)]
         argv += ["--hold-timeout-s", str(self.hold_timeout_s)]
         self.process = subprocess.Popen(argv)
@@ -171,9 +187,14 @@ async def call(port: int, path: str, body: bytes, headers: dict | None = None) -
         writer.close()
 
 
+@pytest.fixture(params=PROGRAMS)
+def program(request: pytest.FixtureRequest) -> list[str]:
+    return request.param
+
+
 @pytest.fixture
-async def relay(tmp_path: Path):
-    process = RelayProcess(tmp_path)
+async def relay(tmp_path: Path, program: list[str]):
+    process = RelayProcess(tmp_path, program)
     yield process
     if process.process is not None and process.process.poll() is None:
         process.stop()
@@ -304,11 +325,11 @@ async def test_an_unreachable_upstream_is_retried_until_it_comes_up(relay: Relay
     await upstream.stop()
 
 
-async def test_an_upstream_unreachable_past_the_hold_timeout_gets_a_502(tmp_path: Path) -> None:
+async def test_an_upstream_unreachable_past_the_hold_timeout_gets_a_502(tmp_path: Path, program: list[str]) -> None:
     probe = await Upstream().start()
     port = probe.port
     await probe.stop()
-    relay = RelayProcess(tmp_path, hold_timeout_s=1.5)
+    relay = RelayProcess(tmp_path, program, hold_timeout_s=1.5)
     relay.point(1, f"http://127.0.0.1:{port}/v1")
     await relay.start()
     try:
@@ -384,7 +405,7 @@ OLD_PYTHONS = [
 @pytest.mark.parametrize("python", OLD_PYTHONS)
 async def test_the_relay_serves_on_an_old_interpreter(python: str, tmp_path: Path) -> None:
     upstream = await Upstream().start()
-    relay = RelayProcess(tmp_path)
+    relay = RelayProcess(tmp_path, [python, "-I", str(RELAY)])
     relay.point(1, upstream.url())
     argv = [python, "-I", str(RELAY), "--port", "0", "--endpoint", str(relay.endpoint)]
     argv += ["--session-dir", str(relay.session), "--status", str(relay.status_path)]
