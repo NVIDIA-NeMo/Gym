@@ -5,6 +5,7 @@ requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev,ray,sandbox]",
     "harbor[opensandbox]>=0.24",
+    "opensandbox>=1.2",
     # SkillsBench worker harness (MIT), updated 2026-10-23.
     "openhands-sdk==1.54.0",
     "openhands-tools==1.54.0",
