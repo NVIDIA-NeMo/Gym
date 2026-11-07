@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/jeebench/configs/jeebench.yaml
+
+indic_jee_bench_resources_server:
+  _inherit_from: jeebench
+
+indic_jee_bench_simple_agent:
+  _inherit_from: jeebench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_jee_bench_resources_server
+      datasets:
+        - name: indic_jee_bench
+          type: benchmark
+          jsonl_fpath: benchmarks/indic/jee_bench/data/jee_bench_benchmark.jsonl
+          prepare_script: benchmarks/indic/jee_bench/prepare.py
+          prompt_config: benchmarks/indic/jee_bench/prompts/default.yaml
+          num_repeats: 1
+          license: MIT
+
+indic_jee_bench_environment_server:
+  _inherit_from: jeebench_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_jee_bench_simple_agent
