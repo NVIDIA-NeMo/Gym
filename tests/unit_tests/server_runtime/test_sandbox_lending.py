@@ -201,3 +201,28 @@ async def test_release_all_stops_the_sandboxes_concurrently(workdir, started, mo
 
     assert len(entered) == 3
     assert all(lender.get(session) is None for session in ("a", "b", "c"))
+
+
+async def test_a_lend_cancelled_while_describing_the_sandbox_still_stops_it(workdir, monkeypatch) -> None:
+    lender = _lender(workdir)
+    seed = anyio.CancelScope()
+    finished: list[AsyncSandbox] = []
+
+    async def serialize(self: AsyncSandbox, *, scope: str | None = None) -> dict[str, str]:
+        # The seed request is cancelled while the new sandbox is being described.
+        seed.cancel()
+        await anyio.sleep(0)
+        return {"sandbox_id": "local"}
+
+    async def stop(self: AsyncSandbox) -> None:
+        # A checkpoint where an unshielded stop would be cancelled with the seed.
+        await anyio.sleep(0)
+        finished.append(self)
+
+    monkeypatch.setattr(AsyncSandbox, "serialize", serialize)
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    with seed:
+        await lender.lend("session", TASK)
+
+    assert len(finished) == 1
+    assert lender.get("session") is None
