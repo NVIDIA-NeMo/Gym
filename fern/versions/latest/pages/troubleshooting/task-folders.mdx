@@ -139,8 +139,9 @@ needs other servers reachable sets `absolute_ip_server_types` or `default_host` 
 
 ## The model rejects every request
 
-**Symptom.** Every episode fails at the agent stage with `failure_kind` `model_request_rejected` and an `HTTP 400`
-reason from the model endpoint, such as `max_tokens is too large`.
+**Symptom.** Every episode fails at the agent stage, ungraded, with a failure reason such as
+`HTTP 400: max_tokens is too large`. The failure's partial response names `model_request_rejected` in
+`metadata.ng_agent_outcome`.
 
 **Cause.** The endpoint refused the request as invalid before the model answered, so the run's settings are at
 fault and the episode is not graded. A common case is a harness output limit above the model's cap: OpenCode asks
