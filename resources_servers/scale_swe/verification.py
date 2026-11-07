@@ -33,6 +33,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
+    apply_setup_patch_command,
+    setup_files,
+    setup_patch_failed,
+)
+
 
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SCALE_SWE_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SCALE_SWE_TEST_END___"
@@ -127,6 +134,8 @@ class VerificationInputs:
     f2p_script: str = ""
     fail_to_pass: Sequence[str] = field(default_factory=tuple)
     pass_to_pass: Sequence[str] = field(default_factory=tuple)
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
 
 
 @dataclass
@@ -206,6 +215,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     pytest_targets = " ".join(shlex.quote(path) for path in files)
 
     pre = clean_commands(inputs.pre_commands)
+    apply_setup = apply_setup_patch_command(inputs.setup_patch)
     apply_patch = (
         "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_patch.diff || true"
         if inputs.patch.strip()
@@ -232,6 +242,7 @@ cd {shlex.quote(inputs.workdir)} || exit 97
 set +e
 {pre}
 
+{apply_setup}
 {apply_patch}
 {apply_f2p_patch}
 {install_f2p_script}
@@ -279,6 +290,7 @@ def grade(statuses: dict[str, str], fail_to_pass: Iterable[str], pass_to_pass: I
 def verification_files(inputs: VerificationInputs) -> dict[str, str]:
     """Files the sandbox is created with; see build_eval_script for why they live in /tmp."""
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.f2p_patch.strip():
@@ -309,6 +321,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
+    if setup_patch_failed(inputs.setup_patch, result.return_code, output):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=SETUP_PATCH_FAILED_ERROR,
+        )
     if result.return_code == 97:
         return VerificationResult(
             completed=False,

@@ -28,3 +28,6 @@ class TaskData(BaseModel):
     # round-trips unchanged either way (see verification.as_id_list).
     FAIL_TO_PASS: str | list[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["verify"]})
     PASS_TO_PASS: str | list[str] = Field(default_factory=list, json_schema_extra={"consumed_by": ["verify"]})
+    # Curriculum start states (see swebench/start_state.py); squash_history is read only when seeding.
+    setup_patch: str = Field(default="", json_schema_extra={"consumed_by": ["verify"]})
+    squash_history: bool = False

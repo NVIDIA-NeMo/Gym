@@ -29,3 +29,6 @@ class TaskData(BaseModel):
     # instance -- the actual grading signal (see verification.py module docstring); a strict
     # superset of FAIL_TO_PASS/PASS_TO_PASS, which are carried above for provenance only now.
     expected_output_json: str = Field(default="{}", json_schema_extra={"consumed_by": ["verify"]})
+    # Curriculum start states (see swebench/start_state.py); squash_history is read only when seeding.
+    setup_patch: str = Field(default="", json_schema_extra={"consumed_by": ["verify"]})
+    squash_history: bool = False

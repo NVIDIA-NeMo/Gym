@@ -435,8 +435,8 @@ class TestAntiCheating:
 
     def test_seed_session_calls_the_shared_anti_cheat_helper(self) -> None:
         source = self._source()
-        assert "from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup" in source
-        assert "apply_anti_cheat_setup(" in source
+        assert "seed_start_state," in source
+        assert "apply_anti_cheating=self.config.apply_anti_cheating" in source
 
     def test_config_enables_it_by_default(self) -> None:
         from resources_servers.swe_rebench.app import SWERebenchResourcesServerConfig

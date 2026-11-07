@@ -41,6 +41,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
+    apply_setup_patch_command,
+    setup_files,
+    setup_patch_failed,
+)
 from responses_api_agents.swe_agents.swe_bench_ext.frameworks import (
     get_framework_config,
     get_test_command_with_output,
@@ -100,6 +106,8 @@ class VerificationInputs:
     test_command: str
     fail_to_pass: Sequence[str] = field(default_factory=tuple)
     pass_to_pass: Sequence[str] = field(default_factory=tuple)
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
 
 
 @dataclass
@@ -184,6 +192,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     (implementation vs. test tree), so order has not been observed to matter, but this keeps the
     convention consistent across the SWE resources servers.
     """
+    apply_setup = apply_setup_patch_command(inputs.setup_patch)
     apply_patch = (
         "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_patch.diff || true"
         if inputs.patch.strip()
@@ -206,6 +215,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
 cd {shlex.quote(inputs.workdir)} || exit 97
 set +e
 mkdir -p /workspace/test-results 2>/dev/null
+{apply_setup}
 {apply_patch}
 {apply_test_patch}
 
@@ -231,6 +241,7 @@ def _slice(log: str, begin: str, end: str) -> str:
 
 def verification_files(inputs: VerificationInputs) -> dict[str, str]:
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -307,6 +318,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
+    if setup_patch_failed(inputs.setup_patch, result.return_code, output):
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error=SETUP_PATCH_FAILED_ERROR,
+        )
     if result.return_code == 97:
         return VerificationResult(
             completed=False,

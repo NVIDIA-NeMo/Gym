@@ -132,3 +132,8 @@ names the session for `/verify`, and `/close_session` ends it.
 
 The cookie path that an Agent's `/run` uses is unchanged: it does not replay or mask, the stops inside its
 requests are not bounded, and the sandboxes it still holds at shutdown are left to the provider's TTL.
+
+## Curriculum start states
+
+Rows may set `setup_patch` and `squash_history` so the agent starts from part of the reference
+fix. See [SWE curriculum start states](https://docs.nvidia.com/nemo/gym/main/data/prepare-validate#swe-curriculum-start-states).

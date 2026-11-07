@@ -163,3 +163,7 @@ class TaskData(VerifierMetadata):
     f2p_script: str | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
     FAIL_TO_PASS: str | list[str] | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
     PASS_TO_PASS: str | list[str] | None = Field(default=None, json_schema_extra={"consumed_by": ["verify"]})
+    # Scale-SWE's curriculum start-state fields. IF tasks grade the task as shipped, so only the defaults are valid;
+    # the seed refuses any other value.
+    setup_patch: Literal[""] = ""
+    squash_history: Literal[False] = False

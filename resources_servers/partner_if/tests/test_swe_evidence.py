@@ -378,6 +378,27 @@ def test_a_seed_refuses_a_contract_without_the_actors_prompt_before_starting_a_s
     create.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "start_state", [{"setup_patch": "diff --git a/x b/x\n"}, {"squash_history": True}], ids=["setup_patch", "squash"]
+)
+def test_a_seed_refuses_a_curriculum_start_state_before_starting_a_sandbox(start_state):
+    with started() as create:
+        seeded = TestClient(swe_server().setup_webserver()).post("/seed_session", json=seed_body(**start_state))
+    assert seeded.status_code == 422
+    assert next(iter(start_state)) in seeded.json()["detail"]
+    create.assert_not_awaited()
+
+
+def test_a_seed_with_the_default_start_state_fields_seeds_as_before():
+    sandbox = FakeSandbox()
+    with started(sandbox), patch(ANTI_CHEAT, AsyncMock()) as anti_cheat:
+        seeded = TestClient(swe_server().setup_webserver()).post(
+            "/seed_session", json=seed_body(setup_patch="", squash_history=False)
+        )
+    assert seeded.status_code == 200
+    anti_cheat.assert_awaited_once()
+
+
 def test_the_session_lifecycle_meets_gyms_close_contract():
     server = swe_server()
     with started(FakeSandbox(), FakeSandbox()), patch(ANTI_CHEAT, AsyncMock()):

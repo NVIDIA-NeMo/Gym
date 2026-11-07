@@ -22,6 +22,7 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
+from resources_servers.swebench.start_state import SETUP_PATCH_FAILED_ERROR, SETUP_PATCH_FAILED_EXIT
 from resources_servers.swemer_oml.verification import (
     NO_REWARD_TEXT,
     PATCH_APPLIED_MARK,
@@ -162,6 +163,20 @@ class TestParseVerificationOutput:
         assert result.test_results["patch_partially_applied"] is True
         assert parse_verification_output(_output(applied="0", reward="0", changed="1"), 1, _inputs()).resolved is False
 
+    @pytest.mark.parametrize("setup_patch", ["", "diff --git a/s b/s\n"])
+    def test_test_sh_exiting_96_keeps_the_graders_verdict(self, setup_patch: str) -> None:
+        # test.sh's own exit code reaches the parser unchanged; only the setup step's mark makes 96
+        # a setup failure, so these must grade exactly as they would at any other exit code.
+        inputs = _inputs(setup_patch=setup_patch)
+        for output in (_output(reward="0"), _output(), _output(applied="0", reward="1", changed="1")):
+            at_96 = vars(parse_verification_output(output, SETUP_PATCH_FAILED_EXIT, inputs))
+            at_1 = vars(parse_verification_output(output, 1, inputs))
+            assert at_96.pop("test_results").pop("test_exit_code") == SETUP_PATCH_FAILED_EXIT
+            at_1.pop("test_results").pop("test_exit_code")
+            assert at_96 == at_1 and at_96["error"] != SETUP_PATCH_FAILED_ERROR
+        assert parse_verification_output(_output(reward="0"), SETUP_PATCH_FAILED_EXIT, inputs).completed
+        assert parse_verification_output(_output(), SETUP_PATCH_FAILED_EXIT, inputs).resolved
+
     def test_missing_reward_file_is_incomplete(self) -> None:
         result = parse_verification_output(_output(reward=""), 1, _inputs())
         assert not result.completed and not result.resolved
@@ -296,10 +311,11 @@ class TestServerWiring:
 
     def test_seed_session_scrubs_then_seeds_a_committer_identity(self) -> None:
         source = self._source()
-        assert source.index("await self._ensure_git_repo(") < source.index("apply_anti_cheat_setup(sandbox")
+        assert "apply_anti_cheating=self.config.apply_anti_cheating" in source
+        assert source.index("await self._ensure_git_repo(") < source.index("await seed_start_state(")
         # Blob restore must run before the scrub: its `git reset --hard` deletes files it cannot re-read.
-        assert source.index("await self._restore_missing_blobs(") < source.index("apply_anti_cheat_setup(sandbox")
-        assert source.index("apply_anti_cheat_setup(sandbox") < source.index("await prepare_git_for_commits(")
+        assert source.index("await self._restore_missing_blobs(") < source.index("await seed_start_state(")
+        assert source.index("await seed_start_state(") < source.index("await prepare_git_for_commits(")
 
     def test_config_defaults(self) -> None:
         from resources_servers.swemer_oml.app import SwemerOmlResourcesServerConfig

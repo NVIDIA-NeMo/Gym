@@ -63,12 +63,17 @@ from resources_servers.swe_rebench.verification import (
     run_verification,
     verification_files,
 )
-from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
+)
+from resources_servers.swebench.start_state import (
+    seed_start_state,
+    seeded_head,
+    setup_files,
+    wants_start_state,
 )
 
 
@@ -121,6 +126,9 @@ class SWERebenchInstanceRequest(BaseModel):
     # Upstream spells these in caps; keep the dataset's own names so a row round-trips unchanged.
     FAIL_TO_PASS: list[str] = []
     PASS_TO_PASS: list[str] = []
+    # Curriculum start states; see swebench/start_state.py. Absent on ordinary rows.
+    setup_patch: str = ""
+    squash_history: bool = False
 
 
 class SWERebenchSeedSessionRequest(SWERebenchInstanceRequest, BaseSeedSessionRequest):
@@ -165,6 +173,8 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
+        # Start-state sessions diff the agent's work against the seeded commit, not base_commit.
+        self._session_id_to_seeded_head: dict[str, str] = {}
 
     @property
     def _parser_cache_dir(self) -> Path:
@@ -178,6 +188,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
             base_commit=body.base_commit,
             patch=drop_test_patch_files(patch, body.test_patch),
             test_patch=body.test_patch,
+            setup_patch=body.setup_patch,
             install=as_command_list(install_config.get("install")),
             test_cmd=as_command_list(install_config.get("test_cmd")),
             log_parser=str(install_config.get("log_parser") or ""),
@@ -252,6 +263,7 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         """Capture the agent's patch per ``config.patch_capture_mode``, then stop its sandbox."""
         original_sandbox = self._session_id_to_sandbox.pop(session_id)
         pristine_untracked = self._session_id_to_pristine_untracked.pop(session_id, frozenset())
+        base_commit = self._session_id_to_seeded_head.pop(session_id, base_commit)
         try:
             return await capture_model_patch(
                 original_sandbox,
@@ -271,14 +283,29 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         await self._stop_sandbox(self._session_id_to_sandbox.pop(session_id, None))
         self._session_id_to_pristine_untracked.pop(session_id, None)
-        sandbox = await self._create_sandbox(body)
-        if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
+        self._session_id_to_seeded_head.pop(session_id, None)
+        workdir = repo_directory(body.repo)
+        sandbox = await self._create_sandbox(body, files=setup_files(body.setup_patch))
+        try:
+            # Grading here checks out base_commit afresh, so the image's tracked edits are dropped.
+            await seed_start_state(
+                sandbox,
+                workdir,
+                body.instance_id,
+                "swe_rebench",
+                setup_patch=body.setup_patch,
+                squash_history=body.squash_history,
+                apply_anti_cheating=self.config.apply_anti_cheating,
+                keep_worktree=False,
+            )
+            if wants_start_state(body.setup_patch, body.squash_history):
+                self._session_id_to_seeded_head[session_id] = await seeded_head(sandbox, workdir)
+        except Exception:
+            await self._stop_sandbox(sandbox)
+            raise
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
-        await prepare_git_for_commits(sandbox, repo_directory(body.repo), "swe_rebench")
-        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(
-            sandbox, repo_directory(body.repo)
-        )
+        await prepare_git_for_commits(sandbox, workdir, "swe_rebench")
+        self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(sandbox, workdir)
         self._session_id_to_sandbox[session_id] = sandbox
         return SWERebenchSeedSessionResponse(sandbox_handle=str(sandbox._handle.sandbox_id))
 
