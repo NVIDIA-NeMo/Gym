@@ -14,7 +14,7 @@
 
 """Provider-facing sandbox protocol."""
 
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -283,6 +283,14 @@ class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
 
 
+class SandboxExecArgvUnsupportedError(NotImplementedError):
+    """Raised before anything runs when an ``exec`` argument list cannot run without a shell.
+
+    The provider lacks ``SupportsSandboxExecArgv``, or it cannot honor this call's options without a shell (a
+    ``user`` it switches to only through ``su``, say). The list is never joined into shell text instead.
+    """
+
+
 def sandbox_credentials_rejected(
     error: BaseException,
     *,
@@ -340,14 +348,19 @@ class SandboxProvider(Protocol):
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside a sandbox."""
+        """Run a command inside a sandbox.
+
+        ``command`` is shell text. A provider that implements ``SupportsSandboxExecArgv`` also takes a list of
+        strings, which it runs as the process's argv without a shell; ``AsyncSandbox.exec`` passes a list to no
+        other provider.
+        """
         ...
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -385,6 +398,20 @@ class SupportsSandboxBackgroundServices(Protocol):
         timeout_s: int | float | None = None,
         user: str | int | None = None,
     ) -> SandboxExecResult: ...
+
+
+@runtime_checkable
+class SupportsSandboxExecArgv(Protocol):
+    """Optional provider capability: ``exec`` runs an argument list without a shell.
+
+    Such a provider's ``exec`` takes ``command`` as shell text or as a list of strings, and runs a list as the
+    process's argv with no shell in between, as ``SupportsSandboxSidecars.sidecar_exec`` does because sidecar images
+    can be distroless. ``AsyncSandbox.exec`` hands a list only to a provider whose ``exec_takes_argv()`` is true and
+    raises ``SandboxExecArgvUnsupportedError`` for any other. The provider may still refuse one call with that error,
+    before anything runs, when an option such as ``user`` would need a shell; it never joins the list into shell text.
+    """
+
+    def exec_takes_argv(self) -> bool: ...
 
 
 @runtime_checkable

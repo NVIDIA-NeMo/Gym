@@ -152,6 +152,8 @@ The neutral `user` argument to `exec()` maps onto `--user`:
 | `"root"` or `0` | Run as `--user 0`. |
 | Other user or uid | Passed through as `--user <value>`. |
 
+A command given as a list of strings is passed to `docker exec` as the program and its arguments, without `<shell> -c`; `user`, `env` and `cwd` apply as for shell text.
+
 By default `exec_shell` is unset, so the provider auto-detects `bash` once the container is ready (conda and SWE-bench setup commands use `source`, which POSIX `sh`/dash lack) and falls back to `sh`. Pin `exec_shell` to `/bin/sh` or `/bin/bash` to skip the per-create probe.
 
 Command failures return `SandboxExecResult` with the command's exit code. A command timeout returns code `125` with `error_type="timeout"`, and a docker runtime failure — daemon down or container gone, detected via stderr markers — returns code `125` with `error_type="sandbox"`. A timed-out command's in-container process is reaped when the sandbox is closed, since `docker rm -f` stops the whole process tree.

@@ -159,7 +159,7 @@ The spec is provider-neutral; the Apptainer provider uses these fields:
 | Step | Apptainer command |
 |---|---|
 | Create | `apptainer instance start --bind <staging>:<mount_point> [...] <image> <name>` |
-| Exec | `apptainer exec [flags] instance://<name> sh -c <command>` |
+| Exec | `apptainer exec [flags] instance://<name> sh -c <command>`; an argument list as `... instance://<name> <program> <args...>` |
 | Status | `apptainer instance list --json` |
 | Close | `apptainer instance stop <name>` |
 
@@ -205,7 +205,7 @@ The neutral `user` argument to `exec` maps onto Apptainer like this:
 |---|---|
 | `None` | Run as the default (launching) user. |
 | `"root"` or `0` | Add `--fakeroot` (gated by `exec.fakeroot_for_root`). |
-| other name / uid | Add `--fakeroot` and wrap the command in `su -s /bin/sh -c '<cmd>' <user>`. |
+| other name / uid | Add `--fakeroot` and wrap the command in `su -s /bin/sh -c '<cmd>' <user>`; an argument list raises `SandboxExecArgvUnsupportedError`, since `su` runs a shell. |
 
 ### Piping input via `stdin`
 
