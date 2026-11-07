@@ -51,6 +51,10 @@ class GymDatasetDefaults(BaseModel):
     # Rollouts per task for an evaluation of the dataset. The generated run config starts from it and a
     # `+num_repeats=` on the command line replaces it. A run fact, not a task fact: it never enters a task's digest.
     num_repeats: int = Field(default=1, ge=1, strict=True)
+    # The reward.json key that is the score of every task; `[gym.tasks."<id>".verifier] reward_key` overrides it.
+    # The other keys stay metrics, and a file without the key is an invalid reward. Unset: a `reward` key is the
+    # score, else the keys are summed.
+    reward_key: str | None = Field(default=None, min_length=1)
 
 
 class GymTaskOverride(BaseModel):
@@ -306,6 +310,8 @@ def apply_dataset_config(config: HarborTaskConfig, task_id: str, dataset: GymDat
         verifier_update["timeout_sec"] = verifier.timeout_sec * defaults.timeout_multiplier
     if verifier.environment is not None and defaults.resource_multiplier != 1:
         verifier_update["environment"] = _scale_environment(verifier.environment, defaults.resource_multiplier)
+    if defaults.reward_key is not None and "reward_key" not in verifier.model_fields_set:
+        verifier_update["reward_key"] = defaults.reward_key
     if verifier_update:
         verifier = verifier.model_copy(update=verifier_update)
     agent = config.agent
