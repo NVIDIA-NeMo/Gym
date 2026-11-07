@@ -560,3 +560,17 @@ class TestConfigYaml:
         # name and the agent supplies the provider; kilo_config must not declare one to collide with.
         assert inner["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
         assert "provider" not in inner["kilo_config"]
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_model_calls_to_capture(capture):
+    server = _make_agent(
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"), token_id_capture=capture
+    )
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    server.server_client._build_server_base_url = MagicMock(return_value="http://model:9000")
+    with patch("nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict", return_value={}):
+        # The same call that sets the harness's model base URL for a rollout.
+        url = server._resolve_model_base_url("r1")
+    capture_path = "/training-token-capture" if capture else ""
+    assert url == f"http://model:9000/ng-rollout/r1{capture_path}/v1"

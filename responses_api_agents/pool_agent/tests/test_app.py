@@ -944,3 +944,15 @@ async def test_eula_opt_in_is_required_before_any_sandbox_work(borrowed):
     config.assert_not_called()
     provider.assert_not_called()
     install.assert_not_called()
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_model_calls_to_capture(capture):
+    server = agent(token_id_capture=capture)
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    server.server_client._build_server_base_url = MagicMock(return_value="http://model:9000")
+    with patch("nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict", return_value={}):
+        # The same call that sets the harness's model base URL for a rollout.
+        url = server.model_endpoint(model_server=server.config.model_server, rollout_id="r1").base_url
+    capture_path = "/training-token-capture" if capture else ""
+    assert url == f"http://model:9000/ng-rollout/r1{capture_path}/v1"
