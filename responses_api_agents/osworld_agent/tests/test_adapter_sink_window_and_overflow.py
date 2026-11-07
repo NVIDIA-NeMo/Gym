@@ -49,6 +49,130 @@ def _drive(agent: NemotronV3NanoOmniAgent, steps: int) -> List[Dict[str, Any]]:
     return payloads
 
 
+def test_raw_live_history_replays_the_served_output_as_an_exact_prefix() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        max_image_history_length=3,
+        max_live_images=10,
+        assistant_history_replay="raw_live",
+        parse_retries=1,
+    )
+    payloads: List[Dict[str, Any]] = []
+    raw_outputs = [f"<think>\nThought {index}\n</think>\n{GOOD}" for index in (1, 2)]
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        index = len(payloads) - 1
+        return {
+            "content": GOOD,
+            "reasoning_content": f"Thought {index + 1}",
+            "raw_content": raw_outputs[index],
+            "finish_reason": "stop",
+        }
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(2):
+        agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+
+    first_prompt = payloads[0]["messages"]
+    second_prompt = payloads[1]["messages"]
+    assert second_prompt[: len(first_prompt)] == first_prompt
+    assert second_prompt[len(first_prompt)] == {
+        "role": "assistant",
+        "content": raw_outputs[0],
+    }
+    assert "## Code:" in second_prompt[len(first_prompt)]["content"]
+
+
+def test_raw_live_history_normalizes_only_at_a_compaction_boundary() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        history_policy={
+            "schema_version": 1,
+            "name": "hysteresis",
+            "params": {"low_water": 2, "high_water": 3},
+        },
+        assistant_history_replay="raw_live",
+        parse_retries=1,
+    )
+    payloads = _drive(agent, 4)
+    compacted_prompt = payloads[3]["messages"]
+
+    assistant_messages = [message["content"] for message in compacted_prompt if message.get("role") == "assistant"]
+    assert assistant_messages
+    assert all("## Code:" in content for content in assistant_messages)
+
+    summaries = [
+        part["text"]
+        for message in compacted_prompt
+        for part in (message.get("content") or [])
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and "# Previous History Actions" in part.get("text", "")
+    ]
+    assert len(summaries) == 1
+    assert "## Thought:" in summaries[0]
+    assert "## Action:" in summaries[0]
+    assert "## Code:" not in summaries[0]
+
+
+def test_raw_full_history_keeps_original_code_in_compacted_turns() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        history_policy={
+            "schema_version": 1,
+            "name": "hysteresis",
+            "params": {"low_water": 2, "high_water": 3},
+        },
+        assistant_history_replay="raw_full",
+        parse_retries=1,
+    )
+    payloads = _drive(agent, 4)
+
+    first_prompt = payloads[0]["messages"]
+    second_prompt = payloads[1]["messages"]
+    assert second_prompt[: len(first_prompt)] == first_prompt
+
+    compacted_prompt = payloads[3]["messages"]
+    assistant_messages = [message["content"] for message in compacted_prompt if message.get("role") == "assistant"]
+    assert assistant_messages
+    assert all("## Code:" in content for content in assistant_messages)
+
+    summaries = [
+        part["text"]
+        for message in compacted_prompt
+        for part in (message.get("content") or [])
+        if isinstance(part, dict)
+        and part.get("type") == "text"
+        and "# Previous History Actions" in part.get("text", "")
+    ]
+    assert len(summaries) == 1
+    assert "## Thought:" in summaries[0]
+    assert "## Action:" in summaries[0]
+    assert "## Code:\n```python\npyautogui.click(0.5, 0.5)\n```" in summaries[0]
+    assert "pyautogui.click(960, 540)" not in summaries[0]
+
+
+def test_normalized_history_remains_the_benchmark_default() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=20,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=1,
+    )
+    payloads = _drive(agent, 2)
+    assistant_messages = [
+        message["content"] for message in payloads[1]["messages"] if message.get("role") == "assistant"
+    ]
+    assert len(assistant_messages) == 1
+    assert "## Action:" in assistant_messages[0]
+    assert "## Code:" not in assistant_messages[0]
+
+
 def test_sink_window_prompt_keeps_the_first_screenshot_and_slides_the_rest() -> None:
     agent = NemotronV3NanoOmniAgent(
         model="policy-under-test",
@@ -493,3 +617,204 @@ def test_sink_window_telemetry_reaches_the_model_call_records() -> None:
     assert last["snapshot_sink_size"] == 1
     assert last["snapshot_image_intervals"] == [[0, 1], [6, 9]]
     assert last["history_policy_name"] == "sink_window"
+
+
+def test_stop_policy_ends_the_rollout_at_the_first_overflow() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=5,
+        context_overflow_policy="stop",
+    )
+    payloads: List[Dict[str, Any]] = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        payloads.append(payload)
+        if len(_image_turns(payload)) > 3:
+            raise ValueError("Error code: 400 - This model's maximum context length is 64000 tokens")
+        return _reply(len(payloads) - 1)
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(3):
+        _, actions, _ = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        assert actions == ["pyautogui.click(960, 540)"]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-4"})
+
+    assert actions == []
+    assert len(payloads) == 4, "one rejected request, no shrink-and-resend"
+    assert info["stop_rollout"] is True
+    assert info["agent_outcome"] == "context_limit_reached"
+    assert info["agent_outcome_family"] == "policy_stop"
+    assert info["model_call_completed"] is False
+    assert info["parse_failure"]["prompt_shrink_events"] == []
+    assert info["parse_failure"]["failure_kind_counts"] == {"context_overflow": 1}
+
+
+def test_prompt_token_limit_rejects_a_served_call_without_output_room() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        parse_retries=5,
+        context_overflow_policy="stop",
+        context_prompt_token_limit=40960,
+    )
+    prompt_tokens = iter([40000, 40961])
+    calls = []
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        calls.append(payload)
+        return {**_reply(len(calls) - 1), "prompt_tokens": next(prompt_tokens)}
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, actions, _ = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+    assert actions == ["pyautogui.click(960, 540)"]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-2"})
+
+    assert actions == []
+    assert len(calls) == 2
+    assert info["agent_outcome"] == "context_limit_reached"
+    assert info["model_call_completed"] is True
+    assert "prompt_tokens=40961" in info["parse_failure"]["last_error"]
+    assert info["model_calls"][-1]["accepted"] is False
+
+
+def test_prompt_token_limit_under_shrink_policy_shrinks_and_recovers() -> None:
+    agent = NemotronV3NanoOmniAgent(
+        model="policy-under-test",
+        max_steps=30,
+        max_image_history_length=3,
+        max_live_images=10,
+        parse_retries=5,
+        context_prompt_token_limit=3 * 1000,
+    )
+
+    def call_llm(payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        return {**_reply(0), "prompt_tokens": len(_image_turns(payload)) * 1000}
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    for index in range(4):
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        assert actions == ["pyautogui.click(960, 540)"]
+    assert info["prompt_shrink_events"][0]["reason"] == "context_overflow"
+
+
+@pytest.mark.parametrize(
+    ("options", "message"),
+    [
+        ({"context_overflow_policy": "truncate"}, "context_overflow_policy"),
+        ({"context_prompt_token_limit": 0}, "context_prompt_token_limit"),
+        ({"context_prompt_token_limit": "40960"}, "context_prompt_token_limit"),
+    ],
+)
+def test_context_options_are_validated(options: Dict[str, Any], message: str) -> None:
+    with pytest.raises(ValueError, match=message):
+        NemotronV3NanoOmniAgent(model="policy-under-test", max_steps=5, **options)
+
+
+def test_default_context_options_keep_the_published_contract() -> None:
+    from responses_api_agents.osworld_agent.adapter_agents import normalize_nemotron_agent_options
+
+    default = normalize_nemotron_agent_options({})
+    assert "context_overflow_policy" not in default
+    assert "context_prompt_token_limit" not in default
+    stop = normalize_nemotron_agent_options({"context_overflow_policy": "stop", "context_prompt_token_limit": 40960})
+    assert stop["context_overflow_policy"] == "stop"
+    assert stop["context_prompt_token_limit"] == 40960
+    assert "unterminated_episode_policy" not in default
+    assert (
+        normalize_nemotron_agent_options({"unterminated_episode_policy": "fail"})["unterminated_episode_policy"]
+        == "fail"
+    )
+    assert (
+        normalize_nemotron_agent_options({"unterminated_episode_policy": "mask"})["unterminated_episode_policy"]
+        == "mask"
+    )
+    with pytest.raises(ValueError, match="unterminated_episode_policy"):
+        normalize_nemotron_agent_options({"unterminated_episode_policy": "score"})
+
+
+PRINT_DONE = '## Action:\nThe task is complete.\n## Code:\n```python\nprint("Task completed successfully")\n```'
+
+
+def _fail_agent(**options: Any) -> NemotronV3NanoOmniAgent:
+    return NemotronV3NanoOmniAgent(
+        model="policy-under-test", max_steps=3, parse_retries=2, unterminated_episode_policy="fail", **options
+    )
+
+
+def test_fail_policy_forces_fail_at_the_step_horizon_without_terminate() -> None:
+    agent = _fail_agent()
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": PRINT_DONE}  # type: ignore[method-assign]
+
+    for index in range(2):
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+        assert actions == ['print("Task completed successfully")']
+        assert "forced_terminal" not in info
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-3"})
+
+    assert actions == ["FAIL"]
+    assert info["forced_terminal"] == "max_steps"
+
+
+def test_fail_policy_keeps_a_policy_terminate_on_the_last_step() -> None:
+    agent = _fail_agent()
+    done = '## Action:\nDone.\n## Code:\n```python\ncomputer.terminate(status="success")\n```'
+    replies = iter([GOOD, GOOD, done])
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": next(replies)}  # type: ignore[method-assign]
+
+    for index in range(3):
+        _, actions, info = agent.predict("Complete the task.", {"screenshot": f"png-{index + 1}".encode()})
+    assert actions == ["DONE"]
+    assert "forced_terminal" not in info
+
+
+def test_fail_policy_turns_exhausted_parse_retries_into_fail() -> None:
+    agent = _fail_agent()
+    bad = "## Action:\nClick.\n## Code:\n```python\npyautogui.click(]\n```"
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": bad}  # type: ignore[method-assign]
+
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == ["FAIL"]
+    assert info["forced_terminal"] == "model_response_invalid"
+    assert "stop_rollout" not in info
+    assert info["parse_failure"]["attempt_count"] == 2
+
+
+def test_fail_policy_turns_the_context_limit_stop_into_fail() -> None:
+    agent = _fail_agent(context_overflow_policy="stop")
+
+    def call_llm(_payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        raise ValueError("Error code: 400 - This model's maximum context length is 64000 tokens")
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == ["FAIL"]
+    assert info["forced_terminal"] == "context_limit"
+
+
+def test_fail_policy_leaves_transport_failures_to_runtime_admission() -> None:
+    agent = _fail_agent()
+
+    def call_llm(_payload: Dict[str, Any], _model: str) -> Dict[str, Any]:
+        raise ConnectionError("connection reset by peer")
+
+    agent.call_llm = call_llm  # type: ignore[method-assign]
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == []
+    assert info["stop_rollout"] is True
+    assert "forced_terminal" not in info
+
+
+def test_default_policy_still_evaluates_an_unterminated_horizon() -> None:
+    agent = NemotronV3NanoOmniAgent(model="policy-under-test", max_steps=1, parse_retries=2)
+    agent.call_llm = lambda _payload, _model: {**_reply(0), "content": PRINT_DONE}  # type: ignore[method-assign]
+
+    _, actions, info = agent.predict("Complete the task.", {"screenshot": b"png-1"})
+
+    assert actions == ['print("Task completed successfully")']
+    assert "forced_terminal" not in info
