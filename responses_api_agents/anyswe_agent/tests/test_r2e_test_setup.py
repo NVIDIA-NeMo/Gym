@@ -118,7 +118,7 @@ class TestR2ETestSetup:
         with patch("responses_api_agents.anyswe_agent.app.AsyncSandbox", _FakeSandbox):
             asyncio.run(AnySweAgent.__new__(AnySweAgent)._grade_r2e_patch(params, patch_bytes))
 
-        assert uploads == [("/root/patch.diff", patch_bytes)]
+        assert uploads == [("/sandbox/patch.diff", patch_bytes)]
         assert len(scripts) == 1
         script = scripts[0]
         link = script.index("ln -s /r2e_tests /testbed/r2e_tests")
