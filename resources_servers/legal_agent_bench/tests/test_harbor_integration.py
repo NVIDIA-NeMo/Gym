@@ -7,15 +7,16 @@ import asyncio
 import json
 import threading
 import time
-from asyncio import Semaphore
-from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 from omegaconf import OmegaConf
 
-from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAgentBenchHarborBridge
+from resources_servers.legal_agent_bench.lab_harbor import scoring as lab_scoring
+from resources_servers.legal_agent_bench.lab_harbor.judge import (
+    _extract_judge_message_text,
+)
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
     OpenAICompatibleAdapter,
@@ -28,17 +29,12 @@ from resources_servers.legal_agent_bench.prepare import (
     _marker,
     flatten_task_id,
 )
-from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import scoring as lab_scoring
-from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.judge import (
-    _extract_judge_message_text,
-)
 from resources_servers.legal_agent_bench.verifier import (
     _build_reward,
     _validate_reward_mode,
     _write_report,
     score_rubric,
 )
-from responses_api_agents.harbor_agent.app import HarborAgentConfig
 
 
 BENCH_DIR = Path(__file__).resolve().parents[1]
@@ -52,42 +48,23 @@ def _write_skills(skills_dir: Path) -> None:
     (skills_dir / ".nemo_gym_asset.json").write_text(json.dumps(marker), encoding="utf-8")
 
 
-def _bridge() -> LegalAgentBenchHarborBridge:
-    config = HarborAgentConfig(
-        name="legal_agent_bench_harbor_agent",
-        host="127.0.0.1",
-        port=0,
-        entrypoint="../../resources_servers/legal_agent_bench/harbor_bridge.py",
-        concurrency=1,
-        model_server={"type": "responses_api_models", "name": "policy_model"},
-        harbor_datasets={"legal_agent_bench": {"local_dataset_path": "/tmp/tasks"}},
-        harbor_environment_type="docker",
-        harbor_jobs_dir="results/legal_agent_bench/harbor_jobs",
-    )
-    return LegalAgentBenchHarborBridge.model_construct(
-        config=config,
-        server_client=MagicMock(),
-        sem=Semaphore(1),
-    )
-
-
 def test_folder_config_is_public_docker_only() -> None:
     config = OmegaConf.to_container(OmegaConf.load(BENCH_DIR / "configs" / "legal_agent_bench.yaml"), resolve=False)
     resource = config["legal_agent_bench"]["resources_servers"]["legal_agent_bench"]
-    agent = config["legal_agent_bench_harbor_agent"]["responses_api_agents"]["harbor_agent"]
+    agent = config["legal_agent_bench_harbor_agent"]["responses_api_agents"]["harbor_agent_general"]
 
     assert resource["reward_mode"] == "full_task"
     assert resource["auto_prepare_assets"] is True
-    assert agent["harbor_environment_type"] == "docker"
-    assert agent["harbor_environment_import_path"] is None
+    assert agent["job"]["environment"]["type"] == "docker"
+    assert agent["job"]["agents"][0]["override_timeout_sec"] == 10800
     assert "docker_image" not in json.dumps(agent)
 
 
-def test_pinned_snapshot_has_1749_tasks_and_five_committed_examples() -> None:
+def test_pinned_snapshot_has_2010_tasks_and_five_committed_examples() -> None:
     examples = [json.loads(line) for line in (BENCH_DIR / "data" / "example.jsonl").read_text().splitlines()]
     expected_ids = {f"legal_agent_bench::{flatten_task_id(source_id)}" for source_id in SMOKE_TASK_IDS}
 
-    assert EXPECTED_TASK_COUNT == 1749
+    assert EXPECTED_TASK_COUNT == 2010
     assert len(examples) == 5
     assert {row["instance_id"] for row in examples} == expected_ids
 
@@ -109,20 +86,6 @@ def test_committed_example_rollouts_are_complete_and_match_examples() -> None:
         rewards = row["metadata"]["verifier_result"]["rewards"]
         assert rewards["judge_error_count"] == 0
         assert 0.0 < rewards["criteria_pass_rate"] <= 1.0
-
-
-def test_lab_bridge_restores_standard_routes_and_absolute_paths(monkeypatch, tmp_path) -> None:
-    bridge = _bridge()
-    routes = {route.path for route in bridge.setup_webserver().routes}
-    timestamp = datetime(2026, 7, 8, tzinfo=timezone.utc)
-    jobs_before = bridge._get_jobs_output_dir("org/model", "legal_agent_bench", timestamp)
-    monkeypatch.chdir(tmp_path)
-    jobs_after = bridge._get_jobs_output_dir("org/model", "legal_agent_bench", timestamp)
-
-    assert {"/v1/responses", "/run", "/aggregate_metrics"} <= routes
-    assert jobs_before == jobs_after
-    assert jobs_before.is_absolute()
-    assert jobs_before.is_relative_to(REPO_ROOT)
 
 
 def test_agent_discovers_exactly_three_skills_lazily(tmp_path) -> None:
@@ -217,23 +180,11 @@ async def test_policy_adapter_uses_gym_model_server(monkeypatch) -> None:
                 "usage": {"prompt_tokens": 10, "completion_tokens": 2},
             }
 
-    class Session:
-        def __init__(self, *, timeout, headers):
-            observed["timeout"] = timeout.total
-            observed["headers"] = headers
+    async def fake_request(method, url, *, json, timeout, headers):
+        observed.update(method=method, url=url, payload=json, timeout=timeout.total, headers=headers)
+        return Response()
 
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *_args):
-            return None
-
-        def post(self, url, *, json):
-            observed["url"] = url
-            observed["payload"] = json
-            return Response()
-
-    monkeypatch.setattr("harness.adapters.openai_compatible.ClientSession", Session)
+    monkeypatch.setattr("resources_servers.legal_agent_bench.harness.adapters.openai_compatible.request", fake_request)
     adapter = OpenAICompatibleAdapter(
         model="policy-model",
         base_url="http://policy/v1",
@@ -243,6 +194,7 @@ async def test_policy_adapter_uses_gym_model_server(monkeypatch) -> None:
 
     response = await adapter.chat([{"role": "user", "content": "work"}], [])
 
+    assert observed["method"] == "POST"
     assert observed["url"] == "http://policy/v1/chat/completions"
     assert observed["timeout"] == 30
     assert observed["headers"] == {"Authorization": "Bearer EMPTY"}
@@ -349,6 +301,7 @@ def test_scoring_includes_docx_redlines_when_requested(monkeypatch, tmp_path) ->
         def evaluate_prompt(self, *_args, **_kwargs):
             return {"verdict": "pass", "reasoning": "redlines reviewed"}
 
+    monkeypatch.setattr(lab_scoring, "pandoc_version", lambda: "3.5")
     monkeypatch.setattr(lab_scoring, "_read_file_as_text", read_file)
     scores = score_rubric(
         criteria=[
@@ -466,3 +419,28 @@ def test_html_report_escapes_task_and_judge_content(tmp_path) -> None:
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in report
     assert "Title &lt;unsafe&gt;" in report
     assert "&lt;img src=&quot;x&quot;&gt;" in report
+
+
+@pytest.mark.asyncio
+async def test_harbor_transfers_large_tool_payload_without_command_arguments(tmp_path) -> None:
+    from resources_servers.legal_agent_bench.legal_harbor_agent import HarborToolExecutor
+
+    content = "legal work product\n" * 100_000
+
+    class Environment:
+        uploaded = None
+
+        async def upload_file(self, source, destination):
+            self.uploaded = (json.loads(Path(source).read_text()), destination)
+
+        async def exec(self, command, **kwargs):
+            assert len(command) < 1024
+            assert self.uploaded[1] in command
+            assert kwargs["cwd"] == "/workspace"
+            return MagicMock(stdout='{"result":"written","metrics":{"files_written":1}}', stderr="", return_code=0)
+
+    environment = Environment()
+    executor = HarborToolExecutor(environment, host_vdr_dir=tmp_path)
+    assert await executor.execute("write", {"path": "output/result.txt", "content": content}) == "written"
+    assert environment.uploaded[0]["content"] == content
+    assert executor.files_written == 1
