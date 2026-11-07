@@ -220,6 +220,10 @@ class AgentWithoutEnvironmentServerError(ConfigError, ValueError):
     """An agent instance has no environment server."""
 
 
+class LegacyAgentWithoutRunError(ConfigError, ValueError):
+    """A `legacy_agent` environment server names an agent that implements only agent sessions."""
+
+
 class AmbiguousEnvironmentServerError(ConfigError, ValueError):
     """Rows route by an agent that more than one environment server fronts."""
 

@@ -57,6 +57,7 @@ from nemo_gym.config.config_types import (
     ConfigPathNotFoundError,
     HeadServerConfigMalformedError,
     InheritPathNotFoundError,
+    LegacyAgentWithoutRunError,
     MalformedConfigPathsError,
     NoServerInstancesError,
     ServerInstanceConfig,
@@ -237,6 +238,10 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "terminus_2_sandboxed_agent",
     }
 )
+# Agent types that implement agent sessions but not their own /run, which is deprecated. A `legacy_agent` environment
+# server relays /run, so it cannot reach them, and config validation rejects one that names such an agent. Like
+# AGENT_SESSION_AGENT_TYPES, this list is the source of truth, and a unit test keeps it in step with the agent apps.
+AGENT_TYPES_WITHOUT_RUN: frozenset[str] = frozenset()
 # An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
 # fallback through a legacy_agent relay.
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
@@ -1286,6 +1291,38 @@ Unset {ERROR_ON_AGENT_WITHOUT_ENVIRONMENT_SERVER_KEY_NAME} to generate a legacy_
 
         logger.warning(agents_without_environment_server_deprecation(generated))
 
+    def _reject_legacy_agent_without_run(self, global_config_dict: DictConfig) -> None:
+        """Reject a `legacy_agent` environment server, declared or generated, whose agent has no /run.
+
+        Such an agent implements only agent sessions, so every episode the relay sends to its /run would fail.
+        """
+        agent_types = {agent.name: agent.agent_type for agent in self._agent_instances(global_config_dict)}
+        unreachable = []
+        for instance_name, instance in global_config_dict.items():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            relay = servers.get(LEGACY_AGENT_SERVER_TYPE)
+            if not isinstance(relay, DictConfig):
+                continue
+            agent_name = (relay.get(AGENT_SERVER_REF_KEY_NAME) or {}).get("name")
+            agent_type = agent_types.get(agent_name)
+            if agent_type in AGENT_TYPES_WITHOUT_RUN:
+                unreachable.append(f"  - {instance_name} -> {agent_name} ({agent_type})")
+        if not unreachable:
+            return
+
+        listing = "\n".join(unreachable)
+        raise LegacyAgentWithoutRunError(
+            f"""legacy_agent environment server(s) relay /run to an agent that implements only agent sessions:
+{listing}
+
+Front each agent with an environment server that drives agent sessions, such as single_agent_turn, naming the agent
+in its `{AGENT_SERVER_REF_KEY_NAME}` reference."""
+        )
+
     def raise_on_missing_values(self, global_config_dict: DictConfig) -> None:
         """Fail fast with one actionable error listing every unset '???' value.
 
@@ -1629,6 +1666,7 @@ Pass each config with --config (it builds the list for you), e.g.:
         self.raise_on_missing_values(global_config_dict)
         # NOTE(martas): this is for catching agents not attached to an environment server
         self._front_agents_without_environment_server(global_config_dict)
+        self._reject_legacy_agent_without_run(global_config_dict)
 
         # TODO @bxyu-nvidia: We need a better way of handling dummy model configs
         with open_dict(global_config_dict):

@@ -17,6 +17,7 @@ from typing import ClassVar
 from unittest.mock import MagicMock
 
 import pytest
+from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
 from nemo_gym.agents.base_responses_api_agent import (
@@ -49,6 +50,22 @@ class TestBaseResponsesAPIAgent:
 
         agent = TestSimpleResponsesAPIAgent(config=config, server_client=MagicMock(spec=ServerClient))
         agent.setup_webserver()
+
+    def test_agent_without_run_starts_and_its_run_answers_501(self) -> None:
+        # run() is deprecated: an agent that implements only agent sessions need not define it.
+        config = BaseResponsesAPIAgentConfig(host="", port=0, entrypoint="", name="")
+
+        class SessionOnlyAgent(SimpleResponsesAPIAgent):
+            async def responses(self, body=...):
+                raise NotImplementedError
+
+        agent = SessionOnlyAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        with TestClient(agent.setup_webserver()) as client:
+            response = client.post("/run", json={"responses_create_params": {"input": "hi"}})
+
+        assert response.status_code == 501
+        assert "SessionOnlyAgent implements agent sessions only" in response.json()["detail"]
+        assert "single_agent_turn" in response.json()["detail"]
 
     async def test_aggregate_metrics_skip_verification_warns_and_returns_empty_metrics(self) -> None:
         config = BaseResponsesAPIAgentConfig(

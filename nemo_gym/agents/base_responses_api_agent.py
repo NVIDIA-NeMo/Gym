@@ -1290,9 +1290,20 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
-    @abstractmethod
     async def run(self, body: BaseRunRequest = Body()) -> BaseVerifyResponse:
-        pass
+        """Run a whole episode in the agent, including the resources server's ``seed_session`` and ``verify``.
+
+        Deprecated: rollout collection reaches an agent's own ``/run`` only through the ``legacy_agent`` environment
+        server. New agents implement agent sessions (``/v1/agent_sessions``) and leave ``run()`` alone, so that an
+        environment server drives the episode. To customize how an episode runs, implement an environment server on
+        ``BaseEnvironmentServer`` instead of overriding ``run()``. An agent type that does not override it must be
+        listed in ``AGENT_TYPES_WITHOUT_RUN`` so config validation keeps ``legacy_agent`` away from it.
+        """
+        raise HTTPException(
+            501,
+            f"Agent type {type(self).__name__} implements agent sessions only: "
+            "drive it from an environment server such as single_agent_turn, not through /run",
+        )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
         """Default: same RewardProfiler aggregation as resources server. Override to proxy."""
