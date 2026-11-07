@@ -336,6 +336,8 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     timeout: int = 900
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
+    # Step cap of the build agent (OpenCode's `agent.build.steps`); unset keeps OpenCode's default.
+    max_steps: Optional[int] = Field(default=None, gt=0)
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
@@ -531,6 +533,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
     def _build_opencode_config(self, rollout_id: Optional[str] = None) -> dict[str, Any]:
         config = self._deep_merge({}, copy.deepcopy(_without_empty_tools(self.config.opencode_config)))
+        if self.config.max_steps is not None:
+            self._deep_merge(config, {"agent": {"build": {"steps": self.config.max_steps}}})
         if self.config.model_server:
             providers = config.setdefault("provider", {})
             nemo = providers.setdefault("nemo", {"npm": "@ai-sdk/openai-compatible"})
@@ -939,10 +943,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "compaction"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/compaction only; unsupported: {sorted(unsupported)}",
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
@@ -1657,6 +1662,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 config.setdefault("agent", {}).setdefault("build", {})["prompt"] = system
             else:
                 config["instructions"] = [f"{state.session.session_dir}/instructions.md"]
+        if self.config.max_steps is not None:
+            config.setdefault("agent", {}).setdefault("build", {})["steps"] = self.config.max_steps
         if self._model_call_capture_enabled():
             apply_observability_patch(
                 config, plugin_path=Path(state.persistent_directory) / ASSISTANT_MESSAGE_PLUGIN_FILE
