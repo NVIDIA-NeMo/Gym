@@ -22,6 +22,12 @@ opencode_agent:
         type: resources_servers
         name: ???
       sandbox_provider: sandbox
+      # Grade what the model knows: the sandbox reaches only the model server, as with the deprecated agents.
+      # A search preset overrides this with model_and_tools. A restricted sandbox cannot download OpenCode,
+      # so the image carries the binary and its checksum.
+      network_access: model_only
+      sandbox_executable_path: ???
+      sandbox_executable_sha256: ???
       # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
       sandbox_config:
         image: ???

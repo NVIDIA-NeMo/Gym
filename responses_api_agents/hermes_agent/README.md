@@ -80,6 +80,8 @@ on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an uns
 harness on the Gym host. Hermes derives the sandbox's lifetime from its own timeouts. Supply the image in
 `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `hermes_agent.responses_api_agents.hermes_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`.
 
 HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
 Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
@@ -123,6 +125,7 @@ hermes_agent:
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
+| `network_access` | `inherit` | egress of an agent-owned sandbox: `inherit` (the provider's network), `model_only` (only the Model Server's host), or `model_and_tools` (also each MCP grant's host). OpenSandbox only; a session that borrows a sandbox rejects any other value than `inherit`. The Agent Server builds Hermes's runtime and uploads it, so a restricted sandbox needs no network for setup (see below). A borrowed sandbox relies on its owner's network policy. Under `model_only` a required MCP grant is refused at seed with a 422, since the policy would block its host; under `model_and_tools` a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. A model URL the sandbox cannot reach (such as loopback without `use_absolute_ip`) also refuses the seed with a 422. The policy is only as strong as the OpenSandbox server's egress mode: in `dns` mode a hard-coded IP bypasses it, and full isolation needs `dns+nft`. |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
 | `session_close_retry_window_seconds` | `300` | how long a successful close's fence and saved reply last; retries do not extend it |
@@ -134,7 +137,7 @@ Host and sandbox execution use the same request rules. User tasks remain user me
 Request `model` must match the configured model. Unsupported non-default controls return
 HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
 `max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. Only text input is supported; `developer` messages
+Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. Only text input is supported; `developer` messages
 are rejected.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
