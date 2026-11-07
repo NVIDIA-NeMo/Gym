@@ -102,7 +102,7 @@ from nemo_gym.environment import TaskRunner, plan_benchmark
 planned = plan_benchmark("ifeval")          # resolve, prepare, plan and collate the benchmark
 runner = TaskRunner(planned.rows, registry_server=BaseServerConfig(host="127.0.0.1", port=11000))
 result = await runner.run_task(planned.task_ids()[0])
-print(result.rewards)
+print(result.outcome.reward)
 ```
 
 `plan_benchmark` builds the same plan as `gym eval plan` and collates the benchmark's rows. It reads no
@@ -119,10 +119,9 @@ This API is experimental: signatures, result fields and behaviour may change or 
 period. `plan_benchmark`, `serve_benchmark` and `TaskRunner` warn on stderr when they are used. A test pins the current
 names and fields so that a change is deliberate.
 
-A `TaskResult` has one `RolloutOutcome` per rollout in `outcomes` (`TaskResult.outcome` is the only one, for a task run once): the `reward` (None when none exists, as for a failed
-`/run`), a `TaskFailure` when a failure was reported, whether it was `masked`, and the `prompt` and `output` as JSON text
-for display. A failed `/run` does not raise: its rollout comes back with a `failure` and no reward, and the other repeats
-of the task still finish.
+`run_task` runs one rollout of a task. Its `TaskResult` has the rollout's typed `outcome`: the `reward` (None when none
+exists, as for a failed `/run`), a `TaskFailure` when a failure was reported, whether it was `masked`, and the `prompt` and
+`output` as JSON text for display. A failed `/run` does not raise: the outcome has a `failure` and no reward.
 
 A failure reports what Gym observed and leaves the decision to you:
 
@@ -135,8 +134,7 @@ A failure reports what Gym observed and leaves the decision to you:
 
 Group failures by `domain` and a new kind under an existing domain needs no change from you.
 
-`TaskResult.results` holds Gym's raw `/run` responses (the failure record for a failed `/run`). Their keys are not part of the contract: depend on `rewards`
-and `outcomes`, and use `results` for debugging.
+`TaskResult.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part of the contract: depend on `outcome`, and use `raw` for debugging.
 
 ### Constraints
 

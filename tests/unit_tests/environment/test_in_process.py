@@ -66,9 +66,9 @@ class _Completions:
 class _FakeRuns:
     """Stands in for `run_outcomes`: records what was sent and returns a reward per row."""
 
-    def __init__(self, reward: float = 1.0, fail_row: int | None = None) -> None:
+    def __init__(self, reward: float = 1.0, fail: bool = False) -> None:
         self.reward = reward
-        self.fail_row = fail_row
+        self.fail = fail
         self.sent: list[list[dict]] = []
         self.completions: _Completions | None = None
 
@@ -76,81 +76,67 @@ class _FakeRuns:
         self.sent.append(rows)
         assert head_server_config == HEAD
 
-        async def completed(index, row):
-            if index == self.fail_row:
+        async def completed(row):
+            if self.fail:
                 raise RuntimeError("rollout failed")
             return row, {"reward": self.reward, "row_task_id": row["task_id"]}
 
-        self.completions = _Completions([completed(index, row) for index, row in enumerate(rows)])
+        self.completions = _Completions([completed(row) for row in rows])
         return self.completions
 
 
 class _FakeResults:
-    """Stands in for `run_outcomes`: returns the given `/run` results, one per row."""
+    """Stands in for `run_outcomes`: returns the given `/run` result for the one row."""
 
-    def __init__(self, *results: dict) -> None:
-        self.results = results
+    def __init__(self, result) -> None:
+        self.result = result
 
     def __call__(self, rows, head_server_config):
-        async def completed(row, result):
-            return row, result
+        async def completed(row):
+            return row, self.result
 
-        return _Completions([completed(row, result) for row, result in zip(rows, self.results)])
+        return _Completions([completed(row) for row in rows])
 
 
 class TestOutcomes:
-    async def test_a_task_run_once_has_its_one_outcome_as_a_property(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        runner = TaskRunner([_row("a")], registry_server=HEAD)
-        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 1.0}, {"reward": 0.0}))
-
-        assert (await runner.run_task("a")).outcome == RolloutOutcome(reward=1.0)
-        with pytest.raises(ValueError):
-            (await runner.run_task("a", num_repeats=2)).outcome
-
-    async def test_each_rollout_has_a_typed_outcome_beside_the_raw_result(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        passed = {
-            "reward": 1.0,
-            "responses_create_params": {"input": [{"role": "user", "content": "solve it"}]},
-            "response": {"output": [{"type": "message", "content": "done"}]},
-        }
-        failed = {"reward": 0.0, "failure_kind": "judge_failed", "failure_reason": "no verdict"}
-        masked = {"reward": 0.0, "mask_sample": True}
-        runner = TaskRunner([_row("a")], registry_server=HEAD)
-        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(passed, failed, masked))
-
-        result = await runner.run_task("a", num_repeats=3)
-
-        assert result.rewards == [1.0, 0.0, 0.0]
-        assert result.results == [passed, failed, masked]
-        assert result.outcomes == [
-            RolloutOutcome(
-                reward=1.0,
-                prompt='[{"role": "user", "content": "solve it"}]',
-                output='[{"type": "message", "content": "done"}]',
-            ),
-            RolloutOutcome(
-                reward=0.0,
-                failure=TaskFailure(
-                    kind="judge_failed",
-                    source="environment",
-                    reason="no verdict",
+    @pytest.mark.parametrize(
+        "raw, outcome",
+        [
+            (
+                {
+                    "reward": 1.0,
+                    "responses_create_params": {"input": [{"role": "user", "content": "solve it"}]},
+                    "response": {"output": [{"type": "message", "content": "done"}]},
+                },
+                RolloutOutcome(
+                    reward=1.0,
+                    prompt='[{"role": "user", "content": "solve it"}]',
+                    output='[{"type": "message", "content": "done"}]',
                 ),
             ),
-            RolloutOutcome(reward=0.0, masked=True),
-        ]
-
-    async def test_a_failure_without_a_reason_has_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+            (
+                {"reward": 0.0, "failure_kind": "judge_failed", "failure_reason": "no verdict"},
+                RolloutOutcome(
+                    reward=0.0, failure=TaskFailure(kind="judge_failed", source="environment", reason="no verdict")
+                ),
+            ),
+            (
+                {"reward": 0.0, "failure_kind": "session_lost"},
+                RolloutOutcome(reward=0.0, failure=TaskFailure(kind="session_lost", source="environment")),
+            ),
+            ({"reward": 0.0, "mask_sample": True}, RolloutOutcome(reward=0.0, masked=True)),
+        ],
+    )
+    async def test_the_outcome_is_typed_and_the_raw_result_stays_beside_it(
+        self, monkeypatch: pytest.MonkeyPatch, raw: dict, outcome: RolloutOutcome
+    ) -> None:
         runner = TaskRunner([_row("a")], registry_server=HEAD)
-        monkeypatch.setattr(
-            RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 0.0, "failure_kind": "session_lost"})
-        )
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(raw))
 
-        outcome = (await runner.run_task("a")).outcomes[0]
+        result = await runner.run_task("a")
 
-        assert outcome.failure.domain == "session"
-        assert outcome.failure == TaskFailure(kind="session_lost", source="environment", reason=None)
+        assert result.outcome == outcome
+        assert result.raw == raw
 
 
 def _record(
@@ -193,18 +179,15 @@ class TestTaskFailure:
 
 
 class TestFailedRuns:
-    async def test_a_failed_run_comes_back_as_an_outcome_beside_the_rollouts_that_finished(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    async def test_a_failed_run_comes_back_as_an_outcome(self, monkeypatch: pytest.MonkeyPatch) -> None:
         record = _record(kind="model_request_error", stage="agent", terminal=True)
         runner = TaskRunner([_row("a")], registry_server=HEAD)
-        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 1.0}, record))
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(record))
 
-        result = await runner.run_task("a", num_repeats=2)
+        result = await runner.run_task("a")
 
-        assert result.rewards == [1.0, None]
-        assert result.results[1] == record.model_dump(mode="json")
-        assert result.outcomes[1] == RolloutOutcome(
+        assert result.raw == record.model_dump(mode="json")
+        assert result.outcome == RolloutOutcome(
             reward=None,
             failure=TaskFailure(
                 kind="model_request_error",
@@ -233,7 +216,7 @@ class TestFailedRuns:
         record = _record(source=source, delivery=delivery, http_status=None, exception_type=None)
         monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(record))
 
-        failure = (await runner.run_task("a")).outcomes[0].failure
+        failure = (await runner.run_task("a")).outcome.failure
 
         assert failure is not None
         assert (failure.kind, failure.source) == (kind, source)
@@ -253,7 +236,7 @@ class TestTaskRunner:
         with pytest.raises(ConfigError, match="share a task id"):
             TaskRunner([_row("a", "x"), _row("a", "y")], registry_server=HEAD)
 
-    async def test_runs_one_task_with_repeats_and_rollout_ids(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_runs_one_task_under_the_given_rollout_id(self, monkeypatch: pytest.MonkeyPatch) -> None:
         runner = TaskRunner([_row("a"), _row("b")], registry_server=HEAD)
         runs = _FakeRuns(reward=1.0)
         monkeypatch.setattr(
@@ -262,25 +245,12 @@ class TestTaskRunner:
             lambda self, rows, head_server_config: runs(rows, head_server_config),
         )
 
-        result = await runner.run_task("b", num_repeats=2, rollout_id="trial-7")
+        result = await runner.run_task("b", rollout_id="trial-7")
 
         assert result.task_id == "b"
-        assert result.rewards == [1.0, 1.0]
-        assert [row["task_id"] for row in runs.sent[0]] == ["b", "b"]
-        assert [row["_ng_rollout_id"] for row in runs.sent[0]] == ["trial-7-r0", "trial-7-r1"]
-
-    async def test_a_single_rollout_keeps_the_rollout_id_as_given(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        runner = TaskRunner([_row("a")], registry_server=HEAD)
-        runs = _FakeRuns()
-        monkeypatch.setattr(
-            RolloutCollectionHelper,
-            "run_outcomes",
-            lambda self, rows, head_server_config: runs(rows, head_server_config),
-        )
-
-        await runner.run_task("a", rollout_id="trial-7")
-
-        assert runs.sent[0][0]["_ng_rollout_id"] == "trial-7"
+        assert result.outcome.reward == 1.0
+        assert [row["task_id"] for row in runs.sent[0]] == ["b"]
+        assert [row["_ng_rollout_id"] for row in runs.sent[0]] == ["trial-7"]
 
     @staticmethod
     def _serve(monkeypatch: pytest.MonkeyPatch, runs: _FakeRuns) -> None:
@@ -295,19 +265,19 @@ class TestTaskRunner:
         runs = _FakeRuns()
         self._serve(monkeypatch, runs)
 
-        await asyncio.gather(runner.run_task("a"), runner.run_task("b"), runner.run_task("a", num_repeats=2))
+        await asyncio.gather(runner.run_task("a"), runner.run_task("b"), runner.run_task("a"))
 
         ids = [row["_ng_rollout_id"] for sent in runs.sent for row in sent]
-        assert len(ids) == 4
-        assert len(set(ids)) == 4
+        assert len(ids) == 3
+        assert len(set(ids)) == 3
 
     async def test_closes_the_completions_when_a_rollout_fails(self, monkeypatch: pytest.MonkeyPatch) -> None:
         runner = TaskRunner([_row("a")], registry_server=HEAD)
-        runs = _FakeRuns(fail_row=1)
+        runs = _FakeRuns(fail=True)
         self._serve(monkeypatch, runs)
 
         with pytest.raises(RuntimeError, match="rollout failed"):
-            await runner.run_task("a", num_repeats=3)
+            await runner.run_task("a")
 
         assert runs.completions.closed
 
@@ -340,7 +310,7 @@ class TestTaskRunner:
 
         result = await runner.run_task("a")
 
-        assert result.rewards == [1.0]
+        assert result.outcome.reward == 1.0
 
     def test_refuses_a_materialized_task_row(self) -> None:
         materialized = {

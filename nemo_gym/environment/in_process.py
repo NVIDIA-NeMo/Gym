@@ -7,7 +7,7 @@
 planned = plan_benchmark("ifeval")                        # resolve, prepare, plan and collate
 runner = TaskRunner(planned.rows, registry_server=BaseServerConfig(host="127.0.0.1", port=11000))
 result = await runner.run_task(planned.plan.tasks[0].task_id.task_id)
-result.rewards                                            # one reward per repeat
+result.outcome.reward                                     # None when the rollout has no reward
 ```
 
 To start the servers from Python too, serve the benchmark and give the yielded registry server to the runner:
@@ -29,9 +29,9 @@ talks to it.
 This is the API for callers outside Gym. They import the names `nemo_gym.environment` exports (`plan_benchmark`,
 `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`)
 and `ConfigError` from
-`nemo_gym.config`. It is experimental: signatures and result fields may change without a deprecation period, and tests pin the current ones. `TaskResult.results`
-holds Gym's raw `/run` responses (the failure record for a failed `/run`), whose keys can change: depend on
-`rewards` and `outcomes`, and use `results` for debugging.
+`nemo_gym.config`. It is experimental: signatures and result fields may change without a deprecation period, and
+tests pin the current ones. `TaskResult.raw` is Gym's raw `/run` response (the failure record for a failed `/run`),
+whose keys can change: depend on `TaskResult.outcome`, and use `raw` for debugging.
 """
 
 import json
@@ -40,7 +40,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -149,22 +149,14 @@ class RolloutOutcome:
 
 @dataclass(frozen=True)
 class TaskResult:
-    """One task's rollouts, in the same order in each list.
+    """One task's rollout: its typed `outcome`, and Gym's `raw` `/run` response (the failure record for a failed `/run`).
 
-    `rewards` and `outcomes` are the contract. `results` is Gym's raw `/run` responses, whose keys can change: use it
-    for debugging only.
+    Depend on `outcome`. `raw` is Gym's own shape, whose keys can change: use it for debugging only.
     """
 
     task_id: str
-    rewards: list[Optional[float]]
-    results: list[dict[str, Any]]
-    outcomes: list[RolloutOutcome] = field(default_factory=list)
-
-    @property
-    def outcome(self) -> RolloutOutcome:
-        """The outcome of the only rollout, for a task run once. Raises ValueError when there is not exactly one."""
-        (only,) = self.outcomes
-        return only
+    outcome: RolloutOutcome
+    raw: dict[str, Any]
 
 
 @experimental
@@ -296,9 +288,8 @@ def _collated_rows(global_config_dict: DictConfig, output_dir: Path) -> list[dic
 class TaskRunner:
     """Runs single tasks of collated rows against Gym servers that are already running.
 
-    The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row,
-    repeats it, sends it through the agent's `/run` and returns the rewards. Concurrent calls in one
-    event loop are supported.
+    The rows are checked and indexed by task id once. Each `run_task` call then selects one task's row, sends it
+    through the agent's `/run` and returns the rollout's outcome. Concurrent calls in one event loop are supported.
     """
 
     @experimental
@@ -313,35 +304,25 @@ class TaskRunner:
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
 
-    async def run_task(self, task_id: str, *, num_repeats: int = 1, rollout_id: Optional[str] = None) -> TaskResult:
-        """Run `num_repeats` rollouts of one task.
+    async def run_task(self, task_id: str, *, rollout_id: Optional[str] = None) -> TaskResult:
+        """Run one rollout of a task.
 
-        `rollout_id` names the rollouts for Gym's rollout correlation (e.g. verification events); repeats
-        get `<rollout_id>-r<n>`. It must differ between concurrent calls; a fresh one is made when it is None.
+        `rollout_id` names the rollout for Gym's rollout correlation (e.g. verification events). It must differ between
+        concurrent calls; a fresh one is made when it is None.
 
-        A `/run` call that fails does not raise: its rollout comes back as an outcome with a `failure` and no
-        reward, and the other repeats still finish.
+        A `/run` call that fails does not raise: the outcome has a `failure` and no reward.
         """
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
         with ignoring_command_line():
-            rows = self._helper.preprocess_examples(
-                [self._row_of_task[task_id]], task_ids=[task_id], num_repeats=num_repeats
-            )
-        rollout_id = rollout_id or uuid.uuid4().hex
-        rows = [_with_rollout_id(row, rollout_id, index, num_repeats) for index, row in enumerate(rows)]
-        completions = self._helper.run_outcomes(rows, head_server_config=self._registry_server)
+            (row,) = self._helper.preprocess_examples([self._row_of_task[task_id]], task_ids=[task_id], num_repeats=1)
+        row = {**row, "_ng_rollout_id": rollout_id or uuid.uuid4().hex}
+        completions = self._helper.run_outcomes([row], head_server_config=self._registry_server)
         try:
-            completed = [await rollout for rollout in completions]
+            [(_, result)] = [await rollout for rollout in completions]
         finally:
             await completions.aclose()
-        outcomes = [_outcome(result) for _, result in completed]
-        return TaskResult(
-            task_id=task_id,
-            rewards=[outcome.reward for outcome in outcomes],
-            results=[_raw(result) for _, result in completed],
-            outcomes=outcomes,
-        )
+        return TaskResult(task_id=task_id, outcome=_outcome(result), raw=_raw(result))
 
 
 def _raw(result: Mapping[str, Any] | RolloutFailureRecord) -> dict[str, Any]:
@@ -371,9 +352,8 @@ def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome
 
 
 def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
-    kind = record.sidecar_failure_class
     return TaskFailure(
-        kind=kind,
+        kind=record.sidecar_failure_class,
         source=record.source,
         stage=record.failure.stage,
         terminal=record.failure.terminal,
@@ -386,7 +366,3 @@ def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
 def _first_row_of_each_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
     ids = list(dict.fromkeys(row_task_id(row) for row in rows))
     return {row_task_id(rows[index]): rows[index] for index in select_tasks(rows, ids)}
-
-
-def _with_rollout_id(row: dict[str, Any], rollout_id: str, index: int, num_repeats: int) -> dict[str, Any]:
-    return {**row, "_ng_rollout_id": rollout_id if num_repeats == 1 else f"{rollout_id}-r{index}"}

@@ -96,7 +96,6 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
     "TaskRunner.run_task": [
         ("self", _POSITIONAL, _REQUIRED),
         ("task_id", _POSITIONAL, _REQUIRED),
-        ("num_repeats", _KEYWORD, 1),
         ("rollout_id", _KEYWORD, None),
     ],
     "TaskRunner.task_ids": [("self", _POSITIONAL, _REQUIRED)],
@@ -116,7 +115,7 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
 # deprecation first. Update this list in the same change.
 EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "PlannedBenchmark": ["plan", "rows"],
-    "TaskResult": ["task_id", "rewards", "results", "outcomes"],
+    "TaskResult": ["task_id", "outcome", "raw"],
     "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output"],
     "TaskFailure": [
         "kind",
