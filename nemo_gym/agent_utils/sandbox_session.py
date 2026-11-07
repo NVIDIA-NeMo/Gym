@@ -108,6 +108,16 @@ class SandboxSession[Artifacts]:
         return task is not None and task.done() and not task.cancelled() and task.exception() is None
 
     @property
+    def execution_finished(self) -> bool:
+        """Whether the supervised harness exited successfully without an execution timeout.
+
+        This describes the process, not model completion: a model output limit
+        can end a successful process, while a wall-time stop is unfinished.
+        """
+        receipt = self.cleanup
+        return bool(receipt and receipt["return_code"] == 0 and not receipt["timed_out"] and not receipt.get("error"))
+
+    @property
     def cleanup_confirmed(self) -> bool:
         """Whether no launch occurred, termination was witnessed, or owned sandbox stopped."""
         return self.sandbox_stopped or (

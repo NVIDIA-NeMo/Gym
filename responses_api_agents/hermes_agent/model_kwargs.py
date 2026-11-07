@@ -4,6 +4,7 @@
 """Shared model-request adaptation for host and sandbox Hermes runtimes (stdlib only)."""
 
 import json
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import Any
 
@@ -42,11 +43,75 @@ def _model_api_kwargs(kwargs: dict[str, Any], *, preserve_reasoning_history: boo
     return kwargs
 
 
+def _install_training_history(agent: Any) -> None:
+    """Keep served calls in history while applying upstream guardrails only at dispatch."""
+    names = (
+        "_interruptible_api_call",
+        "_build_assistant_message",
+        "_repair_tool_call",
+        "_cap_delegate_task_calls",
+        "_deduplicate_tool_calls",
+        "_execute_tool_calls",
+    )
+    if not all(callable(getattr(agent, name, None)) for name in names):
+        raise RuntimeError("Hermes runtime lacks the hooks required to preserve training history")
+    original_call = agent._interruptible_api_call
+    original_build = agent._build_assistant_message
+    original_cap = agent._cap_delegate_task_calls
+    original_dedupe = agent._deduplicate_tool_calls
+    original_execute = agent._execute_tool_calls
+    last_message = None
+    served_message = None
+
+    def remember_response(kwargs: dict[str, Any]) -> Any:
+        nonlocal last_message, served_message
+        response = original_call(kwargs)
+        if response.choices:
+            last_message = response.choices[0].message
+            served_message = deepcopy(last_message)
+        return response
+
+    def build_message(message: Any, finish_reason: str) -> dict[str, Any]:
+        # Upstream validates/normalizes arguments in place before building history.
+        # Dispatch may use that normalization, but history must retain the served call.
+        return original_build(served_message if message is last_message else message, finish_reason)
+
+    def retain_calls(calls: list) -> list:
+        return calls
+
+    def execute(message: Any, messages: list[dict[str, Any]], task_id: str, api_call_count: int = 0) -> None:
+        calls = message.tool_calls
+        selected = original_dedupe(original_cap(calls))
+        selected_objects = {id(call) for call in selected}
+        dispatched = deepcopy(message)
+        dispatched.tool_calls = selected
+        original_execute(dispatched, messages, task_id, api_call_count)
+        # A removed call still needs an honest result tied to its original ID.
+        for call in calls:
+            if id(call) not in selected_objects:
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": "Skipped by Hermes tool-call guardrails: duplicate call or delegation limit. No execution occurred.",
+                    }
+                )
+
+    agent._interruptible_api_call = remember_response
+    agent._build_assistant_message = build_message
+    # Invalid names follow upstream's explicit error/retry path, without fuzzy repair.
+    agent._repair_tool_call = lambda name: None
+    agent._cap_delegate_task_calls = retain_calls
+    agent._deduplicate_tool_calls = retain_calls
+    agent._execute_tool_calls = execute
+
+
 def install_summary_compat(
     agent: Any,
     *,
     preserve_reasoning_history: bool,
     sampling_overrides: dict[str, float | int] | None = None,
+    preserve_training_history: bool = False,
 ) -> None:
     """Route pinned Hermes's iteration-limit summary through Gym's observed model path."""
     if getattr(agent, "_gym_summary_compat_installed", False):
@@ -54,14 +119,20 @@ def install_summary_compat(
     original_ensure_client = getattr(agent, "_ensure_primary_openai_client", None)
     original_handle_max_iterations = getattr(agent, "_handle_max_iterations", None)
     if not callable(original_ensure_client) or not callable(original_handle_max_iterations):
-        if sampling_overrides:
+        if sampling_overrides or preserve_training_history:
             raise RuntimeError("Hermes runtime lacks the hooks required to enforce model-call controls")
         return
 
+    if preserve_training_history:
+        _install_training_history(agent)
     original_call = agent._interruptible_api_call
     controls = dict(sampling_overrides or {})
+    training_tools = None
 
     def controlled_call(kwargs: dict[str, Any]) -> Any:
+        nonlocal training_tools
+        if preserve_training_history and kwargs.get("tools"):
+            training_tools = deepcopy(kwargs["tools"])
         request = _model_api_kwargs(kwargs, preserve_reasoning_history=preserve_reasoning_history)
         for name, value in controls.items():
             if name == "max_tokens":
@@ -89,6 +160,10 @@ def install_summary_compat(
                 if key not in {"codex_reasoning_items", "reasoning", "finish_reason"}
             }
             api_messages.append(agent._sanitize_tool_calls_for_strict_api(api_message))
+        if preserve_training_history and training_tools:
+            # Keep the tool-bearing context envelope while forbidding further calls.
+            # Dropping tools would change the context of the captured continuation.
+            kwargs = {**kwargs, "tools": training_tools, "tool_choice": "none"}
         request = _model_api_kwargs(
             {**kwargs, "messages": api_messages},
             preserve_reasoning_history=preserve_reasoning_history,
@@ -109,6 +184,12 @@ def install_summary_compat(
             invocation_id = getattr(agent, "_gym_invocation_id", None)
             if callable(callback) and isinstance(invocation_id, str):
                 callback(invocation_id=invocation_id)
+        if preserve_training_history and agent.insert_reasoning:
+            for message in messages:
+                if message.get("role") == "assistant" and message.get("reasoning"):
+                    # Hermes's ordinary requests echo this field, but its summary strips
+                    # the internal reasoning field before our client adapter sees it.
+                    message["reasoning_content"] = message["reasoning"]
         return original_handle_max_iterations(messages, api_call_count)
 
     agent._ensure_primary_openai_client = ensure_client
@@ -121,5 +202,8 @@ def install_summary_compat(
             children = _SummaryCompatChildren(children)
             agent._active_children = children
         children._gym_prepare_child = lambda child: install_summary_compat(
-            child, preserve_reasoning_history=preserve_reasoning_history, sampling_overrides=controls
+            child,
+            preserve_reasoning_history=preserve_reasoning_history,
+            sampling_overrides=controls,
+            preserve_training_history=preserve_training_history,
         )

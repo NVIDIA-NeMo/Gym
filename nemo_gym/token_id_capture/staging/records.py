@@ -97,6 +97,22 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+class ReplayItem(_WireModel):
+    """Prompt-content identity before gateway conversion, without media payloads."""
+
+    role: Literal["system", "developer", "user", "assistant", "tool", "envelope"]
+    digest: DigestHex
+    empty_tool_content_digest: DigestHex | None = None
+
+
+class ReplayContext(_WireModel):
+    """Versioned comparison facts; only the framework decides compatibility."""
+
+    normalization_version: Literal[1] = 1
+    items: list[ReplayItem]
+    render_digest: DigestHex | None = None
+
+
 class GenerationCutContinuation(_WireModel):
     """A checkpointed prefix of the same call, which the worker continues instead of regenerating.
 

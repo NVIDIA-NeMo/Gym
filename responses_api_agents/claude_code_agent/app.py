@@ -827,7 +827,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        response = self._response_from_output(body, items, model, run_metadata, status=status)
+        response.metadata = {
+            **(response.metadata or {}),
+            "agent_execution_finished": str(state.session.execution_finished).lower(),
+        }
+        return response
 
     async def responses(
         self,

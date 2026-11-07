@@ -111,6 +111,7 @@ def _run(payload: dict[str, Any], session_dir: Path, *, output_path: Path | None
     install_summary_compat(
         agent,
         preserve_reasoning_history=payload["chat_template_kwargs_enabled"],
+        preserve_training_history=payload.get("preserve_training_history", False),
         sampling_overrides={
             key: payload[key] for key in ("temperature", "top_p", "max_tokens") if payload.get(key) is not None
         },
