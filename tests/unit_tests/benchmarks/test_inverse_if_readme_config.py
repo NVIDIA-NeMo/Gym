@@ -25,10 +25,10 @@ from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 README = REPO_ROOT / "resources_servers/inverse_if/README.md"
 POLICY = {"base_url": "http://policy.invalid/v1", "api_key": "policy-key", "model_name": "policy-model"}
 
