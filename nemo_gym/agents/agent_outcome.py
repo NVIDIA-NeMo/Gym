@@ -15,6 +15,7 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_OOM_KILLED,
     FailureClassificationConfig,
@@ -79,6 +80,8 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
+            # A request the endpoint refused as invalid never reached the model: not graded, not retried.
+            MODEL_REQUEST_REJECTED: OutcomeAction.FAIL,
             PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
         }

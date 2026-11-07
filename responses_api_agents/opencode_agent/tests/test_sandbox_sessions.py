@@ -2049,12 +2049,18 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     response = await task
     assert response.status == "failed"
     assert response.error.message == (f"HTTP {status}: provider error" if status is not None else "provider error")
-    expected = (
-        {"failure_kind": "unknown"}
-        if status is None
-        else {"failure_kind": "model_request_error", "status_code": status}
-    )
+    if status is None:
+        expected = {"failure_kind": "unknown"}
+    elif status == 400:
+        # A non-overflow 400 is a request the endpoint refused; it fails the attempt instead of being graded.
+        expected = {"failure_kind": "model_request_rejected"}
+    else:
+        expected = {"failure_kind": "model_request_error", "status_code": status}
     assert json.loads(response.metadata["ng_agent_outcome"]) == expected
+    if status == 400:
+        from nemo_gym.agents import OutcomeAction, agent_outcome_policy
+
+        assert agent_outcome_policy(response) == OutcomeAction.FAIL
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
