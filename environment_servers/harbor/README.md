@@ -30,7 +30,9 @@ One `/run` call is one whole episode, and no Resources Server takes part. For ea
 Once `test.sh` has run, the sample counts: a missing or invalid reward file scores 0 with a `failure_kind`. A Gym-side
 failure (a lost sandbox, a failed transfer) sets `mask_sample`. So do a failed ATIF export, an image without `bash` or
 `timeout`, an image `ENTRYPOINT` that exits non-zero during the rollout and an overlay or entrypoint that fails in a
-separate verifier's sandbox. A task that cannot be set up fails at `stage: seed`: terminally when the server refuses
+separate verifier's sandbox. With `verifier_exit_nonzero = "mask"` in `dataset.toml`, so does a `test.sh` that exits
+non-zero without being stopped by its timeout (`harbor:verifier_exit_nonzero`), for a verifier that exits non-zero when
+it could not grade, such as a failed LLM judge; a reward file it wrote is kept in `verifier_rewards`. A task that cannot be set up fails at `stage: seed`: terminally when the server refuses
 the task, row or configuration (such as a failed overlay `RUN` line or `ENTRYPOINT`), and retryably otherwise, even
 for a health check that never passes or an image that cannot be pulled. A task with `[[steps]]` runs one such turn
 per step in the same sandbox. It stops early after a step whose preparation fails, or one that is masked, leaves no

@@ -30,7 +30,9 @@ row, the server runs one episode:
 Once the verifier has run, the attempt counts: a missing or invalid reward file scores 0 with a `failure_kind`.
 A Gym-side failure while verifying, such as a lost sandbox, sets `mask_sample` and leaves the attempt out of the
 score. So does an image `ENTRYPOINT` that exits non-zero after the seed or in a separate verifier's sandbox
-(`harbor:entrypoint_failed`), or an image without the `timeout` or `bash` that `test.sh` needs. An episode that
+(`harbor:entrypoint_failed`), or an image without the `timeout` or `bash` that `test.sh` needs. A dataset can
+also mask a `test.sh` that exits non-zero without being stopped by its timeout (`harbor:verifier_exit_nonzero`): see
+`verifier_exit_nonzero` in [Task Folder Format](/main/data/task-folders/task-folder-format#dataset-settings). An episode that
 fails earlier (say, its sandbox does not start) or runs past its time budget has no result: it goes to
 `rollouts_failures.jsonl`, and `--resume` retries it unless the failure is terminal. A task with several steps runs
 one turn per step; see [Multi-Step Task Folders](/main/data/task-folders/multi-step-tasks).

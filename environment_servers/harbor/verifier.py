@@ -91,6 +91,7 @@ TIMEOUT_WRAPPER_GUARD = "command -v timeout >/dev/null 2>&1 && command -v bash >
 VERIFIER_TIMEOUT_KIND = "harbor:verifier_timeout"
 MISSING_REWARD_KIND = "harbor:missing_reward"
 INVALID_REWARD_KIND = "harbor:invalid_reward"
+VERIFIER_EXIT_NONZERO_KIND = "harbor:verifier_exit_nonzero"
 
 
 def parse_reward_file(directory: Path) -> tuple[dict[str, float] | None, str | None]:
@@ -437,6 +438,8 @@ class VerifierSettings:
     collect: list[Any] = field(default_factory=list)
     # The task's `[verifier].network_mode` (a step's over it), reported as `verifier_network`.
     network_mode: str | None = None
+    # The task's `[verifier].exit_nonzero` from dataset.toml; a step has none of its own.
+    exit_nonzero: str | None = None
 
 
 class HarborVerificationMixin:
@@ -1085,6 +1088,7 @@ class HarborVerificationMixin:
                 user=verifier.user,
                 collect=verifier.collect,
                 network_mode=verifier.network_mode,
+                exit_nonzero=verifier.exit_nonzero,
             )
         # A step's tests/ (and a multi-step task's top-level tests/) may be absent; a single-turn task's tests/ is
         # uploaded whatever the host says, so a snapshot removed under the episode fails the upload and masks.
@@ -1199,6 +1203,14 @@ class HarborVerificationMixin:
                 )
                 | extras
             )
+        if settings.exit_nonzero == "mask" and result.return_code != 0 and not timed_out:
+            # The dataset says a non-zero exit means test.sh could not grade (e.g. a required LLM judge failed), so
+            # the trial is not a measurement; a reward file it wrote anyway is kept as metrics.
+            reason = f"test.sh exited {result.return_code} and the dataset masks a non-zero verifier exit"
+            outcome = self._masked(VERIFIER_EXIT_NONZERO_KIND, f"{reason}; tail: {_stdout_tail(logs_dir)}")
+            if rewards is not None:
+                outcome["verifier_rewards"] = rewards
+            return outcome | extras
         if rewards is None:
             kind = MISSING_REWARD_KIND if "written" in (problem or "") else INVALID_REWARD_KIND
             return self._measured(0.0, kind, f"{problem}; tail: {_stdout_tail(logs_dir)}") | extras
@@ -1385,4 +1397,5 @@ class HarborVerificationMixin:
             user=step.user if step.user is not None else task.config.verifier.user,
             collect=[*task.config.verifier.collect, *step.collect],
             network_mode=step.network_mode if step.network_mode is not None else task.config.verifier.network_mode,
+            exit_nonzero=task.config.verifier.exit_nonzero,
         )

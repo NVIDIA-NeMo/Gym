@@ -3176,6 +3176,37 @@ class TestDatasetConfig:
         (folder / "dataset.toml").unlink()
         assert load_task(folder / "hello").digest == content_hash(folder / "hello")
 
+    def test_verifier_exit_nonzero_default_reaches_every_task_unless_a_task_overrides_it(self, tmp_path):
+        """#5642: `[gym.defaults] verifier_exit_nonzero` becomes each task's `[verifier].exit_nonzero`, a task's own
+        `[gym.tasks."<id>".verifier] exit_nonzero` wins, and setting it changes the digest."""
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        write_task(folder / "other")
+        plain = load_task(folder / "hello")
+        (folder / "dataset.toml").write_text(
+            '[gym.defaults]\nverifier_exit_nonzero = "mask"\n\n[gym.tasks."other".verifier]\nexit_nonzero = "score"\n'
+        )
+        hello, other = load_task(folder / "hello"), load_task(folder / "other")
+        assert plain.config.verifier.exit_nonzero is None
+        assert hello.config.verifier.exit_nonzero == "mask" and other.config.verifier.exit_nonzero == "score"
+        assert hello.digest != plain.digest
+
+    def test_a_task_toml_cannot_set_exit_nonzero(self, tmp_path, caplog):
+        """Harbor has no such key, so the task folder scores the same under Gym and Harbor: only dataset.toml sets it."""
+        folder = tmp_path / "ds"
+        write_task(folder / "hello", toml=HELLO_TOML.replace("[verifier]", '[verifier]\nexit_nonzero = "mask"', 1))
+        with caplog.at_level("WARNING"):
+            task = load_task(folder / "hello")
+        assert task.config.verifier.exit_nonzero is None
+        assert "verifier.exit_nonzero" in caplog.text
+
+    def test_an_invalid_exit_nonzero_value_is_refused(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "hello")
+        (folder / "dataset.toml").write_text('[gym.defaults]\nverifier_exit_nonzero = "fail"\n')
+        with pytest.raises(HarborTaskError):
+            load_task(folder / "hello")
+
     def test_legacy_override_spellings_replace_the_tasks_current_fields(self, tmp_path):
         from nemo_gym.data.tasks.harbor.dataset_config import apply_dataset_config, read_dataset_config
 
