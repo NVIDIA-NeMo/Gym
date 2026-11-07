@@ -6,8 +6,12 @@ verifies the task, and closes Resources. Qwen Code runs its own tools and calls 
 Its native subagents (the `agent` tool, nested delegation, background agents and the experimental Agent Team) are
 configurable.
 
-Capability level: **Evaluation**. The adapter returns the root session as Responses items, Qwen Code's run usage
-(subagents included), and an observation bundle with explicit gaps. Token IDs are not captured.
+The adapter returns the root session as Responses items, Qwen Code's run usage (subagents included), and an
+observation bundle with explicit gaps.
+
+Training token-ID capture is off by default. Root and subagent model calls go to Gym Model Servers under the rollout's
+prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Configure and run
 

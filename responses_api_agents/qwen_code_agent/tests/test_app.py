@@ -252,6 +252,27 @@ def test_settings_route_every_model_through_the_rollout():
     assert settings["ui"] == {"theme": "x"}
 
 
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
+    server = agent(
+        subagent_model="worker",
+        subagent_model_server={"type": "responses_api_models", "name": "worker_model"},
+        token_id_capture=capture,
+    )
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    server.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['name']}:9000"
+    with patch(
+        "nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict",
+        side_effect=lambda _, name: {"name": name},
+    ):
+        settings = server.qwen_settings(MagicMock(request=seed()), body())
+    capture_path = "/training-token-capture" if capture else ""
+    assert [route["baseUrl"] for route in settings["modelProviders"]["openai"]] == [
+        f"http://policy_model:9000/ng-rollout/rollout-1{capture_path}/v1",
+        f"http://worker_model:9000/ng-rollout/rollout-1{capture_path}/v1",
+    ]
+
+
 @pytest.mark.parametrize(
     ("request_seed", "reason"),
     [
