@@ -14,10 +14,12 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 from app import (
     Ether0ResourcesServer,
     Ether0VerifyRequest,
 )
+from graders import EVAL_FUNCTIONS
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
@@ -79,6 +81,53 @@ class TestVerify:
         )
         result = await server.verify(req)
         assert result.reward == 1.0
+
+    def test_fixed_graders_registered(self) -> None:
+        assert EVAL_FUNCTIONS["str_eval"].__module__ == "graders"
+        assert EVAL_FUNCTIONS["sol_eval"].__module__ == "graders"
+
+    @pytest.mark.parametrize(
+        ("prediction", "expected"),
+        [
+            pytest.param("CCO", 1.0, id="exact"),
+            pytest.param("OCC", 1.0, id="same-molecule-other-smiles"),
+            pytest.param("CCN", 0.0, id="different-molecule"),
+            pytest.param("ethanol", 0.0, id="text-for-molecule-reference"),
+        ],
+    )
+    async def test_str_eval_compares_molecules(self, prediction: str, expected: float) -> None:
+        server = _make_server()
+        req = _make_request(
+            f"<answer>{prediction}</answer>", "str_eval!:!CCO!:!property-cat-safety", "property-cat-safety"
+        )
+        result = await server.verify(req)
+        assert result.reward == expected
+
+    async def test_str_eval_text_reference(self) -> None:
+        server = _make_server()
+        req = _make_request(
+            "<answer>Suzuki Coupling</answer>", "str_eval!:!suzuki coupling!:!reaction-name", "reaction-name"
+        )
+        result = await server.verify(req)
+        assert result.reward == 1.0
+
+    @pytest.mark.parametrize(
+        ("prediction", "expected"),
+        [
+            pytest.param("CC(=O)Oc1ccccc1C(=O)O", 1.0, id="exact"),
+            pytest.param("CC(=O)Oc1ccccc1C(=O)O.[Na+]", 1.0, id="extra-valid-salt-component"),
+            pytest.param("CC(=O)Oc1ccccc1C(=O)O.CCO", 1.0, id="smaller-valid-second-component"),
+            pytest.param("CC(=O)Oc1ccccc1C(=O)O.", 0.0, id="empty-fragment"),
+            pytest.param("CC(=O)Oc1ccccc1C(=O)O.Q", 0.0, id="invalid-fragment"),
+            pytest.param("CC(=O)Oc1ccccc1C(=O)O.CC(=O)Oc1ccccc1C(=O)OC", 0.0, id="hedged-larger-candidate-graded"),
+        ],
+    )
+    async def test_product_eval_validates_every_fragment(self, prediction: str, expected: float) -> None:
+        server = _make_server()
+        solution = "product_eval!:!CC(=O)Oc1ccccc1C(=O)O!:!reaction-prediction"
+        req = _make_request(f"<answer>{prediction}</answer>", solution, "reaction-prediction")
+        result = await server.verify(req)
+        assert result.reward == expected
 
     async def test_str_eval_wrong(self) -> None:
         server = _make_server()
