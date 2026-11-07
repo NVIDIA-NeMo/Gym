@@ -157,8 +157,7 @@ def test_converts_supported_rows_and_lists_the_rest(converted: tuple[Path, dict]
         "swe_rebench__octo__gadget-9",
     ]
     assert manifest["skipped"] == [{"line": 3, "source": "swemer_v1", "instance_id": "delivery__iceberg-1"}]
-    assert "CR line endings" in manifest["converted"][0]["note"]
-    assert "note" not in manifest["converted"][1]
+    assert "tests/nemo_gym/grade.py" in manifest["converted"][0]["verifier_file_sha256"]
     assert manifest["swe_rebench_log_parsers_commit"] == _git(
         "-C", str(parser_cache / "SWE-rebench-V2"), "rev-parse", "HEAD"
     )
@@ -193,9 +192,9 @@ def test_tasks_load_with_gyms_harbor_loader(
     server = convert.server_config(source)
     resources = server["sandbox_config"]["resources"]
     prompt = row["responses_create_params"]["input"][0]["content"]
-    # Gym reads instruction.md as text: the file holds the prompt byte for byte, the agent gets LF line endings.
+    # Both the stored instruction and the prompt presented to the agent keep the source bytes.
     assert (task_dir / "instruction.md").read_bytes() == prompt.encode()
-    assert loaded.instruction == prompt.replace("\r\n", "\n")
+    assert loaded.instruction == prompt
     assert len(loaded.overlay) == 1
     encoded = re.search(r"printf '%s' '([A-Za-z0-9+/=]+)'", loaded.overlay[0].command).group(1)
     assert base64.b64decode(encoded).decode() == (task_dir / "environment/setup.sh").read_text()
@@ -352,6 +351,7 @@ def test_swe_rebench_grader_uses_the_servers_parser_lookup(
     grader.main([*argv, "--logs", str(tmp_path / "logs-unknown")])
     verdict = json.loads((tmp_path / "logs-unknown/reward.json").read_text())
     assert (verdict["reward"], verdict["evaluation_completed"]) == (0.0, 0.0)
+    assert verdict["infrastructure_failure"] == 1.0
     assert "parse_log_unknown" in json.loads((tmp_path / "logs-unknown/grading.json").read_text())["error"]
 
 

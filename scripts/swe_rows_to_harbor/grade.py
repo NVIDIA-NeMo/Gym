@@ -150,7 +150,7 @@ def grade_swe_rebench(task: dict[str, Any], patch: str, pristine: list[str], roo
     try:
         parser = parsers.resolve_parser(inputs.log_parser, HERE / SWE_REBENCH_PARSER_CACHE)
     except Exception as exc:
-        # The server answers before spending a sandbox: an unknown parser is a 0 without a verdict.
+        # The server masks this inconclusive verification rather than measuring a task failure.
         result = v.VerificationResult(
             completed=False,
             resolved=False,
@@ -187,6 +187,8 @@ def main(argv: list[str] | None = None) -> int:
     # Newer servers also tell an infrastructure failure from a verdict; report it where the module can say.
     infrastructure_failure = getattr(module, "infrastructure_failure", None)
     infrastructure_reason = infrastructure_failure(result) if callable(infrastructure_failure) else None
+    if not result.completed:
+        infrastructure_reason = infrastructure_reason or result.error or "verification incomplete"
 
     verdict = {
         "reward": 1.0 if result.resolved else 0.0,

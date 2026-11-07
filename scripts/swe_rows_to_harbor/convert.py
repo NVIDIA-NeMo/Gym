@@ -249,6 +249,8 @@ class SWERebenchAdapter(SourceAdapter):
         # The server's own fetch: a shallow clone of upstream's default branch, once per cache.
         self.log_parsers._clone_locked(self.parser_repo)
         self.parser_commit = _git(self.parser_repo, "rev-parse", "HEAD")
+        if _git(self.parser_repo, "status", "--porcelain", "--untracked-files=no"):
+            raise ValueError(f"Parser checkout has modified tracked files: {self.parser_repo}")
 
     def plan(self, row: dict[str, Any]) -> TaskPlan:
         workdir = self.verification.repo_directory(row["repo"])
@@ -299,6 +301,7 @@ class SWERebenchAdapter(SourceAdapter):
             extra_task_json={
                 "overwrite_maven_settings": bool(self.config.get("overwrite_maven_settings", True)),
                 "log_parsers_upstream_commit": self.parser_commit,
+                "log_parsers_upstream_repo": self.log_parsers.UPSTREAM_REPO,
             },
         )
 
@@ -534,9 +537,12 @@ def convert(
             metadata["source_task_id"] = dict(task_id)
         write_task(plan, output_dir / name, agent_timeout_sec=agent_timeout_sec, metadata=metadata)
         entry = {"task": name, "line": number, "source": source, "instance_id": plan.instance_id}
-        if "\r" in plan.prompt:
-            # Gym reads instruction.md as text, which turns CRLF into LF: the agent sees LF line endings.
-            entry["note"] = "prompt has CR line endings; Gym's instruction.md reader turns them into LF"
+        entry["prompt_sha256"] = hashlib.sha256(plan.prompt.encode("utf-8")).hexdigest()
+        entry["verifier_file_sha256"] = {
+            path.relative_to(output_dir / name).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted((output_dir / name / "tests").rglob("*"))
+            if path.is_file()
+        }
         converted.append(entry)
 
     (output_dir / "dataset.toml").write_text(
@@ -556,6 +562,14 @@ def convert(
         "gym_commit": _git(REPO_ROOT, "rev-parse", "HEAD"),
         "gym_dirty": bool(_git(REPO_ROOT, "status", "--porcelain")),
         "swe_rebench_log_parsers_commit": getattr(adapters.get("swe_rebench"), "parser_commit", None),
+        # Use the same cache for the source resource server; never resolve upstream main again for that arm.
+        "swe_rebench_log_parser_cache_dir": str(adapters["swe_rebench"].parser_repo.parent.resolve())
+        if "swe_rebench" in adapters
+        else None,
+        "harbor_server_overrides": {
+            "verifier_completion_key": "evaluation_completed",
+            "inconclusive_verification_retries": 1,
+        },
         "agent_timeout_sec": agent_timeout_sec,
         # None: each task keeps its server's own evaluation_timeout.
         "evaluation_timeout_sec": evaluation_timeout_sec,
