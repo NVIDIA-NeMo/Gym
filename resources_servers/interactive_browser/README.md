@@ -85,6 +85,24 @@ fully scanned, and the observation says so.
 `final_url` / `url_contains` / `dom_contains` / `answer_equals`. Sparse 0/1 outcome
 reward by default (least reward-hackable); extend `_score()` with new keys as needed.
 
+`url_contains` matches only an `http`, `https` or `file` page, so a `data:` or
+`about:` URL the policy navigates to cannot satisfy it. A value containing `/`,
+`?`, `#` or `=` names part of a URL and is matched as a substring of the whole
+URL. Any other value is a name:
+
+- a domain such as `iana.org` must be the host of an `http` or `https` page,
+  or a parent domain of that host;
+- a file such as `about.html` (a dotted name ending in a page suffix like `html`
+  or `php`), or an undotted name such as `example-domains`, must be a whole path
+  segment.
+
+So text appended to a page's query or fragment cannot satisfy a name, and
+`iana.org` is not satisfied by `https://example.com/iana.org`. To match a bare word
+inside a query, a fragment or part of a segment, write the URL syntax around it:
+`q=shoes`, `#/settings`, `/checkout`. A path-segment name does not bind the host
+(`example-domains` is also met by `https://example.com/example-domains`), so use
+`final_url` when the host matters.
+
 A spec carrying none of those keys **raises** rather than scoring 0 — a misspelled
 key would otherwise give every rollout reward 0, which looks identical to a policy
 that never solves the task.
