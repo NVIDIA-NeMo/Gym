@@ -61,6 +61,7 @@ from nemo_gym.data.tasks.harbor.prepare import (
     AgentSelection,
     PreparedTaskset,
     build_run,
+    harness_output_limit,
     prepare_target,
     resolve_agent,
     run_images,
@@ -2487,6 +2488,39 @@ class TestCli:
         agent = AgentSelection(tmp_path / "agent.yaml", "hermes_agent", "hermes_agent", runs_in_sandbox=True)
         _, tokens = build_run(self._prepared(tmp_path), agent, sandbox=None, overrides=[override])
         assert [token for token in tokens if "use_absolute_ip" in token] == [override]
+
+    def test_resolve_agent_marks_harnesses_with_an_output_limit(self):
+        assert resolve_agent("opencode_agent").has_output_limit is True
+        assert resolve_agent("pi_agent").has_output_limit is True
+        assert resolve_agent("hermes_agent").has_output_limit is False
+        assert resolve_agent("terminus_2_sandboxed").has_output_limit is False
+
+    @pytest.mark.parametrize("flag", ["+responses_create_params.max_output_tokens=16384"])
+    def test_max_output_tokens_sets_the_harness_limit(self, tmp_path, flag):
+        """A task row takes no request overrides (the harness sends its own requests), so `--max-output-tokens`
+        becomes the harness's own `max_output_tokens` and leaves the collector's overrides."""
+        agent = resolve_agent("opencode_agent")
+        path, tokens = build_run(self._prepared(tmp_path), agent, sandbox="docker", overrides=[flag])
+        generated = yaml.safe_load(path.read_text())["harbor_ds_agent"]["responses_api_agents"]["opencode_agent"]
+        assert generated["max_output_tokens"] == 16384
+        assert not any(token.lstrip("+").startswith("responses_create_params.") for token in tokens)
+
+    @pytest.mark.parametrize(
+        ("agent_name", "value", "message"),
+        [
+            ("hermes_agent", "16384", "hermes_agent has no `max_output_tokens` setting"),
+            ("opencode_agent", "0", "must be a positive integer"),
+            ("opencode_agent", "lots", "must be a positive integer"),
+        ],
+    )
+    def test_max_output_tokens_is_refused_when_it_cannot_apply(self, agent_name, value, message):
+        agent = resolve_agent(agent_name)
+        with pytest.raises(ValueError, match=message):
+            harness_output_limit([f"+responses_create_params.max_output_tokens={value}"], agent)
+
+    def test_max_output_tokens_is_ignored_for_the_oracle(self):
+        agent = resolve_agent("harbor_oracle")
+        assert harness_output_limit(["+responses_create_params.max_output_tokens=16"], agent) is None
 
     def test_build_run_merges_caller_overlays_after_component_defaults(self, tmp_path):
         """A later config_paths entry wins and replaces lists, so a run overlay must come after the
