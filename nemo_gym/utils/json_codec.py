@@ -85,7 +85,13 @@ def loads_json(data: bytes | bytearray | memoryview | str) -> Any:
     Raises:
         orjson.JSONDecodeError: ``data`` is not valid JSON. A body both parsers reject raises ``orjson``'s error.
     """
-    if _may_hold_wide_integer(data):
+    if type(data) is bytes:
+        # Replies and record lines arrive as bytes: check them inline, without the type dispatch below.
+        classes = data.translate(_BYTE_CLASSES)
+        wide = classes.rfind(_INTEGER_START) >= 0 or classes.startswith(_INTEGER_START[1:])
+    else:
+        wide = _may_hold_wide_integer(data)
+    if wide:
         return _loads_stdlib(data, None)
     try:
         return orjson.loads(data)
