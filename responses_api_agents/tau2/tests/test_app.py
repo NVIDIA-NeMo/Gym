@@ -245,6 +245,27 @@ class TestApp:
 
         assert create_chat_completion.await_count == 1
 
+    @pytest.mark.parametrize(
+        "arguments",
+        [
+            # Valid JSON that json.loads refuses with a plain ValueError: Python's integer digit limit is 4,300.
+            pytest.param('{"account_id": ' + "9" * 5000 + "}", id="integer-over-digit-limit"),
+            pytest.param("[" * 100_000 + "]" * 100_000, id="nesting-over-recursion-limit"),
+        ],
+    )
+    async def test_tool_argument_validation_rejects_arguments_json_cannot_decode(self, arguments: str) -> None:
+        response = self._chat_completion(arguments)
+        client = Tau2ToolValidatingAsyncOpenAI(base_url="http://model/v1", api_key="dummy")  # pragma: allowlist secret
+
+        with patch(
+            "nemo_gym.client.openai_client.NeMoGymAsyncOpenAI.create_chat_completion",
+            AsyncMock(return_value=response),
+        ) as create_chat_completion:
+            with pytest.raises(Tau2MalformedToolCallError, match="function.arguments cannot be decoded"):
+                await client.create_chat_completion(model="model", messages=[])
+
+        assert create_chat_completion.await_count == 1
+
     @pytest.mark.parametrize("arguments", ['{"account_id": "123"}', None])
     async def test_tool_argument_validation_passes_valid_and_no_tool_responses_without_retry(
         self, arguments: Optional[str]
