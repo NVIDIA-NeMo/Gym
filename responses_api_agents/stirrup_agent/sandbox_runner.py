@@ -193,6 +193,28 @@ class TaskTools(ToolProvider):
         pass
 
 
+VIEW_IMAGE_DESCRIPTION = "View an image file (PNG, JPEG, GIF, WebP, BMP or TIFF) in the workspace."
+
+
+class WorkspaceImages(ToolProvider):
+    """The ``view_image`` tool: the model looks at an image file in the working directory.
+
+    Stirrup answers the call with the file's pixels as an image block (``LocalShell.view_image``), which its agent
+    sends to the model in a user message after the tool's text answer (``text_only_tool_responses``), re-encoded as a
+    PNG of at most one megapixel (``ImageContentBlock.to_base64_url``). A missing file, or one that is no image, is a
+    failed call whose message says why, and no image reaches the model.
+    """
+
+    def __init__(self, shell: LocalShell) -> None:
+        self._shell = shell
+
+    async def __aenter__(self) -> Tool:
+        return self._shell.get_view_image_tool(description=VIEW_IMAGE_DESCRIPTION)
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        pass
+
+
 def _report_invalid_arguments() -> None:
     """Answer a rejected call as Stirrup answers arguments that fail local validation (see ``nemo_client``)."""
     import stirrup.core.agent as stirrup_agent
@@ -405,6 +427,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             max_turns=payload["max_turns"],
             tools=[
                 *([shell] if payload["code_exec"] else []),
+                *([WorkspaceImages(shell)] if payload.get("view_image") else []),
                 TaskTools([tool for tool in task_tools if tool.name not in (finish_names or [])]),
             ],
             finish_tool=[tool for tool in task_tools if tool.name in finish_names] if finish_names else None,
