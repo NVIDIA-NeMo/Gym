@@ -46,7 +46,7 @@ def parse_events(text: str) -> tuple[list[tuple[float, dict[str, Any]]], int]:
     """Return the recorded ``(seen_at, event)`` pairs and the number of malformed lines skipped."""
     events: list[tuple[float, dict[str, Any]]] = []
     malformed = 0
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if not line.strip():
             continue
         try:

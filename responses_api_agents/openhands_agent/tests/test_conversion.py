@@ -354,3 +354,26 @@ def test_condensation_records_its_summary_call_and_neighbors():
     assert compaction.after_model_call.response_id == "r2"
     # The summary call belongs to the compaction, not to a policy step of the invocation.
     assert [call.response_id for call in evidence.records[0].model_calls] == ["r1", "r2"]
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("ensure_ascii", [False, True])
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"])
+def test_jsonl_keeps_unicode_message_and_model_call_identity(separator, ensure_ascii, line_ending):
+    value = f"before{separator}after"
+    message = {
+        "kind": "MessageEvent",
+        "source": "agent",
+        "llm_response_id": "response-unicode",
+        "llm_message": {"content": [{"type": "text", "text": value}]},
+    }
+    action_event = action("unicode-call", "response-action", thought=value, command=value)
+    stdout = line_ending.join(json.dumps([1.5, event], ensure_ascii=ensure_ascii) for event in (message, action_event))
+    events, malformed = parse_events(stdout + line_ending)
+    assert malformed == 0
+    assert len(events) == 2
+    assert [event["llm_response_id"] for _, event in events] == ["response-unicode", "response-action"]
+    items = output_items(events)
+    assert [item.content[0].text for item in items if item.type == "message"] == [value, value]
+    call = next(item for item in items if item.type == "function_call")
+    assert call.call_id == "unicode-call" and json.loads(call.arguments)["command"] == value
