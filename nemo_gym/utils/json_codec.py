@@ -180,7 +180,7 @@ def _json_ready(value: Any, default: Callable[[Any], Any] | None) -> Any:
     if type(value) is float:
         return value if math.isfinite(value) else None
     if isinstance(value, dict):
-        if any(not isinstance(key, str) for key in value):
+        if any(type(key) is not str for key in value):  # ``orjson`` refuses str subclasses as keys too
             raise TypeError("Dict key must be str")
         return {key: _json_ready(item, default) for key, item in value.items()}
     if isinstance(value, list) or type(value) is tuple:

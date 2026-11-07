@@ -82,7 +82,7 @@ def test_values_orjson_rejects_round_trip_exactly(value: object, encoded: str, d
 
     assert data == encoded.encode("utf-8")
     data.decode("utf-8")  # valid UTF-8, even with a lone surrogate in the value
-    assert loads_json(data) == decoded
+    assert repr(loads_json(data)) == repr(decoded)  # == alone accepts the float 2**70
     assert json.loads(data) == decoded
 
 
@@ -94,7 +94,9 @@ def test_fallback_honors_sort_keys_indent_and_newline() -> None:
 
     narrow = {"b": 1, "a": {"d": 1, "c": [2]}}
     assert data == orjson.dumps(narrow, option=option).replace(b'"b": 1', b'"b": ' + str(WIDE).encode())
-    assert loads_json(data) == value
+    decoded = loads_json(data)
+    assert decoded == value
+    assert type(decoded["b"]) is int  # == alone accepts the float 2**70
 
 
 def test_fallback_writes_other_types_as_orjson_does() -> None:
@@ -144,7 +146,7 @@ def test_nesting_deeper_than_orjson_allows_round_trips() -> None:
     for _ in range(300):
         value = [value]
 
-    assert loads_json(dumps_json(value)) == value
+    assert repr(loads_json(dumps_json(value))) == repr(value)
 
 
 @pytest.mark.parametrize(
@@ -329,3 +331,54 @@ async def test_a_lone_surrogate_reaches_the_resources_server_intact(tool_server_
 
     assert response.status == 200
     assert await get_response_json(response) == {"seen": {"s": ["str", ascii("a\ud800b")], "n": ["int", str(WIDE)]}}
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        # Token IDs and logprobs as replies carry them: long fractions and integers below 19 digits.
+        b'{"token_ids": [151643, 999999999999999999], "logprobs": [-0.00032186508178710937500, -1.5e-07]}',
+        b"[0.12345678901234567890123, -999999999999999999]",
+    ],
+)
+def test_common_bodies_never_take_the_standard_library_path(monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
+    def no_fallback(*args: object) -> object:
+        raise AssertionError("parsed with the standard library")
+
+    monkeypatch.setattr(json_codec, "_loads_stdlib", no_fallback)
+
+    assert loads_json(data) == orjson.loads(data)
+    assert loads_json(data.decode()) == orjson.loads(data)
+
+
+def test_an_invalid_body_holding_a_wide_integer_raises_orjsons_error() -> None:
+    with pytest.raises(orjson.JSONDecodeError) as raised:
+        loads_json(b"[1180591620717411303424,")
+
+    assert type(raised.value) is orjson.JSONDecodeError
+
+
+def test_a_str_holding_a_lone_surrogate_decodes() -> None:
+    assert loads_json('{"s": "a\ud800b"}') == {"s": "a\ud800b"}
+
+
+def test_nesting_deeper_than_the_standard_library_allows_raises_orjsons_error() -> None:
+    with pytest.raises(orjson.JSONDecodeError):
+        loads_json(b"[" * 100_000 + str(WIDE).encode() + b"]" * 100_000)
+
+
+def test_nan_in_a_tuple_beside_a_wide_integer_is_written_as_null() -> None:
+    assert dumps_json({"n": WIDE, "t": (NAN, 1)}) == b'{"n":1180591620717411303424,"t":[null,1]}'
+
+
+class _Key(enum.StrEnum):
+    A = "a"
+
+
+@pytest.mark.parametrize("key", [_Key.A, type("_Str", (str,), {})("a")], ids=["str-enum", "str-subclass"])
+def test_string_subclass_keys_are_refused_as_orjson_refuses_them(key: str) -> None:
+    with pytest.raises(orjson.JSONEncodeError):
+        orjson.dumps({key: 1})
+
+    with pytest.raises(orjson.JSONEncodeError):
+        dumps_json({key: 1, "n": WIDE})
