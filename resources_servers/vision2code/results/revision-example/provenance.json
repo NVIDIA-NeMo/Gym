@@ -1,0 +1,44 @@
+{
+  "task_id": "matplotlib_test_000060_913c88be98b1",
+  "policy": "Qwen3.8-27B",
+  "judge": "GPT-6.1-Sol",
+  "reward_mode": "linear",
+  "temperature": 0,
+  "max_output_tokens": 32768,
+  "source_run": "qwen27b_sol_20261028T192218Z/pass3",
+  "source_rollouts_sha256": "4171b64ed69b8f5a488a6921a300e0b3054989e540150429b0b3247c7591de70",
+  "reference": {
+    "file": "reference.png",
+    "sha256": "138536c0b556afb7f304576fcc9cdcc7aef08831cbe71cea4e1a165a5bd62f52",
+    "source_url": "https://matplotlib.org/stable/gallery/statistics/errorbar.html",
+    "dataset_source_id": "matplotlib:default:stable__gallery__statistics__errorbar:figure_000.png",
+    "license": "Matplotlib (see LICENSE.matplotlib)"
+  },
+  "selection": "One illustrative improving rollout, selected from saved outputs; not an aggregate or evidence that every revision improves. Images copied without alteration.",
+  "attempts": [
+    {
+      "pass": 1,
+      "reward": 0.78,
+      "image": "pass1.png",
+      "sha256": "1806fd8059dc649b2af3537821369774143836a0c69ab6a87f2ed821957234d4",
+      "source_artifact_id": "8d2c469698ba429c8099758fde56387c",
+      "feedback": "Feedback on your previous program:\nImprove on these:\n- Layout and Composition Fidelity: The single-panel composition is preserved, but the candidate axes are slightly narrower and noticeably shorter, leaving more bottom whitespace.\n- Plot Element Fidelity: The eight error-bar locations and declining trend are reproduced, but the reference's point-to-point line becomes a smooth curve extending beyond the data. Horizontal error bars are shorter, and added caps change their appearance.\n- Text, Ticks, and Annotations: Tick values and the absence of titles, labels, and legends match. Tick text is smaller, and its placement differs with the altered axes geometry.\n- Style and Rendering Fidelity: The blue plotting color and black frame are close, but the pale blue-gray background replaces white, strokes are thinner, and error-bar caps differ visibly.\nRevise the program to address this feedback and better match the original reference image. Return the complete replacement Python program, not a patch. Follow the original output requirements."
+    },
+    {
+      "pass": 2,
+      "reward": 0.8400000000000001,
+      "image": "pass2.png",
+      "sha256": "2c323425274f9a309ba265baeb94103c91a99ecc6233cd04e9514f3f93c4c3e9",
+      "source_artifact_id": "77653e519acd4ce89a8291d04a94fe79",
+      "feedback": "Feedback on your previous program:\nImprove on these:\n- Layout and Composition Fidelity: The single-panel composition is preserved, but the axes begin farther right and end higher, with slightly different vertical limits shifting the plotted content upward.\n- Plot Element Fidelity: The descending line and eight vertical error bars closely match the reference data, but horizontal error bars are substantially shorter and endpoint caps are added throughout.\n- Text, Ticks, and Annotations: Tick values, formatting, and absence of titles or legends match. Tick placement differs slightly with the altered axes geometry.\n- Style and Rendering Fidelity: The blue color, white background, black frame, and typography are close. Slightly thinner plotted strokes and added error-bar caps reduce rendering fidelity.\nRevise the program to address this feedback and better match the original reference image. Return the complete replacement Python program, not a patch. Follow the original output requirements."
+    },
+    {
+      "pass": 3,
+      "reward": 0.9199999999999999,
+      "image": "pass3.png",
+      "sha256": "a2ec4544380abf56cb654c6ec4f990fbb7d90271fdf4de4349ede090bdbc3708",
+      "source_artifact_id": "ebe6d3f7b13d46d990bd37f420336d48",
+      "feedback": "Feedback on your previous program:\nImprove on these:\n- Layout and Composition Fidelity: The single-panel composition is preserved, but the axes extend farther left and upward, and different limits spread the points horizontally and reduce clearance beneath the error bars.\n- Plot Element Fidelity: All eight points, the descending connecting line, and vertical error bars are present. Horizontal bars are noticeably shorter, and the lower-valued points sit slightly below their reference values.\n- Text, Ticks, and Annotations: Tick values, formatting, and the absence of titles, labels, and legends match. Tick positions shift slightly with the changed axes geometry.\n- Style and Rendering Fidelity: The blue color, solid lines, white background, black spines, and tick typography closely resemble the reference.\nRevise the program to address this feedback and better match the original reference image. Return the complete replacement Python program, not a patch. Follow the original output requirements."
+    }
+  ]
+}

@@ -1,0 +1,43 @@
+{
+  "description": "Five synthetic examples collected with real policy and judge calls and Enroot rendering on the PR worktree. Local artifact paths, execution diagnostics, and timings removed from committed rollouts.",
+  "policy": "nvidia/qwen/qwen3.8-27b",
+  "judge": "nvidia/qwen/qwen3.8-flash-next",
+  "temperature": 0.0,
+  "max_output_tokens": 8192,
+  "num_passes": 1,
+  "reward_power": 2.0,
+  "use_blended_reward": false,
+  "source_rollouts_sha256": "6fc4d592f49617c3836fb63e05d681e18ce60639ba968b61d9112d6bf2345574",
+  "results": [
+    {
+      "id": "example",
+      "reward": 0.9604000000000001,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "example-shapes",
+      "reward": 0.9604000000000001,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "example-line",
+      "reward": 1.0,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "example-triangle",
+      "reward": 0.9604000000000001,
+      "mask_sample": false,
+      "render_status": "ok"
+    },
+    {
+      "id": "example-graph",
+      "reward": 1.0,
+      "mask_sample": false,
+      "render_status": "ok"
+    }
+  ]
+}
