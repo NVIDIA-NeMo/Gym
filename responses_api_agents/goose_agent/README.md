@@ -4,8 +4,11 @@ Runs [Goose](https://github.com/aaif-goose/goose) **1.54.0** (Apache-2.0) headle
 task sandbox. The Environment Server seeds the Resources and agent sessions, activates Goose once, closes the agent,
 verifies the task, and closes Resources. Goose runs its own tools and calls a Gym Model Server for inference.
 
-Capability level: **Evaluation**. The adapter returns the root session as Responses items and an observation bundle
-with explicit gaps. Token IDs are not captured.
+The adapter returns the root session as Responses items and an observation bundle with explicit gaps.
+
+Training token-ID capture is off by default. Goose's model calls go to the Gym Model Server under the rollout's
+prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 Goose's native subagents come from its built-in `summon` extension: the `delegate` tool runs a subagent in its own
 session, synchronously or with `async: true` followed by `load(task_id)`. Several delegate calls in one turn run

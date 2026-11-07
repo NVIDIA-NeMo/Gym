@@ -370,3 +370,17 @@ async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
     assert response.status == "incomplete"
     assert response.output[-1].content[0].text == "Done."
     assert close.agent_observations.records[1].outcome == "timeout"
+
+
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_goose_model_calls_to_capture(capture):
+    server = agent(token_id_capture=capture)
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    server.server_client._build_server_base_url.return_value = "http://model:9000"
+    with patch("nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict", return_value={}):
+        # The same call that sets Goose's OPENAI_BASE_URL for an activation.
+        url = server.model_endpoint(
+            model_server=server.config.model_server, rollout_id=seed().episode_id.capture_key
+        ).base_url
+    capture_path = "/training-token-capture" if capture else ""
+    assert url == f"http://model:9000/ng-rollout/rollout-1{capture_path}/v1"
