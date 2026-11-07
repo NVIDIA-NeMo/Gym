@@ -1,5 +1,16 @@
 # Complete Nemotron 3 Nano Omni OSWorld profile: the upstream agent scaffold,
 # the external vLLM transport, and Gym Docker Sandbox execution.
+#
+# The sampling, step and history values below are the tested recipe for
+# Nemotron 3 Nano Omni (Omni v3), checkpoint revision
+# 24e67ea000b7c2837fc8f9488aa2008524fac8ba. They reproduce the reference scores
+# only when vLLM serves that checkpoint as described under "Serve the
+# checkpoint" in benchmarks/osworld/README.md: chat template SHA-256
+# ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862 rendered
+# with truncate_history_thinking=true, and the nano_v3 reasoning parser.
+# Other Nemotron generations ship their own
+# tokenizer, chat template and reasoning parser; validate this profile before
+# using it with one.
 config_paths:
   - responses_api_agents/osworld_agent/configs/osworld_agent.yaml
 
@@ -21,7 +32,11 @@ policy_model:
       replace_developer_role_with_system: false
       sequential_reasoning_allowed: true
       is_responses_native: false
-      chat_template_kwargs: null
+      # The tested recipe renders earlier assistant turns without their reasoning,
+      # which is the template's own default. Pin it, so that a different template
+      # or caller default cannot change the model input unnoticed.
+      chat_template_kwargs:
+        truncate_history_thinking: true
       extra_body: null
       default_headers: {}
 
