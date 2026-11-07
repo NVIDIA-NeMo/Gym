@@ -10,6 +10,7 @@ import shutil
 import sys
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from fastapi import HTTPException
 
 from nemo_gym.agents import (
     AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedRejectedError,
     AgentSeedSessionRequest,
     SandboxSession,
     check_agent_seed_rejected,
@@ -203,7 +205,8 @@ def test_config_routes_every_model_through_the_rollout_and_keeps_its_providers()
     assert config["providers"]["policy"]["base_url"] == "http://policy_model/ng-rollout/rollout-1/v1"
     assert config["providers"]["subagent"]["base_url"] == "http://lightning/ng-rollout/rollout-1/v1"
     assert config["secondary_model"] == {"default_model": "subagent", "force": True}
-    assert {"Agent", "AgentSwarm"} <= set(config["tools"]["disabled"])
+    # Web tools stay off by default.
+    assert {"Agent", "AgentSwarm", "WebSearch", "FetchURL"} <= set(config["tools"]["disabled"])
     assert config["extra"] == {"x": 1}
 
 
@@ -232,6 +235,74 @@ def test_unsupported_seeds_are_final_refusals(request_seed, reason):
     server = agent()
     assert check_agent_seed_rejected(server.setup_webserver(), request_seed) == reason
     assert not server._session_records
+
+
+@pytest.mark.parametrize(
+    ("network_access", "borrowed", "reason"),
+    [
+        ("model_only", True, "Kimi Code network_access applies only to a sandbox it creates, not a borrowed one"),
+        ("model_and_tools", False, "Kimi Code uses no tool grants; set network_access to model_only or inherit"),
+    ],
+)
+def test_network_access_refusals(network_access, borrowed, reason):
+    server = agent(network_access=network_access, sandbox_provider="sandbox")
+    assert check_agent_seed_rejected(server.setup_webserver(), seed(borrowed=borrowed)) == reason
+
+
+@pytest.fixture
+def owned_sandbox(monkeypatch):
+    import responses_api_agents.kimi_code_agent.app as module
+
+    remote = MagicMock(
+        sandbox_id="owned", start=AsyncMock(), exec=AsyncMock(return_value=SandboxExecResult("", "", 0))
+    )
+    monkeypatch.setattr(module, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(
+        module, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    )
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
+    monkeypatch.setattr(module, "resolve_provider_metadata", lambda *args: {})
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(KimiSession, "install", AsyncMock())
+    hosts = {"policy_model": "model.example", "lightning": "model.example", "elsewhere": "other.example"}
+    monkeypatch.setattr(
+        KimiCodeAgent, "resolve_model_base_url", lambda self, name, **kwargs: f"http://{hosts[name]}:9000/v1"
+    )
+    return remote
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("network_access", "subagent_server", "policy"),
+    [
+        ("inherit", "elsewhere", None),
+        ("model_only", None, {"defaultAction": "deny", "egress": [{"action": "allow", "target": "model.example"}]}),
+        # A subagent server on the same host as the root's needs no extra rule.
+        (
+            "model_only",
+            "lightning",
+            {"defaultAction": "deny", "egress": [{"action": "allow", "target": "model.example"}]},
+        ),
+    ],
+)
+async def test_owned_sandbox_egress_allows_only_the_model_host(owned_sandbox, network_access, subagent_server, policy):
+    subagent = (
+        {"subagent_model_server": {"type": "responses_api_models", "name": subagent_server}} if subagent_server else {}
+    )
+    server = agent(network_access=network_access, sandbox_provider="sandbox", subagent_model="child", **subagent)
+    await server._seed_agent_session_state(seed(borrowed=False))
+    assert owned_sandbox.start.await_args.args[0].provider_options.get("network_policy") == policy
+
+
+@pytest.mark.asyncio
+async def test_model_only_refuses_a_subagent_server_on_another_host(owned_sandbox):
+    subagent = {"type": "responses_api_models", "name": "elsewhere"}
+    server = agent(
+        network_access="model_only", sandbox_provider="sandbox", subagent_model="child", subagent_model_server=subagent
+    )
+    with pytest.raises(AgentSeedRejectedError, match="subagent_model_server is on another"):
+        await server._seed_agent_session_state(seed(borrowed=False))
+    owned_sandbox.start.assert_not_awaited()
 
 
 def test_request_mapping_and_refusals():

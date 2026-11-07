@@ -55,11 +55,12 @@ gym eval run --no-serve \
 | `max_steps_per_turn`, `print_max_turns` | `null` | Kimi's `loop_control.max_steps_per_turn` and `background.print_max_turns`. |
 | `thinking_effort` | `null` | Kimi's `thinking.effort`. |
 | `max_context_size` | `262144` | The model's context window, for Kimi's compaction. |
-| `disabled_tools`, `permission_rules` | Cron tools, `[]` | Kimi tool and permission settings. |
+| `disabled_tools`, `permission_rules` | Cron and web tools, `[]` | Kimi tool and permission settings. `WebSearch` and `FetchURL` are off by default, so tasks are solved without looking answers up online; drop them from the list to turn web access on. |
 | `kimi_config` | `{}` | Merged under the generated `config.toml`; the providers, models and tool settings above win. |
 | `timeout` | `7200` | Seconds per activation, enforced by the sandbox's process supervisor. Task `agent_timeout_sec` metadata can shorten it. |
 | `sandbox_install_timeout_seconds`, `session_close_timeout_seconds` | `900`, `60` | Setup and per-phase close bounds. |
 | `sandbox_provider`, `sandbox_config` | `null`, `{}` | Agent-owned sandbox, only when Resources supplies no `SandboxAccess`. |
+| `network_access` | `inherit` | Egress of an agent-owned sandbox; `model_only` allows only the model servers' host. |
 
 ## Runtime and sandbox setup
 
@@ -74,6 +75,13 @@ Kimi runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` unde
 global `AGENTS.md`, sessions and logs live under `KIMI_CODE_HOME` in a private session directory, so tool shells keep
 the task's `HOME`. `SandboxAccess.env` is forwarded, except `KIMI_*`, `OPENAI_*` and `MOONSHOT_*` variables. Close
 removes only the session directory.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model servers' host (every port). The agent server uploads Kimi, so setup needs no
+other host. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit`, as does a provider without network policies, an explicit
+`sandbox_config.provider_options.network_policy`, or a `subagent_model_server` on another host. Kimi Code uses no tool
+grants, so `model_and_tools` is rejected. Each refusal fails the seed with HTTP 422.
 
 ## Requests, results and outcomes
 

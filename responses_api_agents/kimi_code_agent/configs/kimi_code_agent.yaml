@@ -26,7 +26,7 @@ kimi_code_agent:
       # Kimi K3 accepts low, high and max only.
       thinking_effort: null
       max_context_size: 262144
-      disabled_tools: [CronCreate, CronList, CronDelete]
+      disabled_tools: [CronCreate, CronList, CronDelete, WebSearch, FetchURL]
       permission_rules: []
       kimi_config: {}
       concurrency: 32
@@ -37,3 +37,4 @@ kimi_code_agent:
       # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
       sandbox_provider: null
       sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host
