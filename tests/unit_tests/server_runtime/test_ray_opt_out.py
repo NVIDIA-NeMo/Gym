@@ -52,6 +52,8 @@ INHERITED_RAY_DECLARATIONS = {
     ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
+    # Serves agent sessions only and refuses /run; app.py keeps Ray for the SWE-Gym /run path.
+    ("responses_api_agents/mini_swe_agent/sessions_app.py", "MiniSWESessionsAgent"): False,
 }
 
 

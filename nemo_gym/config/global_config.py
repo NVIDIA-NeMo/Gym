@@ -226,6 +226,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "hermes_agent",
         "langgraph_agent",
         "kilocode_agent",
+        "mini_swe_agent",
         "miniswe_sandboxed_agent",
         "nooa_agent",
         "openclaw_agent",
