@@ -1318,7 +1318,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                if message_dict.get("role") != "assistant":
+                    continue
+
+                # External harnesses can supply reasoning separately from content.
+                # Normalize that history too: newer vLLM ignores reasoning_content.
+                reasoning = message_dict.get("reasoning_content") or message_dict.get("reasoning")
+                if reasoning and self.config.uses_interleaved_reasoning:
+                    message_dict.pop("reasoning_content", None)
+                    message_dict.pop("reasoning", None)
+                    _set_reasoning(message_dict, reasoning, self.config.reasoning_field)
+
+                if "content" not in message_dict:
                     continue
 
                 content = message_dict["content"]
