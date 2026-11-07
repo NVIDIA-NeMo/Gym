@@ -65,6 +65,7 @@ from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
+    MODEL_REQUEST_REJECTED,
     MODEL_TRANSPORT_ERROR,
     MediaFile,
     NeMoGymEasyInputMessage,
@@ -143,6 +144,8 @@ _INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
 _TESTED_OUTCOME_VERSION = "1.17.11"
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
+# Set by the adapter on the result it classifies: an earlier assistant turn of this run completed without error.
+_ANSWERED_BEFORE_KEY = "_ng_answered_before"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
@@ -462,6 +465,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             return AgentOutcome(failure_kind="unknown")
         data = error.get("data") or {}
         status = data.get("statusCode")
+        if status == 400 and not native_result.get(_ANSWERED_BEFORE_KEY):
+            # OpenCode reports a context overflow as its own error (above). A 400 on a run whose model never
+            # answered is a request the endpoint refuses as invalid, such as max_tokens above the model's cap: the
+            # run's configuration, not the model, is at fault. After real work, a 400 stays a graded request error.
+            return AgentOutcome(failure_kind=MODEL_REQUEST_REJECTED)
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if status is None and data.get("isRetryable") is True:
@@ -1948,7 +1956,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             usage=usage,
             error_message=reported_message,
         )
-        return self.report_outcome(response, native_result)
+        answered = any(not message.get("error") and message.get("finish") for message in assistants[:-1])
+        return self.report_outcome(response, {**native_result, _ANSWERED_BEFORE_KEY: answered})
 
 
 if __name__ == "__main__":
