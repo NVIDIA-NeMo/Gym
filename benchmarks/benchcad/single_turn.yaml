@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/benchcad/config.yaml
+benchcad_agent:
+  responses_api_agents:
+    benchcad_agent:
+      description: Single-turn CAD generation, editing, and numeric QA with native BenchCAD scoring
+      inference_mode: single_turn
+      single_turn_max_output_tokens: null
+      single_turn_timeout: 3600
+      results_dir: results/benchcad-single-turn
