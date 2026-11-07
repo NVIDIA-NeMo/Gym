@@ -1,0 +1,9 @@
+agent:
+  type: claude-code
+  effort: high
+  max_turns: 200
+model:
+  model_name: claude-opus-4-7
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}

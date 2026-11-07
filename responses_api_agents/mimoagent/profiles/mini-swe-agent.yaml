@@ -1,0 +1,13 @@
+agent:
+  type: mini-swe-agent
+  version: 2.4.6
+  reasoning_effort: xhigh
+  max_tokens: 65536
+  step_limit: 500
+  cost_limit: 0.0
+  command_timeout: 300
+model:
+  model_name: claude-opus-5
+  model_kwargs:
+    base_url: ${ANTHROPIC_BASE_URL:-https://api.anthropic.com}
+    api_key: ${ANTHROPIC_API_KEY:-}
