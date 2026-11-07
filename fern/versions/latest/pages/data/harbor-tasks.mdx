@@ -395,7 +395,10 @@ gym dataset pull harbor:terminal-bench@2.0                         # a registry 
 A **committed entry** is a folder `environments/harbor/<entry>/` the checkout keeps for one dataset: a README,
 deployment YAML overlays and a `dataset.toml` whose `[gym]` table declares `source`, the hub reference its task
 folders come from. `terminal_bench_4` declares `harbor:terminal-bench/terminal-bench@4.0.0`; `terminal_bench_2_1`
-pins the store's Terminal-Bench 2.1 by content hash, since the store tags it `latest` only. The pulled task
+pins the store's Terminal-Bench 2.1 by content hash, since the store tags it `latest` only. An entry may declare no
+`source` when a preparation script writes its task folders instead, as
+[SkillsBench's](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/skillsbench/README.md) does; such an entry is
+prepared locally, not pulled, and validate and run resolve its name the same way. The pulled task
 folders and `manifest.toml` are gitignored next to the committed files, and a pull of the declared reference
 itself lands in the same folder, so one dataset never lives in two sibling folders. The match is exact:
 `harbor:terminal-bench/terminal-bench` (the store's `latest`) is another reference and lands in

@@ -36,6 +36,7 @@ from nemo_gym.core import (
     current_rollout_id,
 )
 from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ChatCompletionsConverter, SimpleResponsesAPIModel
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -88,6 +89,7 @@ class InferenceProvider(SimpleResponsesAPIModel):
             responses_create_params=body,
             chat_completion=chat_completion_response,
         )
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         return response.model_copy(update={"created_at": int(time())})
 
     async def chat_completions(

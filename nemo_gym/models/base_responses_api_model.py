@@ -751,10 +751,14 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion_json = (
                 completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
             )
-            return await self._stream_served_response(
+            streamed = await self._stream_served_response(
                 completion_json,
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
+            if "usage" in completion_json:
+                # A client without stream_options.include_usage gets no usage chunk; capture records Gym's own usage.
+                request.state.nemo_gym_internal_usage = completion_json["usage"]
+            return streamed
 
         # The middleware resets the request's log before the body streams; keep this request's log object.
         failure_log = RequestFailureLog.current()

@@ -239,7 +239,7 @@ To see which agent harness a benchmark composes with, inspect it with `gym list 
 | Option | Description |
 | --- | --- |
 | `[<name>]` | Inspect a single benchmark (config path, manifest status, agent, datasets) instead of listing all. |
-| `--json` | Output the benchmark list as JSON. |
+| `--json` | Output the benchmark list as JSON, including the [catalog path fields](#gym-list-environments). |
 
 ```bash
 gym list benchmarks
@@ -260,7 +260,7 @@ List the manifest-first catalog unioned with legacy environment and benchmark co
 | `--domain`, `--modality`, `--licensing` | Filter by catalog metadata. |
 | `--status experimental\|no-manifest` | Filter by the experimental annotation or missing manifest. |
 | `--lifecycle active\|deprecated` | Filter by lifecycle. |
-| `--json` | Output catalog entries as JSON. |
+| `--json` | Output catalog entries as JSON, including the path fields described below. |
 
 ```bash
 gym list environments
@@ -268,6 +268,15 @@ gym list environments calendar        # inspect one environment
 gym list environments --kind benchmark --domain math
 gym list environments --json | jq '.[].name'
 ```
+
+The JSON output includes three path fields:
+
+- `path`: the entry's directory. Multiple entries can share this directory, so it is not a unique identifier.
+- `config_path`: the entry's config file. Use this field to locate the config; it is not necessarily inside `path`.
+- `manifest_path`: the entry's `manifest.yaml`, or `null` when the entry has no manifest.
+
+All non-null paths are absolute with symlinks resolved. A path reached through a symlink therefore uses its target's location in the output.
+For example, the config for `aalcr/config_v1_1` is `benchmarks/aalcr/config_v1_1.yaml`, beside its entry directory `benchmarks/aalcr/config_v1_1/`.
 
 ### `gym list agents`
 
@@ -325,7 +334,7 @@ Without a type, the command searches the unified environment and benchmark catal
 | --- | --- |
 | `[<type>]` | Optional component type: `benchmarks`, `environments`, `agents`, `models`, or `resources-servers`. |
 | `QUERY` | Text matched (substring or fuzzy) against a component's name, description, and key metadata (positional, required). |
-| `--json` | Output matches as JSON. |
+| `--json` | Output matches as JSON. Environment and benchmark matches include the [catalog path fields](#gym-list-environments). |
 
 ```bash
 gym search math                       # environments and benchmarks matching "math"
@@ -1007,7 +1016,7 @@ gym eval resubmit GYM_JOB_ID BENCHMARK [options]
 | `--acknowledge-failed-judge-jobs`, `--acknowledge-reason TEXT` | With `--recover`: after the last two judge-only jobs ended without settling a saved answer, allow exactly one more; journaled in `judge-job-acknowledgement-journal.jsonl`. |
 | `--score-key JSON`, `--score-agent NAME`, `--score-environment NAME` | With `--recover`: the metric path in the aggregate (a JSON list) and the entry it is read from, by `agent_ref.name` and `_ng_environment_server`. Without them the score gate reports the score as unavailable. |
 | `--mlflow-run-id ID`, `--mlflow-status STATUS` | With `--recover`: an MLflow run and the terminal status you read from the server. They perform no export. |
-| `--max-unhealthy-fraction F` | With `--recover`: the per-rollout health criterion, reported in warnings; it does not change the verdict. |
+| `--max-unhealthy-fraction F` | With `--recover`: the rollout quality criterion, reported in warnings; it does not change the verdict. |
 | `--max-response-failure-fraction F`, `--max-trial-failure-fraction F` | With `--recover`: reported under `criteria` with `applied: false`; they do not change the verdict. |
 | `--policy-timeout-counts-as-model true\|false` | With `--recover`: whether a policy-model response timeout is the model's fault (default `true`). |
 
