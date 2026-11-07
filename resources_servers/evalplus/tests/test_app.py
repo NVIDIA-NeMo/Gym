@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from typing import Generator
 from unittest.mock import MagicMock, patch
 
@@ -49,7 +50,7 @@ _MOCK_DATASET = {
     }
 }
 _MOCK_EXPECTED_OUTPUT = {
-    "HumanEval/0": {"base": [1], "plus": [2]},
+    "HumanEval/0": {"base": [1], "plus": [2], "base_time": [0.01], "plus_time": [0.01]},
 }
 
 
@@ -108,17 +109,32 @@ class TestExtractCode:
         assert extract_code_strict(text) == "y=2"
 
     def test_falls_back_to_generic_fence(self):
-        # Generic ``` fallback only kicks in when ```python is absent. Because
-        # we use rfind for parity with Skills' preprocess_code, a single
-        # generic fence pair has its closing fence as the "last" ``` and
-        # nothing follows it -> strict mode returns "". This matches Skills.
-        # When ```python is also present (the realistic case), the python
-        # fence wins via the prior rfind branch.
+        # Untagged code blocks are valid model output.
         text = "no language tag ```\nz=3\n```"
-        assert extract_code_strict(text) == ""
+        assert extract_code_strict(text) == "z=3"
+
+    def test_chooses_last_complete_generic_fence(self):
+        text = "```\nfirst=1\n```\nanswer:\n```\nfinal=2\n```"
+        assert extract_code_strict(text) == "final=2"
+
+    def test_prefers_python_fence_over_later_generic_fence(self):
+        text = "```python\nanswer=42\n```\n```\nscratch=0\n```"
+        assert extract_code_strict(text) == "answer=42"
 
     def test_strict_mode_no_closing_fence(self):
         text = "```python\nincomplete"
+        assert extract_code_strict(text) == ""
+
+    def test_strict_mode_no_closing_generic_fence(self):
+        text = "```\nincomplete"
+        assert extract_code_strict(text) == ""
+
+    def test_strict_mode_rejects_unclosed_last_python_fence(self):
+        text = "```python\nfirst=1\n```\n```python\nincomplete"
+        assert extract_code_strict(text) == ""
+
+    def test_strict_mode_rejects_unclosed_last_generic_fence(self):
+        text = "```\nfirst=1\n```\n```\nincomplete"
         assert extract_code_strict(text) == ""
 
     def test_no_fence_returns_empty(self):
@@ -149,6 +165,8 @@ class TestApp:
                     name="",
                     dataset="humaneval",
                     num_processes=1,
+                    min_time_limit=0.01,
+                    gt_time_limit_factor=0.1,
                 ),
                 server_client=MagicMock(spec=ServerClient),
             )
@@ -177,6 +195,36 @@ class TestApp:
         assert res.reward == 1.0
         assert res.is_correct is True
         assert res.is_correct_plus is True
+
+    async def test_verify_accepts_generic_code_fence(self, evalplus_client):
+        with (
+            patch(
+                "app.check_correctness_remote.remote",
+                side_effect=_remote_returns({"base_status": "pass", "plus_status": "pass"}),
+            ),
+            patch("app.ray.get", side_effect=_ray_get_returns({"base_status": "pass", "plus_status": "pass"})),
+        ):
+            resp = self._post_verify(evalplus_client, "```\ndef f(x):\n    return x\n```")
+            res = EvalPlusVerifyResponse.model_validate(resp.json())
+
+        assert res.reward == 1.0
+        assert res.extracted_model_code == "def f(x):\n    return x"
+
+    @pytest.mark.skipif(os.name != "posix", reason="EvalPlus watchdog timeout handling is POSIX-specific")
+    async def test_verify_preserves_timeout_and_ordinary_failure_status(self, evalplus_client):
+        timeout_response = self._post_verify(
+            evalplus_client,
+            "```python\ndef f(x):\n    return x\n\nwhile True:\n    pass\n```",
+        )
+        timeout_result = EvalPlusVerifyResponse.model_validate(timeout_response.json())
+
+        failure_response = self._post_verify(evalplus_client, "```python\ndef f(x):\n    return -x\n```")
+        failure_result = EvalPlusVerifyResponse.model_validate(failure_response.json())
+
+        assert timeout_result.base_status == "timeout"
+        assert timeout_result.reward == 0.0
+        assert failure_result.base_status == "fail"
+        assert failure_result.reward == 0.0
 
     async def test_verify_passes_base_fails_plus(self, evalplus_client):
         with (

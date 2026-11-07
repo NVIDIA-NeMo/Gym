@@ -23,6 +23,7 @@ The Ray runtime_env makes the worker use the server's venv Python and adds the s
 to PYTHONPATH so the package-less `evalplus_integration` module resolves.
 """
 
+import signal
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -58,18 +59,27 @@ def check_correctness_remote(
     """
     from evalplus.evaluate import check_correctness
 
-    result = check_correctness(
-        dataset=dataset,
-        completion_id=0,
-        problem=problem,
-        solution=solution,
-        expected_output=expected_output,
-        base_only=False,
-        fast_check=False,
-        identifier=problem.get("task_id"),
-        min_time_limit=min_time_limit,
-        gt_time_limit_factor=gt_time_limit_factor,
-    )
+    sigterm_handler = signal.getsignal(signal.SIGTERM)
+    if sys.platform != "win32":
+        # EvalPlus catches BaseException in its watchdog child; inherit the default
+        # SIGTERM action so its timeout is not recorded as an ordinary failure.
+        signal.signal(signal.SIGTERM, signal.SIG_DFL)
+    try:
+        result = check_correctness(
+            dataset=dataset,
+            completion_id=0,
+            problem=problem,
+            solution=solution,
+            expected_output=expected_output,
+            base_only=False,
+            fast_check=False,
+            identifier=problem.get("task_id"),
+            min_time_limit=min_time_limit,
+            gt_time_limit_factor=gt_time_limit_factor,
+        )
+    finally:
+        if sys.platform != "win32":
+            signal.signal(signal.SIGTERM, sigterm_handler)
     base_outcome = result.get("base", [None, None])
     plus_outcome = result.get("plus", [None, None])
     return {
