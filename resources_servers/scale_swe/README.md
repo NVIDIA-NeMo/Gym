@@ -82,16 +82,23 @@ from a genuinely nondeterministic test so neither silently corrupts the other's 
 
 ## Running an agent
 
-`configs/scale_swe_opencode.yaml` wires the opencode sandboxed agent to
-`scale_swe_resources_server`, pointed at `data/scale_swe_training.jsonl`. It lives in a separate
-file rather than folded into `scale_swe.yaml` so golden-patch validation (which never touches an
-agent) doesn't need to pull in the agent's much larger sandbox/permission config.
+`configs/scale_swe_opencode.yaml` runs `opencode_agent` through `single_agent_turn` against
+`scale_swe_resources_server`, pointed at `data/scale_swe_training.jsonl`: the server lends the task sandbox to the
+agent session as described under Episode sessions below, and rows reach it through the `scale_swe` taskset. It lives
+in a separate file rather than folded into `scale_swe.yaml` so golden-patch validation (which never touches an agent)
+doesn't need to pull in the agent's much larger sandbox/permission config. The `opencode_agent` README still lists its
+session path as evaluation only, so check its token capture before you train on these rollouts.
 
 ```bash
 gym env start \
   --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml
 ```
+
+`configs/scale_swe_opencode_legacy_agent.yaml` is deprecated. It wires `opencode_sandboxed_agent` to the same
+resources server through the `legacy_agent` relay, and that agent
+[will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx) after the Environment
+Server migration.
 
 ## Episode sessions
 

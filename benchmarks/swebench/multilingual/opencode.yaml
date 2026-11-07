@@ -1,28 +1,52 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# SWE-bench Multilingual with OpenCode agent sessions under single_agent_turn. The Resources Server starts the task
+# sandbox, lends it to opencode_agent, and grades the captured patch in a fresh sandbox after the agent closes.
+# opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the legacy_agent relay; the two harnesses are
+# configured differently, so do not compare their scores as the same measurement.
+
 config_paths:
-- responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
-- resources_servers/swebench/configs/swebench.yaml
+  - resources_servers/swebench/configs/swebench.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
-swebench_multilingual_opencode_resources_server:
+environment_routing_mode: taskset
+environment_server_routes:
+  "swebench:multilingual": swebench_multilingual_opencode_single_agent_turn
+
+swebench_multilingual_opencode_agent_resources_server:
   _inherit_from: swebench_resources_server
-
-swebench_multilingual_opencode_sandboxed_agent:
-  _inherit_from: opencode_sandboxed_agent
-  responses_api_agents:
-    opencode_sandboxed_agent:
-      resources_server:
-        type: resources_servers
-        name: swebench_multilingual_opencode_resources_server
+  resources_servers:
+    swebench:
+      allowed_agents: [opencode_agent]
+      num_workers: 1
+      sandbox_config:
+        # Outlive the episode (default_episode_timeout_seconds, 21600), patch extraction, and final cleanup. The
+        # resources session expires with the sandbox, and a verify after that is masked as SESSION_EXPIRED.
+        ttl_s: 25200
       datasets:
         - name: swebench_multilingual
           type: benchmark
+          taskset: "swebench:multilingual"
           jsonl_fpath: benchmarks/swebench/data/swebench_multilingual_benchmark.jsonl
           prepare_script: benchmarks/swebench/multilingual/prepare.py
           num_repeats: 3
 
-swebench_multilingual_environment_server:
+swebench_multilingual_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      resources_server: null
+
+swebench_multilingual_opencode_single_agent_turn:
+  _inherit_from: single_agent_turn
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: swebench_multilingual_opencode_agent_resources_server
       agent_server:
         type: responses_api_agents
-        name: swebench_multilingual_opencode_sandboxed_agent
+        name: swebench_multilingual_opencode_agent
+      resources_tool_transports: []

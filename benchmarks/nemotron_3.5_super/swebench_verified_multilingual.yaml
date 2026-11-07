@@ -4,8 +4,8 @@
 # Benchmark composition for the shared SWE-bench Verified + Multilingual run.
 # SWE-bench Pro intentionally remains a standalone evaluation.
 config_paths:
-  - benchmarks/swebench/verified/opencode.yaml
-  - benchmarks/swebench/multilingual/opencode.yaml
+  - benchmarks/swebench/verified/opencode_legacy_agent.yaml
+  - benchmarks/swebench/multilingual/opencode_legacy_agent.yaml
 
 # Both standalone direct recipes currently use this rollout concurrency.
 num_samples_in_parallel: 1024

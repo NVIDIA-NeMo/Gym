@@ -71,16 +71,16 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
 @pytest.mark.parametrize(
     ("recipe", "prefix"),
     [
-        ("deepswe", "deepswe"),
-        ("swebench/verified", "swebench_verified"),
-        ("swebench/multilingual", "swebench_multilingual"),
-        ("swebench/multimodal", "swebench_multimodal"),
-        ("swebench/pro", "swebench_pro"),
-        ("terminal_bench_2_1", "terminal_bench_2_1"),
+        ("deepswe/opencode", "deepswe"),
+        ("swebench/verified/opencode_legacy_agent", "swebench_verified"),
+        ("swebench/multilingual/opencode_legacy_agent", "swebench_multilingual"),
+        ("swebench/multimodal/opencode", "swebench_multimodal"),
+        ("swebench/pro/opencode_legacy_agent", "swebench_pro"),
+        ("terminal_bench_2_1/opencode", "terminal_bench_2_1"),
     ],
 )
 def test_existing_benchmarks_keep_legacy_bindings(recipe: str, prefix: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = _resolve_config(f"benchmarks/{recipe}/opencode.yaml", monkeypatch)
+    config = _resolve_config(f"benchmarks/{recipe}.yaml", monkeypatch)
     agent_name = f"{prefix}_opencode_sandboxed_agent"
     assert f"{prefix}_opencode_agent" not in config
     assert list(config[agent_name].responses_api_agents) == ["opencode_sandboxed_agent"]

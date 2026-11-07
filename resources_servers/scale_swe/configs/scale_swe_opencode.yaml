@@ -1,42 +1,60 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Wires the opencode sandboxed agent to scale_swe_resources_server for a training run --
-# `scale_swe.yaml` alone only defines the resources server, which is enough for golden-patch
-# validation (apply_golden_patch.py talks to it directly, no agent involved) but not enough to
-# actually run an agent against the dataset. This is a separate file, not folded into
-# scale_swe.yaml, so golden-patch validation keeps working without pulling in the agent's (much
-# larger) opencode/sandbox config.
+# Runs Scale-SWE training rows with OpenCode agent sessions under single_agent_turn. The resources server starts
+# each task sandbox, lends it to opencode_agent, and grades the captured patch in a fresh sandbox after the agent
+# closes. scale_swe_opencode_legacy_agent.yaml keeps opencode_sandboxed_agent on the legacy_agent relay.
 #
-# This is training data (data/scale_swe_training.jsonl, only the 17,696 already-supported
-# instances -- see the README), not a fixed eval benchmark.
+# This is training data (data/scale_swe_training.jsonl), not a fixed eval benchmark.
 #
 #   gym env start --config resources_servers/scale_swe/configs/scale_swe_opencode.yaml
 
 config_paths:
-  - responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml
   - resources_servers/scale_swe/configs/scale_swe.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
 
-scale_swe_opencode_sandboxed_agent:
-  _inherit_from: opencode_sandboxed_agent
-  responses_api_agents:
-    opencode_sandboxed_agent:
-      resources_server:
-        type: resources_servers
-        name: scale_swe_resources_server
+environment_server_routes:
+  scale_swe: scale_swe_opencode_single_agent_turn
+
+scale_swe_resources_server:
+  resources_servers:
+    scale_swe:
+      allowed_agents: [opencode_agent]
+      verified: false
+      sandbox_config:
+        # Outlive the episode (default_episode_timeout_seconds, 21600), patch extraction, and final cleanup.
+        ttl_s: 25200
       datasets:
         - name: scale_swe
           type: train
+          taskset: scale_swe
           jsonl_fpath: resources_servers/scale_swe/data/scale_swe_training.jsonl
           num_repeats: 1
           # AweAI-Team/Scale-SWE has no declared license on the Hub (no license tag, empty card
           # data) -- TBD rather than guessing one of the enum's real licenses.
           license: TBD
 
-scale_swe_environment_server:
+# Golden-patch validation runs on its own config; this run does not use it.
+scale_swe_golden_patch_resources_server: null
+
+scale_swe_opencode_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    opencode_agent:
+      resources_server: null
+      # Training rollouts need the policy's token IDs, as opencode_sandboxed_agent records them by default. The
+      # opencode_agent README still lists its session path as evaluation only; check the capture before training on it.
+      token_id_capture: true
+
+scale_swe_opencode_single_agent_turn:
+  _inherit_from: single_agent_turn
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn:
+      resources_server:
+        type: resources_servers
+        name: scale_swe_resources_server
       agent_server:
         type: responses_api_agents
-        name: scale_swe_opencode_sandboxed_agent
+        name: scale_swe_opencode_agent
+      resources_tool_transports: []
