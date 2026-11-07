@@ -22,10 +22,11 @@ Model performance has many different dimensions, and evaluation can be used to m
 
 The process of evaluating entails different components. For example: to evaluate how accurate a coding agent is at fixing bugs, the following are needed:
 - The model (in Gym, accessed by deploying the **model server**)
-- The agent harness, which determines the tools it can access (**agent server**)
-- A set of real bugs to test against (the dataset, integrated into the **environment** in the **resources server**)
-- A sandbox with the code repository for the agent to work in (**state**, that exists in an **environment** in the **resources server**)
-- A test suite to check if the fix actually works (**verifier**, contained in the **environment**)
+- The **environment**, made of:
+  - The agent harness, which determines the tools it can access (**agent server**)
+  - A set of real bugs to test against (the **dataset**)
+  - A sandbox with the code repository for the agent to work in (**state**, held by the **resources server**)
+  - A test suite to check if the fix actually works (**verifier**, run by the **resources server**)
 
 ## Environments vs Benchmarks
 
