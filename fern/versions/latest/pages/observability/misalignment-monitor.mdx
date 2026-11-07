@@ -1,0 +1,94 @@
+---
+title: "Misalignment Monitor"
+description: "Review agent rollouts for misaligned behavior during evaluation and training, without changing rewards."
+position: 10
+---
+
+The misalignment monitor reviews agent rollouts for sandbox escapes, unauthorized actions, deception, evaluation
+gaming, sabotage, secret exposure and monitor evasion, and writes alerts. It is opt-in and alert-only: it never
+changes a task reward, and no rollout waits for its review.
+
+It is two servers:
+
+- `misalignment_monitored`, an environment server that relays each rollout to your agent and then posts the
+  finished rollout to the monitor. It takes the place of the agent's `legacy_agent` environment server.
+- `misalignment_monitor`, a resources server that reviews each rollout with a judge model you host.
+
+By default the monitor reviews text: a reviewer reads each rollout, and two investigators look into every flag
+before an alert is written. An optional activation screen (layer 0) reads the policy's activations on a GPU first.
+See the [monitor README](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/misalignment_monitor) for
+the layers and every setting, and the
+[relay README](https://github.com/NVIDIA-NeMo/Gym/tree/main/environment_servers/misalignment_monitored) for the relay.
+
+## Minimal Configuration
+
+Add both servers' configs to your run, name your agent in the relay, and point the monitor at a judge model server:
+
+```yaml
+# environment_servers/misalignment_monitored/configs/misalignment_monitored.yaml, with your agent's name
+misalignment_monitored_environment_server:
+  environment_servers:
+    misalignment_monitored:
+      agent_server:
+        type: responses_api_agents
+        name: my_agent
+
+# resources_servers/misalignment_monitor/configs/misalignment_monitor.yaml reviews with this judge
+misalignment_monitor:
+  resources_servers:
+    misalignment_monitor:
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      alerts_jsonl_fpath: results/misalignment_monitor/alerts.jsonl
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: http://judge-host:8000/v1
+      api_key: none
+      model: your-judge-model
+```
+
+This covers `gym eval run` and RL training. The default `review_schedule: final` reviews each rollout once, when it
+finishes, and needs nothing else.
+
+## Capture Requirements
+
+`review_schedule: per_turn` reviews at the end of each agent turn, and `activation_source: engine` reads activation
+results per model call. Both read each call from the model-call capture, so set `observability_enabled: true` and an
+absolute `model_call_capture_dir` in the global configuration, readable by the monitor. See
+[Rollout Evidence](/main/observability/rollout-evidence).
+
+## Alerts, Pausing and Resolution
+
+Alerts go to `alerts_jsonl_fpath`, and P0 alerts are also POSTed to `alert_webhook_url` when it is set. With
+`pause_after_unresolved_p0_minutes`, a P0 left open that long makes the relay hold new rollouts. Rollouts in flight
+finish. Close a P0 after a person has looked at it:
+
+```bash
+curl -X POST http://monitor-host:port/resolve -d '{"alert_id": "8d61be525901", "note": "checked, test fixture"}'
+```
+
+When `gym eval run` ends, the relay asks the monitor to finish its reviews before metrics are computed, for up to
+`monitor_drain_timeout_s`.
+
+## Replay
+
+`gym eval reverify` runs the same review on recorded rollouts without writing alerts. With rows labeled
+`expected_severity`, it reports recall and false-positive rate at each severity. The README has the command.
+
+## Activation Screening (Optional, GPU)
+
+`activation_source: engine` scores the policy's own activations inside vLLM with a plugin, and `reader` loads a
+frozen copy of a model in the monitor. Both use a Jacobian lens or a linear probe. They are a cheap first screen,
+not a replacement for the judge, so calibrate them on your own rollouts before relying on them. The README lists
+the vLLM flags and settings.
+
+## Limits
+
+- The monitor reads what Gym records: model calls, the rollout and earlier alerts. Gym sandboxes expose no network
+  logs or system telemetry.
+- Pausing holds new rollouts. It does not stop rollouts in flight or roll a run back.
+- The monitor keeps its state in memory and runs as one process. A restart forgets open P0 alerts.
