@@ -30,7 +30,10 @@ to use a Gym model server. See `configs/prime_agent.yaml` for all options.
 
 [configs/prime_agent_sandboxed.yaml](configs/prime_agent_sandboxed.yaml) runs Prime Agent **0.7.0**
 inside the task sandbox of a `single_agent_turn` Environment Server, for benchmarks whose Resources
-Server supplies `SandboxAccess`, such as SWE-bench Pro. Capability level: **Evaluation**.
+Server supplies `SandboxAccess`, such as SWE-bench Pro. Training token-ID capture is off by default. With
+`model_server`, model calls go to the Gym Model Server under the rollout's prefix, so capture needs only run-level
+`token_id_capture.enabled: true` and either the agent's `token_id_capture: true` or run-level
+`token_id_capture.all_agents: true`.
 
 ```yaml
 config_paths:

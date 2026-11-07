@@ -5,8 +5,8 @@
 # Install a private Node.js plus the pinned Prime Agent package, both uploaded by the agent server, into a runtime
 # directory inside the task sandbox, or reuse one that already reports the pinned version. npm installs the package's
 # dependencies from the registry. The task's own Node, npm and PATH are untouched: Prime Agent runs as
-# RUNTIME/bin/node RUNTIME/lib/node_modules/prime-agent/dist/bundle/cli.js. Needs bash, sha256sum, tar, gzip and
-# mktemp, plus a glibc image.
+# RUNTIME/bin/node RUNTIME/lib/node_modules/prime-agent/dist/bundle/cli.js. Needs bash, sha256sum, tar, gzip, mktemp
+# and flock, plus a glibc image.
 #
 # Prime Agent's only built-in tool is an IPython kernel. RUNTIME/kernel is a private Python, also uploaded, with the
 # packages Prime Agent's own kernel bootstrap installs (pinned here) and the package's prime-agent-runtime, installed
@@ -43,13 +43,18 @@ kernel_ready() {
 scipy, bs4, lxml, pydantic, tyro"
 }
 
-[ -f "$runtime/ready" ] && [ "$(installed "$runtime")" = "$version" ] && kernel_ready "$runtime" 2>/dev/null && exit 0
+ready() { [ -f "$runtime/ready" ] && [ "$(installed "$runtime")" = "$version" ] && kernel_ready "$runtime" 2>/dev/null; }
+ready && exit 0
 # The official Node.js Linux builds need glibc.
 if ! getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
     echo "Prime Agent's Node.js runtime needs a glibc sandbox image" >&2
     exit 1
 fi
 mkdir -p "$(dirname "$runtime")"
+# Sessions sharing a filesystem install one at a time. A session that waited reuses the runtime the winner published.
+exec 9>"$runtime.lock"
+flock -x 9
+ready && exit 0
 staging=$(mktemp -d "$runtime.install.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 echo "$node_sha256  $node_archive" | sha256sum -c -
@@ -71,8 +76,7 @@ UV_CACHE_DIR="$staging/.uv-cache" "$staging/uv/uv" pip install --python "$stagin
 rm -rf "$staging/uv" "$staging/.uv-cache"
 kernel_ready "$staging"
 touch "$staging/ready"
-# Publish with one rename; a concurrent seed that lost the race keeps the published runtime.
 rm -rf "$runtime.old"
-[ -d "$runtime" ] && mv "$runtime" "$runtime.old"
-mv "$staging" "$runtime" || [ -f "$runtime/ready" ]
+if [ -d "$runtime" ]; then mv "$runtime" "$runtime.old"; fi
+mv "$staging" "$runtime"
 rm -rf "$runtime.old"
