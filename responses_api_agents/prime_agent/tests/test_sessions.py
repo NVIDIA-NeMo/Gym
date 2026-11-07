@@ -125,9 +125,10 @@ def seed(*, workdir="/repo", tools=None, user=None, borrowed=True) -> AgentSeedS
 
 
 def body(**fields) -> NeMoGymResponseCreateParamsNonStreaming:
-    return NeMoGymResponseCreateParamsNonStreaming(
-        input=[{"role": "system", "content": "Use bash."}, {"role": "user", "content": "Fix the bug."}], **fields
+    fields.setdefault(
+        "input", [{"role": "system", "content": "Use bash."}, {"role": "user", "content": "Fix the bug."}]
     )
+    return NeMoGymResponseCreateParamsNonStreaming(**fields)
 
 
 @pytest.mark.parametrize(
@@ -166,7 +167,15 @@ def test_session_request_mapping_and_refusals():
         "Fix the bug.",
         "Be brief.\n\nAnswer in English.\n\nUse bash.",
     )
-    for fields in ({"temperature": 0.5}, {"max_output_tokens": 10}, {"model": "other"}):
+    text = [{"type": "input_text", "text": "Fix "}, {"type": "input_text", "text": "it."}]
+    assert prime._session_conversation(body(input=[{"role": "user", "content": text}])) == ("Fix it.", "Be brief.")
+    image = {"type": "input_image", "image_url": "https://example.test/image.png", "detail": "auto"}
+    for fields in (
+        {"temperature": 0.5},
+        {"max_output_tokens": 10},
+        {"model": "other"},
+        {"input": [{"role": "user", "content": [text[0], image]}]},
+    ):
         with pytest.raises(HTTPException) as error:
             prime._session_conversation(body(**fields))
         assert error.value.status_code == 422
@@ -198,7 +207,9 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
             sandbox=sandbox, session_dir=str(tmp_path / "prime session"), workdir=str(workdir), harness="Prime Agent"
         ),
     )
-    prime = agent(timeout=timeout, thinking="high")
+    # A host-only provider must not be uploaded into the sandbox.
+    host_provider = {"apiKey": "host-only"}  # pragma: allowlist secret
+    prime = agent(timeout=timeout, thinking="high", models_config={"providers": {"private": host_provider}})
     asset = tmp_path / "asset.tgz"
     asset.write_bytes(b"asset")
     # The agent server downloads Node.js, the release package and the kernel's Python and uv; the fake installer
@@ -236,6 +247,7 @@ async def test_real_session_run_maps_output_and_keeps_the_task_environment(tmp_p
     assert args[:5] == ["--print", "--mode", "json", "--no-session", "--daemon-socket"]
     assert args[args.index("--provider") + 1] == "nemo" and args[args.index("--model") + 1] == "policy"
     assert args[args.index("--append-system-prompt") + 1] == "Use bash." and args[-1] == "Fix the bug."
+    assert list(seen["models"]["providers"]) == ["nemo"]
     assert seen["models"]["providers"]["nemo"]["baseUrl"] == "http://model.invalid/ng-rollout/rollout-1/v1"
     assert seen["env"]["PRIME_AGENT_CODING_AGENT_DIR"] == state.agent_dir
     assert seen["env"]["PRIME_AGENT_KERNEL_PYTHON"] == f"{state.runtime}/kernel/bin/python3"

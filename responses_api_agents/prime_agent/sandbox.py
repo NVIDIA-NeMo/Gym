@@ -155,14 +155,18 @@ class PrimeSession(AgentSessionState):
         except Exception:
             LOG.warning("Prime Agent stdout unavailable", exc_info=True)
             stdout = ""
+        # stderr is optional diagnostics: failing to fetch it must not discard a completed run's stdout.
         stderr = ""
-        tail = await sandbox.exec(
-            f"tail -c {STDERR_TAIL_BYTES} {quote(f'{directory}/stderr.log')} > {quote(f'{directory}/stderr.tail')}",
-            cwd="/",
-            timeout_s=30,
-        )
-        if tail.return_code == 0 and not tail.error_type:
-            stderr = await read_text(sandbox, path=f"{directory}/stderr.tail")
+        try:
+            tail = await sandbox.exec(
+                f"tail -c {STDERR_TAIL_BYTES} {quote(f'{directory}/stderr.log')} > {quote(f'{directory}/stderr.tail')}",
+                cwd="/",
+                timeout_s=30,
+            )
+            if tail.return_code == 0 and not tail.error_type:
+                stderr = await read_text(sandbox, path=f"{directory}/stderr.tail")
+        except Exception:
+            LOG.warning("Prime Agent stderr unavailable", exc_info=True)
         return PrimeArtifacts(stdout=stdout, stderr=stderr)
 
     async def close(self, *, timeout: float) -> None:

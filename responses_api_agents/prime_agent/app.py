@@ -616,6 +616,13 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "Prime Agent accepts one user message with an optional system or developer message"
             )
+        # Prime Agent takes text only. Flattening would silently drop images or files from the task.
+        for item in items:
+            if not isinstance(item.content, str) and any(
+                (part.get("type") if isinstance(part, dict) else getattr(part, "type", None)) != "input_text"
+                for part in item.content
+            ):
+                raise HTTPException(422, "Prime Agent only supports text input")
         user_message, input_system = _extract_instruction(items)
         if not user_message.strip():
             raise HTTPException(422, "Prime Agent requires a nonempty task")
@@ -644,7 +651,9 @@ class PrimeAgent(SimpleResponsesAPIAgent):
             "PRIME_AGENT_KERNEL_PYTHON": f"{state.runtime}/kernel/bin/python3",
             "PI_SKIP_VERSION_CHECK": "1",
         }
-        models = self._build_models_config(state.request.episode_id.capture_key)
+        # Only the Gym provider: the sandbox is model-controlled, so host providers' keys must not reach it.
+        nemo = self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]
+        models = {"providers": {"nemo": nemo}}
         return await state.stage(command=command, env=env, models=json.dumps(models, indent=2))
 
     def _session_observations(
