@@ -18,6 +18,8 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -172,6 +174,27 @@ class TestBuildEvalScript:
         script = build_eval_script(_inputs())
         assert "__test_exit=$?" in script and "exit $__test_exit" in script
 
+    @pytest.mark.parametrize("exit_code", [0, 1, 124, 137])
+    @pytest.mark.parametrize("termination", ["exit", "exec sh -c"])
+    def test_stderr_and_explicit_exit_remain_inside_test_markers(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exit_code: int, termination: str
+    ) -> None:
+        monkeypatch.setattr("resources_servers.swe_rebench.verification.repo_directory", lambda _: str(tmp_path))
+        last_command = f"exit {exit_code}" if termination == "exit" else f"exec sh -c 'exit {exit_code}'"
+        script = build_eval_script(
+            _inputs(
+                patch="",
+                test_patch="",
+                install=["echo install-noise >&2"],
+                test_cmd=["echo test-stdout", "echo test-stderr >&2", last_command],
+            )
+        )
+        result = subprocess.run(["bash"], input=script, text=True, capture_output=True, check=False)
+        assert result.returncode == exit_code
+        assert TEST_OUTPUT_END in result.stdout
+        assert slice_test_output(result.stdout).strip().splitlines() == ["test-stdout", "test-stderr"]
+        assert "install-noise" in result.stderr
+
 
 class TestVerificationFiles:
     def test_ships_the_script_and_only_the_patches_that_exist(self) -> None:
@@ -218,6 +241,24 @@ class _FakeSandbox:
 
 
 class TestRunVerification:
+    @pytest.mark.parametrize("error_type", ["timeout", "connection_error", "provider_error"])
+    async def test_exec_error_prevents_parsing_even_when_the_log_looks_complete(self, error_type: str) -> None:
+        def must_not_parse(log: str) -> dict[str, str]:
+            raise AssertionError("An infrastructure failure cannot be graded")
+
+        log = f"{TEST_OUTPUT_BEGIN}\na PASSED\n{TEST_OUTPUT_END}"
+        result = await run_verification(
+            sandbox=_FakeSandbox(log, error_type=error_type),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=must_not_parse,
+        )
+        assert not result.completed and not result.resolved
+        assert result.test_results is None
+        assert result.test_output == log
+        assert result.error == (
+            "evaluation timed out" if error_type == "timeout" else f"evaluation exec failed: {error_type}"
+        )
+
     @pytest.mark.asyncio
     async def test_grades_a_passing_run(self) -> None:
         log = f"{TEST_OUTPUT_BEGIN}\nirrelevant\n{TEST_OUTPUT_END}"

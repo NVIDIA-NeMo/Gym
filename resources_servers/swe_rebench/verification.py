@@ -181,7 +181,9 @@ set +e
 {install_block}
 
 echo "{TEST_OUTPUT_BEGIN}"
+(
 {test_block}
+) 2>&1
 __test_exit=$?
 echo "{TEST_OUTPUT_END}"
 exit $__test_exit
@@ -294,6 +296,17 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
+    error_type = getattr(result, "error_type", None)
+    if error_type is not None:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error="evaluation timed out" if error_type == "timeout" else f"evaluation exec failed: {error_type}",
+        )
+
     if result.return_code == 97:
         return VerificationResult(
             completed=False,
@@ -305,7 +318,7 @@ async def run_verification(
         )
     # 124/137 can also be the test's own exit code; treat them as a kill only when output is cut off.
     cut_off = TEST_OUTPUT_END not in output
-    timed_out = getattr(result, "error_type", None) == "timeout" or (result.return_code == 124 and cut_off)
+    timed_out = result.return_code == 124 and cut_off
     if timed_out or (result.return_code == 137 and cut_off):
         return VerificationResult(
             completed=False,
