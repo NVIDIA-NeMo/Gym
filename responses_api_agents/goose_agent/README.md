@@ -12,7 +12,8 @@ prefix, so capture needs only run-level `token_id_capture.enabled: true` and eit
 
 Goose's native subagents come from its built-in `summon` extension: the `delegate` tool runs a subagent in its own
 session, synchronously or with `async: true` followed by `load(task_id)`. Several delegate calls in one turn run
-concurrently. Delegates cannot delegate further (depth 1).
+concurrently. Delegates cannot delegate further (depth 1). `GOOSE_SUBAGENT_PROVIDER` and `GOOSE_SUBAGENT_MODEL` pin
+delegates to the same Gym Model Server and model, whatever provider or model the policy passes to `delegate`.
 
 ## Configure and run
 
@@ -56,8 +57,7 @@ gym eval run --no-serve \
 | `model` | `${policy_model_name}` | `GOOSE_MODEL`, the model name Goose sends. |
 | `timeout` | `3600` | Seconds per activation, enforced by the sandbox's process supervisor. Task `agent_timeout_sec` metadata can shorten it. |
 | `max_turns` | `1000` | `goose run --max-turns` for the root. Delegates use Goose's own limit. |
-| `delegate` | `true` | `false` disables `summon` (`delegate` and `load`), for a solo control. |
-| `subagent_model` | `null` | `GOOSE_SUBAGENT_MODEL` for delegates; `null` reuses `model`. |
+| `delegate` | `true` | `false` disables `summon` (`delegate` and `load`) and `extensionmanager`, for a solo control. |
 | `context_limit` | `null` | `GOOSE_CONTEXT_LIMIT`: the served model's context window, for Goose's compaction. |
 | `system_prompt` | `null` | Prepended to the request's system text. |
 | `sandbox_install_timeout_seconds` | `900` | Bound on session setup, including installation. |
@@ -69,14 +69,15 @@ gym eval run --no-serve \
 
 Session setup installs the pinned static (musl) release for the sandbox's architecture (`uname -m`: `x86_64` or
 `aarch64`) under `/tmp/nemo-gym-goose-runtime-1.54.0`. The agent server downloads the GitHub release archive once into
-its asset cache, checks the SHA-256 pinned in `sandbox.py`, and uploads it; the sandbox checks the checksum again,
-extracts it, checks the version Goose reports, and reuses a runtime that already reports it. The sandbox needs only
-bash, `sha256sum`, `tar` and `gzip`, and no internet access; the agent server needs access to GitHub releases.
+its asset cache, checks the SHA-256 pinned in `sandbox.py`, and uploads it. On every seed the sandbox checks the
+checksum again, extracts it, checks the version Goose reports and publishes it, so a binary already at the runtime path
+is never trusted. The sandbox needs only bash, `sha256sum`, `tar`, `gzip` and `timeout`, and no internet access. The
+agent server needs access to GitHub releases.
 
 Goose runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` under the process supervisor. Its
 config, sessions and state live under `GOOSE_PATH_ROOT` in a private session directory, so tool shells keep the
-task's `HOME` and `XDG_*` directories. `SandboxAccess.env` is forwarded, except `GOOSE_*` and `OPENAI_*` variables,
-which could redirect Goose's configuration or model calls. Close removes only the session directory; the Resources
+task's `HOME` and `XDG_*` directories. `SandboxAccess.env` is forwarded, except `GOOSE_*`, `OPENAI_*`, `OTEL_*` and
+`LANGFUSE_*` variables, which could redirect Goose's configuration, model calls or traces. Close removes only the session directory. The Resources
 Server destroys a borrowed sandbox, and the agent stops a sandbox it owns.
 
 `network_access: model_only` limits an agent-owned sandbox's egress to the model server's host (every port). The
@@ -94,30 +95,31 @@ requests and `/run`.
 
 The response output is the root session converted to Responses items (reasoning, messages, function calls and their
 outputs). Goose's own messages (`userVisible: false`, such as compaction notices) are not output. Response metadata
-records `goose_exit_code`, `goose_stop_reason`, `goose_subagents` and `goose_max_concurrent_subagents`.
+records `goose_exit_code`, `goose_stop_reason`, `goose_subagents` and `goose_max_concurrent_subagents`. A failed
+response carries Goose's notice in `error`. Every model call sends `x-session-id` set to the rollout's capture key, the
+invocation ID of the observation bundle.
 
 | Goose 1.54.0 ending | Response |
 |---|---|
-| Finished | `completed` |
-| Supervisor deadline, with model output | `incomplete` (verified); without any model output, the activation fails |
-| `--max-turns` notice, or killed before the deadline (exit 137, usually out of memory in the task cgroup) | `incomplete` (verified) |
+| Finished, including after a delegate's error the root recovered from | `completed` |
+| Supervisor deadline or rollout stop, with or without model output | `incomplete` (verified) |
+| `--max-turns` notice, or the context limit still exceeded after compaction | `incomplete` (verified) |
 | Completion cut at the output or context limit | `incomplete`, `max_output_tokens` |
-| Model calls failed at the Model Server (network, 5xx, rate limit, rejected credentials, missing model), in the root or a delegate | `failed`, `model_transport_error` (retryable) |
+| The root's model call failed with an HTTP error at the Model Server | `failed`, `model_request_error` with `status_code` |
+| The root could not reach the Model Server | `failed`, `model_transport_error` |
 | The model kept returning empty completions | `failed`, `agent_invalid_output` |
-| Another Goose error notice, or a nonzero exit | `failed`, `agent_run_error` |
+| Another Goose error notice, or a nonzero exit (including a bare 137) | `failed`, `unknown` |
 | Goose never started, left no session store, or an extension failed to start | The activation raises |
 
 ## Limitations
 
 - Usage is `null`: Goose's usage ledger is not tied to individual model calls. The observation bundle declares
-  `usage_unavailable`, `model_call_ownership_unavailable` (Goose sends no per-call session header),
-  `harness_tool_timing_unavailable` and `child_invocations_unavailable`.
+  `usage_unavailable`, `harness_tool_timing_unavailable` and `child_invocations_unavailable`. Delegates' model calls
+  carry the root's `x-session-id`.
 - Required tool grants are refused at seed; optional grants are skipped and reported. A `SandboxAccess` user override
   is refused.
 - One activation per session; there is no host execution path.
-- The solo control removes `delegate` and `load`, but Goose's extension manager stays enabled, so a model could in
-  principle re-enable `summon` at run time. Delegates started with `async: true` are cancelled if the root ends
-  without collecting them with `load`.
+- Delegates started with `async: true` are cancelled if the root ends without collecting them with `load`.
 
 ## Tests
 

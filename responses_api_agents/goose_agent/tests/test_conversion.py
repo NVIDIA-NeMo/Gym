@@ -7,10 +7,10 @@ import json
 import pytest
 
 from responses_api_agents.goose_agent.conversion import (
-    delegate_model_server_failure,
     goose_messages_to_output,
     goose_stop_reason,
     max_concurrent,
+    model_server_failure,
 )
 
 
@@ -25,8 +25,11 @@ NOTICES = {
     "not_found": "Ran into this error: Request failed: Resource not found (404) at "
     "http://127.0.0.1:18983/v1/chat/completions: model not found.\n\nPlease retry if you think this is a transient or "
     "recoverable error.",
-    "model_error": "Ran into this error trying to compact: Failed to compact: the base prompt (system prompt, tool schemas, "
+    "context_limit": "Ran into this error trying to compact: Failed to compact: the base prompt (system prompt, tool schemas, "
     "and conversation) exceeds the model's effective context window.",
+    "auth": "Ran into this error: Authentication error: Authentication failed for http://127.0.0.1:18991/v1/chat/completions. "
+    "Status: 401 Unauthorized. Response: bad key.",
+    "model_error": "Ran into this error: Execution error: boom.",
     "max_turns": "I've reached the maximum number of actions I can do without user input. Would you like me to continue?",
 }
 
@@ -94,25 +97,35 @@ def test_goose_only_messages_are_not_output():
 
 
 @pytest.mark.parametrize(
-    ("notice", "reason"),
+    ("notice", "reason", "failure"),
     [
-        ("server_error", "model_server"),
-        ("rate_limit", "model_server"),
-        ("network", "model_server"),
-        ("not_found", "model_server"),
-        ("model_error", "model_error"),
-        ("max_turns", "max_turns"),
+        ("server_error", "model_server", ("model_request_error", 500)),
+        ("rate_limit", "model_server", ("model_request_error", 429)),
+        ("network", "model_server", ("model_transport_error", None)),
+        ("not_found", "model_server", ("model_request_error", 404)),
+        ("auth", "model_server", ("model_request_error", 401)),
+        ("context_limit", "context_limit", None),
+        ("model_error", "model_error", None),
+        ("max_turns", "max_turns", None),
     ],
 )
-def test_unpersisted_last_message_is_goose_notice(notice, reason):
-    assert goose_stop_reason(stream("notice", NOTICES[notice]), SESSIONS) == reason
+def test_unpersisted_last_message_is_goose_notice(notice, reason, failure):
+    assert goose_stop_reason(stream("notice", NOTICES[notice]), SESSIONS) == (reason, NOTICES[notice])
+    assert model_server_failure(NOTICES[notice]) == failure
+
+
+def test_context_limit_after_compaction_is_a_system_notification():
+    text = "Unable to continue: Context limit still exceeded after compaction. Try using a shorter message."
+    block = {"type": "systemNotification", "notificationType": "inlineMessage", "msg": text}
+    event = {"type": "message", "message": {"id": "notice", "role": "assistant", "content": [block]}}
+    assert goose_stop_reason(json.dumps(event), SESSIONS) == ("context_limit", text)
 
 
 def test_persisted_policy_text_is_never_a_notice():
     # The policy's own persisted answer is not Goose's notice, whatever its wording.
     sessions = [{"messages": [{"message_id": "m1"}, {"message_id": "m2"}]}]
-    assert goose_stop_reason(stream("m2", NOTICES["max_turns"]), sessions) is None
-    assert goose_stop_reason(stream("m2", "All done."), sessions) is None
+    assert goose_stop_reason(stream("m2", NOTICES["max_turns"]), sessions) == (None, "")
+    assert goose_stop_reason(stream("m2", "All done."), sessions) == (None, "")
 
 
 def test_persisted_notices_are_error_blocks():
@@ -122,8 +135,8 @@ def test_persisted_notices_are_error_blocks():
     def last(content):
         return json.dumps({"type": "message", "message": {"id": "m1", "role": "assistant", "content": content}})
 
-    assert goose_stop_reason(last([{"type": "error", "message": NOTICES["model_error"]}]), sessions) == "model_error"
-    assert goose_stop_reason(last([{"type": "text", "text": NOTICES["model_error"]}]), sessions) is None
+    assert goose_stop_reason(last([{"type": "error", "message": NOTICES["auth"]}]), sessions)[0] == "model_server"
+    assert goose_stop_reason(last([{"type": "text", "text": NOTICES["auth"]}]), sessions) == (None, "")
 
 
 def test_output_limit_is_a_length_stop():
@@ -131,24 +144,7 @@ def test_output_limit_is_a_length_stop():
         "type": "message",
         "message": {"id": "m1", "role": "assistant", "content": [], "metadata": {"outputTokenLimitReached": True}},
     }
-    assert goose_stop_reason(json.dumps(event), [{"messages": [{"message_id": "m1"}]}]) == "length"
-
-
-def test_delegate_model_server_failure_reaches_the_parent_as_a_tool_result():
-    parent = {
-        "messages": [
-            {"role": "assistant", "content": [call("d1", "delegate", {"instructions": "Paris"})]},
-            {"role": "user", "content": [result("d1", NOTICES["server_error"])]},
-        ]
-    }
-    child = {
-        "parent_session_id": "s1",
-        "messages": [{"role": "assistant", "content": [{"type": "text", "text": "x"}]}],
-    }
-    assert delegate_model_server_failure([parent, child])
-    # A delegate's persisted answer that reads like a notice is its own answer.
-    child["messages"][0]["content"][0]["text"] = NOTICES["server_error"]
-    assert not delegate_model_server_failure([parent, child])
+    assert goose_stop_reason(json.dumps(event), [{"messages": [{"message_id": "m1"}]}])[0] == "length"
 
 
 def test_max_concurrent():

@@ -51,10 +51,10 @@ from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.goose_agent.conversion import (
-    delegate_model_server_failure,
     goose_messages_to_output,
     goose_stop_reason,
     max_concurrent,
+    model_server_failure,
     read_goose_sessions,
 )
 from responses_api_agents.goose_agent.sandbox import (
@@ -72,8 +72,6 @@ LOG = logging.getLogger(__name__)
 MAX_SYSTEM_PROMPT_BYTES = 128 * 1024
 # harness_runner.sh exit statuses when Goose itself never ran.
 RUNNER_FAILURES = (125, 126, 127)
-# A kill (SIGKILL) before the deadline, usually the task cgroup running out of memory.
-KILLED = 128 + 9
 
 
 class GooseAgentConfig(BaseResponsesAPIAgentConfig):
@@ -89,8 +87,6 @@ class GooseAgentConfig(BaseResponsesAPIAgentConfig):
     max_turns: int = Field(default=1000, gt=0)
     # false disables Goose's summon extension (delegate/load), for a solo control.
     delegate: bool = True
-    # GOOSE_SUBAGENT_MODEL; null reuses `model`.
-    subagent_model: str | None = None
     # GOOSE_CONTEXT_LIMIT: the served model's context window, for Goose's compaction.
     context_limit: int | None = Field(default=None, gt=0)
     system_prompt: str | None = None
@@ -133,7 +129,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """The failure kind read from Goose 1.54.0's own stop notice."""
-        return AgentOutcome(failure_kind=native_result.get("failure_kind", "unknown"))
+        return AgentOutcome(
+            failure_kind=native_result.get("failure_kind") or "unknown", status_code=native_result.get("status_code")
+        )
 
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
         return state.session if isinstance(state, GooseSession) else None
@@ -293,13 +291,16 @@ class GooseAgent(SimpleResponsesAPIAgent):
         env = {
             key: value
             for key, value in (access.env if access else {}).items()
-            if not key.startswith(("GOOSE_", "OPENAI_"))
+            if not key.startswith(("GOOSE_", "OPENAI_", "OTEL_", "LANGFUSE_"))
         }
         env |= {
             # Goose's config, sessions and state live in the session directory, so tool shells keep the task's HOME.
             "GOOSE_PATH_ROOT": state.root,
             "GOOSE_PROVIDER": "openai",
             "GOOSE_MODEL": self.config.model,
+            # The environment outranks a provider or model the policy passes to `delegate`.
+            "GOOSE_SUBAGENT_PROVIDER": "openai",
+            "GOOSE_SUBAGENT_MODEL": self.config.model,
             # Headless runs cannot answer approval prompts.
             "GOOSE_MODE": "auto",
             "GOOSE_DISABLE_KEYRING": "1",
@@ -308,9 +309,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
                 model_server=self.config.model_server, rollout_id=state.request.episode_id.capture_key
             ).base_url,
             "OPENAI_API_KEY": "gym",  # pragma: allowlist secret
+            # Correlates every model call, including failed ones and delegates', with this invocation.
+            "OPENAI_CUSTOM_HEADERS": f"x-session-id={state.request.episode_id.capture_key}",
         }
-        if self.config.subagent_model:
-            env["GOOSE_SUBAGENT_MODEL"] = self.config.subagent_model
         if self.config.context_limit:
             env["GOOSE_CONTEXT_LIMIT"] = str(self.config.context_limit)
         if body.temperature is not None:
@@ -320,7 +321,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
     async def _stage(self, state: GooseSession, body: NeMoGymResponseCreateParamsNonStreaming) -> SandboxCommand:
         prompt, system = self._conversation(body)
         # JSON is valid YAML, which Goose reads its config as. Goose fills in its other extensions with defaults.
-        config = json.dumps({"extensions": {"summon": {"enabled": self.config.delegate}}})
+        # The solo control also disables extensionmanager, which could re-enable summon.
+        enabled = {"enabled": self.config.delegate}
+        config = json.dumps({"extensions": {"summon": enabled, "extensionmanager": enabled}})
         return await state.stage(
             command=self._command(state, system), env=self._env(state, body), prompt=prompt, config=config
         )
@@ -341,8 +344,6 @@ class GooseAgent(SimpleResponsesAPIAgent):
             prompt, _ = self._conversation(state.activation_request)
             conversation.append(NeMoGymEasyInputMessage(role="user", content=prompt))
         gaps = [
-            # Goose 1.54.0 sends no per-call session header to the model server.
-            "model_call_ownership_unavailable",
             "usage_unavailable",
             "harness_tool_timing_unavailable",
             "child_invocations_unavailable",
@@ -396,39 +397,33 @@ class GooseAgent(SimpleResponsesAPIAgent):
         return_code, timed_out = cleanup["return_code"], cleanup["timed_out"]
         if return_code in RUNNER_FAILURES and not timed_out:
             raise RuntimeError(f"Goose did not start (runner exit {return_code}): {artifacts.stderr[-4096:]}")
-        if artifacts.sessions is None:
+        if artifacts.sessions is None and not timed_out:
             raise RuntimeError(f"Goose left no session store: {artifacts.stderr[-4096:]}")
         failed_extensions = re.findall(r"Failed to start extension '([^']+)'", artifacts.stderr)
         if failed_extensions:
             raise RuntimeError(f"Goose extensions could not start: {', '.join(sorted(set(failed_extensions)))}")
-        sessions = await asyncio.to_thread(self._read_sessions, artifacts.sessions)
+        sessions = await asyncio.to_thread(self._read_sessions, artifacts.sessions) if artifacts.sessions else []
         roots = [session for session in sessions if not session.get("parent_session_id")]
-        if len(roots) != 1:
+        if len(roots) > 1 or (not roots and not timed_out):
             raise RuntimeError(f"Expected one root Goose session, found {len(roots)}")
-        output = goose_messages_to_output(roots[0]["messages"])
+        output = goose_messages_to_output(roots[0]["messages"]) if roots else []
         children = [session for session in sessions if session.get("parent_session_id")]
 
-        status, incomplete, failure_kind = "completed", None, None
-        stop = None if timed_out else goose_stop_reason(artifacts.stdout, sessions)
-        if timed_out:
-            if not output:
-                raise RuntimeError("Goose timed out before any model response")
+        status, incomplete, failure_kind, status_code = "completed", None, None, None
+        stop, notice = (None, "") if timed_out else goose_stop_reason(artifacts.stdout, sessions)
+        if timed_out or stop in ("max_turns", "context_limit"):
+            # A deadline or rollout stop, even before any output, and Goose's own limits are graded as they stand.
             status = "incomplete"
-        elif stop == "model_server" or delegate_model_server_failure(sessions):
-            # Goose's model calls failed at the model server: retry the episode rather than grade it.
-            status, failure_kind = "failed", "model_transport_error"
-        elif return_code == KILLED:
-            # Killed before the deadline, usually out of memory in the task cgroup the policy's commands share:
-            # the task state is graded as it stands.
-            status = "incomplete"
+        elif stop == "model_server":
+            status = "failed"
+            failure_kind, status_code = model_server_failure(notice)
         elif stop == "length":
             status, incomplete = "incomplete", IncompleteDetails(reason="max_output_tokens")
-        elif stop == "max_turns":
-            status = "incomplete"
         elif stop == "empty_response":
             status, failure_kind = "failed", "agent_invalid_output"
         elif stop == "model_error" or return_code != 0:
-            status, failure_kind = "failed", "agent_run_error"
+            # Unexplained, including a bare exit 137: a provider-confirmed OOM arrives from SandboxSession instead.
+            status, failure_kind = "failed", "unknown"
 
         state.observations = self._observations(state, status=status, error_type=stop, output=output)
         response = NeMoGymResponse(
@@ -440,6 +435,9 @@ class GooseAgent(SimpleResponsesAPIAgent):
             # Goose's usage ledger is not tied to individual model calls, so totals stay unknown.
             usage=None,
             status=status,
+            error={"code": "server_error", "message": notice or f"Goose exited with code {return_code}"}
+            if status == "failed"
+            else None,
             incomplete_details=incomplete,
             tool_choice=body.tool_choice,
             tools=body.tools,
@@ -463,7 +461,7 @@ class GooseAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Goose run failed (%s, exit %s); stderr tail: %s", stop, return_code, artifacts.stderr[-2048:])
-            return self.report_outcome(response, {"failure_kind": failure_kind})
+            return self.report_outcome(response, {"failure_kind": failure_kind, "status_code": status_code})
         return self.report_rollout_stop(response, state.session)
 
     async def responses(

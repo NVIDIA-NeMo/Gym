@@ -20,7 +20,6 @@ goose_agent:
       max_turns: 1000
       # false disables Goose's summon extension (delegate/load), for a solo control.
       delegate: true
-      subagent_model: null
       # The served model's context window, for Goose's compaction (GOOSE_CONTEXT_LIMIT).
       context_limit: null
       system_prompt: null

@@ -12,6 +12,7 @@ from shlex import quote
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    AgentSeedRejectedError,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
@@ -89,11 +90,13 @@ class GooseSession(AgentSessionState):
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
         arch = await sandbox.exec("uname -m", cwd="/", timeout_s=60)
+        if arch.return_code != 0 or arch.error_type:
+            raise RuntimeError(f"Cannot read the sandbox architecture: {arch.stderr or arch.error_type}")
         arch_name = {"amd64": "x86_64", "arm64": "aarch64"}.get(
             (arch.stdout or "").strip(), (arch.stdout or "").strip()
         )
         if arch_name not in GOOSE_ARCHIVE_SHA256:
-            raise RuntimeError(f"No Goose {GOOSE_VERSION} release for sandbox architecture {arch_name!r}")
+            raise AgentSeedRejectedError(f"No Goose {GOOSE_VERSION} release for sandbox architecture {arch_name!r}")
         name = goose_archive_name(arch_name)
         local = await cached_download(
             f"{GOOSE_RELEASE_URL}/{name}", sha256=GOOSE_ARCHIVE_SHA256[arch_name], timeout=timeout
@@ -122,8 +125,8 @@ class GooseSession(AgentSessionState):
             "cwd": self.session.workdir,
             "command": command,
             "env": env,
-            # Task-image settings must not redirect Goose's model calls or configuration.
-            "unset_env": ["GOOSE_*", "OPENAI_*"],
+            # Task-image settings must not redirect Goose's model calls, configuration or traces.
+            "unset_env": ["GOOSE_*", "OPENAI_*", "OTEL_*", "LANGFUSE_*"],
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.jsonl",
             "stderr": f"{directory}/stderr.log",
@@ -133,12 +136,10 @@ class GooseSession(AgentSessionState):
 
     async def collect(self) -> GooseArtifacts:
         """Copy stdout, the stderr tail and the session store after the supervisor confirms termination."""
+        if self.session.expired_before_launch:
+            return GooseArtifacts(stdout="", stderr="", sessions=None)  # A rollout stop kept Goose from starting.
         sandbox, directory = self.session.sandbox, self.session.session_dir
-        try:
-            stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")
-        except Exception:
-            LOG.warning("Goose stdout unavailable", exc_info=True)
-            stdout = ""
+        stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")
         stderr = ""
         tail = await sandbox.exec(
             f"tail -c {STDERR_TAIL_BYTES} {quote(f'{directory}/stderr.log')} > {quote(f'{directory}/stderr.tail')}",

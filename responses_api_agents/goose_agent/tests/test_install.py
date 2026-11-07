@@ -32,14 +32,14 @@ def install(runtime: Path, source: Path, sha256: str, version: str = "1.54.0") -
 
 
 @pytest.mark.skipif(shutil.which("sha256sum") is None, reason="needs coreutils sha256sum")
-def test_installs_a_verified_archive_and_reuses_it(tmp_path):
+def test_installs_a_verified_archive_over_a_planted_binary(tmp_path):
     source = archive(tmp_path, "1.54.0")
     runtime = tmp_path / "runtime"
+    runtime.mkdir()
+    # A binary already at the runtime path is never trusted, even one that reports the pinned version.
+    (runtime / "goose").write_text("#!/bin/sh\necho ' 1.54.0'\necho planted\n")
     assert install(runtime, source, hashlib.sha256(source.read_bytes()).hexdigest()).returncode == 0
     assert subprocess.run([runtime / "goose", "--version"], capture_output=True, text=True).stdout.strip() == "1.54.0"
-    # A ready runtime is reused without reading the archive again.
-    source.unlink()
-    assert install(runtime, source, "0" * 64).returncode == 0
     assert [path.name for path in runtime.iterdir()] == ["goose"]
 
 

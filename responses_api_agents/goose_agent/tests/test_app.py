@@ -22,7 +22,6 @@ from nemo_gym.agents import (
     SandboxSession,
     check_agent_seed_rejected,
 )
-from nemo_gym.agents.base_responses_api_agent import ModelEndpoint
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
@@ -39,6 +38,8 @@ if sys.argv[1:] == ["--version"]:
 mode = os.environ.get("TEST_MODE", "normal")
 root = Path(os.environ["GOOSE_PATH_ROOT"])
 prompt = sys.stdin.read()
+if mode == "hang":
+    time.sleep(60)  # No session store or output before the deadline.
 system = next((a[len("--system="):] for a in sys.argv if a.startswith("--system=")), "")
 (root / "seen.json").write_text(json.dumps({
     "argv": sys.argv[1:], "prompt": prompt, "system": system, "cwd": os.getcwd(),
@@ -77,7 +78,7 @@ if mode in notices:
 if mode == "sleep":
     time.sleep(60)
 print(json.dumps({"type": "complete"}))
-sys.exit(3 if mode == "crash" else 0)
+sys.exit({"crash": 3, "killed": 137}.get(mode, 0))
 """.replace("__VERSION__", GOOSE_VERSION)
 
 
@@ -298,7 +299,7 @@ async def activate(tmp_path: Path, mode: str, *, timeout: float = 20):
     assert download.await_args.args[0].endswith(f"/goose-{os.uname().machine}-unknown-linux-musl.tar.gz")
     request = body(temperature=0.6)
     state.activation_request = request
-    endpoint = ModelEndpoint(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
+    endpoint = SimpleNamespace(base_url="http://model.invalid/ng-rollout/rollout-1/v1")
     with patch.object(GooseAgent, "model_endpoint", return_value=endpoint):
         try:
             response = await asyncio.wait_for(server._activate(state, request), timeout=60)
@@ -323,10 +324,14 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
     assert seen["system"] == "Use tools."
     assert seen["cwd"] == state.session.workdir
     assert seen["argv"][:3] == ["run", "--name", "gym"]
-    assert json.loads(seen["config"]) == {"extensions": {"summon": {"enabled": False}}}
+    assert json.loads(seen["config"]) == {
+        "extensions": {"summon": {"enabled": False}, "extensionmanager": {"enabled": False}}
+    }
     assert seen["env"]["OPENAI_BASE_URL"] == "http://model.invalid/ng-rollout/rollout-1/v1"
     assert seen["env"]["GOOSE_PROVIDER"] == "openai"
-    assert seen["env"]["GOOSE_MODEL"] == "policy"
+    assert seen["env"]["GOOSE_MODEL"] == seen["env"]["GOOSE_SUBAGENT_MODEL"] == "policy"
+    assert seen["env"]["GOOSE_SUBAGENT_PROVIDER"] == "openai"
+    assert seen["env"]["OPENAI_CUSTOM_HEADERS"] == "x-session-id=rollout-1"
     assert seen["env"]["GOOSE_TEMPERATURE"] == "0.6"
     assert seen["env"]["GOOSE_CONTEXT_LIMIT"] == "262144"
     assert seen["env"]["GOOSE_PATH_ROOT"] == state.root
@@ -339,7 +344,7 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
     assert close.cleanup_confirmed
     invocation = close.agent_observations.records[0]
     assert invocation.status == "completed" and invocation.conversation[0].content == "Fix the bug."
-    assert "model_call_ownership_unavailable" in {gap.code for gap in close.agent_observations.gaps}
+    assert "model_call_ownership_unavailable" not in {gap.code for gap in close.agent_observations.gaps}
     assert sandbox.disconnected and not Path(state.session.session_dir).exists()
     assert sandbox.events.index("read cleanup.json") < sandbox.events.index("read stdout.jsonl")
 
@@ -347,28 +352,30 @@ async def test_real_run_maps_goose_output_and_keeps_the_task_environment(tmp_pat
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
 @pytest.mark.parametrize(
-    ("mode", "status", "failure_kind"),
+    ("mode", "status", "outcome"),
     [
         ("max_turns", "incomplete", None),
-        ("model_server", "failed", "model_transport_error"),
-        ("crash", "failed", "agent_run_error"),
+        ("model_server", "failed", {"failure_kind": "model_request_error", "status_code": 500}),
+        ("crash", "failed", {"failure_kind": "unknown"}),
+        ("killed", "failed", {"failure_kind": "unknown"}),
     ],
 )
-async def test_goose_stops_map_to_status_and_outcome(tmp_path, mode, status, failure_kind):
+async def test_goose_stops_map_to_status_and_outcome(tmp_path, mode, status, outcome):
     response, close, _, _, _ = await activate(tmp_path, mode)
     assert response.status == status
-    outcome = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
-    assert (json.loads(outcome)["failure_kind"] if outcome else None) == failure_kind
+    reported = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    assert (json.loads(reported) if reported else None) == outcome
     assert close.cleanup_confirmed
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
-async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
-    response, close, _, state, _ = await activate(tmp_path, "sleep", timeout=3)
+@pytest.mark.parametrize(("mode", "output"), [("sleep", 3), ("hang", 0)])
+async def test_timeout_is_incomplete_with_or_without_output(tmp_path, mode, output):
+    response, close, _, state, _ = await activate(tmp_path, mode, timeout=3)
     assert state.session.cleanup["timed_out"]
     assert response.status == "incomplete"
-    assert response.output[-1].content[0].text == "Done."
+    assert len(response.output) == output
     assert close.agent_observations.records[1].outcome == "timeout"
 
 

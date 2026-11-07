@@ -3,12 +3,15 @@
 """Goose session store and stream-json output, converted to Responses items and stop reasons."""
 
 import json
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -20,21 +23,18 @@ from nemo_gym.core import (
 
 # Goose's own text when the model returned empty completions until it gave up (persisted, exit 0).
 GOOSE_EMPTY_RESPONSE_NOTICE = "The model returned an empty response. Please resend your message to continue."
-# summon's wrapper around an async delegate's result in load's tool response.
-GOOSE_TASK_RESULT_HEADER = "# Background Task Result"
-GOOSE_TASK_OUTPUT = "\n## Output\n\n"
 # Goose's MAX_TURNS_MESSAGE, streamed when --max-turns is reached.
 GOOSE_MAX_TURNS_NOTICE = "I've reached the maximum number of actions I can do without user input"
-# Goose 1.54.0's provider errors for a model call that failed at the model server: unreachable, 5xx, rate limit, rejected
-# credentials or a missing model, during a turn or a compaction. The model server or the configuration failed, not the
-# policy, so the request fails and is retried.
+# Goose's notices when compaction cannot bring the conversation under the context window.
+GOOSE_CONTEXT_NOTICES = (
+    "Unable to continue: Context limit still exceeded",
+    "Ran into this error trying to compact: Failed to compact:",
+)
+# Goose 1.54.0's prefixes for a provider error, during a turn or a compaction.
 GOOSE_ERROR_NOTICES = ("Ran into this error: ", "Ran into this error trying to compact: ")
-GOOSE_MODEL_SERVER_ERRORS = (
-    "Network error",
-    "Server error",
-    "Rate limit exceeded",
-    "Authentication error",
-    "Request failed: Resource not found",
+# The HTTP status in Goose's provider error text (http_status.rs): "(500 ...)", "Status: 401 ..." or "status 408 ...".
+GOOSE_HTTP_STATUS = re.compile(
+    r"(?:Server error|Authentication error|Request failed): .*?(?:\(|Status: |status )([45]\d\d)\b"
 )
 
 
@@ -110,27 +110,32 @@ def goose_messages_to_output(messages: list[dict[str, Any]]) -> list[Any]:
                     NeMoGymResponseFunctionToolCall(
                         call_id=block["id"],
                         name=value.get("name", ""),
-                        arguments=json.dumps(value.get("arguments") or {}),
+                        # A malformed call keeps Goose's error, which quotes the raw arguments.
+                        arguments=str(call["error"])
+                        if call.get("status") == "error"
+                        else json.dumps(value.get("arguments") or {}),
                     )
                 )
             elif kind == "toolResponse":
                 result = block.get("toolResult") or {}
                 content = (result.get("value") or {}).get("content") or []
-                text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
+                text = "\n".join(
+                    part.get("text", "") if part.get("type") == "text" else f"[{part.get('type')} content omitted]"
+                    for part in content
+                )
                 output.append(
                     NeMoGymFunctionCallOutput(call_id=block["id"], output=text or str(result.get("error", "")))
                 )
     return output
 
 
-def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None:
-    """Why Goose stopped early, or None.
+def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> tuple[str | None, str]:
+    """Why Goose stopped early, or None, and the text of Goose's notice.
 
-    When a model call fails past its retries or --max-turns is reached, Goose ends the run with a notice of its own as
-    the last assistant message: plain text that it does not persist and exits 0 on, or an error block that it persists
-    and exits 1 on (rejected credentials). Every message from the model is persisted under the id it was streamed with,
-    so an unpersisted last message is a notice too. "model_server" marks a notice for a model server that failed, not
-    the policy.
+    When a model call fails past its retries, compaction cannot fit the context, or --max-turns is reached, Goose ends
+    the run with a notice of its own as the last assistant message: text or a system notification that it does not
+    persist and exits 0 on, or an error block that it persists and exits 1 on (rejected credentials). Every message
+    from the model is persisted under the id it was streamed with, so an unpersisted last message is a notice too.
     """
     last = {}
     for line in stdout.splitlines():
@@ -142,67 +147,37 @@ def goose_stop_reason(stdout: str, sessions: list[dict[str, Any]]) -> str | None
             if (event.get("message") or {}).get("role") == "assistant":
                 last = event["message"]
     if not last:
-        return None
+        return None, ""
     if (last.get("metadata") or {}).get("outputTokenLimitReached"):
         # The output or context limit cut the last completion (the vLLM model server returns an empty one).
-        return "length"
-    blocks = [block for block in last.get("content") or [] if block.get("type") in ("text", "error")]
-    if "".join(block.get("text") or "" for block in blocks).strip() == GOOSE_EMPTY_RESPONSE_NOTICE:
-        return "empty_response"
+        return "length", ""
+    blocks = [
+        block for block in last.get("content") or [] if block.get("type") in ("text", "error", "systemNotification")
+    ]
+    text = "".join(block.get("text") or block.get("message") or block.get("msg") or "" for block in blocks)
+    if text.strip() == GOOSE_EMPTY_RESPONSE_NOTICE:
+        return "empty_response", text
     persisted = {m["message_id"] for s in sessions for m in s["messages"]}
     # Goose's own notice is never persisted, or is persisted as an error block (rejected credentials). Persisted text is
     # the policy's own answer, whatever its wording.
     if not (last.get("id") and last["id"] not in persisted) and not any(b.get("type") == "error" for b in blocks):
-        return None
-    text = "".join(block.get("text") or block.get("message") or "" for block in blocks)
-    if _model_server_error(text):
-        return "model_server"
-    return "max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"
+        return None, ""
+    if text.startswith(GOOSE_CONTEXT_NOTICES):
+        return "context_limit", text
+    if model_server_failure(text):
+        return "model_server", text
+    return ("max_turns" if text.startswith(GOOSE_MAX_TURNS_NOTICE) else "model_error"), text
 
 
-def _model_server_error(text: str) -> bool:
-    if text.startswith("Network error:"):
-        return True
-    head = next((h for h in GOOSE_ERROR_NOTICES if text.startswith(h)), None)
-    return head is not None and text[len(head) :].startswith(GOOSE_MODEL_SERVER_ERRORS)
-
-
-def delegate_model_server_failure(sessions: list[dict[str, Any]]) -> bool:
-    """Whether a delegate's model calls failed at the model server.
-
-    A delegate that hits a provider error ends with Goose's notice as its last message, which it does not persist, and
-    summon returns that text to the parent: as the delegate tool's result, or for an async delegate inside load's
-    "# Background Task Result" under "## Output". The parent carries on and Goose exits 0. Text a delegate persisted is
-    its own answer, whatever its wording.
-    """
-    persisted = {
-        "\n".join(block.get("text", "") for block in message["content"] if block.get("type") == "text")
-        for session in sessions
-        if session.get("parent_session_id")
-        for message in session["messages"]
-        if message["role"] == "assistant"
-    }
-    for session in sessions:
-        calls = {
-            block["id"]: name
-            for message in session["messages"]
-            for block in message["content"]
-            if block.get("type") == "toolRequest"
-            and (name := ((block.get("toolCall") or {}).get("value") or {}).get("name")) in ("delegate", "load")
-        }
-        for message in session["messages"]:
-            for block in message["content"]:
-                if block.get("type") != "toolResponse" or block.get("id") not in calls:
-                    continue
-                content = ((block.get("toolResult") or {}).get("value") or {}).get("content") or []
-                text = "\n".join(part.get("text", "") for part in content if part.get("type") == "text")
-                if calls[block["id"]] == "load":
-                    if not text.startswith(GOOSE_TASK_RESULT_HEADER) or GOOSE_TASK_OUTPUT not in text:
-                        continue
-                    text = text.split(GOOSE_TASK_OUTPUT, 1)[1]
-                if text not in persisted and _model_server_error(text):
-                    return True
-    return False
+def model_server_failure(text: str) -> tuple[str, int | None] | None:
+    """The failure kind and HTTP status of Goose's notice for a model call that failed at the model server."""
+    error = text.removeprefix(next((h for h in GOOSE_ERROR_NOTICES if text.startswith(h)), ""))
+    if error.startswith("Network error:"):
+        return MODEL_TRANSPORT_ERROR, None
+    if error.startswith("Rate limit exceeded:"):
+        return MODEL_REQUEST_ERROR, 429
+    match = GOOSE_HTTP_STATUS.match(error)
+    return (MODEL_REQUEST_ERROR, int(match[1])) if match else None
 
 
 def max_concurrent(intervals: list[tuple[int, int]]) -> int:
