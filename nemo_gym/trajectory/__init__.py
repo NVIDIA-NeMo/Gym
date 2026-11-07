@@ -27,7 +27,9 @@ if TYPE_CHECKING:
         NG_ROW_MEDIA_KEY,
         RowMediaReferences,
         RowMediaUnavailable,
+        reference_row_media,
         restore_row_media,
+        rollouts_media_location,
         row_media_dirs,
     )
     from nemo_gym.trajectory.tool_timing import normalize_operation_timing, normalize_tool_calls, tool_attempt_id
@@ -99,7 +101,9 @@ _PUBLIC_API = {
     "grading_result_binding": "trajectory_record",
     "join_agent_model_calls": "trajectory_record",
     "join_assistant_message_calls": "trajectory_record",
+    "reference_row_media": "row_media",
     "restore_row_media": "row_media",
+    "rollouts_media_location": "row_media",
     "row_media_dirs": "row_media",
     "transcript_to_atif": "atif_export",
 }
