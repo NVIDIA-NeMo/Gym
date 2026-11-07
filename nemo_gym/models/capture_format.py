@@ -31,7 +31,6 @@ blob is read once, so a fully read rollout holds about its unique content rather
 
 import hashlib
 import os
-import re
 import threading
 from collections import OrderedDict, deque
 from dataclasses import dataclass, field
@@ -40,14 +39,19 @@ from typing import Any, Literal, Optional
 
 import orjson
 
+from nemo_gym.utils.data_url_blobs import (
+    BLOB_MIN_CHARS,  # noqa: F401  (part of this module's interface)
+    SHA256_HEX_PATTERN,
+    extract_data_urls,
+    write_blob,
+)
+
 
 CaptureFormat = Literal["full", "delta"]
 
 CAPTURE_FORMAT_KEY = "capture_format"
 DELTA_FORMAT_VERSION = 2
 BLOB_DIR_NAME = "blobs"
-# Shorter data URLs (icons, tiny crops) are cheaper inline than as a file.
-BLOB_MIN_CHARS = 1024
 # The request fields that hold a conversation's history, by dialect: Responses, then Chat and Messages.
 HISTORY_KEYS = ("input", "messages")
 
@@ -60,8 +64,6 @@ _RECENT_ROLLOUTS = 1024
 _DIGEST_SIZE = 16
 # Request fields other than the history are inherited from the base when equal and at least this long.
 _INHERIT_MIN_CHARS = 256
-_DATA_URL = re.compile(r"data:[\w.+-]+/[\w.+-]+[;,]")
-_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 class CaptureDecodeError(ValueError):
@@ -167,11 +169,11 @@ class DeltaCaptureWriter:
             if inherited:
                 spec["inherited_keys"] = inherited
         blobs: list[list[Any]] = []
-        line = _extract_blobs(line, [], blobs)
+        line = extract_data_urls(line, [], blobs)
         if blobs:
             directory = self._blob_root / rollout_id
             for _, digest, text in blobs:
-                _write_blob(directory, digest, text)
+                write_blob(directory, digest, text)
             spec["blobs"] = [[path, digest] for path, digest, _ in blobs]
         line[CAPTURE_FORMAT_KEY] = spec
         return orjson.dumps(line, default=str, option=orjson.OPT_APPEND_NEWLINE)
@@ -224,72 +226,6 @@ def _line_starts_with_call(fd: int, call: _WrittenCall) -> bool:
     except OSError:
         return False
     return head.startswith(b"{") and orjson.dumps(call.model_call_id) in head
-
-
-def _extract_blobs(value: Any, path: list[Any], blobs: list[list[Any]]) -> Any:
-    """``value`` with large data URLs replaced by ``None``; appends ``[path, sha256, text]`` per replacement.
-
-    Containers are copied only where something inside them changed, so the caller's exchange is never modified.
-    """
-    if isinstance(value, str):
-        if len(value) >= BLOB_MIN_CHARS and _DATA_URL.match(value):
-            blobs.append([list(path), hashlib.sha256(value.encode("utf-8")).hexdigest(), value])
-            return None
-        return value
-    if isinstance(value, dict):
-        changed: Optional[dict[str, Any]] = None
-        for key, item in value.items():
-            if not isinstance(item, (str, dict, list)):
-                continue
-            path.append(key)
-            replaced = _extract_blobs(item, path, blobs)
-            path.pop()
-            if replaced is not item:
-                changed = changed if changed is not None else dict(value)
-                changed[key] = replaced
-        return changed if changed is not None else value
-    if isinstance(value, list):
-        changed_list: Optional[list[Any]] = None
-        for index, item in enumerate(value):
-            if not isinstance(item, (str, dict, list)):
-                continue
-            path.append(index)
-            replaced = _extract_blobs(item, path, blobs)
-            path.pop()
-            if replaced is not item:
-                changed_list = changed_list if changed_list is not None else list(value)
-                changed_list[index] = replaced
-        return changed_list if changed_list is not None else value
-    return value
-
-
-def _write_blob(directory: Path, digest: str, text: str) -> None:
-    """Write a blob once, atomically and durably, so a line written after it never names a partial file."""
-    target = directory / digest
-    if target.exists():
-        return
-    if not directory.is_dir():
-        directory.mkdir(parents=True, exist_ok=True)
-        _fsync_directory(directory.parent.parent)
-        _fsync_directory(directory.parent)
-    temporary = directory / f".{digest}.{os.getpid()}.{threading.get_ident()}.tmp"
-    try:
-        with temporary.open("wb") as handle:
-            handle.write(text.encode("utf-8"))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-    _fsync_directory(directory)
-
-
-def _fsync_directory(directory: Path) -> None:
-    directory_fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(directory_fd)
-    finally:
-        os.close(directory_fd)
 
 
 class CaptureReader:
@@ -382,7 +318,7 @@ class CaptureReader:
         return line
 
     def _blob(self, digest: Any) -> str:
-        if not isinstance(digest, str) or not _SHA256_HEX.fullmatch(digest):
+        if not isinstance(digest, str) or not SHA256_HEX_PATTERN.fullmatch(digest):
             raise CaptureDecodeError(f"malformed blob digest {digest!r}")
         text = self._blobs.get(digest)
         if text is None:
