@@ -35,6 +35,8 @@ from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationE
 from nemo_gym.client import MAX_NUM_TRIES, SESSION_ID_KEY, NeMoGymAsyncOpenAI
 from nemo_gym.client.http_client import _redacted_url
 from nemo_gym.core import (
+    MODEL_SAMPLING_HEADER,
+    MODEL_SAMPLING_NULL,
     REQUIRED_TOKEN_METADATA_FIELDS,
     TOKEN_METADATA_FIELDS,
     FailureHeader,
@@ -45,8 +47,10 @@ from nemo_gym.core import (
     NeMoGymChoice,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_model_sampling_segment,
     current_rollout_id,
     failure_report_for,
+    model_call_sampling_config,
 )
 from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -160,6 +164,9 @@ INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
 _CHAT_TOKEN_LIMIT_KEYS = ("max_completion_tokens", "max_tokens")
 _TOKEN_LIMIT_KEYS = (*_CHAT_TOKEN_LIMIT_KEYS, "max_output_tokens")
 _TOKEN_LIMIT_KEY_BY_API = {"completions": "max_tokens", "responses": "max_output_tokens"}
+# Request fields that choose what the engine reports about the tokens it samples, not how it samples them. A trained
+# agent's Model Server may pin these: NeMo RL's score centering pins logprobs and top_logprobs on its policy's server.
+_REPORTING_ONLY_SAMPLING_OVERRIDES = frozenset({"logprobs", "top_logprobs"})
 
 
 def _names_context_window(message: str) -> bool:
@@ -942,8 +949,19 @@ class VLLMModel(SimpleResponsesAPIModel):
             body = _set_aside_unlisted_reasoning_effort(request, body)
         return await super().responses_dispatch(request, body)
 
+    def _sampling_pins(self) -> List[str]:
+        """The ``sampling_overrides`` fields that change how the engine samples."""
+        return sorted(set(self.config.sampling_overrides or {}) - _REPORTING_ONLY_SAMPLING_OVERRIDES)
+
     def _post_init(self) -> None:
         if self.config.sampling_overrides:
+            sampling_config = model_call_sampling_config(getattr(self.server_client, "global_config_dict", None))
+            pins = self._sampling_pins()
+            if pins and sampling_config is not None and self.config.name in sampling_config.required_model_servers:
+                raise ValueError(
+                    f"Model Server {self.config.name!r} serves an agent that the training framework trains, so it "
+                    f"cannot set sampling_overrides {pins}: that agent samples with the framework's values."
+                )
             LOG.info(
                 "`%s` pins sampling on every request to the engine: %s",
                 self.config.name,
@@ -1107,6 +1125,16 @@ class VLLMModel(SimpleResponsesAPIModel):
         """
         if not self.config.sampling_overrides:
             return body_dict
+        pins = self._sampling_pins()
+        if pins and current_model_sampling_segment() not in (None, MODEL_SAMPLING_NULL):
+            # 409, not 500: the conflict is configuration, so retrying the rollout cannot help.
+            raise HTTPException(
+                status_code=409,
+                detail=f"Model Server {self.config.name!r} sets sampling_overrides {pins}, but this call carries a "
+                "training framework's values for an agent it trains, which must sample with them. Remove them "
+                "from this Model Server's sampling_overrides, and give an untrained agent that needs a pin a "
+                "Model Server of its own.",
+            )
         overrides = dict(self.config.sampling_overrides)
         pinned_limits = {key: overrides.pop(key) for key in _TOKEN_LIMIT_KEYS if key in overrides}
         body_dict.update(overrides)
@@ -1671,11 +1699,15 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         execution["upstream_attempted"] = True
         context = current_capture_context()
-        transport_options = (
+        transport_options: dict[str, Any] = (
             {"_resend_after_disconnect": False}
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        if current_model_sampling_segment() == MODEL_SAMPLING_NULL:
+            # A training framework's generation server holds every call to its training sampling, except the calls
+            # of agents it does not train, which keep their own.
+            transport_options["_headers"] = {MODEL_SAMPLING_HEADER: MODEL_SAMPLING_NULL}
         try:
             try:
                 chat_completion_dict = await self._call_endpoint(

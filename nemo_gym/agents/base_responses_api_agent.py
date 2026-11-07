@@ -60,6 +60,13 @@ from nemo_gym.core.episode_context import maybe_rollout_id_from_run_body, rollou
 from nemo_gym.core.episode_types import EpisodeId, TaskId
 from nemo_gym.core.failure_kinds import FailureStage
 from nemo_gym.core.failure_records import FailureBoundary
+from nemo_gym.core.model_call_sampling import (
+    current_model_sampling_segment,
+    encode_model_sampling,
+    model_sampling_context,
+    model_sampling_from_run_body,
+    model_sampling_path_segment,
+)
 from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -86,6 +93,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
+from nemo_gym.server_runtime.request_handling.model_sampling import ModelSamplingContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import ToolAccess
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
@@ -785,7 +793,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             body = kwargs.get("body")
             if body is None:
                 body = next((arg for arg in args if isinstance(arg, BaseRunRequest)), None)
-            with rollout_context(self.rollout_id_from_run(body)):
+            with (
+                rollout_context(self.rollout_id_from_run(body)),
+                model_sampling_context(self.model_sampling_segment_for_run(body)),
+            ):
                 return await run(*args, **kwargs)
 
         app.post("/run")(_agent_boundary(run_with_rollout_context, app=app, operation="agent.run", stage="agent"))
@@ -797,6 +808,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/rollouts/{rollout_id}/stop")(self.stop_rollout)
         app.get("/v1/agent_sessions/capabilities")(self.agent_session_capabilities)
 
+        # Outermost, so the session and checkpoint middleware route an activation without its sampling segment.
+        app.add_middleware(ModelSamplingContextMiddleware)
         return app
 
     @asynccontextmanager
@@ -1210,20 +1223,30 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             return None
         return maybe_rollout_id_from_run_body(body)
 
+    def model_sampling_segment_for_run(self, body: Any) -> Optional[str]:
+        """Return the sampling segment for a run's model calls: the run's own values, else the current request's.
+
+        A run carries values when a training framework trains this agent (``nemo_gym.core.model_call_sampling``).
+        """
+        sampling = model_sampling_from_run_body(body)
+        return encode_model_sampling(sampling) if sampling is not None else current_model_sampling_segment()
+
     def url_path_for_run(self, url_path: str, body: Any) -> str:
-        """Apply this run's capture path to a downstream URL path.
+        """Apply this run's capture path and sampling segment to a downstream URL path.
 
         Evaluation uses ``/ng-rollout/<id>/...``.
         Training capture uses ``/ng-rollout/<id>/training-token-capture/...``.
-        Calls without a rollout id remain unchanged.
+        A run with sampling values adds ``/ng-sampling/<values>`` after the rollout prefix.
+        Calls without a rollout id or values remain unchanged.
         """
         return (
             f"{rollout_path_prefix(self.rollout_id_from_run(body), token_capture=self._token_id_capture_enabled())}"
+            f"{model_sampling_path_segment(self.model_sampling_segment_for_run(body))}"
             f"{url_path}"
         )
 
     def base_url_for_run(self, base_url: str, body: Any) -> str:
-        """Apply this run's capture path to a model-server root URL.
+        """Apply this run's capture path and sampling segment to a model-server root URL.
 
         Append the API-version suffix after this method returns. While traces export, the URL also
         names this run's current span, so the model server parents calls that arrive without a
@@ -1233,25 +1256,32 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             base_url,
             self.rollout_id_from_run(body),
             token_capture=self._token_id_capture_enabled(),
+            model_sampling=self.model_sampling_segment_for_run(body),
         )
 
     def url_path_for_request(self, url_path: str, request: Optional[Request]) -> str:
-        """Carry an inbound capture path onto a downstream URL path.
+        """Carry an inbound capture path and sampling segment onto a downstream URL path.
 
         Prefixed self-calls expose the rollout id as a path parameter.
         Training-capture requests preserve their dedicated path segment.
+        A request that arrived with a sampling segment passes it on after the rollout prefix.
         Unprefixed requests remain unchanged.
         """
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
         request_path = getattr(getattr(request, "url", None), "path", "")
         token_capture = f"/{TOKEN_CAPTURE_PATH_SEGMENT}/" in request_path
-        return f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}{url_path}"
+        return (
+            f"{rollout_path_prefix(rollout_id, token_capture=token_capture)}"
+            f"{model_sampling_path_segment(current_model_sampling_segment())}"
+            f"{url_path}"
+        )
 
     def resolve_model_base_url(
         self, model_server_name: str, rollout_id: Optional[str] = None, *, trace_context: bool = True
     ) -> str:
-        """Resolve a model-server URL with an optional rollout prefix (and trace context, as ``base_url_for_run``).
+        """Resolve a model-server URL with an optional rollout prefix (and trace context and sampling segment, as
+        ``base_url_for_run``).
 
         Pass ``trace_context=False`` for a URL that a client cached across rollouts will keep using.
         """

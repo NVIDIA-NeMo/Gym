@@ -76,6 +76,7 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    MODEL_SAMPLING_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -510,13 +511,17 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    # A training framework's sampling values ride beside the task, which they leave unchanged.
+    if row.get(MODEL_SAMPLING_KEY_NAME) is not None:
+        body["model_sampling"] = row[MODEL_SAMPLING_KEY_NAME]
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:

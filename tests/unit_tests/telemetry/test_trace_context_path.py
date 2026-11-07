@@ -31,6 +31,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client.server_client import _TRACEPARENT_PATTERN, apply_rollout_prefix, trace_context_path_segment
 from nemo_gym.core.episode_context import current_rollout_id
+from nemo_gym.core.model_call_sampling import MODEL_SAMPLING_NULL, model_sampling_context
 from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.trace_context import (
@@ -80,6 +81,21 @@ class TestProducer:
         assert shared_with_rollout == "http://m:8000/ng-rollout/0-0"
         assert re.fullmatch(_TRACEPARENT_PATTERN, traceparent)
 
+    @requires_lens
+    def test_the_sampling_segment_comes_after_the_trace_segment(self, traces):  # noqa: F811
+        from opentelemetry import trace
+
+        with (
+            trace.get_tracer("test").start_as_current_span("agent.run"),
+            model_sampling_context(MODEL_SAMPLING_NULL),
+        ):
+            segment = trace_context_path_segment()
+            url = apply_rollout_prefix("http://m:8000", "0-0")
+            shared = apply_rollout_prefix("http://m:8000", None, trace_context=False)
+        assert url == f"http://m:8000/ng-rollout/0-0{segment}/ng-sampling/null"
+        # A URL reused across rollouts must not sample later rollouts with this one's values either.
+        assert shared == "http://m:8000"
+
 
 class TestMiddlewarePathRewrite:
     """The strip half works without telemetry, so a URL built with the segment always routes."""
@@ -105,6 +121,17 @@ class TestMiddlewarePathRewrite:
                 "/ng-rollout/0-0/training-token-capture/v1/chat/completions",
             ),
             (f"/ng-trace/{TRACEPARENT}/v1/models", "/v1/models"),
+            # A harness URL built from an agent's prefix can carry the sampling segment before the trace segment,
+            # and apply_rollout_prefix puts it after; both route once the trace segment is gone.
+            (
+                f"/ng-rollout/0-0/ng-sampling/null/ng-trace/{TRACEPARENT}/v1/responses",
+                "/ng-rollout/0-0/ng-sampling/null/v1/responses",
+            ),
+            (f"/ng-sampling/null/ng-trace/{TRACEPARENT}/v1/messages", "/ng-sampling/null/v1/messages"),
+            (
+                f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}/ng-sampling/null/v1/responses",
+                "/ng-rollout/0-0/ng-sampling/null/v1/responses",
+            ),
         ],
     )
     async def test_strips_the_segment_and_adds_the_header(self, recorded, path, routed):

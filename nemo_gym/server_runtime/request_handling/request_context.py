@@ -18,6 +18,7 @@ from fastapi import FastAPI
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from nemo_gym.core.episode_context import rollout_context
+from nemo_gym.core.model_call_sampling import model_sampling_context
 
 
 try:
@@ -40,10 +41,10 @@ class RequestContextIsolationMiddleware:
 
     Installed outside the instrumentor (see ``install_request_context_isolation``), this resets
     the OTel context for the request's duration, so the instrumentor extracts the inbound
-    ``traceparent``. It also clears the rollout id. Today that is a guard only: Gym's
-    ``BaseHTTPMiddleware`` layers run the rollout middleware, ``/run`` and the handlers in a
-    child task, so a rollout id set there does not reach the task uvicorn copies; the guard
-    keeps that true if those layers are ever replaced by plain ASGI middleware.
+    ``traceparent``. It also clears the rollout id and the model sampling segment. Today that is a
+    guard only: Gym's ``BaseHTTPMiddleware`` layers run the rollout middleware, ``/run`` and the
+    handlers in a child task, so a value set there does not reach the task uvicorn copies; the
+    guard keeps that true if those layers are ever replaced by plain ASGI middleware.
     """
 
     def __init__(self, app: ASGIApp) -> None:
@@ -55,7 +56,7 @@ class RequestContextIsolationMiddleware:
             return
         otel_token = _otel_context.attach(_otel_context.Context()) if _otel_context is not None else None
         try:
-            with rollout_context(None):
+            with rollout_context(None), model_sampling_context(None):
                 await self.app(scope, receive, send)
         finally:
             if otel_token is not None:
