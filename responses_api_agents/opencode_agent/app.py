@@ -337,6 +337,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     extra_args: list[str] = []
     opencode_config: dict[str, Any] = Field(default_factory=dict)
     context_window: int = 262144
+    supports_images: bool = False
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
 
@@ -1619,6 +1620,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 else {}
                             ),
                             "interleaved": {"field": "reasoning_content"},
+                            **(
+                                {"modalities": {"input": ["text", "image"], "output": ["text"]}}
+                                if self.config.supports_images
+                                else {}
+                            ),
                             "limit": {
                                 "context": self.config.context_window,
                                 "input": self.config.context_window,

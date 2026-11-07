@@ -65,8 +65,8 @@ Rows are lightweight — no base64 in the JSONL:
 ```
 
 `verifier_metadata.prompt` is stored explicitly so `verify()` does not have to dig the prompt back
-out of the content blocks after the agent has rewritten them. `source_pdf` is provenance only
-(re-derives the original download without guessing a filename) — never read at rollout time.
+out of the content blocks after the agent has rewritten them. The OpenCode sandbox uses
+`source_pdf` to deliver the raw PDF; the single-turn agent uses `document_manifest`.
 
 The upstream table pads every row out to 30 fixed-width rubric column groups
 (`rubric - {i}. criterion`, `... criterion_type`, and so on); `extract_criteria` in
@@ -226,3 +226,33 @@ rollout row records the DPI/compositing actually used and every rejected attempt
 ## Licensing
 
 Upstream dataset: MIT. Evaluation only — see the warning above.
+
+## GDP.pdf with OpenCode
+
+OpenCode receives the raw PDF at `/workspace/document.pdf` and the question.
+It can inspect text/images and run Python; the existing grader scores only the
+final answer. Rubrics and reference answers stay outside the sandbox.
+
+```bash
+docker build -t gdp-pdf-tools resources_servers/gdp_pdf
+gym eval prepare --config benchmarks/gdp_pdf/opencode.yaml \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools
+gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+  --config responses_api_models/vllm_model/configs/vllm_model.yaml \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools \
+  ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
+  +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
+  +policy_model_name=MODEL --split benchmark --num-repeats 5 \
+  --output results/gdp-pdf-opencode.jsonl
+```
+
+Set judge credentials in private `env.yaml`. `GYM_HOST_IP` must be reachable from
+Docker: the sandbox calls Gym, which forwards to the image/tool-capable inference
+endpoint. Swap the provider config for other deployments. OpenCode 1.17.11 installs
+in the sandbox; preinstall it for offline use. Defaults are eight concurrent episodes,
+16,384 output tokens per model call and a two-hour timeout, with no episode turn cap.
+Web tools are disabled; shell networking follows the provider policy.
+
+For your own tasks, override the agent's dataset with GDP.pdf rows (`source_pdf`,
+`prompt`, `criteria` in `verifier_metadata`); never train on benchmark questions.
