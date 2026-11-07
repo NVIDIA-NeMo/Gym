@@ -30,6 +30,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    RequestFailureLog,
 )
 from nemo_gym.sandbox import AsyncSandbox
 from responses_api_agents.droid_agent import app, runtime
@@ -845,3 +847,55 @@ async def test_failed_run_without_an_error_event_keeps_droid_stderr(monkeypatch,
     assert response.status == "failed"
     [gap] = [gap for gap in session.observations.gaps if gap.code == "agent_startup_failed"]
     assert gap.detail == marker and marker in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed_cleanup", [False, True])
+async def test_failed_connect_keeps_original_failure_when_provider_cleanup_also_fails(monkeypatch, typed_cleanup):
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="connect timed out", stage="agent"
+    )
+    cleanup = (
+        NgFailureEvent(
+            boundary="sandbox", failure_kind="session_release_failed", failure_reason="close failed", stage="cleanup"
+        )
+        if typed_cleanup
+        else RuntimeError("close failed")
+    )
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(side_effect=original))
+    provider = SimpleNamespace(aclose=AsyncMock(side_effect=cleanup))
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as raised:
+            await agent(monkeypatch)._seed_agent_session_state(seed())
+    assert raised.value is original
+    report = log.reply_report(original)
+    assert report.failure_id == original.event_id
+    assert report.events[original.event_id].stage == "agent"
+    releases = [event for event in report.events.values() if event.failure_kind == "session_release_failed"]
+    assert len(releases) == 1 and releases[0].stage == "cleanup"
+    if typed_cleanup:
+        assert releases[0].event_id == cleanup.event_id
+    provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("workdir", [123, ["/app"], None])
+def test_owned_workdir_type_is_a_final_refusal(monkeypatch, workdir):
+    provider = MagicMock()
+    monkeypatch.setattr(app, "create_provider", provider)
+    instance = agent(monkeypatch, sandbox_provider="sandbox", sandbox_config={"workdir": workdir})
+    assert "workdir" in check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=False))
+    provider.assert_not_called()
+
+
+@pytest.mark.parametrize("borrowed", [False, True])
+@pytest.mark.parametrize("block", [{"unknown_provider": {}}, {"local": 17}])
+def test_invalid_provider_blocks_are_final_refusals_before_connect(monkeypatch, borrowed, block):
+    constructor = MagicMock()
+    constructor.connect = AsyncMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    instance = agent(monkeypatch, sandbox_provider="sandbox")
+    instance.server_client.global_config_dict = {"sandbox": block}
+    check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=borrowed))
+    constructor.assert_not_called()
+    constructor.connect.assert_not_awaited()

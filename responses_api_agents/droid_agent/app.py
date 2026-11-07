@@ -57,6 +57,8 @@ from nemo_gym.core import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -179,7 +181,9 @@ class DroidAgent(SimpleResponsesAPIAgent):
             if not isinstance(access.connection, DirectSandboxConnection):
                 raise AgentSeedRejectedError("Droid supports only direct sandbox connections")
             workdir, provider_ref = access.workdir, access.connection.provider_config_ref
-        path = PurePosixPath(workdir or "")
+        if not isinstance(workdir, str):
+            raise AgentSeedRejectedError("Droid sandbox workdir must be an absolute path string")
+        path = PurePosixPath(workdir)
         if (
             not path.is_absolute()
             or ".." in path.parts
@@ -211,7 +215,7 @@ class DroidAgent(SimpleResponsesAPIAgent):
                 spec = SandboxSpec(**settings)
             # An unknown provider or invalid provider settings fail every retry the same way.
             provider = create_provider(provider_config)
-        except ValueError as error:
+        except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -219,7 +223,22 @@ class DroidAgent(SimpleResponsesAPIAgent):
             try:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
             except BaseException:
-                await provider.aclose()
+                try:
+                    await provider.aclose()
+                except BaseException as cleanup_error:
+                    LOG.exception("Droid provider cleanup failed after connect failed")
+                    if isinstance(cleanup_error, NgFailureEvent):
+                        observe_failure(cleanup_error)
+                    else:
+                        cleanup_failure = NgFailureEvent(
+                            boundary="sandbox",
+                            failure_kind="session_release_failed",
+                            failure_reason=f"Droid provider cleanup failed: {type(cleanup_error).__name__}",
+                            operation="aclose",
+                            stage="cleanup",
+                        )
+                        cleanup_failure.__cause__ = cleanup_error
+                        observe_failure(cleanup_failure)
                 raise
         directory = f"{SESSION_ROOT}/{uuid4().hex}"
         state = DroidSandboxSession(
