@@ -1320,7 +1320,8 @@ def _split_tool_output_images(tool_output: str) -> tuple[str, list[ToolOutputIma
     if not isinstance(payload, dict) or TOOL_OUTPUT_IMAGES_KEY not in payload:
         return tool_output, []
     rest, images = split_tool_output_images(payload)
-    return json.dumps(rest), images
+    # The JSON format FastAPI sends, so the text matches a reply without images and the MCP tool result.
+    return json.dumps(rest, ensure_ascii=False, separators=(",", ":")), images
 
 
 def _tool_image_message(image: ToolOutputImage) -> NeMoGymEasyInputMessage:

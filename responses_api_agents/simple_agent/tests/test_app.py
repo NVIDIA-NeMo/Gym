@@ -3700,3 +3700,23 @@ def test_tool_output_images_reach_the_model_in_user_messages_after_the_turn_s_to
     ]
     # The reply keeps the images too, so a trainer sees what the model saw.
     assert response.json()["output"][-2]["content"][1]["image_url"] == image_url
+
+
+@pytest.mark.parametrize(
+    "tool_output",
+    ["grep: tool_output_images: No such file or directory", '{\n  "stdout": "tool_output_images"\n}'],
+)
+def test_a_tool_output_that_only_names_the_image_key_stays_unchanged(tool_output: str) -> None:
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    assert _split_tool_output_images(tool_output) == (tool_output, [])
+
+
+def test_a_tool_output_with_images_keeps_the_json_format_of_a_reply_without_images() -> None:
+    from nemo_gym.core import TOOL_OUTPUT_IMAGES_KEY
+    from responses_api_agents.simple_agent.app import _split_tool_output_images
+
+    rest, images = _split_tool_output_images(
+        json.dumps({"ok": False, "error": "图像 index 7", TOOL_OUTPUT_IMAGES_KEY: None})
+    )
+    assert (rest, images) == ('{"ok":false,"error":"图像 index 7"}', [])
