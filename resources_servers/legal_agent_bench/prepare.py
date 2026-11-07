@@ -23,13 +23,13 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 NEMO_GYM_ROOT = PACKAGE_DIR.parents[1]
 
 LAB_SOURCE_REPOSITORY = "https://github.com/harveyai/harvey-labs"
-LAB_SOURCE_REVISION = "f46ef86e4788545622db25dcffa3aebb7a139929"  # pragma: allowlist secret
+LAB_SOURCE_REVISION = "1da4750171bc5a534960b3d82d15ba7fd2cf653f"  # pragma: allowlist secret
 LAB_SOURCE_ARCHIVE_URL = f"https://codeload.github.com/harveyai/harvey-labs/tar.gz/{LAB_SOURCE_REVISION}"
 LAB_SOURCE_ARCHIVE_SHA256 = (
-    "e45cbdf3236b22866e034bcc62fb23bf00ef2f2e49db7a0cd8a4b07dbae9212c"  # pragma: allowlist secret
+    "6386827e88b363fb1d9546745681386f36fe7167acf8c24510c9052dd7d23a0c"  # pragma: allowlist secret
 )
 LAB_SOURCE_ARCHIVE_ROOT = f"harvey-labs-{LAB_SOURCE_REVISION}"
-EXPECTED_TASK_COUNT = 1_749
+EXPECTED_TASK_COUNT = 1_760
 REQUIRED_SKILLS = ("docx", "pptx", "xlsx")
 SMOKE_TASK_IDS = (
     "trusts-estates-private-client/compare-trust-documents-against-client-instructions",

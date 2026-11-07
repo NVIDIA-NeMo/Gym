@@ -2,7 +2,7 @@
 
 This directory contains a minimal runtime adaptation of
 [Harvey LAB](https://github.com/harveyai/harvey-labs), pinned to commit
-`f46ef86e4788545622db25dcffa3aebb7a139929` and distributed under Harvey's
+`1da4750171bc5a534960b3d82d15ba7fd2cf653f` and distributed under Harvey's
 MIT license in `LICENSE`.
 
 NeMo Gym modifications add an asynchronous protocol adapter for the local Gym
