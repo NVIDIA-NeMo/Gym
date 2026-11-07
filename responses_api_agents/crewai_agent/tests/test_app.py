@@ -147,6 +147,7 @@ async def test_a_loopback_model_url_is_refused_for_a_remote_sandbox(monkeypatch)
             "only through an MCP grant",
         ),
         ({"input": "hi", "reasoning": {"effort": "high"}}, "request field reasoning"),
+        ({"input": "hi", "max_output_tokens": 32}, "request field max_output_tokens"),
         (
             {
                 "input": [
@@ -181,6 +182,31 @@ def test_system_messages_and_instructions_join_the_agents_system_prompt():
     assert instruction.description == _TASK
     # The seed's and the request's task timeouts both lower the configured one.
     assert instruction.timeout == 30
+
+
+@linux_only
+async def test_request_output_budget_is_refused_before_binding_and_a_corrected_request_can_run(
+    lent_sandbox, runtime, monkeypatch
+):
+    _, access = lent_sandbox
+    agent, request = _agent(), _request()
+    model = _model(monkeypatch, completion("Done.", id="chatcmpl-corrected"))
+    try:
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        with pytest.raises(HTTPException, match="request field max_output_tokens") as refused:
+            await agent.responses(request, _body(max_output_tokens=32))
+        state = agent._require_agent_session(agent._agent_session_id_from_request(request))
+        assert refused.value.status_code == 422
+        assert state.activation_request is None and state.task is None
+        assert model.requests == []
+        response = await agent.responses(request, _body(temperature=0.1, top_p=0.9))
+        close = await agent.close_agent_session(request, _close_body())
+    finally:
+        model.close()
+    assert response.status == "completed" and close.cleanup_confirmed
+    [sent] = model.requests
+    assert (sent["json"]["temperature"], sent["json"]["top_p"]) == (0.1, 0.9)
+    assert "max_tokens" not in sent["json"]
 
 
 async def test_an_activation_outside_the_seeded_session_is_refused():
@@ -251,7 +277,7 @@ async def test_an_episode_runs_one_crew_turn_in_the_lent_sandbox(lent_sandbox, r
         completion(None, ("shell", {"command": "echo $TASK_VAR > out.txt; cat out.txt input.txt"}), id="chatcmpl-1"),
         completion("Wrote hello; the {braces} stay.", id="chatcmpl-2"),
     )
-    body = _body(instructions="Answer in French.", temperature=0.0, max_output_tokens=256)
+    body = _body(instructions="Answer in French.", temperature=0.0)
     try:
         response, close = await _episode(_agent(), access, body)
     finally:
@@ -262,7 +288,8 @@ async def test_an_episode_runs_one_crew_turn_in_the_lent_sandbox(lent_sandbox, r
     first, second = model.requests
     assert first["path"] == f"/ng-rollout/{_EPISODE.capture_key}/v1/chat/completions"
     assert {request["headers"]["x-session-id"] for request in model.requests} == {_EPISODE.capture_key}
-    assert (first["json"]["temperature"], first["json"]["max_tokens"]) == (0.0, 256)
+    assert first["json"]["temperature"] == 0.0
+    assert "max_tokens" not in first["json"]
     assert [tool["function"]["name"] for tool in first["json"]["tools"]] == ["shell"]
     system, user = first["json"]["messages"]
     assert "Answer in French." in system["content"] and _TASK in user["content"]
@@ -441,6 +468,70 @@ async def test_a_rejected_model_request_fails_the_activation_with_its_status(len
     [record] = _records(close, "sandbox")
     assert invocation.status == "failed"
     assert (record.outcome, record.error_type) == ("failed", invocation.error_type)
+
+
+@linux_only
+async def test_a_short_rate_limit_burst_recovers_with_server_retry_after(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    limited = (429, {"error": {"message": "busy"}}, {"Retry-After": "0.2"})
+    model = _model(monkeypatch, limited, limited, limited, limited, completion("Recovered.", id="recovered"))
+    try:
+        response, close = await _episode(_agent(), access)
+    finally:
+        model.close()
+    assert response.status == "completed"
+    assert len(model.requests) == 5
+    assert all(
+        later["received_at"] - earlier["received_at"] >= 0.18
+        for earlier, later in zip(model.requests, model.requests[1:])
+    )
+    assert response.metadata.get("ng_agent_outcome") is None
+    assert [ref.response_id for ref in _records(close, "agent_invocation")[0].model_calls] == ["recovered"]
+
+
+@linux_only
+@pytest.mark.parametrize("status, attempts", [(400, 1), (429, 2)])
+async def test_retry_exhaustion_keeps_actual_status_and_deterministic_rejections_do_not_retry(
+    lent_sandbox, runtime, monkeypatch, status, attempts
+):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, (status, {"error": {"message": "rejected"}}, {"Retry-After": "0.01"}))
+    try:
+        response, _ = await _episode(_agent(max_model_retries=1), access)
+    finally:
+        model.close()
+    assert response.status == "failed" and len(model.requests) == attempts
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {
+        "failure_kind": "model_request_error",
+        "status_code": status,
+    }
+
+
+@linux_only
+@pytest.mark.parametrize("stop_method", ["rollout_stop", "deadline"])
+async def test_activation_stop_or_deadline_cancels_model_retry_after_sleep(
+    lent_sandbox, runtime, monkeypatch, stop_method
+):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, (429, {"error": {"message": "busy"}}, {"Retry-After": "60"}))
+    agent, request = _agent(timeout=10 if stop_method == "deadline" else 1800), _request()
+    try:
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        activation = asyncio.create_task(agent.responses(request, _body()))
+        async with asyncio.timeout(30):
+            while not model.requests:
+                await asyncio.sleep(0.05)
+        await asyncio.sleep(0.2)
+        if stop_method == "rollout_stop":
+            stop = await agent.stop_rollout(_EPISODE.capture_key)
+            assert stop.stopped
+        response = await asyncio.wait_for(activation, 15)
+        close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 10)
+    finally:
+        model.close()
+    assert close.cleanup_confirmed and response.status == "incomplete"
+    assert (ROLLOUT_STOP_METADATA_KEY in response.metadata) == (stop_method == "rollout_stop")
+    assert len(model.requests) == 1
 
 
 @linux_only

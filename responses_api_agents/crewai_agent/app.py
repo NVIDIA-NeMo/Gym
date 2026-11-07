@@ -42,15 +42,19 @@ from nemo_gym.agents import (
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
+    AGENT_RUN_ERROR,
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureHeader,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
     NgFailureEvent,
+    SdkErrorDetails,
+    failure_report_for,
     observe_failure,
     sdk_error_details,
 )
@@ -87,7 +91,6 @@ _APPLIED_REQUEST_FIELDS = frozenset(
         "model",
         "temperature",
         "top_p",
-        "max_output_tokens",
         "parallel_tool_calls",
         "metadata",
         "tools",
@@ -115,9 +118,9 @@ class CrewAIAgentConfig(BaseResponsesAPIAgentConfig):
         default=50, ge=1, description="CrewAI Agent.max_iter: model calls before CrewAI asks for a final answer."
     )
     max_model_retries: int = Field(
-        default=2,
+        default=5,
         ge=0,
-        description="Additional attempts for model HTTP 408, 425, 429 and 5xx responses, with bounded backoff.",
+        description="Additional attempts for model HTTP 408, 425, 429 and 5xx responses; each wait is capped at 60s.",
     )
     context_window_size: int | None = Field(
         default=None,
@@ -227,6 +230,33 @@ def _run_end(report: Mapping[str, Any] | None) -> tuple[str, str | None]:
     if report["stop_reason"] == "cancelled":
         return "cancelled", None
     return "completed", None
+
+
+def _infrastructure_failure(report: Mapping[str, Any]) -> NgFailureEvent:
+    """Project the runner's selected origin/cause facts once; the session reuses these event identities."""
+    failure = NgFailureEvent(
+        boundary="harness",
+        failure_kind=AGENT_RUN_ERROR,
+        failure_reason=report["message"],
+        operation=report["operation"],
+        operation_id=(report.get("grant_name") or "")[:128] or None,
+        stage="agent",
+    )
+    parent = failure
+    for cause in report["causes"]:
+        observed = NgFailureEvent(
+            boundary="harness",
+            failure_kind=cause["failure_kind"],
+            failure_reason=cause["message"],
+            operation=report["operation"],
+            stage="agent",
+            foreign_error=SdkErrorDetails(
+                exception_type=cause["exception_type"], message=cause["message"], http_status=cause["http_status"]
+            ),
+        )
+        parent.__cause__ = observed
+        parent = observed
+    return failure
 
 
 class CrewAIAgent(SimpleResponsesAPIAgent):
@@ -370,6 +400,8 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             raise TypeError("Expected a CrewAI session state")
         if state.provider_wait_failure is not None:
             observe_failure(state.provider_wait_failure)
+        if state.infrastructure_failure is not None:
+            observe_failure(state.infrastructure_failure)
         await state.close(self.config.session_close_timeout_seconds)
         # No trajectory: rollout collection builds the turns from the captured calls, and joins every call, failed
         # attempts included, to the invocation by its session header.
@@ -422,8 +454,6 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             for key, value in (
                 ("temperature", body.temperature),
                 ("top_p", body.top_p),
-                # A crew makes many model calls: the request's output cap applies to each of them.
-                ("max_tokens", body.max_output_tokens),
             )
             if value is not None
         }
@@ -521,7 +551,13 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             if report.get("configuration_error") is not None:
                 raise HTTPException(422, report["configuration_error"])
             if report["infrastructure_error"] is not None:
-                raise HTTPException(503, f"CrewAI episode infrastructure failed: {report['infrastructure_error']}")
+                state.infrastructure_failure = _infrastructure_failure(report["infrastructure_error"])
+                observe_failure(state.infrastructure_failure)
+                raise HTTPException(
+                    503,
+                    f"CrewAI episode infrastructure failed: {state.infrastructure_failure.failure_reason}",
+                    headers=FailureHeader.encode(failure_report_for(state.infrastructure_failure)),
+                ) from state.infrastructure_failure
             return self.report_rollout_stop(self._response(state, instruction, report), state.session)
 
     def _response(

@@ -155,8 +155,12 @@ trace upload and PyPI version check, and starts shell commands with the task's o
 Every CrewAI model call, including the summarization CrewAI runs when a conversation nears the model's context
 window, is one Chat Completions request from the sandbox to the Model Server's rollout-prefixed route
 (`/ng-rollout/<capture key>[/training-token-capture]/v1/chat/completions`), with `x-session-id` set to the invocation
-ID and the Model Server's cookies sent back. HTTP 408, 425, 429 and 5xx are retried `max_model_retries` times with
-backoff; CrewAI also retries a rate-limited call up to three times on its own. CrewAI's own message keys, such as
+ID and the Model Server's cookies sent back. HTTP 408, 425, 429 and 5xx are retried `max_model_retries` times
+(five retries by default). A positive finite `Retry-After` number or HTTP date sets the wait, capped at 60 seconds;
+otherwise the wait uses full jitter with a one-second exponential base and the same 60-second cap. The default's
+five waits total at most 31 seconds without `Retry-After`. Stop and the activation deadline cancel a pending wait.
+Other 4xx responses are not retried, and exhaustion retains the final HTTP status. CrewAI also retries a rate-limited
+call up to three times on its own. CrewAI's own message keys, such as
 `cache_breakpoint`, are dropped before the request. Reasoning that the model returns is kept in the transcript; CrewAI
 does not send it back in later turns.
 
@@ -185,7 +189,12 @@ tools fails the activation with 503 before the first model call, which the Envir
 is skipped with an `mcp_server_skipped` gap.
 
 An MCP grant or the sandbox's `bash` that fails underneath the crew stops it at its next call, and the activation
-answers 503, so the episode is retried instead of graded.
+answers 503, so the episode is retried instead of graded. Its failure header records a stable
+`harness/agent_run_error` event with the operation (`shell_start`, `mcp_list_tools` or `mcp_call_tool`), grant name when
+applicable, and bounded exception cause facts. An observed MCP connection failure or timeout retains its transport
+kind; an HTTP rejection retains its actual status. These are runner failures, not invented sandbox-provider errors;
+actual provider failures retain their shared-layer classifications. Close replays the same event identities.
+Diagnostics select exception type, OS error text or HTTP status without serializing request URLs, headers or bodies.
 
 ### Request fields
 
@@ -193,7 +202,8 @@ answers 503, so the episode is retried instead of graded.
 | --- | --- |
 | `input` | Text `user` messages become the CrewAI task's description, as is: the crew starts without inputs, so CrewAI does not read braces as template variables. Text `system` and `developer` messages, and `instructions`, join the agent's backstory. Other items are refused. |
 | `tools` | Each function tool must name a tool of an MCP grant; the crew is offered those grant tools (and `shell`). Without `tools`, every grant tool is offered. |
-| `temperature`, `top_p`, `max_output_tokens` | Sent on every model call; `max_output_tokens` caps each call, not the episode. |
+| `temperature`, `top_p` | Sent on every model call. |
+| `max_output_tokens` | Non-null values are refused with 422 before the activation is bound; the crew cannot enforce an aggregate response budget. Set per-call caps on the Model Server instead. A corrected request can use the same seeded session. |
 | `parallel_tool_calls` | `false` is sent to the model with the tools. |
 | `model` | Sent as the request's model name; the vLLM Model Server substitutes its own. |
 | `metadata` | `agent_timeout_sec` lowers `timeout`, as the seed's `agent_timeout_sec` does. Other keys are ignored. |
@@ -239,7 +249,7 @@ every call that carried the session header to the invocation, including failed a
 | `model` | `${policy_model_name}` | Model name sent when the request names none. |
 | `timeout` | 1800 | Seconds a crew run may take; a task's `agent_timeout_sec` lowers it. |
 | `max_iter` | 50 | CrewAI `Agent.max_iter`. |
-| `max_model_retries` | 2 | Retries of transient model HTTP statuses. |
+| `max_model_retries` | 5 | Additional attempts for transient model HTTP statuses; 0 disables these retries. Backoff/`Retry-After` waits are capped at 60 seconds each and remain inside the activation deadline. |
 | `context_window_size` | `null` (131072 in `configs/crewai_agent.yaml`) | The model's context window; CrewAI summarizes near 85% of it. Unset, CrewAI assumes 4,096 tokens. |
 | `role`, `goal`, `backstory`, `expected_output` | Generic engineer prompts | The CrewAI agent and task text around the instruction. |
 | `shell_timeout_seconds` | 600 | Deadline for one command. |

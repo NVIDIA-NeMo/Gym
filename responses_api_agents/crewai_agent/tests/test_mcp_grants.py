@@ -3,6 +3,7 @@
 """MCP tool grants, called from the sandbox runner: a real streamable-HTTP MCP server that admits only the
 episode's token."""
 
+import asyncio
 import json
 import socket
 import threading
@@ -12,11 +13,23 @@ from collections.abc import Iterator
 import pytest
 import uvicorn
 from fastapi import HTTPException
+from fastapi.testclient import TestClient
 from mcp.server.fastmcp import FastMCP
 
+from nemo_gym.core import FailureHeader
 from nemo_gym.server_runtime import MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.crewai_agent.tests.fakes import completion
-from responses_api_agents.crewai_agent.tests.test_app import _agent, _body, _episode, _model, _records, linux_only
+from responses_api_agents.crewai_agent.tests.test_app import (
+    _EPISODE,
+    _agent,
+    _body,
+    _close_body,
+    _episode,
+    _model,
+    _records,
+    _seed,
+    linux_only,
+)
 
 
 pytestmark = linux_only
@@ -164,21 +177,77 @@ async def test_a_granted_tool_is_discovered_called_and_its_result_reaches_the_mo
     assert tools["c1-call-1"].error_type == "tool_error"
 
 
-async def test_a_required_grant_that_does_not_connect_fails_the_episode_before_any_model_call(
-    mcp_url, lent_sandbox, runtime, monkeypatch
+@pytest.mark.parametrize("failure_source", ["mcp_http", "mcp_connect", "shell_start"])
+async def test_infrastructure_faults_keep_typed_origin_and_cause_through_the_route_and_close(
+    mcp_url, lent_sandbox, runtime, monkeypatch, failure_source
 ):
     _, access = lent_sandbox
-    model = _model(monkeypatch)
+    if failure_source == "shell_start":
+        access = access.model_copy(update={"env": {"PATH": "/no-crewai-shell"}})
+        model = _model(monkeypatch, completion(None, ("shell", {"command": "true"}), id="shell-call"))
+    else:
+        model = _model(monkeypatch)
+    agent = _agent()
+
+    def exercise_routes():
+        # A bound port with no listener gives a real connection refusal without a port-reuse race.
+        with socket.socket() as unavailable:
+            unavailable.bind(("127.0.0.1", 0))
+            url = (
+                f"http://127.0.0.1:{unavailable.getsockname()[1]}/mcp" if failure_source == "mcp_connect" else mcp_url
+            )
+            grants = [] if failure_source == "shell_start" else [_grant(url, token="Bearer wrong")]
+            application = agent.setup_webserver()
+            # Production startup adds the middleware that forwards observed events on successful replies.
+            agent.setup_exception_middleware(application)
+            with TestClient(application) as client:
+                seed = client.post(
+                    "/v1/agent_sessions",
+                    json=_seed(sandbox_access=access, tool_accesses=grants).model_dump(mode="json"),
+                )
+                assert seed.status_code == 200, seed.text
+                route = f"/ng-rollout/{_EPISODE.capture_key}/v1/responses"
+                body = _body().model_dump(mode="json")
+                failed = client.post(route, json=body)
+                replay = client.post(route, json=body)
+                closed = client.post("/v1/agent_sessions/close", json=_close_body().model_dump(mode="json"))
+                return failed, replay, closed
+
     try:
-        response, close = await _episode(_agent(), access, tool_accesses=[_grant(mcp_url, token="Bearer wrong")])
+        response, replay, close = await asyncio.to_thread(exercise_routes)
     finally:
         model.close()
-
-    # A 503 lets the Environment Server retry the episode; the crew never ran.
-    assert isinstance(response, HTTPException) and response.status_code == 503
-    assert model.requests == []
-    [record] = _records(close, "sandbox")
-    assert (record.outcome, record.error_type) == ("failed", "infrastructure_error")
+    assert response.status_code == replay.status_code == 503
+    failure = FailureHeader.decode(response.headers)
+    assert failure is not None and failure.failure_id is not None
+    root = failure.events[failure.failure_id]
+    assert (root.boundary, root.failure_kind, root.stage) == ("harness", "agent_run_error", "agent")
+    assert root.operation == ("shell_start" if failure_source == "shell_start" else "mcp_list_tools")
+    assert root.cause_id is not None
+    causes = [event for event in failure.events.values() if event.foreign_error is not None]
+    if failure_source == "mcp_http":
+        assert any(event.foreign_error.http_status == 401 for event in causes)
+        assert any(event.failure_kind == "agent_request_failed" for event in causes)
+    elif failure_source == "mcp_connect":
+        assert any(event.failure_kind == "transport_unreachable" for event in causes)
+    else:
+        assert any(event.foreign_error.exception_type == "builtins.FileNotFoundError" for event in causes)
+    assert not {event.failure_kind for event in failure.events.values()} & {
+        "model_request_error",
+        "model_transport_error",
+        "provider_unavailable",
+    }
+    encoded = failure.model_dump_json()
+    assert "Bearer wrong" not in encoded and "127.0.0.1" not in encoded
+    assert FailureHeader.decode(replay.headers) == failure
+    assert close.status_code == 200
+    replayed = FailureHeader.decode(close.headers)
+    assert replayed is not None
+    assert replayed.failure_id is None  # Close succeeded while forwarding the original activation's events.
+    assert all(replayed.events[key] == event for key, event in failure.events.items())
+    assert len(model.requests) == (1 if failure_source == "shell_start" else 0)
+    [record] = [item for item in close.json()["agent_observations"]["records"] if item["kind"] == "sandbox"]
+    assert (record["outcome"], record["error_type"]) == ("failed", "infrastructure_error")
 
 
 async def test_an_optional_grant_that_does_not_connect_is_skipped_with_a_gap(

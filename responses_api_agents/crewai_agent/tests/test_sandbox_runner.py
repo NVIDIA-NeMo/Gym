@@ -12,6 +12,52 @@ import pytest
 from responses_api_agents.crewai_agent.sandbox_runner import Shell, Transcript
 
 
+@pytest.mark.parametrize(
+    "retry, retry_after, expected",
+    [
+        (0, "0.25", 0.25),
+        (4, "120", 60.0),
+        (0, "Thu, 01 Jan 2099 00:00:00 GMT", 60.0),
+        (0, "Thu, 01 Jan 1970 00:00:00 GMT", 1.0),
+        (2, None, 4.0),
+        (2, "invalid", 4.0),
+        (2, "nan", 4.0),
+        (2, "inf", 4.0),
+        (2, "-1", 4.0),
+        (2, "0", 4.0),
+        (10000, None, 60.0),
+    ],
+)
+def test_retry_after_dates_and_seconds_are_bounded_and_invalid_values_use_backoff(
+    monkeypatch, retry, retry_after, expected
+):
+    from responses_api_agents.crewai_agent import sandbox_runner
+
+    monkeypatch.setattr(sandbox_runner.random, "uniform", lambda low, high: high)
+    assert sandbox_runner._retry_wait_seconds(retry, retry_after) == expected
+
+
+def test_infrastructure_cause_capture_keeps_status_and_types_without_request_secrets():
+    import httpx
+
+    from responses_api_agents.crewai_agent.sandbox_runner import InfrastructureError
+
+    request = httpx.Request("GET", "https://example.com/mcp?token=private", headers={"Authorization": "private"})
+    response = httpx.Response(401, request=request, text="private response body")
+    cause = httpx.HTTPStatusError("private diagnostic with request URL", request=request, response=response)
+    failure = InfrastructureError("required MCP grant weather did not list its tools", operation="mcp_list_tools")
+    failure.__cause__ = ExceptionGroup("private SDK wrapper", [cause])
+
+    report = failure.to_report()
+
+    assert [cause["exception_type"] for cause in report["causes"]] == [
+        "builtins.ExceptionGroup",
+        "httpx.HTTPStatusError",
+    ]
+    assert report["causes"][-1]["http_status"] == 401
+    assert "private" not in json.dumps(report) and "example.com" not in json.dumps(report)
+
+
 # Killing a process group is reliable on Linux; macOS's bash 3.2 sometimes leaves a subshell of a killed group running.
 _LINUX_PROCESS_GROUPS = pytest.mark.skipif(sys.platform != "linux", reason="Linux process-group kills")
 

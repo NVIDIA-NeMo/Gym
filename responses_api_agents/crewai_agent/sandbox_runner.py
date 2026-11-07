@@ -16,13 +16,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+import random
 import signal
 import sys
 import tempfile
 import time
 import traceback
 from collections.abc import Awaitable, Callable, Mapping
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,6 +36,7 @@ from uuid import uuid4
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import aiohttp  # noqa: E402
+import httpx  # noqa: E402
 
 
 SHELL_TOOL_NAME = "shell"
@@ -47,6 +52,73 @@ class ConfigurationError(Exception):
 
 class InfrastructureError(Exception):
     """A tool grant or the sandbox failed underneath the crew; the episode cannot be graded."""
+
+    def __init__(self, message: str, *, operation: str, grant_name: str | None = None) -> None:
+        super().__init__(message)
+        self.operation = operation
+        self.grant_name = grant_name
+
+    def to_report(self) -> dict[str, Any]:
+        """Selected process/MCP facts, without serializing requests, URLs, headers or response bodies."""
+        causes = []
+        error = self.__cause__
+        seen: set[int] = set()
+        while error is not None and id(error) not in seen and len(causes) < 8:
+            seen.add(id(error))
+            kind = "agent_run_error"
+            status = None
+            message = "Operation raised an unexpected exception"
+            if isinstance(error, httpx.HTTPStatusError):
+                status = error.response.status_code
+                message, kind = f"MCP server answered HTTP {status}", "agent_request_failed"
+            elif isinstance(error, (httpx.TimeoutException, TimeoutError)):
+                message, kind = "MCP operation timed out", "transport_timeout"
+            elif isinstance(error, httpx.ConnectError):
+                message, kind = "Connection to MCP server failed", "transport_unreachable"
+            elif isinstance(error, OSError):
+                message = f"OS error {error.errno}: {error.strerror or 'operation failed'}"
+            elif isinstance(error, BaseExceptionGroup):
+                message = f"Exception group with {len(error.exceptions)} nested exceptions"
+            causes.append(
+                {
+                    "failure_kind": kind,
+                    "exception_type": f"{type(error).__module__}.{type(error).__qualname__}"[:256],
+                    "message": message[:2000],
+                    "http_status": status,
+                }
+            )
+            # MCP task groups wrap one originating error. Do not select an arbitrary cause from a multi-error group.
+            error = (
+                error.__cause__
+                if error.__cause__ is not None
+                else error.exceptions[0]
+                if isinstance(error, BaseExceptionGroup) and len(error.exceptions) == 1
+                else None
+            )
+        return {
+            "message": str(self)[:2000],
+            "operation": self.operation,
+            "grant_name": self.grant_name,
+            "causes": causes,
+        }
+
+
+def _retry_wait_seconds(retry: int, retry_after: str | None) -> float:
+    """Full-jitter backoff or a provider Retry-After, with Gym's shared 1s base and 60s cap."""
+    if retry_after:
+        try:
+            seconds = float(retry_after)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(retry_after)
+                seconds = (
+                    retry_at.replace(tzinfo=retry_at.tzinfo or timezone.utc) - datetime.now(timezone.utc)
+                ).total_seconds()
+            except (TypeError, ValueError, OverflowError):
+                seconds = 0.0
+        if math.isfinite(seconds) and seconds > 0:
+            return min(seconds, 60.0)
+    return random.uniform(0, min(60.0, 2.0 ** min(retry, 6)))
 
 
 class ModelRequestError(Exception):
@@ -133,7 +205,7 @@ class Shell:
                     start_new_session=True,
                 )
             except OSError as error:
-                raise InfrastructureError(f"could not start bash in the sandbox: {error}") from error
+                raise InfrastructureError("could not start bash in the sandbox", operation="shell_start") from error
             timed_out = False
             try:
                 await asyncio.wait_for(process.wait(), self.timeout_seconds)
@@ -196,7 +268,7 @@ class Transcript:
         # The failure behind a crew run that raised: the last model request that failed, if one did.
         self.model_failure: dict[str, Any] | None = None
         # Set when a grant or the sandbox failed underneath the crew; the crew is stopped at its next call.
-        self.infrastructure_error: str | None = None
+        self.infrastructure_error: dict[str, Any] | None = None
         self.on_infrastructure_error: Callable[[], None] = lambda: None
         self._answered_calls: set[str] = set()
 
@@ -323,7 +395,7 @@ class Transcript:
             run["status"], run["error_type"] = "failed", "infrastructure_error"
             # The crew would show the model this error and carry on; stop it at its next call instead, so the
             # episode is not graded. This call still returns its error to CrewAI.
-            self.infrastructure_error = str(error)
+            self.infrastructure_error = error.to_report()
             self.on_infrastructure_error()
             raise
         finally:
@@ -455,7 +527,9 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
                     raise
                 except Exception as error:
                     raise InfrastructureError(
-                        f"MCP grant {grant['name']} failed: {type(error).__name__}: {error}"
+                        f"MCP grant {grant['name']} failed",
+                        operation="mcp_call_tool",
+                        grant_name=grant["name"],
                     ) from error
                 if result.isError:
                     return grant_tool_result(result.content, failed=True), "failed", "tool_error"
@@ -494,7 +568,9 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
             except Exception as error:
                 if grant["required"]:
                     raise InfrastructureError(
-                        f"required MCP grant {grant['name']} did not list its tools: {error}"
+                        f"required MCP grant {grant['name']} did not list its tools",
+                        operation="mcp_list_tools",
+                        grant_name=grant["name"],
                     ) from error
                 transcript.gap("mcp_server_skipped", f"{grant['name']}: {type(error).__name__}")
                 continue
@@ -541,12 +617,13 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
                             data = await response.json(content_type=None)
                             break
                         status, detail = response.status, await response.text(errors="replace")
+                        retry_after = response.headers.get("Retry-After")
                 except (aiohttp.ClientError, TimeoutError):
                     transcript.model_call_pending = False
                     transcript.model_failure = {"transport": True}
                     raise
                 if retry < payload["max_model_retries"] and _retryable(status):
-                    await asyncio.sleep(0.5 * 2 ** min(retry, 4))
+                    await asyncio.sleep(_retry_wait_seconds(retry, retry_after))
                     retry += 1
                     continue
                 transcript.model_call_pending = False
@@ -589,7 +666,7 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
         except ConfigurationError as error:
             report.update(status="failed", configuration_error=str(error))
         except InfrastructureError as error:
-            transcript.infrastructure_error = str(error)
+            transcript.infrastructure_error = error.to_report()
         except Exception as raised:
             # Including a model request that timed out, which CrewAI raises as it is.
             report.update(

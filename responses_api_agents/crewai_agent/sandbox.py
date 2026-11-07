@@ -42,6 +42,7 @@ class CrewAISessionState(AgentSessionState):
     sandbox_provider: str | None = None
     sandbox_id: str | None = None
     provider_wait_failure: NgFailureEvent | None = None
+    infrastructure_failure: NgFailureEvent | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = field(default=None)
 

@@ -4,6 +4,7 @@
 
 import json
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, ClassVar
 
@@ -67,7 +68,7 @@ class ModelServer:
     Once the answers run out, the last one answers every later request, as a server that keeps rejecting does.
     """
 
-    def __init__(self, answers: list[dict | int | tuple[int, dict] | None]) -> None:
+    def __init__(self, answers: list[dict | int | tuple[int, dict] | tuple[int, dict, dict[str, str]] | None]) -> None:
         self.answers = list(answers)
         self.requests: list[dict[str, Any]] = []
         self.blocked = threading.Event()
@@ -77,23 +78,29 @@ class ModelServer:
         class Handler(BaseHTTPRequestHandler):
             def do_POST(self) -> None:
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
-                server.requests.append({"path": self.path, "headers": dict(self.headers), "json": body})
+                server.requests.append(
+                    {"path": self.path, "headers": dict(self.headers), "json": body, "received_at": time.monotonic()}
+                )
                 answer = server.answers[min(len(server.requests), len(server.answers)) - 1]
                 if answer is None:
                     server.blocked.set()
                     server.release.wait(60)
                     return
-                status, answer = (
-                    answer
-                    if isinstance(answer, tuple)
-                    else (answer, {"error": {"message": "rejected"}})
-                    if isinstance(answer, int)
-                    else (200, dict(answer))
-                )
+                headers = {}
+                if isinstance(answer, tuple):
+                    status, answer, *extra = answer
+                    if extra:
+                        [headers] = extra
+                elif isinstance(answer, int):
+                    status, answer = answer, {"error": {"message": "rejected"}}
+                else:
+                    status, answer = 200, dict(answer)
                 answer = dict(answer)
                 cookies = answer.pop(_SET_COOKIES, {})
                 payload = json.dumps(answer).encode()
                 self.send_response(status)
+                for name, value in headers.items():
+                    self.send_header(name, value)
                 for name, value in cookies.items():
                     self.send_header("Set-Cookie", f"{name}={value}; Path=/")
                 self.send_header("Content-Type", "application/json")
