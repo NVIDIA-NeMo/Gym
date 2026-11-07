@@ -1011,7 +1011,7 @@ def test_prepared_panel_materializes_as_actual_episode_requests(tmp_path):
     from pydantic import ValidationError
 
     from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
-    from nemo_gym.data.task_materialization import materialize_task
+    from nemo_gym.data import materialize_task
 
     path = tmp_path / "panel.jsonl"
     materialize(path, tactics=["canonical_who_are_you", "premise_false"], multi_per_strategy=1)
