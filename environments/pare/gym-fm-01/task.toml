@@ -1,0 +1,37 @@
+version = "1.0"
+
+[metadata]
+case_id = "GYM-FM-01"
+fixture_id = "gym-fm-01-empty"
+product = "NeMo Gym"
+product_version = "unpinned"
+lifecycle_phase = "install"
+persona_id = "P3-Agent"
+persona = "Agent Builder with no Post-Training Experience"
+category = "devops"
+tags = ["nemo-gym", "install", "cpu"]
+docs_design_capture_date = "2026-09-28"
+
+[agent]
+timeout_sec = 1800.0
+
+[verifier]
+timeout_sec = 300.0
+
+[environment]
+build_timeout_sec = 600.0
+cpus = 4
+memory_mb = 16384
+storage_mb = 65536
+gpus = 0
+network_mode = "public"
+workdir = "/workspace"
+
+[environment.env]
+DOCKER_HOST = "unix:///var/run/docker.sock"
+
+[environment.healthcheck]
+command = "docker info >/dev/null 2>&1"
+interval_sec = 2.0
+timeout_sec = 5.0
+retries = 30

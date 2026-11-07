@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+harbor_environment_server:
+  environment_servers:
+    harbor:
+      sandbox_provider_options:
+        run_args: ["--privileged"]
+
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      # Use the adapter's disabled-search default; live-search support is deferred to engineering.
+      reasoning_effort: high
+      model_server_forwards_reasoning_effort: true
+      timeout: 1800
+      sandbox_logs_dir: /logs/agent
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      is_responses_native: true

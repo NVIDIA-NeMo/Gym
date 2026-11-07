@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - environments/pare/config/gym-fm-02.yaml
+
+fm02_inner_agent: codex_agent
+fm02_inner_model: openai/openai/gpt-5.4-mini

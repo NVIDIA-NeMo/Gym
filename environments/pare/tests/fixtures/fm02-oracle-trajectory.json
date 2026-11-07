@@ -1,0 +1,48 @@
+{
+  "schema_version": "ATIF-v1.7",
+  "session_id": "0-0",
+  "trajectory_id": "0-0",
+  "agent": {
+    "name": "harbor_gym-fm-02_agent",
+    "version": "0.7.0rc0",
+    "model_name": "oracle"
+  },
+  "steps": [
+    {
+      "step_id": 1,
+      "source": "user",
+      "message": "NeMo Gym is already installed and I want to try its Workplace Assistant example, where the assistant replies to Carlos's last email about \"Task Update on Develop prototype for report generation\" with \"Thanks for the update - I will get back to you tomorrow.\"\n\nI want to use the model named in `GYM_MODEL` through `OPENAI_BASE_URL` and my API key is in the `GYM_API_KEY` environment variable.\n\nRun the example using `GYM_AGENT` and save the result somewhere under `/workspace` so I can review it later.\n"
+    },
+    {
+      "step_id": 2,
+      "source": "agent",
+      "message": "ming /v1/responses request.\n(policy_model) WARNING:nemo_gym.responses_streaming:Dropping unsupported input item of type 'message' from a streaming /v1/responses request.\n(policy_model) WARNING:nemo_gym.responses_streaming:Dropping unsupported input item of type 'message' from a streaming /v1/responses request.\n(workplace_assistant_agent) WARNING:__main__:codex reported errors: ['Model metadata for `openai/openai/gpt-5.4-mini` not found. Defaulting to fallback metadata; this can degrade performance and cause issues.']\n(workplace_assistant) Error executing tool:  'exec_command'\n(workplace_assistant) Error executing tool:  'exec_command'\n(workplace_assistant) Error executing tool:  'exec_command'\n(workplace_assistant) Error executing tool:  'exec_command'\n\r                                                          \rFinished 1 / 1 rollouts (100%) in 0:00:23 (2.50 rollouts/min). Examples left:\n\nFound 1 / 1 (100.00%) rollouts for `workplace_assistant_agent`.\n{\n    \"reward\": 1.0,\n    \"mask_sample\": 0.0,\n    \"turns_used\": 3.0,\n    \"finished_naturally\": 1.0\n}\n\n\rCollecting rollouts:   0%|          | 0/1 [00:23<?, ?it/s]\rCollecting rollouts: 100%|██████████| 1/1 [00:23<00:00, 23.93s/it]\nPer-task latency over 1 completed rollout(s): median 0.4 min, p90 0.4 min, p99 0.4 min, max 0.4 min\nTask-time delivered: 0.0 task-hours\nSorting results to ensure consistent ordering\nComputing aggregate metrics\nINFO:     127.0.0.1:53688 - \"GET /global_config_dict_yaml HTTP/1.1\" 200 OK\n\nKey metrics for workplace_assistant_agent:\n{\n    \"mean/reward\": 1.0,\n    \"mean/turns_used\": 3.0,\n    \"mean/finished_naturally\": 1.0,\n    \"mean/input_tokens\": 59634.0,\n    \"mean/output_tokens\": 571.0,\n    \"mean/total_tokens\": 60205.0\n}\nFinished rollout collection! View results at:\nFully materialized inputs: /workspace/results/carlos_rollouts_materialized_inputs.jsonl\nRollouts: /workspace/results/carlos_rollouts.jsonl\nAggregate metrics: /workspace/results/carlos_rollouts_aggregate_metrics.json\nRollout health: 1 checked, 0 healthy, 0 unhealthy, 1 unobserved\nQuality summary: /workspace/results/quality_summary.json\nSending interrupt signals to servers...\nWaiting for processes to finish...\n(policy_model) INFO:     Shutting down\n(workplace_assistant_environment_server) INFO:     Shutting down\n(workplace_assistant) (workplace_assistant_agent) INFO:     Shutting down\nINFO:     Shutting down\n(policy_model) INFO:     Waiting for application shutdown.\n(policy_model) INFO:     Application shutdown complete.\n(policy_model) INFO:     Finished server process [976]\n(workplace_assistant_environment_server) INFO:     Waiting for application shutdown.\n(workplace_assistant_environment_server) INFO:     Application shutdown complete.\n(workplace_assistant_environment_server) INFO:     Finished server process [979]\n(workplace_assistant_agent) INFO:     Waiting for application shutdown.\n(workplace_assistant_agent) INFO:     Application shutdown complete.\n(workplace_assistant_agent) INFO:     Finished server process [981]\n(workplace_assistant) INFO:     Waiting for application shutdown.\n(workplace_assistant) INFO:     Application shutdown complete.\n(workplace_assistant) INFO:     Finished server process [978]\nSome processes (policy_model) didn't shutdown within the 1s timeout, killing instead. You may see messages like:\n```bash\nrpc_client.h:203: Failed to connect to GCS within 60 seconds. GCS may have been killed. It's either GCS is terminated by `ray stop` or is killed unexpectedly. If it is killed unexpectedly, see the log file gcs_server.out. https://docs.ray.io/en/master/ray-observability/user-guides/configure-logging.html#logging-directory-structure. The program will terminate.\n```\n\nINFO:     Shutting down\nINFO:     Waiting for application shutdown.\nINFO:     Application shutdown complete.\nINFO:     Finished server process [81]\nNeMo Gym finished!\nSaved rollout: /workspace/results/carlos_rollouts.jsonl\nGym email-task reward: 1.0\nShutting down Ray cluster spun up by NeMo Gym...\n",
+      "extra": {
+        "nemo_gym": {
+          "source_item_id": "msg_a8df3f7d1284438d9c06776470d2d6d6"
+        }
+      }
+    }
+  ],
+  "final_metrics": {
+    "total_prompt_tokens": 0,
+    "total_completion_tokens": 0,
+    "total_steps": 2
+  },
+  "extra": {
+    "nemo_gym": {
+      "exporter": {
+        "name": "nemo-gym",
+        "version": "0.7.0rc0"
+      },
+      "source": {
+        "format": "responses_transcript"
+      },
+      "conversion": {
+        "profile": "ng-transcript-to-atif-v1",
+        "status": "complete",
+        "open_tool_calls": []
+      }
+    }
+  }
+}
