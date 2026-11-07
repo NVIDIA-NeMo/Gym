@@ -94,6 +94,7 @@ from nemo_gym.trajectory.atif_reverification import (
     load_atif_manifest,
     project_atif_manifest_entries,
 )
+from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -459,7 +460,7 @@ def _parse_output_line(line: bytes) -> Dict[str, Any]:
     result_str = line.strip()
     if not result_str:
         return {}
-    return orjson.loads(result_str)
+    return loads_json(result_str)
 
 
 def _parse_output_line_key(line: bytes) -> tuple[int, int] | None:
@@ -592,7 +593,7 @@ def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path) -> None:
         for line in f:
             if not line.strip():
                 continue
-            row = orjson.loads(line)
+            row = loads_json(line)
             # A rollout that produced no result has nothing to recover, so its row cannot lose stage identity.
             if "stage_index" in row and not is_omitted_rollout_row(row):
                 raise ConfigError(
@@ -624,7 +625,7 @@ def _seed_output_with_successes(
     with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
         selected = (
             (
-                orjson.dumps(_project_reverification_row(record.read())) + b"\n"
+                dumps_json_bytes(_project_reverification_row(record.read())) + b"\n"
                 for record in source_store.selected_records("success").values()
             )
             if source_store is not None
@@ -666,7 +667,7 @@ def _yield_inputs_and_rollouts_paired(
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
         for line in m_f:
-            r = orjson.loads(line)
+            r = loads_json(line)
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
@@ -677,7 +678,7 @@ def _yield_inputs_and_rollouts_paired(
                 line = next(rows)
             except StopIteration:
                 break
-            rollout_row = line if selected_rollouts is not None else orjson.loads(line)
+            rollout_row = line if selected_rollouts is not None else loads_json(line)
             if rollout_predicate is not None and not rollout_predicate(rollout_row):
                 continue
             input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
@@ -796,7 +797,9 @@ def _rescoring_source_answer(row: Dict, run_id: str) -> dict[str, str | int]:
         "attempt": row.get(ATTEMPT_INDEX_KEY_NAME, 0),
         "task_index": row[TASK_INDEX_KEY_NAME],
         "rollout_index": row[ROLLOUT_INDEX_KEY_NAME],
-        "answer_sha256": hashlib.sha256(orjson.dumps(_rollout_response(row), option=orjson.OPT_SORT_KEYS)).hexdigest(),
+        "answer_sha256": hashlib.sha256(
+            dumps_json_bytes(_rollout_response(row), option=orjson.OPT_SORT_KEYS)
+        ).hexdigest(),
     }
 
 
@@ -827,7 +830,7 @@ def _validate_rescoring_cache(store: RolloutStore, output_fpaths: OutputPaths) -
                     "source answer. Choose a fresh output path; saved artifacts were not changed."
                 )
                 try:
-                    cached = orjson.loads(line)
+                    cached = loads_json(line)
                 except orjson.JSONDecodeError as error:
                     raise ConfigError(message) from error
                 binding = cached.get(_SOURCE_ANSWER_KEY) if isinstance(cached, dict) else None
@@ -1167,7 +1170,7 @@ async def _call_aggregate_metrics(
 
     # Write single file with all agents
     metrics_fpath = aggregate_metrics_path_for(output_fpath)
-    metrics_fpath.write_bytes(orjson.dumps(all_agent_metrics, option=orjson.OPT_INDENT_2))
+    metrics_fpath.write_bytes(dumps_json_bytes(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
     return metrics_fpath
 
@@ -1263,7 +1266,7 @@ def _source_identity_stamps(
             for line in f:
                 if not line.strip():
                     continue
-                row = orjson.loads(line)
+                row = loads_json(line)
                 task, rollout = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
                 if task is None or rollout is None:
                     continue
@@ -1292,7 +1295,7 @@ def _load_reverified_results(
     ``ConfigError`` before anything is exported or aggregated; the output file keeps every row.
     """
     with output_fpath.open("rb") as f:
-        results = [orjson.loads(line) for line in f if line.strip()]
+        results = [loads_json(line) for line in f if line.strip()]
     results.sort(key=lambda r: (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]))
     if identity_sources and any(key not in r for r in results for key in _IDENTITY_KEYS):
         stamps_by_key, source_keys = _source_identity_stamps(identity_sources)
@@ -1999,7 +2002,7 @@ class RolloutReverificationHelper(BaseModel):
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
 
-                serialized = orjson.dumps(result)
+                serialized = dumps_json_bytes(result)
 
                 # ATIF writes kill-shaped diagnostics to its sidecar too.
                 if not sources_dropped and (not no_persist or config.input_format == "atif"):
@@ -2018,7 +2021,7 @@ class RolloutReverificationHelper(BaseModel):
                     # contaminates the score.
                     failure_class = failure_class or ATIF_NO_PERSIST_FAILURE_CLASS
                     result[NG_FAILURE_CLASS_KEY] = failure_class
-                    serialized = orjson.dumps(result)
+                    serialized = dumps_json_bytes(result)
                     failure_counts[failure_class] += 1
                     # Every dropped rollout says so as it happens, as in rollout collection.
                     detail = str(result.get("_ng_failure_message") or result.get("error") or "")[:200]

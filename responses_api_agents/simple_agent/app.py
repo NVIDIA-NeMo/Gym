@@ -726,7 +726,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     started_monotonic = perf_counter()
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
-                except (json.JSONDecodeError, TypeError) as e:
+                except (ValueError, TypeError) as e:
+                    # ValueError also covers valid JSON the decoder refuses, such as an integer over 4,300 digits.
                     tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
                     if collect_trajectory:
                         error_type = type(e).__name__

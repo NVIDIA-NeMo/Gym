@@ -64,6 +64,7 @@ from nemo_gym.models.token_capture.records import UNCOMMITTED_CALL_REASON
 from nemo_gym.models.token_capture.sink import CaptureContext, reset_token_sink, set_token_sink
 from nemo_gym.models.token_capture.store import make_token_store
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -204,7 +205,7 @@ class CaptureStore:
         allowing independent rollouts to write concurrently. This does blocking file IO + fsync,
         so callers run it off the event loop (the capture middleware uses ``asyncio.to_thread``).
         """
-        line = orjson.dumps(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
+        line = dumps_json_bytes(exchange, default=str, option=orjson.OPT_APPEND_NEWLINE)
         path = self.path_for(rollout_id)
         with path.open("ab") as handle:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
@@ -228,7 +229,7 @@ class CaptureStore:
                     stripped = line.strip()
                     if not stripped:
                         continue
-                    exchanges.append(orjson.loads(stripped))
+                    exchanges.append(loads_json(stripped))
             finally:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         return exchanges
@@ -249,7 +250,7 @@ class CaptureStore:
                     if not stripped:
                         continue
                     try:
-                        exchange = orjson.loads(stripped)
+                        exchange = loads_json(stripped)
                     except orjson.JSONDecodeError:
                         invalid_count += 1
                     else:

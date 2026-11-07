@@ -49,6 +49,7 @@ from nemo_gym.models.token_capture.protocols import (
     TokenCaptureSnapshot,
 )
 from nemo_gym.models.token_capture.records import EngineRefusalRecord, ParentResolutionStatus, TokenEntry
+from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -121,7 +122,7 @@ class TokenCaptureStore:
                 "indexed_size": 0,
                 "engine_refusals": [],
             }
-        state = orjson.loads(path.read_bytes())
+        state = loads_json(path.read_bytes())
         if not isinstance(state, dict):
             raise ValueError(f"Invalid token-capture state for rollout {rollout_id}")
         return state
@@ -162,7 +163,7 @@ class TokenCaptureStore:
                 payload = tail[position:end].strip()
                 if payload:
                     try:
-                        parsed = orjson.loads(payload)
+                        parsed = loads_json(payload)
                     except orjson.JSONDecodeError:
                         remainder = tail[end + 1 :] if newline != -1 else b""
                         if remainder.strip():
@@ -202,7 +203,7 @@ class TokenCaptureStore:
         # The temporary-file replacement remains atomic.
         # Use it only for state reconstructed from the JSONL tail.
         # Lifecycle flags are not reconstructible.
-        payload = orjson.dumps(state, option=orjson.OPT_SORT_KEYS | orjson.OPT_APPEND_NEWLINE)
+        payload = dumps_json_bytes(state, option=orjson.OPT_SORT_KEYS | orjson.OPT_APPEND_NEWLINE)
         with tempfile.NamedTemporaryFile(dir=self._root, prefix=".tokens-state-", delete=False) as handle:
             temporary_path = Path(handle.name)
             try:
@@ -251,7 +252,7 @@ class TokenCaptureStore:
 
     def append(self, entry: TokenEntry) -> None:
         """Idempotently append one entry and fsync."""
-        canonical = orjson.dumps(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
+        canonical = dumps_json_bytes(entry.model_dump(mode="json"), option=orjson.OPT_SORT_KEYS)
         line = canonical + b"\n"
         digest = self._entry_digest(canonical)
         rollout_id = entry.capture_key
@@ -583,7 +584,7 @@ class TokenCaptureStore:
             for line in handle:
                 stripped = line.strip()
                 if stripped:
-                    entries.append(TokenEntry.model_validate(orjson.loads(stripped)))
+                    entries.append(TokenEntry.model_validate(loads_json(stripped)))
         return entries
 
 

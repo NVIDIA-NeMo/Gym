@@ -70,6 +70,7 @@ from nemo_gym.rollouts.rollout_recovery import (
     validate_resume,
 )
 from nemo_gym.telemetry.observer import driver_metrics
+from nemo_gym.utils.json_codec import dumps_json_bytes
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -271,7 +272,7 @@ class RolloutStore:
         state = RolloutRecords(manifest, rows, classification=saved_failure_classification(output))
         with materialized.open("wb") as file:
             for row in rows:
-                file.write(orjson.dumps(row) + b"\n")
+                file.write(dumps_json_bytes(row) + b"\n")
         observer = driver_metrics()
         if observer is not None:
             observer.materialize.record((perf_counter() - materialize_started) * 1000.0)
@@ -383,7 +384,7 @@ class RolloutStore:
         pending = PendingRejudge(
             operation_id=uuid.uuid4().hex,
             predecessor_failure_id=predecessor_id,
-            predecessor_sha256=hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest(),
+            predecessor_sha256=hashlib.sha256(dumps_json_bytes(failure, option=orjson.OPT_SORT_KEYS)).hexdigest(),
             admitted_at=time.time(),
         )
         self._write_pending(self.manifest.pending_rejudge | {key[0]: pending})
@@ -483,7 +484,7 @@ class RolloutStore:
             or result.get(REJUDGE_OPERATION_ID_KEY) != pending.operation_id
             or result.get("_ng_rejudge_admitted_at") != pending.admitted_at
             or pending.predecessor_failure_id != rejudge_predecessor_id(failure)
-            or hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest()
+            or hashlib.sha256(dumps_json_bytes(failure, option=orjson.OPT_SORT_KEYS)).hexdigest()
             != pending.predecessor_sha256
         ):
             raise ConfigError(f"Rollout attempt {key!r}: no matching admitted re-judgment for this result.")
@@ -598,7 +599,7 @@ class RolloutStore:
         self._require_open()
         self._state.check_outcome(result)
         file = self._failures_file if result.get("_ng_failure_class") is not None else self._results_file
-        raw = orjson.dumps(result) + b"\n"
+        raw = dumps_json_bytes(result) + b"\n"
         stat = os.fstat(file.fileno())
         record = RolloutRecord(Path(file.name), file.tell(), len(raw), file_identity=(stat.st_dev, stat.st_ino))
         write_started = perf_counter()
@@ -636,7 +637,7 @@ class RolloutStore:
         It is not an outcome: the history skips it on load, and resume still runs the rollout.
         """
         self._require_open()
-        raw = orjson.dumps(row) + b"\n"
+        raw = dumps_json_bytes(row) + b"\n"
         write_started = perf_counter()
         self._failures_file.write(raw)
         self._failures_file.flush()

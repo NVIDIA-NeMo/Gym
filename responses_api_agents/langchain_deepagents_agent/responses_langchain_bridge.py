@@ -91,7 +91,7 @@ def to_langchain(input_items: list) -> list:
         elif item_type == "function_call":
             try:
                 args = json.loads(item.arguments)
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, TypeError):
                 # Malformed args from the caller. Same graceful-degradation choice as
                 # to_langchain_ai_message()'s identical guard on the model-output side: pass through {}
                 # rather than crashing the request.
@@ -185,7 +185,7 @@ def to_langchain_ai_message(gym_response: NeMoGymResponse) -> AIMessage:
         elif item_type == "function_call":
             try:
                 args = json.loads(item.arguments)
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, TypeError):
                 # Malformed args from the model server. Pass through as {} rather than crashing the
                 # request — deepagents' underlying ToolNode (handle_tool_errors=True by default) will
                 # fail the tool invocation against the real schema and feed the model an error

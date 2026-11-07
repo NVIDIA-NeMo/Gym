@@ -79,6 +79,7 @@ from nemo_gym.rollouts.health.types import (
 from nemo_gym.rollouts.rollout_records import RUN_ID_KEY, resolve_rollout_path
 from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore, logical_rollout_id
+from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
 from nemo_gym.utils.path_utils import (
     aggregation_sources_path_for,
     failures_path_for,
@@ -127,7 +128,7 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
         handle.seek(line.offset)
         raw = handle.read(line.length).strip()
     try:
-        parsed = orjson.loads(raw)
+        parsed = loads_json(raw)
         if not isinstance(parsed, dict):
             raise ValueError("rollout line is not an object")
         if line.legacy_attempt_index is not None:
@@ -670,7 +671,7 @@ def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
     with path.open("rb") as handle:
         for line in handle:
             try:
-                row = orjson.loads(line)
+                row = loads_json(line)
             except orjson.JSONDecodeError:
                 continue  # Blank lines, and the truncated last line a killed writer can leave.
             if isinstance(row, dict):
@@ -926,7 +927,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
     verdicts_path = output_dir / ROLLOUT_VERDICTS_FILENAME
-    summary_path.write_bytes(orjson.dumps(summary, option=orjson.OPT_INDENT_2))
+    summary_path.write_bytes(dumps_json_bytes(summary, option=orjson.OPT_INDENT_2))
     with verdicts_path.open("wb") as handle:
         for digest in sorted(digests, key=_sort_key):
             findings = [
@@ -943,7 +944,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
             }
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index
-            handle.write(orjson.dumps(row, option=orjson.OPT_APPEND_NEWLINE))
+            handle.write(dumps_json_bytes(row, option=orjson.OPT_APPEND_NEWLINE))
     return summary_path, verdicts_path
 
 
@@ -1247,7 +1248,7 @@ def write_disabled_summary(rollout_paths: Sequence[Path], output_dir: Path) -> P
     run = {"artifacts": artifacts, QUALITY_SUMMARY_SOURCES_KEY: _report_sources(rollout_paths, output_dir)}
     summary_path = output_dir / QUALITY_SUMMARY_FILENAME
     try:
-        summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
+        summary_path.write_bytes(dumps_json_bytes({"run": run}, option=orjson.OPT_INDENT_2))
         (output_dir / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     except OSError:
         logger.exception("Writing the disabled quality summary failed.")
@@ -1297,7 +1298,7 @@ def write_provisional_summary(
         "findings": [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings],
         QUALITY_SUMMARY_SOURCES_KEY: _report_sources([rollout_path], rollout_path.parent),
     }
-    summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
+    summary_path.write_bytes(dumps_json_bytes({"run": run}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     return summary_path
 
@@ -1400,7 +1401,7 @@ def run_provenance(rollout_path: Path) -> dict[str, Any]:
 def _persisted_limits(run_dir: Path) -> RunHealthLimits:
     """The limits the run's earlier summary was judged by; none (no limit) when it has no readable summary."""
     try:
-        persisted = orjson.loads((run_dir / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["artifacts"]["limits"]
+        persisted = loads_json((run_dir / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["artifacts"]["limits"]
         return RunHealthLimits.model_validate({k: v for k, v in persisted.items() if k != "source"})
     except (OSError, orjson.JSONDecodeError, KeyError, TypeError, ValueError):
         return RunHealthLimits()
@@ -1588,7 +1589,7 @@ def health_check_run_dir(
             stacklevel=2,
         )
     if json_output:
-        print(orjson.dumps(result.summary).decode())
+        print(dumps_json_bytes(result.summary).decode())
     else:
         print(format_health_report(result))
     return result

@@ -170,10 +170,18 @@ def test_compute_digest_vectors():
         assert compute_digest(_digest_input(vector["input"])) == vector["expected"], name
 
 
-@pytest.mark.parametrize("value", [{1: "x"}, {"nested": [{1: "x"}]}, {"large": 2**128, "bad": float("nan")}])
+@pytest.mark.parametrize("value", [{1: "x"}, {"nested": [{1: "x"}]}, {"large": 2**128, "bad": {1, 2}}])
 def test_json_fallback_rejects_invalid_json(value):
     with pytest.raises(ValueError, match="unsupported prompt content"):
         canonicalize_tool_arguments(value)
+
+
+def test_nan_beside_a_wide_integer_canonicalizes_as_null_like_nan_alone():
+    # orjson writes NaN as null; the fallback a wide integer takes must agree, or adding one would change the meaning.
+    assert canonicalize_tool_arguments({"bad": float("nan")}) == '{"bad":null}'
+    assert canonicalize_tool_arguments({"large": 2**128, "bad": float("nan")}) == (
+        '{"bad":null,"large":340282366920938463463374607431768211456}'
+    )
 
 
 def test_large_nested_tool_arguments_agree_across_wire_shapes():

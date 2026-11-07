@@ -38,6 +38,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.eval.comparison.schema import RunFile, RunSource
 from nemo_gym.metrics.metrics_config import COMPLETION_TOKEN_METRIC_NAMES, Stat
 from nemo_gym.rollouts.rollout_records import resolve_rollout_path
+from nemo_gym.utils.json_codec import loads_json
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 from nemo_gym.utils.text import did_you_mean
 
@@ -99,7 +100,7 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
         raise ConfigError(f"Cannot read aggregate metrics at '{metrics_fpath}': {e}") from e
 
     try:
-        payload = orjson.loads(raw)
+        payload = loads_json(raw)
     except orjson.JSONDecodeError as e:
         raise ConfigError(f"'{metrics_fpath}' is not valid JSON: {e}") from e
 

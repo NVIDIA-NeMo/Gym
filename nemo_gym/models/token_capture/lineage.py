@@ -50,8 +50,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import orjson
-
 from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.models.token_capture.fingerprint import (
     FINGERPRINT_VERSION,
@@ -71,6 +69,7 @@ from nemo_gym.models.token_capture.protocols import (
     RolloutRetiredError,
 )
 from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, cumulative_tokens
+from nemo_gym.utils.json_codec import loads_json
 
 
 if TYPE_CHECKING:
@@ -947,21 +946,21 @@ class FileLineageStore(IncrementalLineageStore):
                     payload = line.strip()
                     if not payload:
                         continue
-                    items.append((TokenEntry.model_validate(orjson.loads(payload)), line_offset))
+                    items.append((TokenEntry.model_validate(loads_json(payload)), line_offset))
                 offset = handle.tell()
         return items, (inode, offset)
 
     def _load_entry(self, rollout_id: str, ref: Any) -> TokenEntry:
         with self._store.path_for(rollout_id).open("rb") as handle:
             handle.seek(ref)
-            return TokenEntry.model_validate(orjson.loads(handle.readline()))
+            return TokenEntry.model_validate(loads_json(handle.readline()))
 
     def _load_entries(self, rollout_id: str, refs: list[Any]) -> list[TokenEntry]:
         entries = []
         with self._store.path_for(rollout_id).open("rb") as handle:
             for ref in refs:
                 handle.seek(ref)
-                entries.append(TokenEntry.model_validate(orjson.loads(handle.readline())))
+                entries.append(TokenEntry.model_validate(loads_json(handle.readline())))
         return entries
 
     # --- CaptureLedger surface -------------------------------------------
