@@ -39,7 +39,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.models import Body, ChatCompletionsConverter
+from nemo_gym.models import Body, ChatCompletionsConverter, SimpleResponsesAPIModel
 from nemo_gym.models.chat_completions_converter import _usage_detail
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 
@@ -225,6 +225,10 @@ class LiteLLMModelServerConfig(SimpleModelServerConfig):
 
 class LiteLLMModelServer(SimpleModelServer):
     config: LiteLLMModelServerConfig
+
+    async def systemone(self, body: dict = Body()) -> dict:
+        # A LiteLLM proxy does not serve /systemone, so keep the base 501 instead of the inherited passthrough.
+        return await SimpleResponsesAPIModel.systemone(self, body)
 
     async def _version_from_probe_header(self, base_url: str, headers: Dict[str, str]) -> str:
         """Read ``x-litellm-version`` from a one-token ``POST /v1/responses`` when the health route is forbidden.
