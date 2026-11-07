@@ -473,7 +473,11 @@ def test_all():  # pragma: no cover
     for root in component_search_roots():
         for server_type_dir in SERVER_TYPE_KEYS:
             for module_path in sorted((root / server_type_dir).glob("*")):
-                if "pycache" in module_path.name or not module_path.is_dir():
+                if (
+                    "pycache" in module_path.name
+                    or module_path.name.endswith((".egg-info", ".dist-info"))
+                    or not module_path.is_dir()
+                ):
                     continue
                 rel_path = f"{server_type_dir}/{module_path.name}"
                 if rel_path in seen_rel_paths:
@@ -1195,6 +1199,10 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "modality": entry.modality,
         "licensing": entry.licensing,
         "lifecycle": entry.lifecycle,
+        # Absolute, like the agent inspect view, so an entry found under any search root can be located.
+        "path": str(entry.path.resolve()),
+        "config_path": str(entry.config_path.resolve()),
+        "manifest_path": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
     }
     if entry.status is None:
         payload.pop("status")

@@ -71,7 +71,13 @@ from nemo_gym.core import (
     NgFailureEvent,
     rollout_context,
 )
-from nemo_gym.models import PolicyModelParticipant, VLLMWorkerCaptureHandler, generation_cut_requester
+from nemo_gym.models import (
+    ChatCompletionsConverter,
+    PolicyModelParticipant,
+    VLLMWorkerCaptureHandler,
+    generation_cut_requester,
+    start_model_execution,
+)
 from nemo_gym.models.token_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -98,7 +104,6 @@ from responses_api_agents.simple_agent.app import (
     SimpleAgentRunRequest,
 )
 from responses_api_models.vllm_model.app import (
-    VLLMConverter,
     VLLMModel,
     VLLMModelConfig,
     _append_transport_io,
@@ -3808,9 +3813,9 @@ class TestApp:
         assert data == expected_dict
 
 
-class TestVLLMConverter:
+class TestChatCompletionsConverter:
     def setup_method(self, _):
-        self.converter = VLLMConverter(return_token_id_information=False)
+        self.converter = ChatCompletionsConverter(return_token_id_information=False)
 
     def test_responses_input_types_EasyInputMessageParam(self) -> None:
         """
@@ -4149,7 +4154,7 @@ class TestVLLMConverter:
         assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
-        converter = VLLMConverter(return_token_id_information=True)
+        converter = ChatCompletionsConverter(return_token_id_information=True)
 
         message = NeMoGymChatCompletionMessageForTraining(
             content="<think>I'm thinking</think>I'm chatting!",
@@ -5583,7 +5588,7 @@ class TestCompletionsBackendRawRender:
         assert prompt == "Hello world"
 
     def test_input_text_block_type_accepted(self) -> None:
-        # VLLMConverter._format_message rewrites input_text → text, but be
+        # ChatCompletionsConverter._format_message rewrites input_text → text, but be
         # defensive: accept the input_text variant directly too.
         model = _make_completions_backend_model()
         prompt = model._render_messages_to_prompt(
@@ -9064,3 +9069,19 @@ async def test_a_400_for_an_unsupported_parameter_value_records_invalid_request_
     execution = request.state.nemo_gym_model_execution
     assert execution["upstream_status_code"] == 400
     assert execution.get("error_category") == category
+
+
+@mark.parametrize("finish_reason", ["stop", "tool_calls", "length"])
+async def test_responses_notes_the_chat_finish_reason_for_model_call_capture(
+    monkeypatch: MonkeyPatch, finish_reason: str
+) -> None:
+    model = _refit_model(monkeypatch, False)
+    completion = PARAMETERIZE_DATA[0][2].model_copy(deep=True)
+    completion.choices[0].finish_reason = finish_reason
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=completion))
+    request = _refit_request()
+    start_model_execution(request, upstream_attempted=True)
+
+    await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+    assert request.state.nemo_gym_model_execution["finish_reason"] == finish_reason

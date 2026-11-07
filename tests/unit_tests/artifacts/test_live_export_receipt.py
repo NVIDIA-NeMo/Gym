@@ -15,6 +15,7 @@
 """Same-run live delivery certification through the actual SDK exporter and managed Store."""
 
 import json
+import stat
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +35,7 @@ from nemo_gym.cli.eval import _finalize_live_exporters
 from nemo_gym.rollouts.rollout_health import run_health_checks
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.test_export_receipt import _collected_mlflow
+from tests.unit_tests.artifacts.test_export_receipt import _collected_mlflow
 
 
 class Client:
@@ -417,6 +418,24 @@ def test_live_upload_uses_actual_producer_default_when_key_is_absent(live):
     assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["uploaded_rollouts"] is True
 
 
+def test_a_live_run_that_uploads_no_rollouts_is_certified_and_not_exported_again(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    exporter.global_config_dict.upload_rollouts = False
+    exporter._delivered_rollouts.clear()
+    OmegaConf.save(exporter.global_config_dict, artifacts.resolved_config_yaml_fpath)
+    exporter.export_config()
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt["run_id"] == "live-run" and receipt["uploaded_rollouts"] is False
+    assert client.status == "FINISHED" and post.runs == []  # one MLflow run, the live one
+
+
 def test_live_finalizer_streams_rollout_files_without_backend_table_download(live, monkeypatch):
     artifacts, exporter, client = live
     original = Path.read_bytes
@@ -759,6 +778,18 @@ def test_postrun_exports_the_same_bound_health_metric_snapshot(live, monkeypatch
     ]
 
 
+@pytest.mark.parametrize("mode", [0o664, 0o640])
+def test_postrun_health_rewrite_keeps_each_files_mode(live, mode):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, _ = live
+    summary = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+    for path in (artifacts.aggregate_metrics_json_fpath, summary):
+        path.chmod(mode)
+    _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert [stat.S_IMODE(p.stat().st_mode) for p in (artifacts.aggregate_metrics_json_fpath, summary)] == [mode, mode]
+
+
 def test_postrun_exports_a_benchmark_declared_metric_coverage(live):
     from nemo_gym.cli.eval import _prepare_run_health_metrics
 
@@ -915,8 +946,8 @@ def test_health_export_projects_validated_collector_facts_without_changing_score
     """Explicit collector projection boundary; real classifier, persisted metadata and SDK delivery."""
     import nemo_gym.orchestration.recovery as recovery
     from nemo_gym.cli.eval import _prepare_run_health_metrics
-    from tests.unit_tests.test_llm_judge_trial_coverage import _recovered_fixture
-    from tests.unit_tests.test_tool_trial_coverage import fixture
+    from tests.unit_tests.orchestration.test_llm_judge_trial_coverage import _recovered_fixture
+    from tests.unit_tests.orchestration.test_tool_trial_coverage import fixture
 
     artifacts, exporter, client = live
     if case in {"recovered", "invalid"}:
@@ -1118,7 +1149,7 @@ def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omission
     import nemo_gym.orchestration.recovery as recovery
     from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
     from nemo_gym.cli.eval import _prepare_run_health_metrics
-    from tests.unit_tests.test_evaluation_health import _run
+    from tests.unit_tests.orchestration.test_evaluation_health import _run
 
     artifacts, _, _ = live
     collected = _run(49, settled={"model_transport_error": 1} if case == "settled_zero" else None)

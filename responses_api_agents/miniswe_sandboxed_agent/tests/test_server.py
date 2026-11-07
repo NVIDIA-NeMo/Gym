@@ -77,11 +77,12 @@ async def fixture(tmp_path, monkeypatch):
     server._loader.load = AsyncMock(return_value=task)
     envs, events, harnesses = [], [], []
 
-    def create(task, config, session_id, directory, verifier=False):
+    def create(task, config, session_id, directory, verifier=False, *, placement_group=None):
         name = "verifier" if verifier else "agent"
         env = SimpleNamespace(
             task=task,
             session_id=session_id,
+            placement_group=placement_group or session_id,
             closed=False,
             resources=[],
             cleanup_errors=[],
@@ -203,6 +204,7 @@ async def test_agent_owns_loop_and_replays_exact_result(fixture):
         "verifier_stop",
     ]
     assert all(env.closed for env in f.envs)
+    assert f.envs[0].placement_group == f.envs[1].placement_group
     f.server._loader.load.assert_awaited_once()
     f.server.server_client.post.assert_not_called()
     session = f.server._sessions[result.session_id]
@@ -1309,7 +1311,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
     with rollout_context(f.agent.rollout_id_from_run(body)):
         result = await f.agent.run(f.request, body)
-    from tests.unit_tests.test_recovery_saved_generation import persist_producer_result
+    from tests.unit_tests.orchestration.test_recovery_saved_generation import persist_producer_result
 
     decision, store, projected = await persist_producer_result(
         tmp_path / "persisted", monkeypatch, result.model_dump(mode="json")
