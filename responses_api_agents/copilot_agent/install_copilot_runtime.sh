@@ -74,9 +74,11 @@ reuse() {
 
 mkdir -p "$(dirname "$runtime")"
 # Concurrent seeds in one sandbox share one installation.
+locked=0
 if command -v flock >/dev/null 2>&1; then
   exec 9>>"$runtime.lock"
-  flock 9
+  flock -w 60 9 || { echo "Timed out waiting for Copilot runtime lock: $runtime.lock" >&2; exit 1; }
+  locked=1
   # No other installer is staging now; remove what interrupted ones left.
   rm -rf -- "$runtime".partial-*
 fi
@@ -106,8 +108,15 @@ dist_dir "$staging" >/dev/null
 
 # Without flock, another installer may have published a runtime meanwhile.
 reuse && exit 0
-rm -rf -- "$runtime"
-mv "$staging" "$runtime"
+if [ "$locked" = 1 ]; then
+  rm -rf -- "$runtime"
+  mv -T -- "$staging" "$runtime"
+elif ! mv -T -- "$staging" "$runtime" 2>/dev/null; then
+  # Never remove a runtime another installer may have published since the readiness check.
+  reuse && exit 0
+  echo "Cannot replace stale Copilot runtime safely without flock: $runtime" >&2
+  exit 1
+fi
 dist=$(dist_dir "$runtime")
 healthy "$runtime/copilot" "$runtime/home" "$dist" \
   || { echo "Copilot runtime failed its health check after installation" >&2; exit 1; }

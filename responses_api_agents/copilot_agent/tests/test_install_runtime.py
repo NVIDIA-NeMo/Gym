@@ -8,6 +8,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 from pathlib import Path
 
@@ -55,6 +56,8 @@ def executable(path: Path, text: str) -> None:
 @pytest.fixture
 def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     """Run the real installer with an isolated PATH: no python3, no package manager, and a fake curl."""
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Installer publication requires Linux coreutils (mv -T)")
     bindir = tmp_path / "bin"
     bindir.mkdir()
     for name in ("bash", "env", "mkdir", "dirname", "rm", "mv", "chmod", "touch", "cat", "tar", "sha512sum"):
@@ -232,3 +235,36 @@ def test_bootstrap_installs_bash_only_when_missing(tmp_path, package_manager, fa
     )
     assert again.returncode == 0, again.stderr
     assert not (tmp_path / "packages.log").exists()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="publication uses GNU mv -T")
+def test_no_lock_keeps_cold_install_and_reuse_but_never_removes_a_stale_runtime(sandbox):
+    root, env = sandbox
+    (root / "bin/flock").unlink()
+    assert install(root, env).returncode == 0
+    assert install(root, env).returncode == 0
+    assert len(downloads(root)) == 1
+    (root / "runtime/ready").unlink()
+    (root / "runtime/keep").write_text("existing runtime")
+
+    refused = install(root, env)
+
+    assert refused.returncode != 0
+    assert "Cannot replace stale Copilot runtime safely without flock" in refused.stderr
+    assert (root / "runtime/keep").read_text() == "existing runtime"
+    assert not list(root.glob("runtime.partial-*"))
+
+
+def test_lock_wait_is_bounded_and_preserves_runtime(sandbox):
+    root, env = sandbox
+    (root / "bin/flock").unlink()
+    executable(root / "bin/flock", '#!/bin/sh\n[ "$1 $2 $3" = "-w 60 9" ] || exit 2\nexit 1\n')
+    (root / "runtime").mkdir()
+    (root / "runtime/keep").write_text("existing runtime")
+
+    refused = install(root, env)
+
+    assert refused.returncode != 0
+    assert "Timed out waiting for Copilot runtime lock" in refused.stderr
+    assert (root / "runtime/keep").read_text() == "existing runtime"
+    assert not downloads(root)

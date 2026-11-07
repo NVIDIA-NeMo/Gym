@@ -857,7 +857,7 @@ async def test_package_metadata_is_read_once_on_the_host(monkeypatch):
     "reply",
     [
         ClientConnectionError("connection refused"),
-        Reply({"error": "Not found"}, status=404),
+        Reply({"error": "Unavailable"}, status=503),
         Reply({"name": "@github/copilot-linux-x64"}),
         Reply({"dist": {"tarball": TARBALL, "integrity": "sha1-AAAA"}}),
         Reply({"dist": {"tarball": TARBALL, "integrity": "sha512-not base64"}}),
@@ -1165,3 +1165,45 @@ def test_rejected_calls_have_zero_completed_response_tokens():
     assert usage is not None
     assert (usage.input_tokens, usage.output_tokens, usage.cached_tokens, usage.reasoning_tokens) == (0, 0, 0, 0)
     assert usage.response_ids == []
+
+
+@pytest.mark.parametrize("provider_config", [{"unknown_provider": {}}, {"local": 17}])
+@pytest.mark.parametrize("borrowed", [True, False])
+def test_invalid_provider_configuration_is_a_final_seed_refusal(setup, provider_config, borrowed):
+    from nemo_gym.sandbox import create_provider
+
+    agent, _ = setup
+    agent.config.sandbox_provider = "sandbox"
+    with (
+        patch(f"{MODULE}.resolve_provider_config", return_value=provider_config),
+        patch(f"{MODULE}.create_provider", create_provider),
+        patch(f"{MODULE}.AsyncSandbox.connect", AsyncMock()) as connect,
+    ):
+        reason = check_agent_seed_rejected(agent.setup_webserver(), seed(sandbox_access=borrowed))
+    assert "provider" in reason.lower()
+    connect.assert_not_awaited()
+    assert not agent._session_records
+
+
+def test_unpublished_registry_version_is_a_final_seed_refusal(setup, monkeypatch):
+    agent, sandbox = setup
+    registry(monkeypatch, Reply({"error": "Not found"}, status=404))
+    sandbox.metadata.side_effect = copilot_package_metadata
+
+    reason = check_agent_seed_rejected(agent.setup_webserver(), seed())
+
+    assert "is not published" in reason
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.launch.assert_not_awaited()
+    assert not agent._session_records
+
+
+@pytest.mark.parametrize("settings", [{"metadata": 17}, {"unknown_setting": True}])
+def test_invalid_owned_sandbox_spec_is_refused_before_provider_allocation(setup, settings):
+    agent, _ = setup
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.sandbox_config = settings
+    with patch(f"{MODULE}.create_provider") as create:
+        assert check_agent_seed_rejected(agent.setup_webserver(), seed(sandbox_access=False))
+    create.assert_not_called()
+    assert not agent._session_records

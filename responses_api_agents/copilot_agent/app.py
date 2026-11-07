@@ -161,16 +161,20 @@ async def copilot_package_metadata(registry: str, package: str, version: str) ->
     """Return the tarball URL and SHA-512 (hex) that the registry publishes for a pinned platform package.
 
     Read on the Agent Server, once per registry, package and version; the sandbox installer checks the
-    download against this digest. A failed read is an error to retry, not a refusal of the seed.
+    download against this digest. An unpublished version is refused; transient registry failures are retried.
     """
     key = (registry, package, version)
     if key not in _PACKAGE_METADATA:
         url = f"{registry.rstrip('/')}/@github/{package}/{version}"
         try:
             async with await http_request("GET", url, timeout=ClientTimeout(total=60)) as response:
+                if response.status == 404:
+                    raise AgentSeedRejectedError(f"Copilot package @github/{package}@{version} is not published")
                 response.raise_for_status()
                 metadata = await response.json(content_type=None)
             tarball, integrity = metadata["dist"]["tarball"], metadata["dist"]["integrity"]
+        except AgentSeedRejectedError:
+            raise
         except (ClientError, TimeoutError, ValueError, LookupError, TypeError) as error:
             raise RuntimeError(f"Cannot read Copilot package metadata from {url}: {error!r}") from error
         if not isinstance(tarball, str) or not isinstance(integrity, str) or not integrity.startswith("sha512-"):
@@ -504,15 +508,20 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise AgentSeedRejectedError("Copilot requires sandbox_access or a configured sandbox_provider")
-            sandbox_config = dict(self.config.sandbox_config)
-            sandbox_config.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
-            sandbox_config["metadata"] = {
-                **resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict()),
-                **sandbox_config.get("metadata", {}),
-                "harness": "copilot",
-                "agent_session_id": body.agent_session_id[:63],
-            }
-            spec = SandboxSpec(**{"workdir": "/app", **sandbox_config})
+            try:
+                sandbox_config = dict(self.config.sandbox_config)
+                sandbox_config.setdefault(
+                    "ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600
+                )
+                sandbox_config["metadata"] = {
+                    **resolve_provider_metadata(self.config.sandbox_provider, get_global_config_dict()),
+                    **sandbox_config.get("metadata", {}),
+                    "harness": "copilot",
+                    "agent_session_id": body.agent_session_id[:63],
+                }
+                spec = SandboxSpec(**{"workdir": "/app", **sandbox_config})
+            except (TypeError, ValueError) as error:
+                raise AgentSeedRejectedError(str(error)) from error
             workdir = spec.workdir
             provider_ref = self.config.sandbox_provider
         else:
@@ -533,7 +542,10 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         if not _EXACT_VERSION.fullmatch(self.config.copilot_version):
             raise AgentSeedRejectedError(f"Copilot requires an exact copilot_version, for example {COPILOT_VERSION}")
 
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        try:
+            provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(str(error)) from error
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
         else:
