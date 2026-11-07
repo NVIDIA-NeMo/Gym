@@ -176,11 +176,13 @@ def response_usage(
         return sum(value for usage in usages if type(value := usage.get(name)) is int and value >= 0)
 
     input_tokens, output_tokens = total("prompt_tokens"), total("completion_tokens")
+    # SDK 1.59.0 normalizes missing cache/reasoning details to zero. Even positive aggregates can be
+    # incomplete, so its per-call stats cannot establish known detail totals. Keep the raw stats intact.
     return NeMoGymResponseUsage(
         input_tokens=input_tokens,
-        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=total("cache_read_tokens")),
+        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=None),
         output_tokens=output_tokens,
-        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=total("reasoning_tokens")),
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=None),
         total_tokens=input_tokens + output_tokens,
     )
 
@@ -318,6 +320,15 @@ def observation_records(
         gap("run_result_unavailable")
     elif not token_usages(result):
         gap("model_call_usage_unavailable")
+    else:
+        gap(
+            "cached_token_usage_unavailable",
+            "OpenHands SDK stats do not preserve whether cache details were reported",
+        )
+        gap(
+            "reasoning_token_usage_unavailable",
+            "OpenHands SDK stats do not preserve whether reasoning details were reported",
+        )
     started, ended = (result or {}).get("started_at"), (result or {}).get("ended_at")
     duration_ms = (
         (ended - started) * 1000

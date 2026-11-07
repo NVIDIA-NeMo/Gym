@@ -19,7 +19,7 @@ from nemo_gym.agents import (
     SandboxSession,
     shell_assignments,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
@@ -120,6 +120,7 @@ class OpenHandsSandboxSession(AgentSessionState):
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
+    provider_wait_failure: NgFailureEvent | None = None
 
     def path(self, name: str) -> str:
         return f"{self.session.session_dir}/{name}"

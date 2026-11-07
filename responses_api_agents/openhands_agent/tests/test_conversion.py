@@ -174,7 +174,8 @@ def test_usage_is_reported_only_when_every_used_response_has_a_record():
     events = recorded(action("c1", "r1"), observation("c1", "ok"), action("c2", "r2", tool="finish"))
     total = response_usage(events, result("r1", "r2"))
     assert (total.input_tokens, total.output_tokens, total.total_tokens) == (200, 20, 220)
-    assert total.input_tokens_details.cached_tokens == 8
+    assert total.input_tokens_details.cached_tokens is None
+    assert total.output_tokens_details.reasoning_tokens is None
     assert response_usage(events, result("r1")) is None
     assert response_usage(events, None) is None
 
@@ -183,6 +184,45 @@ def test_condenser_calls_count_toward_usage():
     events = recorded(action("c1", "r1"), {"kind": "Condensation", "llm_response_id": "s1", "summary": "sum"})
     assert response_usage(events, result("r1", condenser=["s1"])).input_tokens == 150
     assert response_usage(events, result("r1")) is None
+
+
+@pytest.mark.parametrize(
+    "agent_details,condenser_details",
+    [
+        ({}, {}),
+        ({"cache_read_tokens": 0, "reasoning_tokens": 0}, {"cache_read_tokens": 0, "reasoning_tokens": 0}),
+        ({"cache_read_tokens": 4, "reasoning_tokens": 2}, {"cache_read_tokens": 3, "reasoning_tokens": 1}),
+        ({"cache_read_tokens": 4, "reasoning_tokens": 2}, {}),
+    ],
+    ids=["missing", "normalized-zero", "positive", "mixed"],
+)
+def test_normalized_sdk_details_remain_unknown_and_raw_stats_are_preserved(agent_details, condenser_details):
+    events = recorded(action("c1", "r1"), {"kind": "Condensation", "llm_response_id": "s1", "summary": "sum"})
+    run_result = result("r1", condenser=["s1"])
+    metrics = run_result["stats"]["usage_to_metrics"]
+    for name, details in (("agent", agent_details), ("condenser", condenser_details)):
+        record = metrics[name]["token_usages"][0]
+        record.pop("cache_read_tokens")
+        record.update(details)
+    raw_result = json.dumps(run_result)
+
+    total = response_usage(events, run_result)
+    assert (total.input_tokens, total.output_tokens, total.total_tokens) == (150, 15, 165)
+    assert total.input_tokens_details.cached_tokens is None
+    assert total.output_tokens_details.reasoning_tokens is None
+    evidence = observation_records(
+        events,
+        run_result,
+        invocation_id="rollout",
+        model_ref=MODEL,
+        conversation=[],
+        outcome=run_outcome(events, run_result, timed_out=False),
+    )
+    gaps = {gap.code: gap for gap in evidence.gaps}
+    for code in ("cached_token_usage_unavailable", "reasoning_token_usage_unavailable"):
+        assert gaps[code].invocation_id == "rollout"
+        assert "do not preserve" in gaps[code].detail
+    assert json.dumps(run_result) == raw_result
 
 
 @pytest.mark.parametrize(
@@ -329,7 +369,11 @@ def test_observations_time_each_tool_call_and_fail_nonzero_exits():
     assert tools["c1"].status == "completed" and tools["c1"].duration_ms == 1000
     assert tools["c2"].status == "failed"
     assert tools["c3"].status == "incomplete" and tools["c3"].completed_at is None
-    assert [gap.code for gap in evidence.gaps] == ["tool_timing_unavailable"]
+    assert [gap.code for gap in evidence.gaps] == [
+        "cached_token_usage_unavailable",
+        "reasoning_token_usage_unavailable",
+        "tool_timing_unavailable",
+    ]
 
 
 def test_condensation_records_its_summary_call_and_neighbors():

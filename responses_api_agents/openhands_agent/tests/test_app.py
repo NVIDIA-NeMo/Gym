@@ -26,7 +26,7 @@ from nemo_gym.agents import (
     harness_termination_failure,
 )
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent, RequestFailureLog
 from nemo_gym.server_runtime import MCPToolAccess
 from nemo_gym.trajectory import SandboxObservation, ToolCallObservation
 from responses_api_agents.openhands_agent import app
@@ -316,6 +316,11 @@ async def test_activation_routes_every_model_call_through_the_rollout_prefixed_m
     assert response.status == "completed"
     assert response.output_text == "done"
     assert response.usage.total_tokens == 24
+    assert response.usage.input_tokens_details.cached_tokens is None
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    assert {"cached_token_usage_unavailable", "reasoning_token_usage_unavailable"} <= {
+        gap.code for gap in state.observations.gaps
+    }
     assert response.metadata["harness_execution"] == "sandbox"
     assert response.metadata["stop_reason"] == "finished"
     assert state.observations.records[0].model_calls[0].response_id == "r1"
@@ -354,14 +359,35 @@ async def test_model_failure_is_classified_and_context_limit_stays_gradable(monk
 
 
 @pytest.mark.asyncio
-async def test_deadline_keeps_partial_work_as_incomplete(monkeypatch):
+@pytest.mark.parametrize("with_original_event", [False, True])
+async def test_deadline_keeps_partial_work_as_incomplete(monkeypatch, with_original_event):
     instance = agent()
     cleanup = {"timed_out": True, "return_code": 143, "cleanup_confirmed": True, "error": None}
     captured = artifacts(FINISHED_EVENTS[:2], run_result(status="terminated", execution_status="running"))
     state = session_state(cleanup=cleanup, artifacts=captured)
-    monkeypatch.setattr(adapter.OpenHandsSandboxSession, "execute", AsyncMock(side_effect=TimeoutError("provider")))
+    failure = TimeoutError("provider")
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="provider wait", stage="agent"
+    )
+    if with_original_event:
+        failure.__cause__ = original
+    monkeypatch.setattr(adapter.OpenHandsSandboxSession, "execute", AsyncMock(side_effect=failure))
     body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
-    response = await instance._activate(state, body, prompt="Build it", system="")
+    with RequestFailureLog.capture() as activation_log:
+        response = await instance._activate(state, body, prompt="Build it", system="")
+    report = activation_log.reply_report(None)
+    assert report.failure_id is None
+    wait = report.events[state.provider_wait_failure.event_id]
+    assert (wait.boundary, wait.operation, wait.failure_kind) == ("sandbox", "exec_wait", "transport_timeout")
+    assert (wait.foreign_error.exception_type, wait.foreign_error.message) == ("TimeoutError", "provider")
+    if with_original_event:
+        assert wait.cause_id == original.event_id
+        assert report.events[original.event_id].stage == "agent"
+    monkeypatch.setattr(adapter.OpenHandsSandboxSession, "close", AsyncMock())
+    state.session.cleanup_confirmed = True
+    with RequestFailureLog.capture() as close_log:
+        await instance._close_agent_session_state(state)
+    assert close_log.reply_report(None) == report
     assert response.status == "incomplete"
     assert response.metadata["stop_reason"] == "timeout"
     assert [item.type for item in response.output] == ["function_call", "function_call_output"]
@@ -662,3 +688,49 @@ async def test_tool_errors_the_harness_tolerates_leave_the_response_completed(mo
     tools = {r.tool_call_id: r.status for r in state.observations.records if isinstance(r, ToolCallObservation)}
     assert tools == {"c1": "failed", "c2": "completed"}
     assert "tool_call_action_unavailable" in [gap.code for gap in state.observations.gaps]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("typed_cleanup", [False, True])
+async def test_failed_connect_keeps_original_failure_when_provider_cleanup_also_fails(monkeypatch, typed_cleanup):
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="connect timed out", stage="agent"
+    )
+    cleanup = (
+        NgFailureEvent(
+            boundary="sandbox", failure_kind="session_release_failed", failure_reason="close failed", stage="cleanup"
+        )
+        if typed_cleanup
+        else RuntimeError("close failed")
+    )
+    monkeypatch.setattr(app.AsyncSandbox, "connect", AsyncMock(side_effect=original))
+    provider = SimpleNamespace(aclose=AsyncMock(side_effect=cleanup))
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as raised:
+            await agent()._seed_agent_session_state(seed())
+    assert raised.value is original
+    report = log.reply_report(original)
+    assert report.failure_id == original.event_id
+    assert report.events[original.event_id].stage == "agent"
+    releases = [event for event in report.events.values() if event.failure_kind == "session_release_failed"]
+    assert len(releases) == 1 and releases[0].stage == "cleanup"
+    if typed_cleanup:
+        assert releases[0].event_id == cleanup.event_id
+    provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_deadline_does_not_hide_an_unrelated_provider_failure(monkeypatch):
+    instance = agent()
+    cleanup = {"timed_out": True, "return_code": 143, "cleanup_confirmed": True, "error": None}
+    captured = artifacts(FINISHED_EVENTS[:2], run_result(status="terminated", execution_status="running"))
+    state = session_state(cleanup=cleanup, artifacts=captured)
+    failure = RuntimeError("artifact transfer failed")
+    monkeypatch.setattr(adapter.OpenHandsSandboxSession, "execute", AsyncMock(side_effect=failure))
+    body = NeMoGymResponseCreateParamsNonStreaming(input="Build it")
+    with pytest.raises(RuntimeError) as raised:
+        await instance._activate(state, body, prompt="Build it", system="")
+    assert raised.value is failure
+    assert state.observations.records[-1].outcome == "timeout"
+    assert state.provider_wait_failure is None

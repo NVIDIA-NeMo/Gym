@@ -38,6 +38,9 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    observe_failure,
+    sdk_error_details,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -228,7 +231,22 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             try:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
             except BaseException:
-                await provider.aclose()
+                try:
+                    await provider.aclose()
+                except BaseException as cleanup_error:
+                    LOG.exception("OpenHands provider cleanup failed after connect failed")
+                    if isinstance(cleanup_error, NgFailureEvent):
+                        observe_failure(cleanup_error)
+                    else:
+                        cleanup_failure = NgFailureEvent(
+                            boundary="sandbox",
+                            failure_kind="session_release_failed",
+                            failure_reason=f"OpenHands provider cleanup failed: {type(cleanup_error).__name__}",
+                            operation="aclose",
+                            stage="cleanup",
+                        )
+                        cleanup_failure.__cause__ = cleanup_error
+                        observe_failure(cleanup_failure)
                 raise
         directory = f"{SESSION_ROOT}/{uuid4().hex}"
         state = OpenHandsSandboxSession(
@@ -269,6 +287,8 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Stop OpenHands before verification; a borrowed sandbox stays with Resources."""
         assert isinstance(state, OpenHandsSandboxSession)
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
         await state.close(self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
@@ -361,6 +381,20 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             artifacts = state.session.artifacts
         cleanup = state.session.cleanup
         timed_out = bool(cleanup and cleanup["timed_out"])
+        if isinstance(failure, TimeoutError) and timed_out and artifacts is not None:
+            # The provider wait and the confirmed harness deadline are separate observed facts.
+            state.provider_wait_failure = NgFailureEvent(
+                boundary="sandbox",
+                failure_kind="transport_timeout",
+                failure_reason="Sandbox provider wait expired after OpenHands confirmed its deadline",
+                operation="exec_wait",
+                stage="agent",
+                foreign_error=sdk_error_details(failure, message=str(failure)),
+            )
+            state.provider_wait_failure.__cause__ = failure
+            failure = None
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
         events, malformed = parse_events(artifacts.events) if artifacts is not None else ([], 0)
         result = None
         if artifacts is not None and artifacts.result is not None:
@@ -370,7 +404,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
             except ValueError:
                 result = None
         outcome = run_outcome(events, result, timed_out=timed_out, rollout_stop=state.session.expired)
-        if failure is not None and not (timed_out and artifacts is not None):
+        if failure is not None:
             outcome = RunOutcome(
                 "incomplete" if isinstance(failure, asyncio.CancelledError) else "failed",
                 "cancelled" if isinstance(failure, asyncio.CancelledError) else "sandbox_error",
@@ -384,7 +418,7 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
         )
         if artifacts is None:
             state.observations.gaps.append(ObservationGap(code="agent_artifact_unavailable"))
-        if failure is not None and not (timed_out and artifacts is not None):
+        if failure is not None:
             # Termination, transport and capture failures are not results; the episode can be retried.
             raise failure
         if outcome.stop_reason == "runner_error":

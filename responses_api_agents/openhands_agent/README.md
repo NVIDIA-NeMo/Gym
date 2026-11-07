@@ -151,6 +151,9 @@ and the adapter logs the end of that stderr when a run fails.
 Tool errors are returned to the model and do not end the run. A terminal command that exits nonzero is
 recorded as a `failed` tool call. Usage is reported only when every model response the conversation used,
 including condenser summaries, has a usage record; otherwise it stays unknown.
+Cached and reasoning token details stay unknown (`null`), with observation gaps: OpenHands SDK 1.59.0
+normalizes absent details to zero, so its counters cannot establish complete totals. The raw SDK stats,
+including any positive detail counters, remain in the run result artifact.
 
 ## Observations
 
