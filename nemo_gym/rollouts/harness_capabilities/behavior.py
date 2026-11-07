@@ -13,6 +13,7 @@ from nemo_gym.agents.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutco
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.models.chat_completions_converter import message_content_to_text
 from nemo_gym.trajectory.model_call_record import build_model_call_record
+from nemo_gym.trajectory.row_media import require_inline_media
 
 from .checks import BehavioralCheck
 from .results import Results
@@ -178,7 +179,12 @@ def inspect_behavior(
     fingerprint: Callable,
     judge_verifier: bool = False,
 ) -> list[dict]:
-    """Check saved evidence and observations against explicit test expectations."""
+    """Check saved evidence and observations against explicit test expectations.
+
+    Saved requests are compared with the witnessed ones image for image, so a record that stores its images by
+    reference (``row_media: reference``) is refused with ``RowMediaUnavailable``; restore it first.
+    """
+    require_inline_media(record, reader="Harness behavior inspection")
     results = Results()
     attempts = (witness or {}).get("attempts", [])
     statuses = [a["status_code"] for a in attempts]

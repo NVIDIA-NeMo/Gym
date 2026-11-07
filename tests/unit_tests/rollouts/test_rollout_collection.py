@@ -7373,6 +7373,62 @@ class TestRolloutCollection:
 
         assert placements == [configured or "inline"]
 
+    @pytest.mark.parametrize("row_media", [None, "inline", "reference"])
+    async def test_rows_store_their_images_once_when_row_media_is_reference(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock, row_media: str | None
+    ) -> None:
+        """``gym eval run ++row_media=reference`` writes each image of a row once, beside the rows."""
+        from nemo_gym.trajectory.row_media import NG_ROW_MEDIA_KEY, restore_row_media
+
+        image = "data:image/png;base64," + "iVBORw0KGgo" * 400
+        output = [{"type": "input_image", "image_url": image, "detail": "auto"}]
+        result = {
+            "response": {"output": []},
+            "reward": 1.0,
+            "ng_agent_observations": {"source": "codex", "records": [{"output": output}, {"output": output}]},
+        }
+        if row_media is not None:
+            empty_global_config.return_value = {"row_media": row_media}
+        retained: list[dict] = []
+        monkeypatch.setattr(
+            nemo_gym.rollouts.rollout_collection,
+            "_record_rollout_shape",
+            lambda row, record: retained.append(deepcopy(record)),
+        )
+        input_jsonl_fpath = tmp_path / "input.jsonl"
+        input_jsonl_fpath.write_text(
+            json.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "my agent name"}}) + "\n"
+        )
+
+        class TestRolloutCollectionHelper(RolloutCollectionHelper):
+            def _run_examples_with_metadata(self, examples: list[dict], *args, **kwargs):
+                future = Future()
+                future.set_result(_CompletedRollout(row=examples[0], result=deepcopy(result), rollout_latency_ms=None))
+                return [future]
+
+        output_fpath = tmp_path / "output.jsonl"
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_jsonl_fpath), output_jsonl_fpath=str(output_fpath), disable_aggregation=True
+        )
+
+        await TestRolloutCollectionHelper().run_from_config(config)
+
+        [line] = output_fpath.read_bytes().splitlines()
+        [record] = retained
+        written = orjson.loads(line)
+        # What collection keeps in memory is what it wrote.
+        assert written == record
+        if row_media != "reference":
+            assert NG_ROW_MEDIA_KEY not in written and line.count(image.encode()) == 2
+            assert not (tmp_path / "output_blobs").exists()
+            return
+        assert image.encode() not in line
+        assert written[NG_ROW_MEDIA_KEY]["root"] == "rollouts_dir"
+        [blob_dir] = (tmp_path / "output_blobs").iterdir()
+        assert [blob.read_text() for blob in blob_dir.iterdir()] == [image]
+        restored = restore_row_media(written, rollouts_dir=tmp_path)
+        assert restored["ng_agent_observations"] == result["ng_agent_observations"]
+
     async def test_run_from_config_sanity(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
@@ -8905,6 +8961,7 @@ class TestRolloutCollection:
                 "ng_agent_observations": {"invocations": [{"conversation": ["large"]}]},
                 "ng_model_call_capture": {"calls": [{"request": "large"}]},
                 "ng_trajectory": {"model_calls": [{"request": "large"}]},
+                "ng_row_media": {"version": 1, "root": "rollouts_dir", "dir": "x_blobs/0-0", "blobs": []},
             },
             {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 1, "reward": 0.0, "response": {"usage": {"tokens": 12}}},
             {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0, "response": {"usage": {"tokens": 8}}},
@@ -8937,6 +8994,7 @@ class TestRolloutCollection:
             assert "ng_agent_observations" not in item
             assert "ng_model_call_capture" not in item
             assert "ng_trajectory" not in item
+            assert "ng_row_media" not in item
             assert "usage" in item["response"]
             assert "output" not in item["response"]
         assert sent_data[0]["response"]["incomplete_details"] == {"reason": "max_output_tokens"}
@@ -17328,6 +17386,82 @@ class TestRunRecordWriter:
                     record_shard="s",
                     scope_rollout_ids=scope_rollout_ids,
                 )
+
+    async def test_a_recorded_shard_references_its_images_and_the_caller_keeps_them(self, tmp_path: Path) -> None:
+        from nemo_gym.trajectory.row_media import NG_ROW_MEDIA_KEY, restore_row_media
+
+        capture_dir = tmp_path / "capture"
+        global_config = {
+            "observability_enabled": True,
+            "model_call_capture_dir": str(capture_dir),
+            "row_media": "reference",
+        }
+        image = "data:image/png;base64," + "iVBORw0KGgo" * 400
+        observations = {"source": "codex", "records": [{"output": [{"type": "input_image", "image_url": image}]}]}
+        row = TestEnrichRunResult._row()
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                TestEnrichRunResult._store_call(
+                    capture_dir, maybe_rollout_id_from_run_body(examples[0]), "c1", "first"
+                )
+                result = {"reward": 1.0, "response": {}, "ng_agent_observations": deepcopy(observations)}
+                future = Future()
+                future.set_result(_CompletedRollout(row=examples[0], result=result, rollout_latency_ms=1.0))
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(Helper().run_examples([row], record_output_dir=run_dir, record_shard="step_5"))
+        _, returned = await completion
+
+        [written] = self._lines(run_dir / "rollouts-step_5.jsonl")
+        assert returned["ng_agent_observations"] == observations
+        assert written["ng_agent_observations"]["records"][0]["output"][0]["image_url"] is None
+        rollout_id = maybe_rollout_id_from_run_body(written)
+        assert written[NG_ROW_MEDIA_KEY]["dir"] == f"blobs/{rollout_id}"
+        assert restore_row_media(written, capture_dirs=[capture_dir]) == returned
+        # The capture's blob directory now holds the row's images, so deleting the capture would lose them.
+        with pytest.raises(ValueError, match="row_media: inline"):
+            Helper().run_examples(
+                [row], record_output_dir=run_dir, record_shard="step_5", delete_model_call_capture=True
+            )
+
+    async def test_a_staged_shard_without_captures_publishes_rows_whose_images_are_beside_them(
+        self, tmp_path: Path
+    ) -> None:
+        from nemo_gym.trajectory.row_media import NG_ROW_MEDIA_KEY, restore_row_media
+
+        image = "data:image/png;base64," + "iVBORw0KGgo" * 400
+        observations = {"source": "codex", "records": [{"output": [{"type": "input_image", "image_url": image}]}]}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={"row_media": "reference"})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                result = {"reward": 1.0, "response": {}, "ng_agent_observations": deepcopy(observations)}
+                future = Future()
+                future.set_result(_CompletedRollout(row=examples[0], result=result, rollout_latency_ms=1.0))
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples(
+                [TestEnrichRunResult._row()],
+                record_output_dir=run_dir,
+                record_shard="step_6",
+                record_staging_dir=tmp_path / "local",
+            )
+        )
+        _, returned = await completion
+
+        [written] = self._lines(run_dir / "rollouts-step_6.jsonl")
+        assert written[NG_ROW_MEDIA_KEY]["root"] == "rollouts_dir"
+        assert written[NG_ROW_MEDIA_KEY]["dir"].startswith("rollouts-step_6_blobs/")
+        assert restore_row_media(written, rollouts_dir=run_dir) == returned
 
     def test_a_shard_whose_every_rollout_failed_still_has_its_rollouts_file(self, tmp_path: Path) -> None:
         from nemo_gym.rollouts.rollout_collection import _RunRecordWriter

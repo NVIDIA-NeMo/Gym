@@ -157,6 +157,9 @@ MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # (``inline``, ``reference`` or ``none``). See ``nemo_gym/models/model_call_capture.py``.
 MODEL_CALL_CAPTURE_FORMAT_KEY_NAME = "model_call_capture_format"
 MODEL_CALL_PAYLOADS_KEY_NAME = "model_call_payloads"
+# Whether written rollout rows keep large ``data:`` URLs inline (``inline``) or store each once and reference it
+# (``reference``). See ``nemo_gym/trajectory/row_media.py``.
+ROW_MEDIA_KEY_NAME = "row_media"
 # Run-wide training-token capture settings.
 # See ``nemo_gym/models/token_capture/config.py``.
 TOKEN_CAPTURE_BLOCK = "token_id_capture"
@@ -215,6 +218,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
     MODEL_CALL_CAPTURE_FORMAT_KEY_NAME,
     MODEL_CALL_PAYLOADS_KEY_NAME,
+    ROW_MEDIA_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     MODEL_CALL_SAMPLING_BLOCK,
     COMPONENT_NAME_KEY_NAME,

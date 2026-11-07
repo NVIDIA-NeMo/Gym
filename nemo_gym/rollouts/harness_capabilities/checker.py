@@ -10,6 +10,7 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
+from nemo_gym.trajectory.row_media import require_inline_media
 from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY
 
 from .checks import SchemaCheck, SemanticCheck
@@ -1320,7 +1321,12 @@ class Inspector:
 
 
 def inspect_record(record: dict | None, *, source: str = "record", scope: EvidenceScope = EvidenceScope()) -> dict:
-    """Validate designated fields; absent required input fails applicable checks."""
+    """Validate designated fields; absent required input fails applicable checks.
+
+    ``content.media`` validates image data, so a row that stores its images by reference (``row_media: reference``)
+    is refused with ``RowMediaUnavailable``; ``inspect_bundle`` restores such rows from the run first.
+    """
+    require_inline_media(record, reader="Harness conformance (content.media)")
     inspector = Inspector(record, scope)
     inspector.model_calls()
     inspector.structure()
