@@ -52,7 +52,7 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
-from tests.single_agent_turn_helpers import _agent_response, _Client, _environment_server, _request, _Response
+from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,7 +322,7 @@ async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_
     ("stage", "path", "status", "detail"),
     [
         ("agent", "/ng-rollout/rollout-a2/v1/responses", 422, "Agent turn refused: unsupported tool_choice"),
-        ("cleanup", "/v1/agent_sessions/close", 409, "Agent close receipt has expired"),
+        ("cleanup", "/v1/agent_sessions/close", 409, "Agent session is no longer available"),
         ("verification", "/verify", 422, "verify refused: task_data is missing expected_answer"),
     ],
 )
@@ -477,34 +477,29 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
     assert client.calls == []
 
 
-def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:
-    return SingleAgentTurnEnvironmentServerConfig.model_validate(
-        {**environment_server.config.model_dump(), "resources_server": None}
-    )
-
-
-async def test_an_unset_resources_server_is_the_agents_own() -> None:
-    # A server that replaced a legacy_agent relay binds the resources server the agent's /run used.
-    configured, client = _environment_server(resources_tool_transports=["direct_http"])
+async def test_environment_resources_binding_is_independent_of_the_agents() -> None:
+    environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     client.global_config_dict.agent.responses_api_agents.test.update(
         {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
     )
-    environment_server = SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
 
     result = await environment_server.run_request(_request())
 
     assert result.result.reward == 1.0
-    resources_calls = [path for server, path, _ in client.calls if server == "agents_resources"]
+    resources_calls = [path for server, path, _ in client.calls if server == "resources"]
     assert resources_calls == ["/seed_session", "/verify", "/close_session"]
+    assert not any(server == "agents_resources" for server, _, _ in client.calls)
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
-    assert [access.name for access in create_body.tool_accesses] == ["agents_resources.direct_http"]
+    assert [access.name for access in create_body.tool_accesses] == ["resources.direct_http"]
 
 
-def test_a_server_whose_agent_names_no_resources_server_does_not_start() -> None:
-    configured, client = _environment_server()
+@pytest.mark.parametrize("resources", [{}, {"resources_server": None}])
+def test_environment_requires_its_own_resources_binding(resources: dict) -> None:
+    configured, _ = _environment_server()
+    config = configured.config.model_dump(exclude={"resources_server"})
 
-    with pytest.raises(ValueError, match="sets no resources_server"):
-        SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
+    with pytest.raises(ValidationError, match="resources_server"):
+        SingleAgentTurnEnvironmentServerConfig.model_validate({**config, **resources})
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
@@ -1636,6 +1631,7 @@ async def test_seed_observation_is_appended_only_to_the_agent_request(
         **request.task.task_input.task_data,
         "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
         "response": _agent_response().model_dump(mode="json"),
+        "failure_report": None,
     }
     assert verify_call["cookies"] == {"session": "updated-cookie"}
     assert request.task.task_input.responses_create_params is params

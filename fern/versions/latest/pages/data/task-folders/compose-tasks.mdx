@@ -156,6 +156,9 @@ service key, such as `privileged` or `secrets`, leaves the task out. So does a t
 `services`, `networks` and `volumes`, such as `version` or an `x-` block. A `depends_on` entry with `required: false`
 or `restart: true`, or a `user` with a group, such as `1000:1000`, fails when the group starts.
 
+`[environment.healthcheck]` runs at seed as `main`'s `user:` when one is set, as a decimal string's integer user ID;
+with no `user:` it runs as the image's user. The agent keeps its own user.
+
 | Field | Meaning in a sandbox group |
 | --- | --- |
 | `deploy` | `resources.limits.cpus` and `limits.memory` size the sandbox, or `reservations` when `limits` leaves them out. A sidecar that reserves GPUs (`count` or `device_ids`) goes to the server's `gpu_sandbox_provider`, when set. `main` follows the task's `[environment].gpus`. `count: all`, `limits.pids`, `replicas` other than 1 and keys besides `resources`, `replicas` and `restart_policy` fail. |
@@ -213,5 +216,10 @@ harbor_environment_server:
 - Prepare reads the block too, records the overlay's images and checks each merged document. Put it in `env.yaml` or
   a `--config` file that both prepare and the server read, and prepare again after you change it. Image references
   must resolve at prepare, without `compose_variables`.
+- For a Dockerfile task without its own Compose file, attaching services keeps the image's startup user and working
+  directory: the entrypoint and image health check run as the Dockerfile's final `USER` and `WORKDIR`, after its
+  `RUN` lines, which can already write to named and external volumes. `[agent].user` and `[environment].workdir`
+  apply to the agent's commands. An explicit `services.main.user` or `services.main.working_dir` in an overlay file
+  overrides the startup default.
 - Restart the servers after you edit the template. Prepare also compiles it, so install `jinja2>=3.1` where you run
   `gym` (the `ray` extra includes it).

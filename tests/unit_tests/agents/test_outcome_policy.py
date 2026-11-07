@@ -12,8 +12,8 @@ from nemo_gym.agents.agent_outcome import (
     choose_action,
     failure_outcome_policy,
 )
-from nemo_gym.core.episode_types import FailureBoundary, ModelFailureDetails
 from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, MODEL_POLICY_RESPONSE_TIMEOUT, MODEL_TRANSPORT_ERROR
+from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails
 from nemo_gym.core.typed_exceptions import NgFailureEvent
 
 

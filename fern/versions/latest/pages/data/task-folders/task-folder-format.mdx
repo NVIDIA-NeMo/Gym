@@ -60,7 +60,7 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 | `workdir` | none | The working directory. Unset, the Dockerfile's final `WORKDIR`, else the image's. |
 | `healthcheck` | none | A `command` polled at seed. After `start_period_sec` (`0`), `retries` (`3`) consecutive failures `interval_sec` (`5`) apart fail the seed (retryable). `timeout_sec` (`30`) bounds each attempt; `start_interval_sec` (`5`) paces the start period. |
 | `mcp_servers` | `[]` | Tool servers for the task. See [A task with its own MCP tool](/main/data/task-folders/task-folder-patterns#a-task-with-its-own-mcp-tool). |
-| `skills_dir` | none | A skills folder for harnesses that read one. |
+| `skills_dir` | none | A skills folder for harnesses that read one; a relative path resolves in the working directory. When the sandbox's folder is missing or empty and the task ships `environment/skills/`, the server uploads it there at seed. |
 
 A task whose `environment/` holds `docker-compose.yaml` runs as a group of sandboxes, one per service, on
 OpenSandbox only; see [Multi-Container Tasks](/main/data/task-folders/compose-tasks).
@@ -69,6 +69,10 @@ OpenSandbox only; see [Multi-Container Tasks](/main/data/task-folders/compose-ta
 
 `timeout_sec` (default `28800`) is the agent's budget. `user` is the user the agent runs as; unset, the
 Dockerfile's final `USER`, else the image's.
+
+A numeric user is looked up by name in the image first. A bare numeric `USER` with no passwd entry runs as that
+integer user ID on Docker and on OpenSandbox's plain exec; other providers, and OpenSandbox's PTY and bash sessions,
+need a named user. A `uid:gid` pair runs only on Docker.
 
 ### [verifier]
 

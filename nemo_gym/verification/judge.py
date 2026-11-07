@@ -56,11 +56,17 @@ from pydantic import BaseModel
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
-from nemo_gym.core.episode_types import FailureBoundary, SdkErrorDetails
+from nemo_gym.core.episode_context import (
+    VERIFIER_INVOCATION_HEADER,
+    current_verifier_invocation_id,
+    note_verifier_model_request,
+)
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    PROVIDER_QUOTA_EXHAUSTED,
 )
+from nemo_gym.core.failure_records import FailureBoundary, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureReportRow, observe_failure, report_for_current_request
 from nemo_gym.core.typed_exceptions import NgFailureEvent, sdk_error_details
 from nemo_gym.trajectory.trajectory_record import ModelCallRef
@@ -130,6 +136,37 @@ def judge_call_failed(
     )
 
 
+JUDGE_PROVIDER_STOP_KINDS = (PROVIDER_QUOTA_EXHAUSTED, PROVIDER_CREDENTIALS_REJECTED)
+"""The kinds of a judge provider that cannot grade until an operator acts: its quota resets or its key is fixed."""
+
+
+def judge_provider_stopped(message: str, *, failure_kind: str, operation: str) -> NgFailureEvent:
+    """The resources server boundary's stop of a judge provider that refuses to grade (quota or credentials).
+
+    ``judge_failsafe`` routes it like a judge failure, so the row keeps its saved answer and recovery grades it again
+    from that answer; the kind tells recovery and the run that no attempt can succeed until the operator acts.
+    """
+    if failure_kind not in JUDGE_PROVIDER_STOP_KINDS:
+        raise ValueError(f"not a judge provider stop kind: {failure_kind!r}")
+    return NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=failure_kind,
+        failure_reason=bounded_text(message, 2000),
+        operation=operation,
+        stage="verification",
+        message_args=(message,),
+    )
+
+
+def is_judge_provider_stop(error: BaseException) -> bool:
+    """Whether ``error`` is a ``judge_provider_stopped`` event."""
+    return (
+        isinstance(error, NgFailureEvent)
+        and error.boundary == FailureBoundary.RESOURCES_SERVER
+        and error.failure_kind in JUDGE_PROVIDER_STOP_KINDS
+    )
+
+
 def is_judge_failure(error: BaseException) -> bool:
     """Whether ``error`` is a judge failure: the ``JudgeError`` a parser raises, or a ``judge_failed`` event."""
     return isinstance(error, JudgeError) or (
@@ -153,6 +190,11 @@ def _judge_error(
     each of its attempts with ``operation_id`` and ``attempt_id`` and records the reply's status.
     """
     message = f"{type(error).__name__}: {error}"
+    content = getattr(error, "response_content", None)
+    if content:
+        # The reply's own body names the upstream cause (a rejected credential, say), bounded like the reason.
+        text = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+        message += f"; reply: {bounded_text(text, 500)}"
     return judge_call_failed(
         message,
         operation="judge.request",
@@ -227,6 +269,7 @@ async def call_judge(
     json: Any,
     response_model: Type[ResponseT],
     timeout: ClientTimeout | None = None,
+    max_attempts: int = JUDGE_CALL_MAX_ATTEMPTS,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
@@ -238,7 +281,8 @@ async def call_judge(
     calls and retries share that identity. Standalone calls do not invent a verifier execution.
 
     A 408, 429 or 5xx reply, a timeout or a lost connection is tried again, up to
-    ``JUDGE_CALL_MAX_ATTEMPTS`` attempts with full-jitter exponential backoff, before the
+    ``max_attempts`` attempts (default ``JUDGE_CALL_MAX_ATTEMPTS``; 1 for a caller that owns its retry loop)
+    with full-jitter exponential backoff, before the
     failure masks the row; other 4xx replies and unparseable replies fail at once. Each failed
     attempt is observed as its own ``judge_failed`` event (one ``operation_id`` per call, the
     attempt in ``attempt_id``, the reply's ``http_status``), so a row a retry scored and a row a
@@ -247,6 +291,7 @@ async def call_judge(
 
     async def _call() -> ResponseT:
         invocation_id = current_verifier_invocation_id()
+        note_verifier_model_request(server_name)
         http_response = await server_client.post(
             server_name=server_name,
             url_path=url_path,
@@ -268,7 +313,7 @@ async def call_judge(
         return parsed
 
     operation_id = uuid.uuid4().hex
-    for attempt in range(1, JUDGE_CALL_MAX_ATTEMPTS):
+    for attempt in range(1, max_attempts):
         try:
             return await _reraise_judge_errors(
                 _call(), operation_id=operation_id, attempt_id=f"{operation_id}-{attempt}"
@@ -277,9 +322,7 @@ async def call_judge(
             if not _is_retryable_judge_error(failure.__cause__ or failure):
                 raise
         await asyncio.sleep(_judge_retry_wait_s(attempt))
-    return await _reraise_judge_errors(
-        _call(), operation_id=operation_id, attempt_id=f"{operation_id}-{JUDGE_CALL_MAX_ATTEMPTS}"
-    )
+    return await _reraise_judge_errors(_call(), operation_id=operation_id, attempt_id=f"{operation_id}-{max_attempts}")
 
 
 def judge_failsafe(verify_fn: Callable) -> Callable:
@@ -294,8 +337,9 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
         try:
             return await verify_fn(*args, **kwargs)
         except JUDGE_FAILURES as e:
-            if not is_judge_failure(e):
+            if not (is_judge_failure(e) or is_judge_provider_stop(e)):
                 raise
+            kind = e.failure_kind if is_judge_provider_stop(e) else JUDGE_FAILED
             body = kwargs.get("body") or next(
                 (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
                 None,
@@ -309,7 +353,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "reward": 0.0,
                 "mask_sample": True,
                 # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
-                "failure_kind": JUDGE_FAILED,
+                "failure_kind": kind,
                 "failure_reason": error,
                 # Keep older NeMo RL consumers working during top-level field migration.
                 "instance_config": {
@@ -321,7 +365,7 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             }
             # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
             failure = e
-            if not (isinstance(e, NgFailureEvent) and e.failure_kind == JUDGE_FAILED):
+            if not (isinstance(e, NgFailureEvent) and e.failure_kind == kind):
                 failure = judge_call_failed(error, operation="judge.verify")
                 failure.__cause__ = e
             data |= FailureReportRow.fields(report_for_current_request(failure))

@@ -296,7 +296,6 @@ class TestFernDocsLinks(unittest.TestCase):
             with self.subTest(version=version):
                 pages = REPO_ROOT / f"fern/versions/{version}/pages/evaluation"
                 broken_links = []
-                canonical_links = 0
                 expected_target = (
                     "/reference/cli-commands#gym-eval-profile"
                     if version == "latest"
@@ -307,10 +306,13 @@ class TestFernDocsLinks(unittest.TestCase):
                     for line_number, line in enumerate(page.read_text().splitlines(), start=1):
                         if "#eval-profile" in line:
                             broken_links.append(f"{page.relative_to(REPO_ROOT)}:{line_number}")
-                        canonical_links += line.count(expected_target)
 
                 self.assertEqual([], broken_links)
-                self.assertEqual(2, canonical_links)
+                for name in ("index.mdx", "benchmarks.mdx"):
+                    self.assertIn(
+                        f'<Card title="Reward Profiling" href="{expected_target}">',
+                        (pages / name).read_text(),
+                    )
 
     def test_internal_pages_are_linked_by_path_not_by_absolute_url(self):
         """An absolute docs.nvidia.com link pins the reader to the default version.

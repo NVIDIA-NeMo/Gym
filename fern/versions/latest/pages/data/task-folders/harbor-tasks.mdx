@@ -237,7 +237,9 @@ to pin the content, or `harbor:<dataset>@<version>` for Harbor's registry. `gym 
 
 A **committed entry** is a folder under `environments/harbor/` that the Gym checkout keeps for one hub dataset,
 with a `dataset.toml` that names the reference in `[gym] source`. `terminal_bench_2_1` is one: it pins
-Terminal-Bench 2.1 by content hash.
+Terminal-Bench 2.1 by content hash. An entry may declare no `source` when a preparation script writes its task
+folders instead, as [SkillsBench's](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/skillsbench/README.md)
+does; such an entry is prepared locally, not pulled.
 
 ```bash
 gym dataset pull terminal_bench_2_1

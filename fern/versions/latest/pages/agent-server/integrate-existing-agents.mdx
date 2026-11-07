@@ -14,10 +14,11 @@ To use an agent that Gym does not integrate yet, see [Add an agent that is not l
 
 ## Sandboxed harnesses
 
-These adapters run a coding harness inside a task sandbox. The `single_agent_turn` Environment Server drives them when a Resources server provides the sandbox, and the `harbor` Environment Server drives them when a [Harbor task folder](/main/data/task-folders/harbor-tasks) does. Each row summarizes the adapter's README; the README is the reference for supported features, runtime requirements, and limits.
+These adapters run a harness inside a sandbox. The `single_agent_turn` Environment Server drives them with a task sandbox when the Resources server supplies one; otherwise a configured provider creates an agent-owned sandbox. The `harbor` Environment Server drives them in the sandbox of a [Harbor task folder](/main/data/task-folders/harbor-tasks). Each row summarizes the adapter's README; the README is the reference for supported features, runtime requirements, and limits.
 
 | Harness | Model API | Resources tool grants | Token IDs and logprobs | SWE-bench Pro | Terminal Bench 2.1 | Harbor task folders |
 | --- | --- | --- | --- | --- | --- | --- |
+| BrowseComp (`browsecomp_agent`) | Responses | Direct HTTP | Preserved from Model Server responses; sandbox path qualified for evaluation only | Not declared | Not declared | Only when the task runs as root: a task user is refused |
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared | Yes |
 | Pi (`pi_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
 | Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared | Yes |
@@ -79,8 +80,14 @@ sequences. Other OpenCode configuration keeps its native substitution behavior.
 Pi's `enable_tools` defaults to `true`. Setting it to `false` disables Pi's
 built-in tools through `--no-builtin-tools`; separately configured MCP tools and
 session grants remain available and retain their validation. For a run with no
-tools, also omit MCP configuration and grants. OpenCode continues to select its
-tools through `opencode_config.tools`, for example `{"*": false}`.
+tools, also omit MCP configuration and grants. For OpenCode, withhold tools with
+`opencode_config.permission` rules, for example `task: deny`. To withhold every
+tool, also deny `edit` and `bash` through their own maps (`edit: {"**": deny}`,
+`bash: {"*": deny}`): `opencode_agent`'s permission profile allows them after its
+`"*"` rule, and a `"*": deny` override keeps that rule's place before them. Do not
+use an `opencode_config.tools` map with `opencode_agent`: OpenCode places its keys
+before the profile's `"*": allow`, which then overrides them (see the
+`opencode_agent` README).
 
 Record prompt replacement and tool selection as evaluation treatments: they can
 change results relative to the harness's default coding behavior.

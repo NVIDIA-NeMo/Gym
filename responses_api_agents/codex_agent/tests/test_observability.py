@@ -97,6 +97,34 @@ def test_multiple_native_session_files_preserve_record_boundaries(tmp_path: Path
     assert not bundle.gaps
 
 
+@pytest.mark.parametrize("separator", ["\u0085", " ", " "])
+def test_unicode_line_separators_inside_records_keep_the_tool_output(tmp_path: Path, separator: str) -> None:
+    output = f"Chunk ID: abc\nProcess exited with code 0\nOutput:\nfirst{separator}second"
+    records = [
+        {"type": "function_call", "call_id": "call-1", "name": "exec_command", "arguments": '{"cmd":"cat f"}'},
+        {"type": "function_call_output", "call_id": "call-1", "output": output},
+    ]
+    # Codex leaves these characters unescaped; the sandbox snapshot joins its files with "\n".
+    transcript = "\n".join(
+        json.dumps(
+            {"type": "response_item", "timestamp": f"2026-10-05T10:00:0{index}Z", "payload": payload},
+            ensure_ascii=False,
+        )
+        for index, payload in enumerate(records)
+    )
+    folder = tmp_path / "sessions"
+    folder.mkdir()
+    (folder / "episode.jsonl").write_text(transcript + "\n", encoding="utf-8")
+    for bundle in (
+        parse_codex_observations(transcript, "invocation", returncode=0, timed_out=False),
+        read_codex_observations(tmp_path, "invocation", returncode=0, timed_out=False),
+    ):
+        invocation, tool = bundle.records
+        assert invocation.conversation[1].output == output
+        assert tool.status == "completed"
+        assert not bundle.gaps
+
+
 def test_native_usage_uses_latest_cumulative_total_without_adding_details() -> None:
     records = []
     for count in (20, 41):
@@ -265,3 +293,74 @@ def test_a_transcript_that_could_not_be_read_leaves_tool_time_unknown() -> None:
 def test_a_record_it_could_not_read_leaves_tool_time_unknown(transcript: str, expected: tuple) -> None:
     """An unreadable record may have been a tool call; a token usage record it could not read was not."""
     assert _time_split(parse_codex_observations(transcript, "0-0", returncode=-9, timed_out=True)) == expected
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        None,
+        "missing_model",
+        "policy_request",
+        "different_summary",
+        "duplicate",
+        "shared_event",
+        "failed",
+        "transport",
+        "missing_id",
+    ],
+)
+def test_compaction_requires_native_event_and_unique_session_helper(damage):
+    from copy import deepcopy
+
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.trajectory import ContextCompactionObservation
+    from responses_api_agents.codex_agent.observability import (
+        _COMPACTION_PREFIX,
+        associate_codex_compaction_calls,
+    )
+
+    transcript = json.dumps(
+        {
+            "type": "compacted",
+            "timestamp": "2026-10-29T10:00:00Z",
+            "payload": {"message": _COMPACTION_PREFIX + "Keep the changes."},
+        }
+    )
+    bundle = parse_codex_observations(transcript, "root", returncode=0, timed_out=False)
+    model_ref = ModelServerRef(type="responses_api_models", name="policy")
+    attempt = {
+        "status": 200,
+        "compaction_response": {"response_id": "response-helper", "summary": "Keep the changes."},
+    }
+    attempts = [attempt]
+    if damage == "missing_model":
+        model_ref = None
+    elif damage == "policy_request":
+        del attempt["compaction_response"]
+    elif damage == "different_summary":
+        attempt["compaction_response"]["summary"] = "Different"
+    elif damage == "duplicate":
+        attempts.append(deepcopy(attempt))
+    elif damage == "shared_event":
+        bundle.records.append(bundle.records[-1].model_copy(deep=True))
+    elif damage == "failed":
+        attempt["status"] = 500
+    elif damage == "transport":
+        attempt["transport_error"] = "stream closed"
+    elif damage == "missing_id":
+        del attempt["compaction_response"]["response_id"]
+    joined = associate_codex_compaction_calls(bundle, attempts, model_ref=model_ref)
+    event = next(r for r in joined.records if isinstance(r, ContextCompactionObservation))
+    assert event.summary == "Keep the changes."
+    assert event.outcome == "completed"
+    assert [ref.response_id for ref in event.model_calls] == ([] if damage else ["response-helper"])
+    assert joined.records[0].model_calls == event.model_calls
+    assert bool(joined.gaps) == bool(damage)
+    assert bundle.records[-1].model_calls == []
+    if damage is None:
+        repeated = associate_codex_compaction_calls(joined, attempts, model_ref=model_ref)
+        assert repeated == joined
+        repeated = associate_codex_compaction_calls(joined, attempts * 2, model_ref=model_ref)
+        event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
+        assert not event.model_calls and repeated.gaps
+        assert not repeated.records[0].model_calls
