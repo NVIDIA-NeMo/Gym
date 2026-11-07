@@ -57,6 +57,57 @@ final turn cannot reuse earlier analysis as its answer. Context overflow optiona
 (`truncate_on_overflow`), which is for eval only — during training the full trajectory has to be
 preserved for reward assignment.
 
+# Running behind an Environment Server
+
+The shipped `finance_sec_search` and `finance_agent_v2` resources and benchmark configs run through the
+`single_agent_turn_legacy` Environment Server.
+It seeds the resources session and an agent session, calls `/v1/responses` once, closes the agent session, verifies,
+and closes the resources session. Existing `--resources-server` and `--benchmark` commands select this path;
+no separate session config is needed. Instance names and dataset routing are unchanged. The `big_finance` configs
+stay on the relay until the `big_finance` resources server serves episode sessions.
+
+The agent and the finance resources servers export no checkpoint state (`restart_only`), so after a crash the episode
+still starts over from its input. A failed model call, seed or judge now becomes a classified failure instead of
+reward 0. This changes failure counts and can change aggregate scores when comparing with earlier relay-based runs,
+as detailed below. The agent's `/run` endpoint remains available for callers that explicitly use it.
+
+An agent session takes its tools from the Environment Server's grant, so the Environment Server must set
+`resources_tool_transports: [direct_http]`. The agent refuses, with a terminal 422, a session with no direct HTTP grant,
+more than one, a required MCP grant, or sandbox access. Every tool call goes to the grant's base URL with its headers
+and the resources cookie jar, and close returns the updated jar. When model calls are captured
+(`observability_enabled`), close also returns the loop's observations: one invocation with its stop reason and model
+calls, and a record per tool call.
+
+`finance_agent` is registered in `AGENT_SESSION_AGENT_TYPES`, so composing it onto another environment keeps that
+environment's `single_agent_turn_legacy` Environment Server, which must then grant `direct_http` too; otherwise every
+seed gets 422.
+
+Outcomes differ from the legacy `/run`, which verifies every loop it finishes and turns any exception into reward 0.
+Under the Environment Server, a failed model call other than a context overflow, or a tool abort, marks the response
+`failed` with its cause, and the Environment Server's `agent_outcome_policy` decides what happens:
+
+| Event | Legacy `/run` | Environment Server, default policy |
+|-------|---------------|------------------------------------|
+| Model call fails with a context overflow in its error text, at any HTTP status (`openai_model` answers a provider's 400 with a 500 unless `propagate_upstream_http_status_codes` lists it) | verified, usually 0 | response `incomplete`, no failure, verified |
+| Model call fails with another HTTP 400, 413 or 422 | verified, usually 0 | `model_request_error`, verified |
+| Model call fails with HTTP 408, 425, 429 or 5xx | verified, usually 0 | `model_request_error`, retryable failure |
+| Model call fails with another HTTP 4xx | verified, usually 0 | `model_request_error`, terminal failure |
+| Model call times out (`model_call_timeout`), or cannot connect before it does. Without `model_call_timeout`, a refused connection is resent without limit, so the episode runs into the Environment Server's deadline instead | verified, usually 0 | `model_transport_error`, retryable failure |
+| Seed, verify or the agent itself fails | reward 0 | failure classified by the Environment Server |
+| Tool error or timeout | verified | verified, as before |
+| A tool reports an error type in `abort_on_tool_error_types` (v2: `RetryExhaustedError`, the SEC API or sec.gov still answering 429 or 503 after its retries) | verified, usually 0 | `unknown`, retryable failure |
+| Context overflow that `vllm_model` answers itself (its default) | verified | verified, as before |
+
+The tool-abort row departs from upstream on purpose: `vals-ai/finance-agent-v2` ends the question with an empty answer,
+and the legacy `/run` still grades the rollout like upstream, but on the Environment Server path an SEC outage is
+retried instead of scored 0.
+
+A failure is not scored: rollout collection writes it to the failures sidecar instead of the rollouts file, and
+`--resume` dispatches a retryable one again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`. So an outage no longer counts as a
+wrong answer, and the score covers fewer rollouts when episodes fail. To count these failures as 0, pass
+`+count_failure_classes_as_zero=[environment_server_failed]`. Like the legacy run, that also zeroes seed, judge and
+verify failures, which share the class.
+
 # Licensing information
 Code: Apache 2.0
 Data: N/A
