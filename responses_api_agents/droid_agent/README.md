@@ -153,8 +153,9 @@ A failed response's `error.message` is Droid's error message, or what ended the 
 (`result_missing`, `process_exit_<code>`), cut to 2,000 characters; the Environment Server saves it
 as the failure reason.
 
-Droid's stream-json error event carries only a message, so the classifier matches the messages
-Droid 1.1.0 wrote in runs against a scripted model server:
+Droid's terminal stream-json `type: error` event carries only a message, so the classifier matches
+the message grammar Droid 1.1.0 wrote in runs against a scripted model server. Tool-result errors,
+assistant text and stderr are not model-failure evidence, even when their text matches this grammar:
 
 | Error event message | `ng_agent_outcome` |
 | --- | --- |

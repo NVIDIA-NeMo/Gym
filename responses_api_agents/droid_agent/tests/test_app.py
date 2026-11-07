@@ -382,10 +382,64 @@ def test_classifier_reads_droid_error_messages(monkeypatch, message, kind):
     assert (outcome.failure_kind, outcome.status_code) == kind
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
-def test_classifier_reports_unknown_for_an_untested_release(monkeypatch, message):
-    outcome = agent(monkeypatch, droid_version="1.2.0").classify_outcome({"error": message})
-    assert outcome.failure_kind == "unknown"
+async def test_terminal_error_reports_unknown_for_an_untested_release(monkeypatch, message):
+    events = [*EVENTS[:4], {"type": "error", "source": "agent_loop", "message": message}]
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
+    )
+    session = state(cleanup={"timed_out": False, "return_code": 1, "cleanup_confirmed": True})
+    response = await agent(monkeypatch, droid_version="1.2.0")._sandbox_response(session, body())
+    assert response.status == "failed" and response.error.message == message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    invocation = session.observations.records[0]
+    assert (invocation.error_type, invocation.stop_reason) == ("agent_error", None)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["429 rate limited", "Connection error.", CONTEXT_LIMIT_ERROR])
+@pytest.mark.parametrize("source", ["tool_result", "assistant", "stderr"])
+@pytest.mark.parametrize("return_code", [0, 1])
+async def test_error_lookalikes_outside_terminal_events_do_not_classify_the_run(
+    monkeypatch, message, source, return_code
+):
+    events = [event.copy() for event in EVENTS]
+    stderr = ""
+    if source == "tool_result":
+        events[3].pop("value")
+        events[3].update(isError=True, error={"message": message})
+    elif source == "assistant":
+        events[4]["text"] = message
+    else:
+        stderr = message
+    monkeypatch.setattr(
+        adapter.DroidSandboxSession,
+        "execute",
+        AsyncMock(return_value=adapter.DroidArtifacts(stdout(events), stderr=stderr)),
+    )
+    session = state(cleanup={"timed_out": False, "return_code": return_code, "cleanup_confirmed": True})
+    response = await agent(monkeypatch)._sandbox_response(session, body())
+    invocation = session.observations.records[0]
+    assert invocation.stop_reason is None
+    if return_code:
+        assert (response.status, response.error.message, invocation.error_type) == (
+            "failed",
+            "process_exit_1",
+            "process_exit_1",
+        )
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    else:
+        assert (response.status, response.error, invocation.error_type) == ("completed", None, None)
+        assert "ng_agent_outcome" not in response.metadata
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
+    if source == "tool_result":
+        assert response.output[1].output == message
+        assert session.observations.records[1].status == "failed"
+    elif source == "assistant":
+        assert response.output[2].content[0].text == message
 
 
 @pytest.mark.asyncio
@@ -724,18 +778,23 @@ async def test_task_timeout_bounds_the_supervised_run(monkeypatch, metadata, dea
 
 
 @pytest.mark.asyncio
-async def test_error_event_fails_a_run_that_exits_zero(monkeypatch):
-    events = [EVENTS[0], {"type": "error", "source": "agent_loop", "message": "429 rate limited"}]
+@pytest.mark.parametrize(
+    "message,outcome",
+    [
+        ("429 rate limited", {"failure_kind": "model_request_error", "status_code": 429}),
+        ("Connection error.", {"failure_kind": "model_transport_error"}),
+    ],
+)
+async def test_error_event_fails_a_run_that_exits_zero(monkeypatch, message, outcome):
+    events = [EVENTS[0], {"type": "error", "source": "agent_loop", "message": message}]
     monkeypatch.setattr(
         adapter.DroidSandboxSession, "execute", AsyncMock(return_value=adapter.DroidArtifacts(stdout(events)))
     )
     session = state()
     response = await agent(monkeypatch)._sandbox_response(session, body())
     assert response.status == "failed" and session.observations.records[0].error_type == "agent_error"
-    assert json.loads(response.metadata["ng_agent_outcome"]) == {
-        "failure_kind": "model_request_error",
-        "status_code": 429,
-    }
+    assert response.error.message == message
+    assert json.loads(response.metadata["ng_agent_outcome"]) == outcome
 
 
 @pytest.mark.asyncio
