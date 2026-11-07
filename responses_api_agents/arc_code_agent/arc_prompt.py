@@ -50,6 +50,31 @@ CANVAS = (246, 246, 246)  # margin colour of the padded ("pad32") image style
 TOOL_OUTPUT_CHARS = 1000  # the base prompt's output cap, replaced by the configured out_chars
 BASE_TOKEN_BUDGET = 20000
 
+TEXT_RUN_SENTENCE = (
+    "- Run Python by writing code between <code> and </code>. Generation pauses after </code>, the code runs, and what it prints "
+    "comes back in the next message inside <tool_response> and </tool_response>. Variables and functions you define stay defined for later runs."
+)
+NATIVE_RUN_SENTENCE = (
+    "- Run Python by calling the `python` tool with the code in its `code` argument. The code runs, and what it prints comes back as "
+    "the tool result. Variables and functions you define stay defined for later runs."
+)
+
+# The function tool offered when the model calls tools natively.
+PYTHON_TOOL = {
+    "type": "function",
+    "name": "python",
+    "description": (
+        "Run Python code in the stateful sandbox and return what it prints. Variables and functions you define stay defined "
+        "for later calls; the puzzle and the helper functions are preloaded."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {"code": {"type": "string", "description": "The Python code to run."}},
+        "required": ["code"],
+    },
+    "strict": False,
+}
+
 BASE_SYSTEM_PROMPT = f"""Solve this ARC-AGI puzzle by finding the hidden rule and writing the output grid for the test input. A grid is a rectangle of digits 0-9, where 0 is the background colour and the other digits are distinct colours (1 blue, 2 red, 3 green, 4 yellow, 5 grey, 6 magenta, 7 orange, 8 sky, 9 brown). Every example pair was produced by the same hidden transformation.
 
 You have a stateful Python sandbox (numpy as np, scipy, networkx) and a tight token budget: the whole conversation, puzzle included, must fit in about {BASE_TOKEN_BUDGET} tokens.
@@ -172,9 +197,14 @@ def build_system_prompt(
     helpers_v2: bool = True,
     helpers_v3_new: bool = True,
     sandbox_hygiene: bool = True,
+    native_tools: bool = False,
 ) -> str:
-    """The system prompt: base prompt for a large budget and many runs, image note, helper list, sandbox libraries, output cap."""
+    """The system prompt: base prompt for a large budget and many runs, image note, helper list, sandbox libraries, output cap.
+
+    With ``native_tools`` the code-running sentence describes the `python` function tool instead of <code> blocks."""
     out = BASE_SYSTEM_PROMPT
+    if native_tools:
+        out = _replace_once(out, TEXT_RUN_SENTENCE, NATIVE_RUN_SENTENCE)
     out = _replace_once(
         out,
         f"a tight token budget: the whole conversation, puzzle included, must fit in about {BASE_TOKEN_BUDGET} tokens.",

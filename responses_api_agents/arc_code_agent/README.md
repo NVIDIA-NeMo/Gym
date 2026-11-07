@@ -8,7 +8,8 @@ raw-text Qwen3.8 runs; this version talks to the Gym model server through the Re
 
 1. Builds the whole prompt from the row (`examples`, `test_input`; the row's own `input` is ignored): a system prompt, then
    one user message with a computed "Observations" block and, for every grid, its digits followed by an image.
-2. Calls the model. The model reasons, then writes Python in `<code>...</code>` (generation stops at `</code>`).
+2. Calls the model. The model reasons, then writes Python in `<code>...</code>` (generation stops at `</code>`), or calls a
+   `python` function tool when `native_tools` is on (see below).
 3. Runs the code in a sandbox that keeps state between runs and returns the output as a user turn
    `<tool_response>\n...\n</tool_response>`.
 4. Repeats until the model writes the final grid in `<answer>...</answer>`. A turn cut by the per-turn token cap gets a
@@ -17,6 +18,29 @@ raw-text Qwen3.8 runs; this version talks to the Gym model server through the Re
 
 The first run whose `check(transform)` passes every example pair ends the attempt (`auto_answer`): the checked
 function's prediction for the test input becomes the answer, recorded as a synthetic assistant message.
+
+## Native tool calling (`native_tools: true`)
+
+Some models are trained for native function calling and do not write `<code>` blocks. With `native_tools: true` the
+agent offers one function tool, `python` (argument `{"code": "<python source>"}`, `strict: false`), in every request,
+sets no stop string, and the system prompt's code-running sentence says to call the `python` tool; everything else in
+the prompt (helpers, budget, run count, answer format) is unchanged. The model server must parse tool calls (vLLM
+`--enable-auto-tool-choice` with the model's tool parser) and use a reasoning parser.
+
+- Each `function_call` item of a turn is run in the sandbox, in order, and answered with a `function_call_output`
+  item with the same `call_id` whose output is the sandbox text (stdout, then `[error] ...`), without the
+  `<tool_response>` wrapper. Several calls in one turn share the sandbox state and each counts as a run.
+- Arguments that are not JSON, lack a non-empty string `code`, or a call to another tool name, return an
+  `[error] ...` output (and count as a run). Calls beyond `max_runs` are answered with a "not run" output and, with
+  `runs_cap_final`, the next request is the forced final answer. A call in a turn cut by the token limit is answered
+  with a "not run" output, followed by the usual cut nudge.
+- A turn with neither a function call nor an answer follows the text protocol: `nocode_nudge` turns are nudged,
+  otherwise the attempt ends. Typed answers, `answer_resend`, `auto_answer` and the token budget work as before.
+- The forced final answer keeps the tool definition with `tool_choice: "none"` and thinking off.
+- Reasoning and function calls are replayed as `reasoning` and `function_call` items (`keep_thinking`), which the
+  model server turns into one assistant message with its reasoning and tool calls.
+- `response.output` returned by the agent is the whole history after the prompt: `reasoning`, `function_call`,
+  `function_call_output`, messages, nudges and the synthetic auto-answer message.
 
 ## Row schema
 

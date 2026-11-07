@@ -85,6 +85,31 @@ def model_reply(
     }
 
 
+def tool_reply(
+    calls: List[tuple], text: str = "", reasoning: Optional[str] = "thinking", out_tokens: int = 100, in_tokens: int = 3000
+) -> dict:
+    """A reply with native function calls: ``calls`` is a list of (call_id, name, arguments JSON string)."""
+    reply = model_reply(text, reasoning, out_tokens, in_tokens)
+    if not text:
+        reply["output"] = [i for i in reply["output"] if i["type"] != "message"]
+    for call_id, name, arguments in calls:
+        reply["output"].append(
+            {
+                "id": f"fc-{call_id}",
+                "type": "function_call",
+                "call_id": call_id,
+                "name": name,
+                "arguments": arguments,
+                "status": "completed",
+            }
+        )
+    return reply
+
+
+def py(code: str) -> str:
+    return json.dumps({"code": code})
+
+
 class Harness:
     """Scripted model server plus the real resources server behind a fake ServerClient."""
 
@@ -326,3 +351,177 @@ def test_image_rendering_matches_pad32_style() -> None:
     assert img.size == (64, 32)  # 3x2 cells of 12 px, padded to multiples of 32
     assert img.getpixel((0, 0)) == (0, 116, 217) and img.getpixel((12, 0)) == (255, 65, 54)
     assert img.getpixel((35, 23)) == (135, 12, 37) and img.getpixel((40, 0)) == arc_prompt.CANVAS
+
+
+# -- native function calling ----------------------------------------------------------------------------------------
+
+
+def kinds(result) -> List[str]:
+    return [i.type if getattr(i, "type", None) != "message" else f"message:{i.role}" for i in result.response.output]
+
+
+def outputs(request) -> List[Any]:
+    """The function_call_output items of a model request."""
+    return [i for i in request.input if getattr(i, "type", None) == "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_native_tool_call_then_answer(make) -> None:
+    h = make(
+        [
+            tool_reply([("call_1", "python", py("print(test_inputs[0].shape)"))], reasoning="plan"),
+            model_reply(GOOD_ANSWER, out_tokens=50, in_tokens=3300),
+        ],
+        native_tools=True,
+    )
+    result = await h.run()
+    assert result.reward == 1.0 and result.turns == 2 and result.code_runs == 1
+    assert result.answer_source == "typed" and result.finished_with_answer and result.generated_tokens == 150
+
+    # The request offers the python tool, has no stop string, and the system prompt names the tool.
+    first = h.model_calls[0]
+    assert [t["name"] for t in first.tools] == ["python"] and first.tool_choice == "auto"
+    assert first.tools[0]["parameters"]["required"] == ["code"]
+    assert "stop" not in json.loads(first.metadata["extra_body"])
+    system = first.input[0].content
+    assert "calling the `python` tool" in system and "<code>" not in system and "</code>" not in system
+    # The second request replays reasoning and the call, then the function result with the same call id.
+    second = h.model_calls[1]
+    assert [getattr(i, "type", None) for i in second.input[2:]] == ["reasoning", "function_call", "function_call_output"]
+    out = second.input[-1]
+    assert out.call_id == "call_1" and out.output == "(2, 2)\n" and "tool_response" not in out.output
+    # The returned history holds everything for export.
+    assert kinds(result) == ["reasoning", "function_call", "function_call_output", "reasoning", "message:assistant"]
+
+
+@pytest.mark.asyncio
+async def test_native_parallel_tool_calls_share_sandbox_state(make) -> None:
+    h = make(
+        [
+            tool_reply([("a", "python", py("y = 7")), ("b", "python", py("print(y + 1)"))]),
+            model_reply(GOOD_ANSWER),
+        ],
+        native_tools=True,
+    )
+    result = await h.run()
+    assert result.code_runs == 2 and result.turns == 2 and result.reward == 1.0
+    got = {o.call_id: o.output for o in outputs(h.model_calls[1])}
+    assert got == {"a": "", "b": "8\n"}
+    assert kinds(result)[:4] == ["reasoning", "function_call", "function_call", "function_call_output"]
+
+
+@pytest.mark.asyncio
+async def test_native_bad_arguments_are_returned_as_errors_and_count_as_runs(make) -> None:
+    h = make(
+        [
+            tool_reply([("a", "python", "{not json"), ("b", "python", json.dumps({"src": "1"})), ("c", "nope", "{}")]),
+            model_reply(GOOD_ANSWER),
+        ],
+        native_tools=True,
+    )
+    result = await h.run()
+    got = {o.call_id: o.output for o in outputs(h.model_calls[1])}
+    assert "not valid JSON" in got["a"] and "non-empty string field `code`" in got["b"] and "unknown tool" in got["c"]
+    assert all(v.startswith("[error]") for v in got.values())
+    assert result.code_runs == 3 and result.reward == 1.0
+
+
+@pytest.mark.asyncio
+async def test_native_turn_without_call_or_answer_is_nudged(make) -> None:
+    h = make(
+        [model_reply("I think the rule is a rotation."), model_reply(GOOD_ANSWER)], native_tools=True, nocode_nudge=1
+    )
+    result = await h.run()
+    assert result.reward == 1.0 and result.turns == 2 and result.code_runs == 0
+    nudge = h.model_calls[1].input[-1]
+    assert nudge.role == "user" and nudge.content == arc_prompt.NOCODE_NUDGE
+
+
+@pytest.mark.asyncio
+async def test_native_turn_without_call_or_answer_ends_attempt_by_default(make) -> None:
+    h = make([model_reply("I think the rule is a rotation.")], native_tools=True)
+    result = await h.run()
+    assert result.reward == 0.0 and not result.finished_with_answer and result.answer_source == "none"
+
+
+@pytest.mark.asyncio
+async def test_native_auto_answer_from_passing_check(make) -> None:
+    h = make([tool_reply([("a", "python", py(CHECKED_CODE))])], native_tools=True)
+    result = await h.run()
+    assert result.reward == 1.0 and result.answer_source == "auto" and len(h.model_calls) == 1
+    assert kinds(result) == ["reasoning", "function_call", "function_call_output", "message:assistant"]
+    assert "check: passed 2/2" in result.response.output[2].output
+    assert result.response.output[-1].content[0].text == GOOD_ANSWER
+
+
+@pytest.mark.asyncio
+async def test_native_budget_forces_final_answer_with_thinking_off(make) -> None:
+    h = make(
+        [
+            tool_reply([("a", "python", py("print(1)"))], out_tokens=3900, in_tokens=1500),
+            model_reply(GOOD_ANSWER, reasoning=None, out_tokens=30, in_tokens=5500),
+        ],
+        native_tools=True,
+        cap=5000,
+        answer_tokens=600,
+    )
+    result = await h.run()
+    assert result.forced_final and result.answer_source == "forced" and result.reward == 1.0 and result.turns == 1
+    final = h.model_calls[1]
+    assert json.loads(final.metadata["chat_template_kwargs"]) == {"enable_thinking": False}
+    assert final.tool_choice == "none" and final.max_output_tokens == 600
+    assert final.input[-1].content == arc_prompt.FINAL_NUDGE
+    assert getattr(final.input[-2], "type", None) == "function_call_output"  # the call was answered before
+
+
+@pytest.mark.asyncio
+async def test_native_run_cap_answers_the_call_and_goes_to_forced_final(make) -> None:
+    h = make(
+        [
+            tool_reply([("a", "python", py("print(1)"))]),
+            tool_reply([("b", "python", py("print(2)")), ("c", "python", py("print(3)"))]),
+            model_reply(GOOD_ANSWER),
+        ],
+        native_tools=True,
+        max_runs=1,
+    )
+    result = await h.run()
+    assert result.code_runs == 1 and result.forced_final and result.reward == 1.0
+    got = {o.call_id: o.output for o in outputs(h.model_calls[2])}
+    assert got["a"] == "1\n" and "limit of code runs" in got["b"] and "limit of code runs" in got["c"]
+
+
+@pytest.mark.asyncio
+async def test_native_sandbox_timeout_is_reported_and_cell_dropped(make) -> None:
+    h = make(
+        [
+            tool_reply([("a", "python", py("x = 5\nwhile True:\n    pass"))]),
+            tool_reply([("b", "python", py("print(x)"))]),
+            model_reply(GOOD_ANSWER),
+        ],
+        native_tools=True,
+        timeout_s=2,
+    )
+    result = await h.run()
+    first = outputs(h.model_calls[1])[0].output
+    assert "timed out after 2s" in first and "the cell was discarded" in first
+    assert "NameError" in outputs(h.model_calls[2])[-1].output
+    assert result.code_runs == 2 and result.reward == 1.0
+
+
+@pytest.mark.asyncio
+async def test_native_cut_turn_with_a_call_answers_it(make) -> None:
+    h = make(
+        [tool_reply([("a", "python", '{"code": "pri')], out_tokens=1000), model_reply(GOOD_ANSWER)],
+        native_tools=True,
+        turn_cap=1000,
+    )
+    result = await h.run()
+    assert result.cuts == 1 and result.code_runs == 0 and result.reward == 1.0
+    assert "not run" in outputs(h.model_calls[1])[0].output and h.model_calls[1].input[-1].content == arc_prompt.CUT_NUDGE
+
+
+def test_native_system_prompt_differs_only_in_the_run_sentence() -> None:
+    text = arc_prompt.build_system_prompt(73728, 24, 4000)
+    native = arc_prompt.build_system_prompt(73728, 24, 4000, native_tools=True)
+    assert text.replace(arc_prompt.TEXT_RUN_SENTENCE, arc_prompt.NATIVE_RUN_SENTENCE) == native

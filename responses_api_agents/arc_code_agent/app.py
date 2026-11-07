@@ -40,6 +40,7 @@ from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
@@ -54,6 +55,7 @@ from responses_api_agents.arc_code_agent.arc_prompt import (
     HYGIENE_IMPORTS,
     HYGIENE_RECURSION,
     NOCODE_NUDGE,
+    PYTHON_TOOL,
     RESEND_NUDGE,
     build_system_prompt,
     sandbox_header,
@@ -113,6 +115,9 @@ class ArcCodeAgentConfig(BaseResponsesAPIAgentConfig):
     runs_cap_final: bool = True  # reaching max_runs goes straight to the forced final answer
     nocode_nudge: int = 0  # turns with neither code nor answer that are nudged instead of ending the attempt
     parse_tool_calls: bool = True  # native <tool_call> blocks count as code
+    # Native function calling: offer a `python` function tool in each request instead of the <code> text protocol (no
+    # stop string); every function call of a turn is run in the sandbox and answered with a function_call_output item.
+    native_tools: bool = False
 
     # Sandbox.
     timeout_s: float = 30.0
@@ -263,27 +268,30 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
         seed: Optional[int],
         template_kwargs: Dict[str, Any],
         stop: bool,
+        tool_choice: Optional[str] = None,
     ) -> NeMoGymResponseCreateParamsNonStreaming:
         cfg = self.config
         extra_body: Dict[str, Any] = {"top_k": cfg.top_k, **cfg.extra_body}
         if seed is not None:
             extra_body["seed"] = seed
-        if stop and cfg.stop_strings:
+        if stop and cfg.stop_strings and not cfg.native_tools:
             extra_body["stop"] = cfg.stop_strings
             if cfg.include_stop_str_in_output:
                 extra_body["include_stop_str_in_output"] = True
         metadata = dict(base.metadata or {})
         metadata["extra_body"] = json.dumps(extra_body)
         metadata["chat_template_kwargs"] = json.dumps(template_kwargs)
-        return base.model_copy(
-            update={
-                "input": items,
-                "temperature": cfg.temperature,
-                "top_p": cfg.top_p,
-                "max_output_tokens": max_tokens,
-                "metadata": metadata,
-            }
-        )
+        update: Dict[str, Any] = {
+            "input": items,
+            "temperature": cfg.temperature,
+            "top_p": cfg.top_p,
+            "max_output_tokens": max_tokens,
+            "metadata": metadata,
+        }
+        if cfg.native_tools:
+            update["tools"] = [dict(PYTHON_TOOL)]
+            update["tool_choice"] = tool_choice or "auto"
+        return base.model_copy(update=update)
 
     async def _call_model(self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: Any, url_path: str):
         resp = await self.server_client.post(
@@ -320,6 +328,7 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
             helpers_v2=cfg.helpers_v2,
             helpers_v3_new=cfg.helpers_v3_new,
             sandbox_hygiene=cfg.sandbox_hygiene,
+            native_tools=cfg.native_tools,
         )
         content = user_content(row.examples, row.test_input, cfg.image_px, cfg.image_scale, cfg.image_style)
         prompt = [
@@ -356,11 +365,15 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
         def add_model_output(resp: NeMoGymResponse) -> None:
             history.extend(resp.output)
             # A cut turn may hold reasoning only; keep the assistant turn boundary so the history stays well formed.
-            if not any(getattr(i, "type", None) == "message" for i in resp.output):
+            if not any(getattr(i, "type", None) in ("message", "function_call") for i in resp.output):
                 history.append(_assistant_message("", "empty"))
 
         def add_user(text: str) -> None:
             history.append(NeMoGymEasyInputMessage(role="user", content=text))
+            ledger.add_text(text)
+
+        def add_tool_output(call_id: str, text: str) -> None:
+            history.append(NeMoGymFunctionCallOutput(call_id=call_id, output=text))
             ledger.add_text(text)
 
         def record(resp: NeMoGymResponse) -> None:
@@ -390,6 +403,7 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
                     self._request_seed(task_id, sample, 0),
                     cfg.final_template_kwargs,
                     False,
+                    "none",
                 )
                 resp, cookies = await self._call_model(body, cookies, url_path)
                 record(resp)
@@ -410,14 +424,51 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
             raw = _message_text(resp)
             add_model_output(resp)
 
+            calls = [i for i in resp.output if getattr(i, "type", None) == "function_call"] if cfg.native_tools else []
+
             if _was_cut(resp, limit):  # cut: keep the turn, then tell the model to test or answer
+                for call in calls:  # a call of a cut turn may be incomplete: answer it without running it
+                    add_tool_output(call.call_id, "[harness] not run: the turn hit the per-turn token limit")
                 add_user(CUT_NUDGE)
                 counters["cuts"] += 1
                 if counters["cuts"] > cfg.max_cuts:
                     ledger.exhausted = True
                 continue
 
-            code = extract_code(raw, cfg.parse_tool_calls)
+            if calls:
+                auto_grid, refused = None, False
+                for call in calls:
+                    if counters["code_runs"] >= cfg.max_runs:
+                        refused = True
+                        add_tool_output(call.call_id, "[harness] not run: the limit of code runs is reached")
+                        continue
+                    counters["code_runs"] += 1
+                    code, bad = _call_code(call)
+                    if code is None:
+                        add_tool_output(call.call_id, f"[error] {bad}")
+                        continue
+                    reply = await self._pool.run(header, codes, code)
+                    if cfg.drop_timed_out and reply.get("timed_out"):
+                        reply = dict(
+                            reply,
+                            error=reply.get("error", "")
+                            + "; the cell was discarded, so the sandbox state is as it was before it",
+                        )
+                    else:
+                        codes.append(code)
+                    add_tool_output(call.call_id, _tool_output(reply))
+                    if cfg.auto_answer and auto_grid is None and full_check_pass(reply.get("output", "")):
+                        fn = checked_function(code)
+                        auto_grid = await self._pool.predict_answer(header, codes, fn) if fn else None
+                if auto_grid is not None:
+                    final_text, answer_source = _answer_block(auto_grid), "auto"
+                    history.append(_assistant_message(final_text, "auto-answer"))
+                    break
+                if cfg.runs_cap_final and refused:  # the model asked for a run beyond the cap
+                    force_now = True
+                continue
+
+            code = None if cfg.native_tools else extract_code(raw, cfg.parse_tool_calls)
             if nocode_left > 0 and code is None and parse_answer(raw) is None:
                 nocode_left -= 1
                 add_user(NOCODE_NUDGE)
@@ -548,6 +599,26 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
             answer_source=result["answer_source"],
         )
         return ArcCodeAgentVerifyResponse.model_validate(payload)
+
+
+def _call_code(call: Any) -> Any:
+    """(code, None) for a call of the python tool, or (None, reason) when its name or arguments are unusable."""
+    if call.name != PYTHON_TOOL["name"]:
+        return None, f"unknown tool {call.name!r}; the only tool is `{PYTHON_TOOL['name']}`"
+    try:
+        args = json.loads(call.arguments)
+    except (TypeError, ValueError):
+        return None, "the tool arguments are not valid JSON; pass an object like {\"code\": \"...\"}"
+    code = args.get("code") if isinstance(args, dict) else None
+    if not isinstance(code, str) or not code.strip():
+        return None, "the tool arguments need a non-empty string field `code`"
+    return code, None
+
+
+def _tool_output(reply: Dict[str, Any]) -> str:
+    """The sandbox output as a function result (the same text as the tool turn, without its wrapper)."""
+    text = tool_response_text(reply)
+    return text[len("<tool_response>\n") : -len("\n</tool_response>")]
 
 
 def _is_user_text(item: Any, text: str) -> bool:

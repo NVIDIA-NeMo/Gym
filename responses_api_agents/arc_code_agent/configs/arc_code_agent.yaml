@@ -48,6 +48,7 @@ arc_code_agent:
       runs_cap_final: true
       nocode_nudge: 0
       parse_tool_calls: true
+      native_tools: false    # true: offer a `python` function tool (native function calling) instead of <code> blocks
 
       # Sandbox
       timeout_s: 30
