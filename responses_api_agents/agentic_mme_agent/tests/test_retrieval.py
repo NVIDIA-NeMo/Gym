@@ -27,7 +27,7 @@ def workspace():
         "http://localhost/a",
         "http://127.0.0.1",
         "http://169.254.169.254",
-        "https://user:pass@example.com",
+        "https://user:pass@example.com",  # pragma: allowlist secret
         "http://10.0.0.1/a",
         "http://[::1]",
         "https://example.com:9000",

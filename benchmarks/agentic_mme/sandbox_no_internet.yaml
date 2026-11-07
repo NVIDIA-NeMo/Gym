@@ -25,4 +25,4 @@ agentic_mme_opencode_agent:
   responses_api_agents:
     opencode_agent:
       sandbox_executable_path: /opt/opencode/bin/opencode
-      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret

@@ -28,7 +28,7 @@ from pathlib import Path
 
 
 REPO_ID = "Crystal1047/Agentic-MME"
-REVISION = "b9ea9d3f68ff896d83fec666b6143da594c054a8"
+REVISION = "b9ea9d3f68ff896d83fec666b6143da594c054a8"  # pragma: allowlist secret
 MAX_PIXELS = 2048 * 2048
 MAX_BYTES = 15 * 1024 * 1024
 
