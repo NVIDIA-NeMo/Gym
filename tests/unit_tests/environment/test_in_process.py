@@ -10,6 +10,8 @@ import pytest
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig, ConfigError
 from nemo_gym.config.global_config import maybe_get_global_config_dict, scoped_global_config_dict
+from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.failure_records import EpisodeFailure
 from nemo_gym.environment import in_process
 from nemo_gym.environment.in_process import (
     PlannedBenchmark,
@@ -22,6 +24,7 @@ from nemo_gym.environment.in_process import (
 from nemo_gym.eval.eval_plan import PlanBenchmark, PlanGym, build_eval_plan
 from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 
 
 HEAD = BaseServerConfig(host="127.0.0.1", port=4242)
@@ -47,7 +50,7 @@ def _planned(*task_ids: str, prompt: str = "solve it", commit: str | None = "abc
 
 
 class _Completions:
-    """The completion iterator `run_examples` returns: awaitables to iterate, and an `aclose` that records the call."""
+    """The completion iterator `run_outcomes` returns: awaitables to iterate, and an `aclose` that records the call."""
 
     def __init__(self, completions: list) -> None:
         self._completions = completions
@@ -61,7 +64,7 @@ class _Completions:
 
 
 class _FakeRuns:
-    """Stands in for `run_examples`: records what was sent and returns a reward per row."""
+    """Stands in for `run_outcomes`: records what was sent and returns a reward per row."""
 
     def __init__(self, reward: float = 1.0, fail_row: int | None = None) -> None:
         self.reward = reward
@@ -83,7 +86,7 @@ class _FakeRuns:
 
 
 class _FakeResults:
-    """Stands in for `run_examples`: returns the given `/run` results, one per row."""
+    """Stands in for `run_outcomes`: returns the given `/run` results, one per row."""
 
     def __init__(self, *results: dict) -> None:
         self.results = results
@@ -107,7 +110,7 @@ class TestOutcomes:
         failed = {"reward": 0.0, "failure_kind": "judge_failed", "failure_reason": "no verdict"}
         masked = {"reward": 0.0, "mask_sample": True}
         runner = TaskRunner([_row("a")], registry_server=HEAD)
-        monkeypatch.setattr(RolloutCollectionHelper, "run_examples", _FakeResults(passed, failed, masked))
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(passed, failed, masked))
 
         result = await runner.run_task("a", num_repeats=3)
 
@@ -119,19 +122,102 @@ class TestOutcomes:
                 prompt='[{"role": "user", "content": "solve it"}]',
                 output='[{"type": "message", "content": "done"}]',
             ),
-            RolloutOutcome(reward=0.0, failure=TaskFailure(kind="judge_failed", domain="judge", reason="no verdict")),
+            RolloutOutcome(
+                reward=0.0,
+                failure=TaskFailure(
+                    kind="judge_failed",
+                    domain="judge",
+                    source="environment",
+                    delivery="delivered",
+                    reason="no verdict",
+                ),
+            ),
             RolloutOutcome(reward=0.0, masked=True),
         ]
 
     async def test_a_failure_without_a_reason_has_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         runner = TaskRunner([_row("a")], registry_server=HEAD)
         monkeypatch.setattr(
-            RolloutCollectionHelper, "run_examples", _FakeResults({"reward": 0.0, "failure_kind": "session_lost"})
+            RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 0.0, "failure_kind": "session_lost"})
         )
 
         outcome = (await runner.run_task("a")).outcomes[0]
 
-        assert outcome.failure == TaskFailure(kind="session_lost", domain="session", reason=None)
+        assert outcome.failure == TaskFailure(
+            kind="session_lost", domain="session", source="environment", delivery="delivered", reason=None
+        )
+
+
+def _record(
+    *,
+    source: str = "collector",
+    delivery: str = "delivered",
+    kind: str | None = None,
+    stage: str | None = None,
+    terminal: bool = False,
+    http_status: int | None = 500,
+    exception_type: str | None = "ClientResponseError",
+) -> RolloutFailureRecord:
+    return RolloutFailureRecord(
+        episode_id=EpisodeId(rollout_id="r-r0"),
+        run_id="run",
+        source=source,
+        delivery=delivery,
+        failure=EpisodeFailure(failure_reason="boom", terminal=terminal, failure_kind=kind, stage=stage),
+        http_status=http_status,
+        exception_type=exception_type,
+    )
+
+
+class TestFailedRuns:
+    async def test_a_failed_run_comes_back_as_an_outcome_beside_the_rollouts_that_finished(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        record = _record(kind="model_request_error", stage="agent", terminal=True)
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 1.0}, record))
+
+        result = await runner.run_task("a", num_repeats=2)
+
+        assert result.rewards == [1.0, None]
+        assert result.results[1] == record.model_dump(mode="json")
+        assert result.outcomes[1] == RolloutOutcome(
+            reward=None,
+            failure=TaskFailure(
+                kind="model_request_error",
+                domain="model",
+                source="collector",
+                delivery="delivered",
+                stage="agent",
+                terminal=True,
+                reason="boom",
+                http_status=500,
+                exception_type="ClientResponseError",
+            ),
+        )
+
+    @pytest.mark.parametrize(
+        "source, delivery, kind",
+        [
+            ("environment", "delivered", "environment_server_failed"),
+            ("collector", "delivered", "agent_run_error"),
+            ("collector", "possibly_delivered", "agent_request_failed"),
+            ("collector", "not_sent", "agent_request_failed"),
+        ],
+    )
+    async def test_a_failure_that_names_no_cause_gets_the_kind_for_who_reported_it_and_whether_it_was_delivered(
+        self, monkeypatch: pytest.MonkeyPatch, source: str, delivery: str, kind: str
+    ) -> None:
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        record = _record(source=source, delivery=delivery, http_status=None, exception_type=None)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(record))
+
+        failure = (await runner.run_task("a")).outcomes[0].failure
+
+        assert failure is not None
+        assert (failure.kind, failure.source, failure.delivery) == (kind, source, delivery)
+        assert failure.http_status is None
+        assert failure.exception_type is None
 
 
 class TestTaskRunner:
@@ -151,7 +237,7 @@ class TestTaskRunner:
         runs = _FakeRuns(reward=1.0)
         monkeypatch.setattr(
             RolloutCollectionHelper,
-            "run_examples",
+            "run_outcomes",
             lambda self, rows, head_server_config: runs(rows, head_server_config),
         )
 
@@ -167,7 +253,7 @@ class TestTaskRunner:
         runs = _FakeRuns()
         monkeypatch.setattr(
             RolloutCollectionHelper,
-            "run_examples",
+            "run_outcomes",
             lambda self, rows, head_server_config: runs(rows, head_server_config),
         )
 
@@ -179,7 +265,7 @@ class TestTaskRunner:
     def _serve(monkeypatch: pytest.MonkeyPatch, runs: _FakeRuns) -> None:
         monkeypatch.setattr(
             RolloutCollectionHelper,
-            "run_examples",
+            "run_outcomes",
             lambda self, rows, head_server_config: runs(rows, head_server_config),
         )
 
@@ -212,11 +298,11 @@ class TestTaskRunner:
         async def never_finishes():
             await release.wait()
 
-        def run_examples(self, rows, head_server_config):
+        def run_outcomes(self, rows, head_server_config):
             hung.append(_Completions([never_finishes()]))
             return hung[0]
 
-        monkeypatch.setattr(RolloutCollectionHelper, "run_examples", run_examples)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", run_outcomes)
         task = asyncio.ensure_future(runner.run_task("a"))
         await asyncio.sleep(0)
         task.cancel()

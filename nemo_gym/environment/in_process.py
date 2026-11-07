@@ -30,8 +30,8 @@ This is the API for callers outside Gym. They import the names `nemo_gym.environ
 `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`)
 and `ConfigError` from
 `nemo_gym.config`. Signatures and result fields change only additively, and tests pin them. `TaskResult.results`
-holds Gym's raw `/run` responses, whose keys can change: depend on `rewards` and `outcomes`, and use `results` for
-debugging.
+holds Gym's raw `/run` responses (the failure record for a failed `/run`), whose keys can change: depend on
+`rewards` and `outcomes`, and use `results` for debugging.
 """
 
 import json
@@ -41,7 +41,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from omegaconf import DictConfig, OmegaConf
 
@@ -54,13 +54,20 @@ from nemo_gym.config.global_config import (
     scoped_global_config_dict,
 )
 from nemo_gym.core.episode_types import is_materialized_task_row
-from nemo_gym.core.failure_kinds import failure_domain
+from nemo_gym.core.failure_kinds import (
+    AGENT_REQUEST_FAILED,
+    AGENT_RUN_ERROR,
+    ENVIRONMENT_SERVER_FAILED,
+    FailureStage,
+    failure_domain,
+)
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
 from nemo_gym.eval.eval_plan import EvalPlan
 from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 
 
 @dataclass(frozen=True)
@@ -96,28 +103,40 @@ class PlannedBenchmark:
 
 @dataclass(frozen=True)
 class TaskFailure:
-    """Why a rollout failed: Gym's failure `kind`, its `domain` and the occurrence's `reason`.
+    """What Gym observed when a rollout failed. It reports; what to do about it is the caller's decision.
 
-    The domain is the layer that observed the failure.
+    `kind` is Gym's failure kind: the cause when the reporter named one, else `environment_server_failed` (the
+    environment reported a failure without a kind), `agent_run_error` (the `/run` call failed and the request was
+    delivered) or `agent_request_failed` (it failed and may not have been). `domain` is the layer that observed it: the
+    part of the kind before its first `_` or `:`, such as `agent`, `judge`, `session` or `provider`.
 
-    The domain is the part of the kind before its first `_` or `:`, such as `agent`, `judge`, `session` or
-    `provider`. A new kind under an existing domain needs no change from a caller that groups failures by domain.
+    `source` says who reported the failure, `delivery` is Gym's evidence about whether the request reached the agent
+    (`not_sent`, `possibly_delivered`, `delivered`), `stage` is where in the episode it happened when the reporter
+    knows, and `terminal` is the reporter's statement that the episode must not be attempted again. `reason`,
+    `http_status` and `exception_type` are diagnostics.
     """
 
     kind: str
     domain: str
+    source: Literal["environment", "collector"]
+    delivery: Literal["not_sent", "possibly_delivered", "delivered"]
+    stage: Optional[FailureStage] = None
+    terminal: bool = False
     reason: Optional[str] = None
+    http_status: Optional[int] = None
+    exception_type: Optional[str] = None
 
 
 @dataclass(frozen=True)
 class RolloutOutcome:
-    """One rollout's outcome: its reward as the verifier returned it, and the failure if it failed.
+    """One rollout's outcome: its reward as the verifier returned it, and the failure if one was reported.
 
+    `reward` is None when no reward exists, as for a failed `/run`: an infrastructure failure is not a score of zero.
     `masked` is True when Gym excludes the rollout from training statistics. `prompt` and `output` are the input
     and output items as JSON text, for display and debugging, or None when the rollout has none.
     """
 
-    reward: float
+    reward: Optional[float]
     failure: Optional[TaskFailure] = None
     masked: bool = False
     prompt: Optional[str] = None
@@ -133,7 +152,7 @@ class TaskResult:
     """
 
     task_id: str
-    rewards: list[float]
+    rewards: list[Optional[float]]
     results: list[dict[str, Any]]
     outcomes: list[RolloutOutcome] = field(default_factory=list)
 
@@ -286,6 +305,9 @@ class TaskRunner:
 
         `rollout_id` names the rollouts for Gym's rollout correlation (e.g. verification events); repeats
         get `<rollout_id>-r<n>`. It must differ between concurrent calls; a fresh one is made when it is None.
+
+        A `/run` call that fails does not raise: its rollout comes back as an outcome with a `failure` and no
+        reward, and the other repeats still finish.
         """
         if task_id not in self._row_of_task:
             raise ConfigError(f"No input rows for task ids {[task_id]}")
@@ -295,36 +317,67 @@ class TaskRunner:
             )
         rollout_id = rollout_id or uuid.uuid4().hex
         rows = [_with_rollout_id(row, rollout_id, index, num_repeats) for index, row in enumerate(rows)]
-        completions = self._helper.run_examples(rows, head_server_config=self._registry_server)
+        completions = self._helper.run_outcomes(rows, head_server_config=self._registry_server)
         try:
             completed = [await rollout for rollout in completions]
         finally:
             await completions.aclose()
-        results = [result for _, result in completed]
+        outcomes = [_outcome(result) for _, result in completed]
         return TaskResult(
             task_id=task_id,
-            rewards=[result["reward"] for result in results],
-            results=results,
-            outcomes=[_outcome(result) for result in results],
+            rewards=[outcome.reward for outcome in outcomes],
+            results=[_raw(result) for _, result in completed],
+            outcomes=outcomes,
         )
 
 
-def _outcome(result: Mapping[str, Any]) -> RolloutOutcome:
+def _raw(result: Mapping[str, Any] | RolloutFailureRecord) -> dict[str, Any]:
+    return result.model_dump(mode="json") if isinstance(result, RolloutFailureRecord) else dict(result)
+
+
+def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome:
+    if isinstance(result, RolloutFailureRecord):
+        return RolloutOutcome(reward=None, failure=_failure_of_record(result))
     kind, reason = result.get("failure_kind"), result.get("failure_reason")
     failure = None
     if kind:
         failure = TaskFailure(
-            kind=str(kind), domain=failure_domain(str(kind)), reason=None if reason is None else str(reason)
+            kind=str(kind),
+            domain=failure_domain(str(kind)),
+            source="environment",
+            delivery="delivered",
+            reason=None if reason is None else str(reason),
         )
     prompt = (result.get("responses_create_params") or {}).get("input")
     output = (result.get("response") or {}).get("output")
     return RolloutOutcome(
-        reward=result["reward"],
+        reward=result.get("reward"),
         failure=failure,
         masked=bool(result.get("mask_sample")),
         prompt=None if prompt is None else json.dumps(prompt, default=str),
         output=None if output is None else json.dumps(output, default=str),
     )
+
+
+def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
+    kind = record.failure.failure_kind or _fallback_kind(record)
+    return TaskFailure(
+        kind=kind,
+        domain=failure_domain(kind),
+        source=record.source,
+        delivery=record.delivery,
+        stage=record.failure.stage,
+        terminal=record.failure.terminal,
+        reason=record.failure.failure_reason,
+        http_status=record.http_status,
+        exception_type=record.exception_type,
+    )
+
+
+def _fallback_kind(record: RolloutFailureRecord) -> str:
+    if record.source == "environment":
+        return ENVIRONMENT_SERVER_FAILED
+    return AGENT_RUN_ERROR if record.delivery == "delivered" else AGENT_REQUEST_FAILED
 
 
 def _first_row_of_each_task(rows: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:

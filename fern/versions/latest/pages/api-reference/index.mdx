@@ -117,13 +117,24 @@ Import everything from `nemo_gym.environment`: `plan_benchmark`, `serve_benchmar
 types change only additively: a new parameter is optional and keyword-only, and a parameter is deprecated before it is
 removed or renamed. A test pins them.
 
-A `TaskResult` has one `RolloutOutcome` per rollout in `outcomes`: the `reward`, a `TaskFailure` when the rollout
-failed, whether it was `masked`, and the `prompt` and `output` as JSON text for display. A failure has Gym's `kind`,
-its `domain` (the layer that observed it: the part of the kind before the first `_` or `:`, such as `agent`, `judge`,
-`session` or `provider`) and the occurrence's `reason`. Group failures by `domain` and a new kind under an existing
-domain needs no change from you.
+A `TaskResult` has one `RolloutOutcome` per rollout in `outcomes`: the `reward` (None when none exists, as for a failed
+`/run`), a `TaskFailure` when a failure was reported, whether it was `masked`, and the `prompt` and `output` as JSON text
+for display. A failed `/run` does not raise: its rollout comes back with a `failure` and no reward, and the other repeats
+of the task still finish.
 
-`TaskResult.results` holds Gym's raw `/run` responses. Their keys are not part of the contract: depend on `rewards`
+A failure reports what Gym observed and leaves the decision to you:
+
+| Field | Meaning |
+| --- | --- |
+| `kind`, `domain` | Gym's failure kind and the layer that observed it (the part of the kind before the first `_` or `:`, such as `agent`, `judge`, `session` or `provider`). When the reporter named no cause, the kind is `environment_server_failed`, `agent_run_error` or `agent_request_failed`. |
+| `source` | Who reported it: `environment` or `collector`. |
+| `delivery` | Gym's evidence about whether the request reached the agent: `not_sent`, `possibly_delivered` or `delivered`. |
+| `stage`, `terminal` | Where in the episode it happened, when known, and the reporter's statement that the episode must not be attempted again. |
+| `reason`, `http_status`, `exception_type` | Diagnostics. |
+
+Group failures by `domain` and a new kind under an existing domain needs no change from you.
+
+`TaskResult.results` holds Gym's raw `/run` responses (the failure record for a failed `/run`). Their keys are not part of the contract: depend on `rewards`
 and `outcomes`, and use `results` for debugging.
 
 ### Constraints

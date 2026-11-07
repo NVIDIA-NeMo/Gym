@@ -118,7 +118,17 @@ EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "PlannedBenchmark": ["plan", "rows"],
     "TaskResult": ["task_id", "rewards", "results", "outcomes"],
     "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output"],
-    "TaskFailure": ["kind", "domain", "reason"],
+    "TaskFailure": [
+        "kind",
+        "domain",
+        "source",
+        "delivery",
+        "stage",
+        "terminal",
+        "reason",
+        "http_status",
+        "exception_type",
+    ],
 }
 
 
