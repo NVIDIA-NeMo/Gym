@@ -447,7 +447,14 @@ class NSToolsResourcesServer(SimpleResourcesServer):
                 raise ValueError(f"Verifier did not return 'reward' field. Response: {result}")
 
             return NSToolsVerifyResponse(
-                **body.model_dump(),
+                **{
+                    **body.model_dump(),
+                    # Keep a failure the verifier masked (such as a judge outage) masked: it is not a wrong answer.
+                    # These come from the verifier even when the request carries same-named extra fields.
+                    "mask_sample": result.get("mask_sample", False),
+                    "failure_kind": result.get("failure_kind"),
+                    "failure_reason": result.get("failure_reason"),
+                },
                 reward=result["reward"],
                 delegated_response=result,
                 **metrics,
