@@ -33,6 +33,16 @@ gym eval run environments/hello_world --agent opencode_agent --sandbox docker \
 
 The command uses OpenCode (`opencode_agent`; the short name `opencode` matches two harnesses and is refused) because it can work with files and tools in the task sandbox while keeping model choice separate. OpenCode runs inside the sandbox and calls Gym's model server on the host, which calls `<url>`, the base URL of any OpenAI-compatible endpoint. So the sandbox must reach the Gym host, and the host must reach `<url>`. The command uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
 
+On your own machine, two settings often need adding to the command:
+
+- If the run stops with `Cannot resolve host '<hostname>' for use_absolute_ip=true`, your hostname resolves to no
+  address the sandbox can reach. Add `+default_host=<your machine's LAN IP>` (on macOS,
+  `+default_host=$(ipconfig getifaddr en0)`). This makes Gym's servers listen on that address.
+- OpenCode asks the model for up to 131,072 output tokens. A model with a lower cap, such as gpt-4.1 (32,768),
+  rejects every call and each task scores 0. Add
+  `++opencode_agent.responses_api_agents.opencode_agent.max_output_tokens=16384`, or any value within your model's
+  limit.
+
 ### What NeMo Gym starts
 
 NeMo Gym separates an evaluation into services so the model, agent harness, task state and scoring, and rollout workflow can be changed or scaled independently.
