@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Rollout metrics: reward profiles, pass@k and majority statistics, and the metric definitions they share."""
+"""Rollout metrics: reward profiles, pass@k and majority statistics, calibration scores, and the metric definitions they
+share."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -21,6 +22,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.metrics.calibration import brier_score, expected_calibration_error, log_loss
     from nemo_gym.metrics.metrics_config import Stat
     from nemo_gym.metrics.reward_profile import (
         MASK_SAMPLE_FIELD,
@@ -43,10 +45,13 @@ _PUBLIC_API = {
     "RewardProfiler": "reward_profile",
     "Stat": "metrics_config",
     "add_avg_sample_std_dev": "reward_profile",
+    "brier_score": "calibration",
     "compute_aggregate_metrics": "reward_profile",
     "compute_pass_majority_metrics": "reward_profile",
     "compute_subset_metrics": "reward_profile",
+    "expected_calibration_error": "calibration",
     "highest_k_metrics": "reward_profile",
+    "log_loss": "calibration",
     "select_measured": "reward_profile",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
