@@ -23,8 +23,6 @@ gym eval run environments/hello_mcp_tool --agent miniswe_sandboxed_agent --sandb
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-Running on your own machine? See [the two settings](../hello_world/README.md#run-it) the Hello World example adds for local Docker.
-
 The command uses mini-SWE because it starts the task's `stdio` MCP server inside the sandbox. A harness that does not, such as OpenCode, is refused this task. It uses Docker for a simple local sandbox, which you can replace with another sandbox provider.
 
 ## Validate it

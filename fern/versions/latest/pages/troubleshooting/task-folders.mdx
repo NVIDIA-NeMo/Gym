@@ -120,31 +120,16 @@ tool in to that registry, and give OpenSandbox the pull credentials in `images.a
 
 ## The sandbox cannot reach the Model Server
 
-**Symptom.** The run stops before any episode with `Cannot resolve host '<hostname>' for use_absolute_ip=true`. Or
-episodes fail after the agent starts, with a connection error or a request timeout in the failure reason, and the
-collector retries them.
+**Symptom.** Episodes fail after the agent starts, with a connection error or a request timeout in the failure
+reason, and the collector retries them.
 
 **Cause.** Some harnesses, such as `hermes_agent` and `codex_agent`, call the Model Server from inside the sandbox.
 For them, `gym eval run` makes the Model Server advertise the machine's network address instead of loopback, which
 a sandbox reaches only when the network routes to it and no firewall blocks the port.
 
-**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. On a laptop with
-local Docker, where the hostname resolves to loopback or to nothing, add `+default_host=<the machine's LAN IP>` (on
-macOS, `+default_host=$(ipconfig getifaddr en0)`); every Gym server then listens on that address. A deployment that
+**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. A deployment that
 needs other servers reachable sets `absolute_ip_server_types` or `default_host` (see
 [Multi-Node Configuration](/main/reference/configuration#multi-node-configuration)).
-
-## Every task scores 0 with OpenCode
-
-**Symptom.** A run with `--agent opencode_agent` finishes with every reward 0 and no failures. In
-`rollouts.jsonl`, `response.error` holds the model's rejection.
-
-**Cause.** OpenCode asks the model for up to `max_output_tokens` (131,072 by default) per call. A model whose output
-cap is lower, such as gpt-4.1 (32,768), rejects every call. The verifier still runs on the untouched sandbox and
-scores 0. `--max-output-tokens` does not apply to task folders.
-
-**Fix.** Set the harness's limit within the model's cap:
-`++opencode_agent.responses_api_agents.opencode_agent.max_output_tokens=16384`.
 
 ## A harness cannot install its runtime in the sandbox
 

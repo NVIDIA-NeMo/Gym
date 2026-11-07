@@ -22,8 +22,6 @@ gym eval run environments/hello_dataset --agent opencode_agent --sandbox docker 
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-Running on your own machine? See [the two settings](../hello_world/README.md#run-it) the Hello World example adds for local Docker.
-
 The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
 
 ## Validate it
