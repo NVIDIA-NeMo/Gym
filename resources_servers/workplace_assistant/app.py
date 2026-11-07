@@ -190,7 +190,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
         finally:
             self.session_id_to_tool_env.pop(session_id, None)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
         # A session verify already discarded, for example because it raised, is left out.
         tool_envs = {
             session_id: self.session_id_to_tool_env[session_id]

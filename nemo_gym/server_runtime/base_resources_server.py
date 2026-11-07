@@ -56,7 +56,7 @@ from nemo_gym.core.responses_api_types import (
 )
 from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode, require_checkpoint_id_keyword
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.resources import (
     MCPTokenClaims,
@@ -582,6 +582,15 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
             )
         )
 
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
+
+        Status, discovery and seed replies report it.
+        A server whose capture depends on its configuration, such as on a sandbox provider that can snapshot,
+        overrides it.
+        """
+        return self.checkpoint_mode
+
     def setup_resources_checkpoint(self, app: FastAPI) -> None:
         # The declarations are class attributes nothing else checks: a typo would act as a mode of its own.
         for name, allowed in (("checkpoint_mode", CheckpointMode), ("checkpoint_verify", StepType)):
@@ -597,7 +606,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "exported":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in get_args(CheckpointMode):
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode == "exported":
             # Hooks from an intermediate base class or a mixin count; only the stubs here do not.
             missing = [
                 name for name in _SESSION_HOOKS if getattr(type(self), name) is getattr(SimpleResourcesServer, name)
@@ -606,7 +618,8 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 raise ValueError(
                     f"{type(self).__name__} declares checkpoint_mode='exported' but does not implement {missing}"
                 )
-        participant = ResourcesParticipant(self, self.checkpoint_mode, verify_step_type=self.checkpoint_verify)
+            require_checkpoint_id_keyword(self, "export_session_states")
+        participant = ResourcesParticipant(self, mode, verify_step_type=self.checkpoint_verify)
         self._checkpoint = participant
         install_server_participant(
             app,
@@ -688,8 +701,9 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         if lifetimes is not None and session_id is not None:
             lifetimes.ended(session_id)
 
-    async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
-        """Return each session's state for a checkpoint, leaving out sessions this server no longer holds."""
+    async def export_session_states(self, session_ids: list[str], *, checkpoint_id: str) -> dict[str, JsonValue]:
+        """Return each session's state for checkpoint ``checkpoint_id``, leaving out sessions this server no longer
+        holds."""
         raise NotImplementedError
 
     async def restore_session_states(self, states: dict[str, JsonValue]) -> None:
@@ -702,6 +716,20 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
         The default does nothing.
         A server that keeps per-session state releases it here, since a retired session's late requests,
         a terminal step among them, are refused.
+        """
+
+    async def release_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as sandbox snapshots.
+
+        Called after the controller published a checkpoint and pruned old ones, only in the ``exported`` mode;
+        an empty ``kept`` means nothing will be restored again. The default keeps nothing outside Gym.
+
+        - It holds the control lock: no prepare, commit, or restore runs meanwhile, and no checkpoint is open.
+        - It is cancelled at the release request's deadline, and the controller releases again later,
+          so it must tolerate state an earlier call already deleted and resume a deletion one left half done.
+        - Admission stays open: episodes keep running, so it must not touch what live sessions use.
+        - With several workers every worker runs it, so deleting what another worker already deleted must not fail.
+        - Keep by reference, not by age: keep whatever a checkpoint in ``kept`` refers to, and delete the rest.
         """
 
     def normalize_tool_name(self, name: str) -> str:
