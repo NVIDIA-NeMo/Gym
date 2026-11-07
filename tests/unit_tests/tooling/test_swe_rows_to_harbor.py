@@ -215,6 +215,24 @@ def test_tasks_load_with_gyms_harbor_loader(
         assert upstream.read_text() == FAKE_PARSERS
 
 
+def test_evaluation_timeout_override_bounds_the_test_run_and_the_verifier(tmp_path: Path, parser_cache: Path) -> None:
+    rows = tmp_path / "rows.jsonl"
+    rows.write_text(json.dumps(REBENCH_ROW) + "\n")
+    out = tmp_path / "dataset"
+
+    manifest = convert.convert(
+        rows, out, dataset_name="nemo-gym/test-swe", parser_cache_dir=parser_cache, evaluation_timeout_sec=1200
+    )
+
+    # The override replaces swe_rebench's own default, both where grade.py bounds the test run and in task.toml.
+    assert convert.server_config("swe_rebench")["evaluation_timeout"] != 1200
+    task_dir = out / "swe_rebench__octo__gadget-9"
+    verifier = tomllib.loads((task_dir / "task.toml").read_text())["verifier"]
+    assert verifier["timeout_sec"] == 1200 + convert.VERIFIER_TIMEOUT_MARGIN_SEC
+    assert json.loads((task_dir / "tests/nemo_gym/task.json").read_text())["evaluation_timeout"] == 1200
+    assert manifest["evaluation_timeout_sec"] == 1200
+
+
 def test_setup_and_capture_run_the_servers_own_commands() -> None:
     plan = convert.ScaleSWEAdapter().plan(SCALE_ROW)
     workdir = SCALE_ROW["workdir"]

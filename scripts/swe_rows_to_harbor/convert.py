@@ -15,6 +15,7 @@ resources server runs the row through ``single_agent_turn``:
   ``tests/nemo_gym/grade.py``. That script calls the server's own grading functions, vendored from this checkout
   under the same relative paths (and, for ``swe_rebench``, the upstream log parsers the server fetches).
 - **Limits**: the server's ``evaluation_timeout`` and sandbox resources, read from its config in this checkout.
+  ``--evaluation-timeout-sec`` replaces the timeout with the one the compared run sets for every server.
 - **Golden patch**: ``solution/solve.sh`` applies the row's patch, so ``gym dataset validate`` checks each task.
 
 Rows are JSONL, either typed (``{"task_id": ..., "task_input": {...}}``) or flat; the source comes from the row's
@@ -503,6 +504,7 @@ def convert(
     license_name: str = "TBD",
     split: str = "train",
     agent_timeout_sec: int = DEFAULT_AGENT_TIMEOUT_SEC,
+    evaluation_timeout_sec: int | None = None,
     default_source: str | None = None,
     skip_unsupported: bool = False,
     parser_cache_dir: Path | None = None,
@@ -521,6 +523,9 @@ def convert(
         if source not in adapters:
             adapters[source] = SWERebenchAdapter(parser_cache_dir) if source == "swe_rebench" else ADAPTERS[source]()
         plan = adapters[source].plan(row)
+        if evaluation_timeout_sec is not None:
+            # A run can override each server's own timeout (MR 69 sets 1200 for every source).
+            plan.evaluation_timeout = evaluation_timeout_sec
         name = task_folder_name(source, plan.instance_id)
         if (output_dir / name).exists():
             raise ValueError(f"line {number}: task {name} appears twice")
@@ -552,6 +557,8 @@ def convert(
         "gym_dirty": bool(_git(REPO_ROOT, "status", "--porcelain")),
         "swe_rebench_log_parsers_commit": getattr(adapters.get("swe_rebench"), "parser_commit", None),
         "agent_timeout_sec": agent_timeout_sec,
+        # None: each task keeps its server's own evaluation_timeout.
+        "evaluation_timeout_sec": evaluation_timeout_sec,
         "converted": converted,
         "skipped": skipped,
     }
@@ -568,6 +575,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", default="train", choices=["train", "validation", "example", "benchmark"])
     parser.add_argument("--agent-timeout-sec", type=int, default=DEFAULT_AGENT_TIMEOUT_SEC)
     parser.add_argument(
+        "--evaluation-timeout-sec",
+        type=int,
+        help="Bound on each task's test run, in place of its server's evaluation_timeout",
+    )
+    parser.add_argument(
         "--source", dest="default_source", choices=sorted(ADAPTERS), help="For rows without source_server"
     )
     parser.add_argument("--skip-unsupported", action="store_true", help="Leave out rows of other sources")
@@ -580,6 +592,7 @@ def main(argv: list[str] | None = None) -> int:
         license_name=args.license_name,
         split=args.split,
         agent_timeout_sec=args.agent_timeout_sec,
+        evaluation_timeout_sec=args.evaluation_timeout_sec,
         default_source=args.default_source,
         skip_unsupported=args.skip_unsupported,
         parser_cache_dir=args.parser_cache_dir,

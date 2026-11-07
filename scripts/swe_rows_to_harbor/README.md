@@ -24,7 +24,7 @@ output lists what was converted and skipped, with the Gym commit the code came f
 | `/verify` captures `git add -N . && git diff <base>` | A `[[verifier.collect]]` hook runs the same command in the agent's sandbox and saves the patch under `/logs/artifacts/nemo_gym` |
 | Grading in a fresh sandbox of the same image | `environment_mode = "separate"` with `[verifier.environment].docker_image` set to the row's image; `tests/test.sh` runs `tests/nemo_gym/grade.py` |
 | `run_verification` and its parsing | `grade.py` calls the server's own functions, copied from this checkout into `tests/nemo_gym/` under their Gym paths; its one sandbox `exec` runs locally |
-| `evaluation_timeout`, sandbox resources | Read from `resources_servers/<source>/configs/<source>.yaml`; the verifier gets 300 s on top for the grader |
+| `evaluation_timeout`, sandbox resources | Read from `resources_servers/<source>/configs/<source>.yaml` (`--evaluation-timeout-sec` replaces the timeout); the verifier gets 300 s on top for the grader |
 | Golden-patch check | `solution/solve.sh` applies the row's `patch`, for `gym dataset validate` |
 
 `grade.py` writes `reward.json`: `reward` is 1.0 when the instance resolves, as the server scores it; the other keys
@@ -41,6 +41,8 @@ error and the per-test results, and `test_output.log` the test run.
 - `swe_rebench` grading uses SWE-rebench's upstream log parsers. The converter fetches them the way the server does
   (a shallow clone of the upstream default branch, cached) and copies the files each task needs.
 - Agent budget: `--agent-timeout-sec` (default 4800) sets `[agent].timeout_sec`; match it to the run being compared.
+- Test-run budget: `--evaluation-timeout-sec` replaces each server's `evaluation_timeout` when the compared run
+  overrides it. MR 69 sets 1200 s for every source, while `swe_rebench` defaults to 3600 s.
 - The server retries a verification that reached no verdict once on a fresh sandbox; Harbor does not. Such a run
   scores 0 with `evaluation_completed = 0`.
 - The base commit and the list of pre-existing untracked files live in `/var/lib/nemo_gym` in the agent's sandbox,
