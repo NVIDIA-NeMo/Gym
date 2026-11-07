@@ -1,0 +1,36 @@
+config_paths:
+- resources_servers/chess/configs/chess.yaml
+
+chess_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: chess_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: environments/chess/data/example.jsonl
+        license: Apache 2.0
+      - name: train
+        type: train
+        jsonl_fpath: environments/chess/data/train.jsonl
+        license: Apache 2.0
+      - name: validation
+        type: validation
+        jsonl_fpath: environments/chess/data/validation.jsonl
+        license: Apache 2.0
+      # One model call per move, plus room for a few invalid actions. A game that reaches this cap is truncated.
+      max_steps: 100
+
+chess_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: chess_gymnasium_agent

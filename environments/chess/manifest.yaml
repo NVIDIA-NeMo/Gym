@@ -1,0 +1,37 @@
+name: chess
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: games
+description: Multi-step chess against a seeded random, greedy, or lookahead opponent, with UCI
+  moves through a make_move tool. Reward +1 win, 0 draw, -1 loss or forfeit.
+modality: text
+licensing: Apache-2.0
+authors:
+- Pd172944
+reward:
+  range:
+  - -1.0
+  - 1.0
+  higher_is_better: true
+determinism: seeded
+resources_server: chess
+agent_server: gymnasium_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: environments/chess/data/example.jsonl
+  num_repeats: 1
+- name: train
+  type: train
+  jsonl_fpath: environments/chess/data/train.jsonl
+  num_repeats: 1
+- name: validation
+  type: validation
+  jsonl_fpath: environments/chess/data/validation.jsonl
+  num_repeats: 1
+model_server: policy_model
+session_model: episode
+state: per_session
+lifecycle: active
