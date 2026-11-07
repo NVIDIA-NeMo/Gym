@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
+from openai.types.completion_usage import CompletionUsage
 from pytest import MonkeyPatch
 
 from nemo_gym.client import ServerClient
@@ -81,6 +82,46 @@ class TestApp:
 
         assert response.status_code == 200
         assert response.json()["service_tier"] == expected_tier
+
+    @pytest.mark.parametrize(
+        ("finish_reason", "expected_status", "expected_incomplete"),
+        [
+            ("stop", "completed", None),
+            ("length", "incomplete", {"reason": "max_output_tokens"}),
+        ],
+    )
+    async def test_responses_usage_and_incomplete(
+        self, finish_reason: str, expected_status: str, expected_incomplete: dict | None
+    ) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        completion = NeMoGymChatCompletion(
+            id="chatcmpl-usage",
+            created=FIXED_TIME,
+            model="dummy_model",
+            object="chat.completion",
+            usage=CompletionUsage(prompt_tokens=7, completion_tokens=3, total_tokens=10),
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason=finish_reason,
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="hi"),
+                )
+            ],
+        )
+        server._client = MagicMock(spec=AsyncAzureOpenAI)
+        server._client.chat.completions.create = AsyncMock(return_value=completion)
+
+        response = client.post("/v1/responses", json={"input": "hello"})
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["model"] == "dummy_model"
+        assert data["usage"]["input_tokens"] == 7
+        assert data["usage"]["output_tokens"] == 3
+        assert data["usage"]["total_tokens"] == 10
+        assert data["status"] == expected_status
+        assert data["incomplete_details"] == expected_incomplete
 
     def _setup_server(self, monkeypatch=None):
         config = AzureOpenAIModelServerConfig(
@@ -158,8 +199,6 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("responses_api_models.azure_openai_model.app.uuid4", lambda: FakeUUID())
-        monkeypatch.setattr("responses_api_models.azure_openai_model.app.time", lambda: FIXED_TIME)
         monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         mock_response_data = NeMoGymChatCompletion(
@@ -200,6 +239,7 @@ class TestApp:
             parallel_tool_calls=True,
             tool_choice="auto",
             tools=[],
+            status="completed",
         )
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input="hello")
