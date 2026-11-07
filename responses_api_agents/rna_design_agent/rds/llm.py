@@ -234,7 +234,7 @@ def _tool_calls_in_text(text: str) -> list[ToolCall]:
         if isinstance(arguments, str):
             try:
                 arguments = json.loads(arguments)
-            except json.JSONDecodeError:
+            except ValueError:
                 continue
         calls.append(ToolCall(id=f"text-{index}", name=name, arguments=dict(arguments)))
     return calls

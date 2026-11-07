@@ -44,6 +44,7 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
+from nemo_gym.utils.json_codec import loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -620,7 +621,7 @@ def _iter_dataset_rows(path: Path) -> Iterator[tuple[int, dict[str, Any]]]:
         with path.open(encoding="utf-8") as stream:
             for line_number, line in enumerate(stream, 1):
                 try:
-                    row = orjson.loads(line)
+                    row = loads_json(line)
                 except orjson.JSONDecodeError as error:
                     raise EnvironmentValidationError(
                         f"Malformed JSON in '{path}' at line {line_number}: {error}"

@@ -577,7 +577,11 @@ class TestHTTPClient:
 
     @mark.parametrize(
         ("value", "encoded"),
-        [(2**70, str(2**70)), ("\ud83d", '"\\ud83d"')],
+        [
+            # Non-ASCII text stays UTF-8, as orjson writes it, unless the body holds a lone surrogate.
+            (2**70, '{"name":"f","arguments":{"value":%s,"note":"ü"}}' % 2**70),
+            ("\ud83d", '{"name":"f","arguments":{"value":"\\ud83d","note":"\\u00fc"}}'),
+        ],
     )
     async def test_request_sends_a_json_body_orjson_rejects(
         self, monkeypatch: MonkeyPatch, value: object, encoded: str
@@ -586,7 +590,7 @@ class TestHTTPClient:
         body = {"name": "f", "arguments": {"value": value, "note": "ü"}}
         await nemo_gym.client.http_client.request("POST", "https://example.test", json=body)
         sent = client.request.call_args.kwargs
-        assert sent["data"] == ('{"name":"f","arguments":{"value":%s,"note":"\\u00fc"}}' % encoded).encode("utf-8")
+        assert sent["data"] == encoded.encode("utf-8")
         assert json.loads(sent["data"]) == body
         assert sent["headers"]["Content-Type"] == "application/json"
 

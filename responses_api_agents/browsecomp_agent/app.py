@@ -914,7 +914,7 @@ class BrowsecompAgent(SimpleResponsesAPIAgent):
                 try:
                     tool_args = json.loads(output_function_call.arguments)
                     tool_args_error = None
-                except json.JSONDecodeError as e:
+                except ValueError as e:
                     tool_args = None
                     tool_args_error = e
 

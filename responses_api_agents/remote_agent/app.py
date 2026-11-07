@@ -268,7 +268,7 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             for output_function_call in all_fn_calls:
                 try:
                     parsed_arguments = json.loads(output_function_call.arguments)
-                except (json.JSONDecodeError, TypeError) as e:
+                except (ValueError, TypeError) as e:
                     # Malformed arguments go back to the service as a tool error output
                     # instead of crashing the rollout; repr(e) keeps the exception type
                     # even when str(e) is empty.

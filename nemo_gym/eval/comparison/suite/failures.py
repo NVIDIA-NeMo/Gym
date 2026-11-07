@@ -5,11 +5,11 @@
 
 from pathlib import Path
 
-import orjson
 from pydantic import ValidationError
 
 from nemo_gym.eval.comparison.suite.schema import SuiteFailureCounts, SuiteFailureSummary
 from nemo_gym.rollouts.rollout_records import coverage_path_for
+from nemo_gym.utils.json_codec import loads_json
 
 
 _COUNT_KEYS = {
@@ -30,7 +30,7 @@ def read_saved_failures(path: Path) -> SuiteFailureSummary | None:
     """
     source = coverage_path_for(path)
     try:
-        payload = orjson.loads(source.read_bytes())
+        payload = loads_json(source.read_bytes())
         if not isinstance(payload, dict):
             raise ValueError("coverage report must be a JSON object")
         version = payload.get("schema_version")

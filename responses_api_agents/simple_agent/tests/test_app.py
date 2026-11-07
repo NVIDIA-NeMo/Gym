@@ -1124,7 +1124,17 @@ class TestApp:
         verify_request = SimpleAgentVerifyRequest.model_validate(verify_payload)
         assert verify_request.response.text.format.schema_ == json_schema_format["schema"]
 
-    async def test_responses_continues_on_malformed_tool_call_arguments(self, monkeypatch: MonkeyPatch) -> None:
+    @pytest.mark.parametrize(
+        ("arguments", "error_type"),
+        [
+            pytest.param("{not json", "JSONDecodeError", id="malformed"),
+            # Valid JSON that json.loads refuses with a plain ValueError: Python's integer digit limit is 4,300.
+            pytest.param('{"n": ' + "9" * 5000 + "}", "ValueError", id="integer-over-digit-limit"),
+        ],
+    )
+    async def test_responses_continues_on_malformed_tool_call_arguments(
+        self, monkeypatch: MonkeyPatch, arguments: str, error_type: str
+    ) -> None:
         """Malformed JSON in a tool-call's arguments must not crash the rollout.
 
         The agent should surface the parse error back to the model as a
@@ -1159,8 +1169,7 @@ class TestApp:
                     "id": "fc_1",
                     "call_id": "call_1",
                     "name": "my_tool",
-                    # Not valid JSON.
-                    "arguments": "{not json",
+                    "arguments": arguments,
                     "type": "function_call",
                     "status": "completed",
                 }
@@ -1228,9 +1237,8 @@ class TestApp:
         error_payload = json.loads(error_outputs[0].output)
         assert "error" in error_payload
         assert "Invalid tool call arguments" in error_payload["error"]
-        # The exception type must be visible to the model — repr(e) on a
-        # JSONDecodeError starts with the class name.
-        assert "JSONDecodeError" in error_payload["error"]
+        # The exception type must be visible to the model — repr(e) starts with the class name.
+        assert f"Invalid tool call arguments: {error_type}(" in error_payload["error"]
 
     @pytest.mark.parametrize("empty_output", [False, True])
     async def test_responses_stops_without_message_or_tool_calls(self, caplog, empty_output) -> None:

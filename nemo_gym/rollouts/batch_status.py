@@ -42,6 +42,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
+from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -173,7 +174,7 @@ def load_batch_manifest(manifest_fpath: Path) -> tuple[BatchManifest, str]:
     except OSError as exc:
         raise ConfigPathNotFoundError(f"Cannot read batch manifest at '{manifest_fpath}': {exc}") from exc
     try:
-        payload = orjson.loads(raw)
+        payload = loads_json(raw)
     except orjson.JSONDecodeError as exc:
         raise ConfigError(f"Batch manifest '{manifest_fpath}' is not valid JSON: {exc}") from exc
     try:
@@ -238,7 +239,7 @@ def _canonical_task_bytes(row: Mapping[str, Any]) -> bytes:
             if not metadata:
                 response_params.pop("metadata")
 
-    return orjson.dumps(task, option=orjson.OPT_SORT_KEYS)
+    return dumps_json_bytes(task, option=orjson.OPT_SORT_KEYS)
 
 
 def observe_materialized_rows(rows: Sequence[Mapping[str, Any]]) -> Dict[str, ObservedBatchMember]:
@@ -311,7 +312,7 @@ def observe_materialized_rows(rows: Sequence[Mapping[str, Any]]) -> Dict[str, Ob
         seeded = bool(seed_presence and all(seed_presence))
         if seeded:
             for task_index, seeds in seeds_by_task.items():
-                serialized_seeds = {orjson.dumps(seed, option=orjson.OPT_SORT_KEYS) for seed in seeds}
+                serialized_seeds = {dumps_json_bytes(seed, option=orjson.OPT_SORT_KEYS) for seed in seeds}
                 if len(serialized_seeds) != len(seeds):
                     errors.append(f"agent '{agent_name}' repeats task {task_index!r} with duplicate seeds")
 
@@ -372,7 +373,7 @@ def _read_aggregate_entries(metrics_fpath: Optional[Path]) -> tuple[Dict[str, Di
     if metrics_fpath is None:
         return {}, None
     try:
-        payload = orjson.loads(metrics_fpath.read_bytes())
+        payload = loads_json(metrics_fpath.read_bytes())
     except (OSError, orjson.JSONDecodeError):
         return {}, "InvalidAggregateMetricsArtifact"
     if not isinstance(payload, list):
@@ -404,7 +405,7 @@ def _atomic_write_json(path: Path, payload: Mapping[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     try:
         with temporary.open("wb") as output:
-            output.write(orjson.dumps(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n")
+            output.write(dumps_json_bytes(payload, option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS) + b"\n")
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)

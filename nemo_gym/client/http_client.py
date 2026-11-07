@@ -16,14 +16,12 @@
 
 import asyncio
 import atexit
-import json
 import socket
 import time
 from collections.abc import Callable
 from traceback import print_exc
 from typing import Any, NamedTuple, Optional, Type, Union, Unpack
 
-import orjson
 from aiohttp import (
     ClientConnectorError,
     ClientOSError,
@@ -62,6 +60,7 @@ from nemo_gym.telemetry.connection_pool import (
 from nemo_gym.telemetry.observer import request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
 from nemo_gym.utils.server_process import (
     get_nemo_gym_fastapi_num_workers,
     is_nemo_gym_fastapi_worker,
@@ -440,13 +439,8 @@ async def request(
 
     # Faster JSON dumps than the default aiohttp json
     if kwargs.get("json"):
-        body = kwargs.pop("json")
-        try:
-            kwargs["data"] = orjson.dumps(body)
-        except TypeError:
-            # orjson rejects integers wider than 64 bits and lone surrogates, which a model can write into a
-            # tool argument. The stdlib encoder escapes non-ASCII text, so both still produce valid UTF-8.
-            kwargs["data"] = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        # A model can write an integer wider than 64 bits or a lone surrogate into a tool argument.
+        kwargs["data"] = dumps_json_bytes(kwargs.pop("json"))
         kwargs.setdefault("headers", dict())
         kwargs["headers"]["Content-Type"] = "application/json"
 
@@ -808,4 +802,4 @@ async def raise_boundary_failure(response: ClientResponse, content: bytes | None
 
 
 async def get_response_json(response: ClientResponse) -> Any:
-    return orjson.loads(await response.read())
+    return loads_json(await response.read())

@@ -162,7 +162,7 @@ def responses_input_to_messages(input_items: list[Any]) -> list[ChatMessage]:
         if item_type == "function_call":
             try:
                 arguments = json.loads(item.arguments) if item.arguments else {}
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, TypeError):
                 arguments = {"__raw_arguments__": item.arguments}
             tool_call = ToolCall(
                 tool_name=item.name,
@@ -390,7 +390,7 @@ def response_to_chat_messages(ng_response: NeMoGymResponse) -> list[ChatMessage]
         elif item_type == "function_call":
             try:
                 arguments = json.loads(item.arguments) if item.arguments else {}
-            except (json.JSONDecodeError, TypeError):
+            except (ValueError, TypeError):
                 # Preserve malformed arguments as a raw string so the downstream tool
                 # invocation surfaces the error instead of us crashing here.
                 arguments = {"__raw_arguments__": item.arguments}
