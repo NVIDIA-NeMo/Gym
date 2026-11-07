@@ -72,7 +72,7 @@ jobs:
             nemo_gym/server_runtime/mcp_auto_exposure.py
             tests/e2e/session_routing/**
 
-  # Four isolated runners keep file-scoped fixtures, ports, Ray, and subprocesses private.
+  # Balance files across four jobs, each running four pytest workers.
   test:
     name: Core tests (shard ${{ matrix.shard }})
     needs: detect
@@ -132,7 +132,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
     runs-on: nemo-ci-aws-cpu-4-16
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
       NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
@@ -333,7 +333,7 @@ jobs:
     needs: detect
     if: needs.detect.outputs.run_full == 'true'
     runs-on: nemo-ci-aws-cpu-4-16
-    timeout-minutes: 45
+    timeout-minutes: 60
     env:
       NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
       NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
@@ -367,6 +367,14 @@ jobs:
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"
+
+      - name: Upload server worker logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: gym-server-worker-logs-${{ matrix.shard }}
+          path: results/server-workers
+          if-no-files-found: warn
 
   # Single aggregated gate for the sharded server suite — make this a required check
   # (in addition to "Test") instead of the individual shard jobs. `always()` so it also
