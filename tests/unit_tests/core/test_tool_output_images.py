@@ -34,6 +34,11 @@ def test_a_reply_without_images_comes_back_unchanged(reply: object) -> None:
     assert split_tool_output_images(reply) == (reply, [])
 
 
+def test_a_null_image_list_means_no_images() -> None:
+    # A typed reply model with an optional image list sends null when the reply has no images.
+    assert split_tool_output_images({"ok": True, TOOL_OUTPUT_IMAGES_KEY: None}) == ({"ok": True}, [])
+
+
 @pytest.mark.parametrize(
     "images",
     [
