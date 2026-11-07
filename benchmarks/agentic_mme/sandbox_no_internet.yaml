@@ -1,0 +1,28 @@
+# Overlay for opencode.yaml or opencode_server_tools.yaml: the sandbox the resources server lends reaches Gym's servers
+# and nothing else, so the harness cannot install tools or look answers up on the internet.
+#
+#   gym env start --config benchmarks/agentic_mme/opencode.yaml,benchmarks/agentic_mme/sandbox_no_internet.yaml ...
+#
+# AGENTIC_MME_SANDBOX_ALLOW is the one address the sandbox may call: the IP that Gym's model server (and, for server
+# tools, the resources server's /mcp) advertises with use_absolute_ip, for example the first address of hostname -I.
+# OpenSandbox enforces the policy in a sidecar; any other connection fails.
+#
+# OpenCode cannot be downloaded at session start without internet access, so it must be preinstalled in the sandbox
+# image (resources_servers/agentic_mme/sandbox_image/Dockerfile puts it under /opt/opencode/bin). The SHA-256 below is
+# of that binary, OpenCode 1.17.11 for glibc x86_64.
+agentic_mme:
+  resources_servers:
+    agentic_mme:
+      sandbox_config:
+        provider_options:
+          network_policy:
+            defaultAction: deny
+            egress:
+              - action: allow
+                target: ${oc.env:AGENTIC_MME_SANDBOX_ALLOW}
+
+agentic_mme_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret

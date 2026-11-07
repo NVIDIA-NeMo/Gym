@@ -1,0 +1,420 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""Native multi-turn atomic Agentic-MME harness with append-only model history."""
+
+import asyncio
+import itertools
+import json
+from dataclasses import dataclass
+from typing import Any
+
+import cv2
+from aiohttp import ClientError, ClientResponseError
+from fastapi import HTTPException, Request, Response
+from pydantic import ConfigDict, Field, PrivateAttr
+
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentCloseSessionResponse,
+    AgentOutcome,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    accumulate_response_usage,
+)
+from nemo_gym.server_runtime import BaseRunRequest
+from resources_servers.agentic_mme.app import AgenticMMEVerifyResponse
+from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageWorkspace, function_schema
+from responses_api_agents.agentic_mme_agent.retrieval import RETRIEVAL_TOOLS, Retrieval, RetrievalConfig
+
+
+class AgenticMMEAgentConfig(BaseResponsesAPIAgentConfig):
+    resources_server: ResourcesServerRef
+    model_server: ModelServerRef
+    # None removes the limit: the episode then ends when the model answers without a tool call,
+    # or when the model call fails (e.g. the context is full). On /run a failed call is policy_error, scored 0;
+    # under an agent session the response is failed with its cause, and the Environment Server grades or retries.
+    max_rounds: int | None = Field(default=15, ge=1, le=100)
+    max_tool_calls: int | None = Field(default=15, ge=0, le=100)
+    max_concurrent_rollouts: int = Field(default=8, ge=1)
+    max_image_pixels: int = Field(default=16_000_000, ge=1)
+    max_total_image_pixels: int = Field(default=64_000_000, ge=1)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
+
+
+class AgenticMMERunRequest(BaseRunRequest):
+    model_config = ConfigDict(extra="allow")
+    verifier_metadata: dict[str, Any] = Field(default_factory=dict)
+    retrieval_replay: list[dict[str, Any]] = Field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class PolicyCallError:
+    """A policy-model call that failed and ended the episode.
+
+    ``status`` is the HTTP status when the model server answered with one. A call that failed before a status
+    (timeout, lost connection) is a transport error, and a reply that is not a Response has an unknown cause.
+    """
+
+    message: str
+    failure_kind: str
+    status: int | None = None
+
+    def failed_response(self, response: NeMoGymResponse) -> NeMoGymResponse:
+        """Mark the episode's response failed with this cause, as Gym's shared agent outcome.
+
+        The Environment Server then applies its outcome policy: by default it grades a rejected request (400, 413,
+        422) as the model's own result, and retries a transport failure or a retryable status such as 429 or 503.
+        """
+        outcome = AgentOutcome(failure_kind=self.failure_kind, status_code=self.status)
+        return NeMoGymResponse.model_validate(
+            response.model_dump()
+            | {
+                "status": "failed",
+                "incomplete_details": None,
+                "error": {"code": "server_error", "message": self.message},
+                "metadata": {
+                    **(response.metadata or {}),
+                    AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
+                },
+            }
+        )
+
+
+@dataclass
+class AgenticMMESessionState(AgentSessionState):
+    """One agent session runs one episode.
+
+    An identical retry of the activation joins the running episode, a different request is refused, and close
+    cancels it. The image tools run in this agent, so the session holds no tool grant and no sandbox.
+    """
+
+    activation_key: tuple[NeMoGymResponseCreateParamsNonStreaming, str] | None = None
+    execution: asyncio.Task[tuple[NeMoGymResponse, dict[str, str]]] | None = None
+
+
+class AgenticMMEAgent(SimpleResponsesAPIAgent):
+    config: AgenticMMEAgentConfig
+    _rollouts: asyncio.Semaphore = PrivateAttr()
+
+    def model_post_init(self, context: Any) -> None:
+        super().model_post_init(context)
+        self._rollouts = asyncio.Semaphore(self.config.max_concurrent_rollouts)
+        cv2.setNumThreads(1)
+
+    def tool_schemas(self) -> list[dict[str, Any]]:
+        tools = dict(IMAGE_TOOLS)
+        if self.config.retrieval.mode != "disabled":
+            tools.update(RETRIEVAL_TOOLS)
+            if self.config.retrieval.mode == "live" and not self.config.retrieval.lens_available():
+                tools.pop("google_lens_search")  # Tavily / Exa: no reverse image search
+        return [function_schema(name, model, description) for name, (model, description) in tools.items()]
+
+    async def _episode(
+        self,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Any,
+        replay: list[dict[str, Any]] | None = None,
+        model_url_path: str = "/v1/responses",
+    ) -> tuple[NeMoGymResponse, list[dict[str, Any]], Any, PolicyCallError | None]:
+        async with self._rollouts:
+            workspace = ImageWorkspace(
+                max_pixels=self.config.max_image_pixels, max_total_pixels=self.config.max_total_image_pixels
+            )
+            return await self._episode_with_workspace(params, cookies, replay, workspace, model_url_path)
+
+    async def _episode_with_workspace(
+        self,
+        params: NeMoGymResponseCreateParamsNonStreaming,
+        cookies: Any,
+        replay: list[dict[str, Any]] | None,
+        workspace: ImageWorkspace,
+        model_url_path: str = "/v1/responses",
+    ) -> tuple[NeMoGymResponse, list[dict[str, Any]], Any, PolicyCallError | None]:
+        params = params.model_copy(deep=True)
+        if isinstance(params.input, str):
+            params.input = [NeMoGymEasyInputMessage(role="user", content=params.input)]
+        for item in params.input:
+            data = item if isinstance(item, dict) else item.model_dump()
+            content = data.get("content", [])
+            if isinstance(content, list):
+                for part in content:
+                    if part.get("type") == "input_image":
+                        await asyncio.to_thread(workspace.load, part["image_url"])
+        if not workspace.images:
+            raise ValueError("Agentic-MME requires at least one input image")
+        tools = self.tool_schemas()
+        # Inputs contain task prompts only; verifier metadata never enters model context.
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+            params.model_dump() | {"tools": tools, "parallel_tool_calls": False}
+        )
+        retrieval = Retrieval(self.config.retrieval, replay)
+        outputs = []
+        trace = []
+        usage = None
+        attempts = 0
+        finished = False
+        policy_error = None
+        generated = None
+        # No forced final-answer call: every model call sees the same tools and tool_choice, so each
+        # call's prompt extends the previous one (NeMo RL token capture links a rollout's calls by
+        # that prefix; a tools-stripped answer-only call broke the chain). max_rounds tool rounds
+        # plus one more call to answer; the episode ends unanswered when the rounds run out or the
+        # model calls a tool beyond max_tool_calls.
+        max_rounds, max_tool_calls = self.config.max_rounds, self.config.max_tool_calls
+        rounds = itertools.count() if max_rounds is None else range(max_rounds + 1)
+        for turn in rounds:
+            new_params = params.model_copy(update={"input": [*params.input, *outputs], "tool_choice": "auto"})
+            try:
+                response = await self.server_client.post(
+                    server_name=self.config.model_server.name,
+                    # Under token capture this is /ng-rollout/<id>/training-token-capture/v1/responses, so the
+                    # policy model server records every call of this rollout; otherwise plain /v1/responses.
+                    url_path=model_url_path,
+                    json=new_params,
+                    cookies=cookies,
+                )
+                if response.ok:
+                    reply = NeMoGymResponse.model_validate(await get_response_json(response))
+                else:
+                    error_body = (await response.read()).decode(errors="replace")
+            except (TimeoutError, ClientError, ValueError) as exc:
+                # The call failed without an HTTP status (connection lost, timeout after the client's
+                # retries, a body that is not JSON or not a Response): it ends the episode like a refusal,
+                # so the rollout scores 0 instead of escaping run() into the failures sidecar.
+                message = f"{type(exc).__name__}: {str(exc)[:1000]}"
+                if isinstance(exc, ClientResponseError):
+                    policy_error = PolicyCallError(message, MODEL_REQUEST_ERROR, exc.status)
+                elif isinstance(exc, ValueError):
+                    policy_error = PolicyCallError(message, "unknown")
+                else:
+                    policy_error = PolicyCallError(message, MODEL_TRANSPORT_ERROR)
+                break
+            if not response.ok:
+                # A refused model call (e.g. an endpoint's request-size limit once many tool images
+                # accumulate) ends this episode unanswered instead of failing the whole collection.
+                policy_error = PolicyCallError(
+                    f"HTTP {response.status}: {error_body[:1000]}", MODEL_REQUEST_ERROR, response.status
+                )
+                break
+            cookies = response.cookies
+            generated = reply
+            usage = accumulate_response_usage(usage, generated.usage)
+            # Preserve typed output items, including token IDs/log-probs for training.
+            outputs.extend(generated.output)
+            calls = [item for item in generated.output if item.type == "function_call"]
+            if generated.incomplete_details:
+                break
+            if not calls and any(item.type == "message" and item.role == "assistant" for item in generated.output):
+                finished = True
+                break
+            image_observations = []
+            budget_exceeded = False
+            for call in calls:
+                arguments = None
+                try:
+                    if max_tool_calls is not None and attempts >= max_tool_calls:
+                        budget_exceeded = True
+                        raise ValueError("tool budget exhausted")
+                    attempts += 1  # Invalid calls consume budget too.
+                    arguments = json.loads(call.arguments)
+                    if not isinstance(arguments, dict):
+                        raise ValueError("tool arguments must be a JSON object")
+                    if call.name in IMAGE_TOOLS:
+                        result = await asyncio.to_thread(workspace.apply, call.name, arguments)
+                    elif call.name in RETRIEVAL_TOOLS:
+                        result = await retrieval.call(call.name, arguments, workspace)
+                    else:
+                        raise ValueError("unknown tool")
+                except (TimeoutError, ClientError):
+                    result = {"ok": False, "error": "retrieval provider unavailable or timed out"}
+                except (ValueError, TypeError, KeyError, OSError, cv2.error) as exc:
+                    result = {"ok": False, "error": str(exc)}
+                trace.append(
+                    {
+                        "index": len(trace) + 1,
+                        "turn": turn + 1,
+                        "tool_name": call.name,
+                        "arguments": arguments,
+                        "output": result,
+                    }
+                )
+                image_url = result.get("image_url")
+                observation = {key: value for key, value in result.items() if key != "image_url"}
+                # Set type explicitly: requests are serialized with exclude_unset, and the model
+                # server's converter cannot route an item that has neither type nor role.
+                outputs.append(
+                    NeMoGymFunctionCallOutput(
+                        type="function_call_output", call_id=call.call_id, output=json.dumps(observation)
+                    )
+                )
+                if image_url:
+                    image_observations.append(
+                        NeMoGymEasyInputMessage(
+                            type="message",
+                            role="user",
+                            content=[
+                                {"type": "input_text", "text": f"Image {result['new_image_index']}"},
+                                {"type": "input_image", "image_url": image_url, "detail": "auto"},
+                            ],
+                        )
+                    )
+            # Complete all function-call outputs before inserting user images.
+            # Some backends emit multiple calls even when parallel_tool_calls=False.
+            outputs.extend(image_observations)
+            if budget_exceeded:
+                break
+        if generated is None:
+            generated = NeMoGymResponse.model_validate(
+                {
+                    "id": "policy_error",
+                    "created_at": 0,
+                    "model": "",
+                    "object": "response",
+                    "parallel_tool_calls": False,
+                    "tool_choice": "auto",
+                    "tools": [],
+                    "output": [],
+                }
+            )
+        result = generated.model_copy(update={"output": outputs, "usage": usage})
+        if not finished and result.incomplete_details is None:
+            # No terminal answer must never accidentally score an earlier answer.
+            result = NeMoGymResponse.model_validate(
+                result.model_dump() | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+            )
+        return result, trace, cookies, policy_error
+
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgenticMMESessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Agentic-MME runs its image tools in the agent and does not use a sandbox")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("Agentic-MME does not use granted tools")
+        if self.config.retrieval.mode == "replay":
+            # The replay list is a field of the task row. An agent session receives only the model request.
+            raise AgentSeedRejectedError(
+                "retrieval.mode=replay reads retrieval_replay from the task row, which agent sessions do not "
+                "receive; use retrieval.mode=disabled or live under an environment server"
+            )
+        return AgenticMMESessionState(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, AgenticMMESessionState):
+            raise TypeError("Expected Agentic-MME session state")
+        execution = state.execution
+        if execution is not None:
+            if not execution.done():
+                execution.cancel()
+                done, _ = await asyncio.wait({execution}, timeout=self.config.session_close_timeout_seconds)
+                if not done:
+                    raise TimeoutError(
+                        "Agentic-MME episode did not stop within the session close timeout; close must retry"
+                    )
+            await asyncio.gather(execution, return_exceptions=True)
+        return AgentCloseSessionResponse(agent_session_id=state.request.agent_session_id)
+
+    async def _session_episode(
+        self, body: NeMoGymResponseCreateParamsNonStreaming, cookies: dict[str, str], model_url_path: str
+    ) -> tuple[NeMoGymResponse, dict[str, str]]:
+        result, _, model_cookies, policy_error = await self._episode(body, cookies, model_url_path=model_url_path)
+        if policy_error is not None:
+            # Report the cause, so the Environment Server's outcome policy decides between grading and retry.
+            result = policy_error.failed_response(result)
+        return result, {name: getattr(value, "value", value) for name, value in (model_cookies or {}).items()}
+
+    async def responses(
+        self,
+        request: Request,
+        response: Response,
+        body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        """Run one episode: the image-tool loop, with every model call through the rollout's model route.
+
+        Under an agent session, the session runs one activation. An identical retry joins it, and a different
+        request, or one routed under another rollout, is refused with 409.
+        """
+        route = self.url_path_for_request("/v1/responses", request)
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            result, _, model_cookies, _ = await self._episode(body, request.cookies, model_url_path=route)
+            for name, value in (model_cookies or {}).items():
+                response.set_cookie(name, value)
+            return result
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, AgenticMMESessionState):
+            raise TypeError("Expected Agentic-MME session state")
+        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+            raise HTTPException(409, "Agent session does not match the rollout route")
+        key = (body.model_copy(deep=True), route)
+        if state.activation_key is not None and state.activation_key != key:
+            raise HTTPException(409, "Session already has another activation")
+        if state.execution is None:
+            state.activation_key = key
+            state.execution = asyncio.create_task(self._session_episode(body, dict(request.cookies), route))
+        try:
+            result, model_cookies = await asyncio.shield(state.execution)
+        except asyncio.CancelledError:
+            request_task = asyncio.current_task()
+            if state.execution.cancelled() and request_task is not None and not request_task.cancelling():
+                raise HTTPException(409, "Agent session is closing") from None
+            raise
+        for name, value in model_cookies.items():
+            response.set_cookie(name, value)
+        return result
+
+    async def run(self, request: Request, body: AgenticMMERunRequest) -> AgenticMMEVerifyResponse:
+        result, trace, _, policy_error = await self._episode(
+            body.responses_create_params,
+            request.cookies,
+            body.retrieval_replay,
+            model_url_path=self.url_path_for_run("/v1/responses", body),
+        )
+        verification = await self.server_client.post(
+            server_name=self.config.resources_server.name,
+            url_path="/verify",
+            json={
+                "responses_create_params": body.responses_create_params.model_dump(),
+                "response": result.model_dump(),
+                "verifier_metadata": body.verifier_metadata,
+            },
+            cookies=request.cookies,
+        )
+        await raise_for_status(verification)
+        verified = AgenticMMEVerifyResponse.model_validate(await get_response_json(verification))
+        successful = sum(bool(event["output"].get("ok")) for event in trace)
+        reference = (
+            (body.verifier_metadata.get("process_evaluation") or {}).get("efficiency", {}).get("reference_tool_calls")
+        )
+        overthink = None
+        if isinstance(reference, int) and not isinstance(reference, bool) and reference >= 0:
+            overthink = max(0, successful - reference) / (reference + 1)
+        return verified.model_copy(
+            update={
+                "tool_trace": trace,
+                "tool_call_count": len(trace),
+                "successful_tool_calls": successful,
+                "tool_error_count": len(trace) - successful,
+                "overthink": overthink,
+                "process_scores_available": False,
+                "policy_error": policy_error.message if policy_error else None,
+                **({"failure_reason": "policy_error"} if policy_error else {}),
+            }
+        )
+
+
+if __name__ == "__main__":
+    AgenticMMEAgent.run_webserver()

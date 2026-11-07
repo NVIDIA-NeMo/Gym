@@ -24,7 +24,7 @@ import shlex
 import shutil
 import tempfile
 from asyncio import Semaphore
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -80,6 +80,7 @@ from nemo_gym.core import (
     SandboxFailureDetails,
     observe_failure,
 )
+from nemo_gym.media_utils import MediaFile, UnsupportedContentError, split_text_and_media, upload_media
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -119,6 +120,7 @@ from responses_api_agents.opencode_agent.pinned import (
 from responses_api_agents.opencode_agent.runtime import (
     ASSISTANT_MESSAGE_PLUGIN_FILE,
     ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+    IMAGE_INPUT_MODEL_OPTIONS,
     OPENCODE_VERSION,
     REQUIRED_MCP_PLUGIN_FILE,
     REQUIRED_MCP_PLUGIN_SOURCE,
@@ -820,11 +822,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system = self._session_input(body)
+            prompt, system, media = self._session_input(body)
             if state.task is None:
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._session_response(state, state.activation_request, prompt=prompt, system=system)
+                    self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "OpenCode sandbox sessions support one activation; retry the same request")
@@ -1337,7 +1339,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
 
-    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
+    def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str, list[MediaFile]]:
+        """Return the user prompt, the system instructions and the prompt's media files."""
         # Sampling is applied to every OpenCode agent (see _session_response); other controls are rejected.
         supported = {"input", "instructions", "model", "temperature", "top_p"}
         sampled = [name for name in ("temperature", "top_p") if getattr(body, name) is not None]
@@ -1378,19 +1381,23 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 422, "OpenCode sandbox execution accepts one user text prompt and optional system/developer message"
             )
         texts = []
+        media: list[MediaFile] = []
         for item in items:
-            if isinstance(item.content, str):
-                texts.append(item.content)
-            else:
-                parts = [part if isinstance(part, dict) else part.model_dump() for part in item.content]
-                if any(part.get("type") != "input_text" for part in parts):
-                    raise HTTPException(422, "OpenCode sandbox execution supports text input only")
-                texts.append("\n".join(part["text"] for part in parts))
+            content = item.content
+            if not isinstance(content, str):
+                content = [part if isinstance(part, dict) else part.model_dump() for part in content]
+            try:
+                text, item_media = split_text_and_media(content)
+            except UnsupportedContentError as error:
+                raise HTTPException(422, f"OpenCode sandbox execution: {error}") from error
+            if item_media and item is not items[-1]:
+                raise HTTPException(422, "OpenCode sandbox execution accepts media only in the user prompt")
+            texts.append(text)
+            media = item_media
         if not texts[-1].strip():
             raise HTTPException(422, "OpenCode sandbox execution requires a nonempty user prompt")
-        return texts[-1], "\n\n".join(
-            text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text
-        )
+        system = "\n\n".join(text for text in [self.config.system_prompt, body.instructions, *texts[:-1]] if text)
+        return texts[-1], system, media
 
     def _session_output(
         self, export: dict[str, Any], observations: AgentObservationBundle
@@ -1486,7 +1493,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        _, system = self._session_input(body)
+        _, system, _ = self._session_input(body)
         supplied_instructions = body.instructions is not None or (
             not isinstance(body.input, str)
             and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
@@ -1499,7 +1506,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run a delta under one budget, including preparation and the concurrency queue."""
         assert isinstance(state, OpenCodeSandboxSession)
-        prompt, system = self._session_input(body)
+        prompt, system, media = self._session_input(body)
         if state.system_instructions is None:
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -1516,6 +1523,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 body,
                 prompt=prompt,
                 system=state.system_instructions,
+                media=media,
                 timeout=timeout,
                 deadline=deadline,
             )
@@ -1634,6 +1642,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        media: Sequence[MediaFile] = (),
         timeout: float | None = None,
         deadline: float | None = None,
     ) -> NeMoGymResponse:
@@ -1668,6 +1677,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                                 "input": self.config.context_window,
                                 "output": self.config.max_output_tokens,
                             },
+                            **copy.deepcopy(IMAGE_INPUT_MODEL_OPTIONS),
                         }
                     },
                 }
@@ -1724,6 +1734,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             command.append("--thinking")
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
+        media_dir = f"{state.session.session_dir}/input-media/{state.activation_id}"
+        for path in await upload_media(state.session.sandbox, media, media_dir):
+            command.extend(["--file", path])
         payload = {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,

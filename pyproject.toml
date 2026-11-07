@@ -892,7 +892,7 @@ layers = [
     # data/
     "nemo_gym.data",
     # agents/
-    "nemo_gym.agents",
+    "nemo_gym.agents : nemo_gym.media_utils",
     # models/
     "nemo_gym.models",
     # server_runtime/
