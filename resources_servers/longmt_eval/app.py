@@ -3,7 +3,7 @@
 """longmt_eval resource server — document-level MT evaluation with SEGALE.
 
 Scoring layers:
-  * verify() strips the reasoning preamble, then dispatches the (source, MT)
+  * verify() checks for leaked reasoning tags, then dispatches the (source, MT)
     pair to a persistent SegaleActor on the extra_gpu node. The actor runs the
     three-phase SEGALE pipeline (LASER2 embed → vecalign align → COMETKiwi
     score) and returns comet_qe as the RL reward.
@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 from collections import defaultdict
-from typing import Any, Dict, List, Optional
+from typing import Any, ClassVar, Dict, List, Optional
 
 import ray
 from fastapi import FastAPI
@@ -30,6 +30,7 @@ from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ReverifyMode,
     SimpleResourcesServer,
 )
 
@@ -99,6 +100,9 @@ class LongmtEvalConfig(BaseResourcesServerConfig):
             `ray start --resources='{"extra_gpu": N}'`.
     """
 
+    # Verification uses the supplied source and translation, without rollout session state.
+    REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
+
     compute_segale: bool = True
     comet_model: str = "Unbabel/wmt22-cometkiwi-da"
     comet_batch_size: int = 8
@@ -152,7 +156,6 @@ class LongmtEvalServer(SimpleResourcesServer):
     def _ensure_actors(self) -> None:
         if self._actors_init_attempted:
             return
-        self._actors_init_attempted = True
         self._actor_lock = threading.Lock()
 
         from segale_actor import _build_segale_actor_class
@@ -185,6 +188,10 @@ class LongmtEvalServer(SimpleResourcesServer):
             except Exception:
                 LOG.exception("SegaleActor failed init; dropping from pool")
 
+        for actor in actors:
+            if actor not in live:
+                ray.kill(actor)
+
         if not live:
             raise RuntimeError(
                 f"0/{n} SegaleActors ready after 300s — check that extra_gpu nodes "
@@ -208,6 +215,7 @@ class LongmtEvalServer(SimpleResourcesServer):
         if not self.config.use_extra_gpu and len(live) == G * A:
             live = [live[g * A + s] for s in range(A) for g in range(G)]
         self._segale_actors = live
+        self._actors_init_attempted = True
         LOG.info(
             "SegaleActor pool: %d actors ready (dispatch_order=%s)",
             len(live),
