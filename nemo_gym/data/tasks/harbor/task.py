@@ -414,6 +414,14 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         data = tomllib.loads((path / TASK_FILE).read_text())
         for key in HarborTaskConfig.unknown_keys(data):
             logger.warning("%s: ignoring unknown key `%s`", path / TASK_FILE, key)
+        # `[verifier].exit_nonzero` changes the score and Harbor ignores it, so it comes from dataset.toml alone: in
+        # the task's own file it stays an unknown key, and the folder scores the same under Gym and under Harbor.
+        verifier_table = data.get("verifier")
+        if isinstance(verifier_table, dict) and "exit_nonzero" in verifier_table:
+            logger.warning(
+                "%s: ignoring unknown key `verifier.exit_nonzero` (set it in dataset.toml)", path / TASK_FILE
+            )
+            data["verifier"] = {key: value for key, value in verifier_table.items() if key != "exit_nonzero"}
         legacy_mode = data.get("multi_step_reward_mode")
         if legacy_mode is not None and legacy_mode != LEGACY_AGGREGATE_REWARD_MODE:
             # Harbor 0.22.0 drops the key whatever it says and rolls the steps up with `mean` (or the task's own
@@ -772,9 +780,10 @@ def task_digest(
     if not dataset.shapes_tasks and shared_verifier_digest is None:
         return folder_digest
     # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
-    # shaping table with a repeat count hashes the same as one without.
+    # shaping table with a repeat count hashes the same as one without. Defaults left unset (None) are left out
+    # too, so a dataset that sets none of them keeps the digests it had before those keys existed.
     applied: dict[str, Any] = {
-        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
+        "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}, exclude_none=True),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
     if shared_verifier_digest is not None:

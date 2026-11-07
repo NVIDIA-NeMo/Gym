@@ -77,6 +77,10 @@ num_repeats = 1
 timeout_multiplier = 1.0
 # Scales cpus, memory_mb and storage_mb of the agent's and the verifier's environments. GPUs never scale.
 resource_multiplier = 1.0
+# What a test.sh that exits non-zero without being stopped by its timeout means. `mask` leaves the trial out of the
+# scores (for a verifier that exits non-zero when it could not grade, such as a failed LLM judge) and keeps any reward
+# file as metrics. Unset, the exit code is ignored, as in Harbor. `[gym.tasks."<id>".verifier] exit_nonzero` overrides it.
+# verifier_exit_nonzero = "mask"
 
 # Per-task overrides, keyed by the task folder name. `env` merges over the task's own; every other field
 # replaces the task's value. Harbor's legacy spellings (`memory = "4G"`, `allow_internet = false`) are accepted
