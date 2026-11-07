@@ -94,6 +94,18 @@ def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
     )
 
 
+# The search agent's plugin list, and the lines those plugins print to prove they loaded.
+ALL_PLUGINS = (
+    "nemo_gym_sentinel.js",
+    "nemo_gym_turn_budget.js",
+    "nemo_gym_web_guard.js",
+    "nemo_gym_tool_surface.js",
+)
+READY_LINE = "[nemo-gym-plugin] ready plugin={}"
+SENTINEL_LINE = "[nemo-gym-plugin] loaded sentinel version=2 plugins="
+SENTINEL_REPRINT = "[nemo-gym-plugin] loaded sentinel version=2 call=21 ready={}"
+
+
 class TestOpenCodeSandboxedAgent:
     def test_import_only_loads_shared_opencode_modules(self) -> None:
         code = (
@@ -649,6 +661,60 @@ class TestOpenCodeSandboxedAgent:
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
         monkeypatch.setattr("responses_api_agents.opencode_sandboxed_agent.app.Path.exists", lambda self: False)
         return sandbox_mock
+
+    @mark.parametrize(
+        "plugin_lines, error",
+        [
+            ("\n".join([SENTINEL_LINE, *(READY_LINE.format(name) for name in ALL_PLUGINS)]), None),
+            # A long run whose setup lines scrolled out: the sentinel's periodic re-print still vouches.
+            ("...\n" + SENTINEL_REPRINT.format(",".join(ALL_PLUGINS)), None),
+            # opencode swallowed web_guard's load error: the sentinel loaded, web_guard never reported.
+            (
+                "\n".join(
+                    [SENTINEL_LINE, *(READY_LINE.format(name) for name in ALL_PLUGINS if "web_guard" not in name)]
+                ),
+                r"did not finish loading: \['nemo_gym_web_guard\.js'\]",
+            ),
+            # Nothing loaded at all: the sentinel gate fires first, unchanged.
+            ("", r"did not load \(no sentinel"),
+        ],
+    )
+    async def test_responses_refuses_a_rollout_whose_plugins_did_not_all_load(
+        self, monkeypatch: MonkeyPatch, plugin_lines: str, error: str | None
+    ) -> None:
+        config = self._create_config()
+        config.opencode_plugins = list(ALL_PLUGINS)
+        server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+        sandbox_mock = self._mock_sandbox(monkeypatch, server)
+        # A real run's output: the launch marker, the plugins' lines, opencode's own progress.
+        run_stdout = f"Shell: /bin/bash\n{plugin_lines}\nOpenCode run finished"
+        sandbox_mock.exec.side_effect = [
+            SimpleNamespace(stdout=run_stdout, stderr="", return_code=0, error_type=None),
+            SimpleNamespace(stdout='[{"id": "session-id"}]', stderr="", return_code=0, error_type=None),
+            SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None),
+        ]
+
+        async def download(remote_path, local_path):
+            name = Path(str(remote_path)).name
+            if name.startswith("nemo-gym-plugin-"):
+                # The upload read-back: serve the real plugin file.
+                plugin = Path(app_module.__file__).parent / "plugins" / name[len("nemo-gym-plugin-") :]
+                Path(local_path).write_bytes(plugin.read_bytes())
+            elif str(remote_path).endswith(".json"):
+                Path(local_path).write_text(json.dumps({"messages": [{"info": {"role": "assistant"}, "parts": []}]}))
+            else:
+                raise FileNotFoundError(remote_path)
+
+        sandbox_mock.download = AsyncMock(side_effect=download)
+        call = server.responses(
+            request=self._responses_request(),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "hello"}]),
+        )
+        if error is None:
+            await call
+        else:
+            with raises(RuntimeError, match=error):
+                await call
 
     async def test_responses_uploads_input_images_and_attaches_them_to_the_run(self, monkeypatch: MonkeyPatch) -> None:
         """Each input_image data URI is decoded, uploaded under the fixed attachments directory with the
@@ -2466,6 +2532,54 @@ async def test_plugin_registration_and_upload_come_from_one_list(monkeypatch):
     config.opencode_plugins = ["nemo_gym_sentinel.js", "not_a_plugin.js"]
     with raises(FileNotFoundError, match="not_a_plugin.js"):
         server._plugin_uploads()
+
+
+@mark.parametrize(
+    "run_output, expected",
+    [
+        ("\n".join(READY_LINE.format(name) for name in ALL_PLUGINS), []),
+        (
+            "\n".join(READY_LINE.format(name) for name in ALL_PLUGINS if "web_guard" not in name),
+            ["nemo_gym_web_guard.js"],
+        ),
+        # Setup lines scrolled out of the capture; the sentinel's periodic re-print alone is enough.
+        (SENTINEL_REPRINT.format(",".join(ALL_PLUGINS)), []),
+        # The two forms combine.
+        (
+            SENTINEL_REPRINT.format("nemo_gym_sentinel.js,nemo_gym_turn_budget.js")
+            + "\n"
+            + READY_LINE.format("nemo_gym_tool_surface.js"),
+            ["nemo_gym_web_guard.js"],
+        ),
+        # Only plugin-prefixed lines count, e.g. not the same words echoed in model output.
+        (
+            "\n".join(READY_LINE.format(name) for name in ALL_PLUGINS if "web_guard" not in name)
+            + "\nmodel says: ready plugin=nemo_gym_web_guard.js",
+            ["nemo_gym_web_guard.js"],
+        ),
+        # A pre-change sentinel re-print (no ready= list) vouches for nobody but itself.
+        ("[nemo-gym-plugin] loaded sentinel version=1 call=21", list(ALL_PLUGINS)),
+        ("", list(ALL_PLUGINS)),
+    ],
+)
+def test_plugins_not_ready(run_output: str, expected: list[str]) -> None:
+    assert app_module._plugins_not_ready(run_output, ALL_PLUGINS) == expected
+
+
+def test_plugins_not_ready_without_configured_plugins() -> None:
+    assert app_module._plugins_not_ready("anything", []) == []
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node is required to load the OpenCode plugins")
+def test_every_plugin_reports_ready():
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("plugin_ready.test.mjs"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")

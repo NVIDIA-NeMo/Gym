@@ -27,6 +27,20 @@
 // on unless NEMO_GYM_CONTAMINATION_GUARD=0, so that "off" is always a deliberate, logged arm.
 
 const PLUGIN = "[nemo-gym-plugin]";
+
+// Readiness proof for the host (app.py). opencode swallows a plugin's load error, and the sentinel
+// loads first, so its "loaded" line cannot vouch for this plugin. If this plugin alone failed to
+// load, webfetch/websearch would silently fall back to opencode's builtins (direct fetches, no
+// contamination filter) and the row would still be scored. markReady() runs on the setup's return
+// path; app.py refuses to score a rollout unless every configured plugin is named either by this
+// line or by the sentinel's periodic "ready=" list (nemo_gym_sentinel.js), which survives a long
+// transcript whose start scrolled out of the capture. PLUGIN_FILE must equal this file's name under
+// plugins/ (tests/plugin_ready.test.mjs checks it).
+const PLUGIN_FILE = "nemo_gym_web_guard.js";
+function markReady() {
+  (globalThis.__nemoGymPluginsReady ??= new Set()).add(PLUGIN_FILE);
+  process.stderr.write(PLUGIN + " ready plugin=" + PLUGIN_FILE + "\n");
+}
 const EMPTY_RESULT = "No results returned"; // neutral: never says why something was dropped
 
 const CONTAMINATION_PATTERNS = [
@@ -440,6 +454,7 @@ export default async function nemoGymWebGuard({ $ }) {
   const bashGuard = guardEnabled() && process.env.NEMO_GYM_BASH_GUARD !== "0";
   process.stderr.write(PLUGIN + " bash_guard=" + (bashGuard ? "on" : "off") + "\n");
 
+  markReady();
   return {
     tool: {
       websearch: {

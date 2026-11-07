@@ -33,6 +33,18 @@
 
 const PLUGIN = "[nemo-gym-plugin]";
 
+// Readiness proof for the host (app.py). opencode swallows a plugin's load error, and the sentinel
+// loads first, so its "loaded" line cannot vouch for this plugin. markReady() runs on every return
+// path of the setup below; app.py refuses to score a rollout unless every configured plugin is named
+// either by this line or by the sentinel's periodic "ready=" list (nemo_gym_sentinel.js), which
+// survives a long transcript whose start scrolled out of the capture. PLUGIN_FILE must equal this
+// file's name under plugins/ (tests/plugin_ready.test.mjs checks it).
+const PLUGIN_FILE = "nemo_gym_tool_surface.js";
+function markReady() {
+  (globalThis.__nemoGymPluginsReady ??= new Set()).add(PLUGIN_FILE);
+  process.stderr.write(PLUGIN + " ready plugin=" + PLUGIN_FILE + "\n");
+}
+
 // Matched as whole description lines. Each names a tool this harness does not expose; leaving
 // either in place is an instruction the model cannot follow.
 const DEAD_REFERENCES = [
@@ -45,11 +57,14 @@ const DEAD_REFERENCES = [
 export default async function nemoGymToolSurface() {
   if (process.env.NEMO_GYM_FIX_GREP_DESCRIPTION !== "1") {
     process.stderr.write(PLUGIN + " tool_surface grep_description=stock\n");
+    // Inactive by configuration, but loaded and healthy.
+    markReady();
     return {};
   }
 
   let reported = false;
 
+  markReady();
   return {
     // Receives the definition about to be serialised into the request. Mutating `output` in
     // place is the documented contract; returning a value does nothing.

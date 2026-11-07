@@ -33,7 +33,7 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import monotonic, time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
+from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional, Sequence
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -668,6 +668,27 @@ def _read_opencode_child_messages(db_path: Path, root_session_id: str) -> list[d
     finally:
         con.close()
     return [{"info": json.loads(row[0])} for row in rows]
+
+
+# "ready plugin=<file>" is printed by each nemo_gym plugin when its setup completes; " ready=<a>,<b>"
+# is the sentinel's periodic re-print of every plugin that has done so. Only plugin-prefixed lines count.
+_PLUGIN_READY_RE = re.compile(r"\[nemo-gym-plugin\] [^\n]*?(?:ready plugin=| ready=)([^\s]*)")
+
+
+def _plugins_not_ready(run_output: str, configured: Sequence[str]) -> list[str]:
+    """Configured plugins the run output never showed finishing their setup, in configured order.
+
+    The sentinel's "loaded" line proves only that the plugin layer started: the sentinel loads first,
+    so it has already printed by the time a later plugin fails, and opencode swallows that failure.
+    A missing nemo_gym_web_guard.js, for example, silently hands webfetch/websearch back to opencode's
+    builtins (direct fetches, no contamination filter). So each plugin reports itself ready, and the
+    sentinel re-prints the ready set every 20 model calls, which keeps the proof inside the captured
+    window of a long run whose first lines have scrolled out (see nemo_gym_sentinel.js).
+    """
+    ready: set[str] = set()
+    for match in _PLUGIN_READY_RE.finditer(run_output):
+        ready.update(name for name in match.group(1).split(",") if name)
+    return [name for name in configured if name not in ready]
 
 
 def _terminal_reason(run_output: str) -> str:
@@ -1798,6 +1819,19 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             tail = run_output[-800:].replace("\n", "\\n")
             raise RuntimeError(
                 "opencode plugins did not load (no sentinel in run output); configured: "
+                f"{self.config.opencode_plugins}. Refusing to score a rollout that ran without them. "
+                f"captured_chars={len(run_output)} export_found={opencode_export_found} "
+                f"finished={opencode_finished} head={head!r} tail={tail!r}"
+            )
+        # The sentinel loaded, so the plugin layer ran -- but it loads first and cannot vouch for the
+        # plugins after it. Same fail-closed rule for any configured plugin that never reported ready.
+        plugins_not_ready = _plugins_not_ready(run_output, self.config.opencode_plugins) if plugins_loaded else []
+        if plugins_not_ready:
+            head = run_output[:800].replace("\n", "\\n")
+            tail = run_output[-800:].replace("\n", "\\n")
+            raise RuntimeError(
+                f"opencode plugins did not finish loading: {plugins_not_ready} never reported ready "
+                "(the sentinel loaded, so opencode swallowed these plugins' own errors); configured: "
                 f"{self.config.opencode_plugins}. Refusing to score a rollout that ran without them. "
                 f"captured_chars={len(run_output)} export_found={opencode_export_found} "
                 f"finished={opencode_finished} head={head!r} tail={tail!r}"
