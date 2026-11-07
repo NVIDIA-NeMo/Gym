@@ -296,7 +296,13 @@ def build_gym_row(
             "source_pdf": source_pdf_relpath,
             "criteria": extract_criteria(row) if criteria is None else criteria,
         },
+        # What an agent session receives: the same manifest gdp_pdf_agent's run() reads from verifier_metadata.
+        "agent_context": _agent_context(document_manifest_relpath),
     }
+
+
+def _agent_context(document_manifest_relpath: str) -> dict:
+    return {"artifacts": {"document_manifest": {"path": document_manifest_relpath}}}
 
 
 def restore_original_prompt(row: dict) -> dict:
@@ -470,6 +476,7 @@ def write_example(rows: list[dict], output_dir: Path) -> Path:
         row["verifier_metadata"]["document_manifest"] = (
             f"{TEST_MEDIA_DIR_NAME}/{DOCUMENTS_DIR_NAME}/{task_dir}/manifest.json"
         )
+        row["agent_context"] = _agent_context(row["verifier_metadata"]["document_manifest"])
         example_rows.append(row)
 
     example_path = output_dir / "example.jsonl"

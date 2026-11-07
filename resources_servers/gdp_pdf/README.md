@@ -64,6 +64,11 @@ Rows are lightweight — no base64 in the JSONL:
       "implicitness": "Explicit", "subjectiveness": "Objective", "failure_mode": "Binary"}]}}
 ```
 
+Each row also carries `"agent_context": {"artifacts": {"document_manifest": {"path": <document_manifest>}}}`,
+the manifest an agent session receives (see `responses_api_agents/gdp_pdf_agent/README.md`). Data prepared
+before this key existed still runs through the `legacy_agent` relay; prepare it again to run it under an
+agent session.
+
 `verifier_metadata.prompt` is stored explicitly so `verify()` does not have to dig the prompt back
 out of the content blocks after the agent has rewritten them. `source_pdf` is provenance only
 (re-derives the original download without guessing a filename) — never read at rollout time.
