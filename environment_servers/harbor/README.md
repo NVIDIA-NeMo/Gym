@@ -46,7 +46,11 @@ fails without retry. Responses without that metadata are verified as before. See
 policy table and its overrides.
 
 When `test.sh` ran, the sample counts. A missing or invalid reward file scores 0 with a `failure_kind`.
-Only a required infrastructure failure (sandbox lost, reward transfer failed) sets `mask_sample`.
+Only a required infrastructure failure (sandbox lost, reward transfer failed) sets `mask_sample`, unless the
+dataset sets `verifier_exit_nonzero = "mask"` in `dataset.toml` (`[gym.defaults]`, or `exit_nonzero` under
+`[gym.tasks."<id>".verifier]` for one task): then a `test.sh` that exits non-zero without being stopped by its
+timeout masks the sample with `harbor:verifier_exit_nonzero` and keeps any reward file in `verifier_rewards`, for
+verifiers that exit non-zero when they could not grade (a required LLM judge failing). A `task.toml` cannot set it.
 Diagnostic logs are best effort: unsafe archive entries are skipped securely, and a diagnostic
 transfer failure cannot discard an already measured reward. Verifier timeouts score zero and retain
 available logs. An existing `reward.json`
@@ -1571,7 +1575,7 @@ deployment wants the same value; a unit test pins that list.
 | Home | File | Owner | Holds |
 |---|---|---|---|
 | Task | `task.toml` | task author | image, resources, timeouts, env, verifier, agent user (read-only once fetched) |
-| Dataset | `dataset.toml`, `[gym]` table; `task_data.py` | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own. `task_data.py`: the `TaskData` model every task's `task_data.json` fields are validated against (materialize, seed, collate) |
+| Dataset | `dataset.toml`, `[gym]` table; `task_data.py` | dataset author | `[gym]` `license` (one of Gym's dataset license values, required for `train` and `validation`), `type` (`train`, `validation`, `example` or `benchmark`; unset means `validation` with a license, else `benchmark`), `allowed_agents` (harness implementation names the dataset admits; unset admits any), `domain` (one of Gym's domain values) and `verified` (boolean); `[gym.defaults]` `timeout_multiplier`, `resource_multiplier`, `num_repeats` (rollouts per task, below `+num_repeats=`), `verifier_exit_nonzero` (`"mask"` leaves a trial whose `test.sh` exits non-zero out of the scores); `[gym.tasks."<id>"]` `environment` and `verifier` overrides in Harbor's own fields (`env` merges, other fields replace) and `artifacts` additions appended to the task's own. `task_data.py`: the `TaskData` model every task's `task_data.json` fields are validated against (materialize, seed, collate) |
 | Deployment | the `sandbox:` provider block | operator | image rewrites and registry credentials (`images`), root setup commands (`setup`), networking, shared-memory labels, shared storage and `volume_sources` for Compose volumes |
 | Run | run config | the run | provider selection, GPU routing, repeats, output paths, `sandbox_resources_override` for parity runs, `compose_overlay` (the job's extra Compose files, MCP entries and prompt template) |
 

@@ -861,6 +861,29 @@ async def test_a_later_turn_whose_verifier_times_out_counts_as_zero_in_the_mean(
     assert result.failure_reason.startswith("turn 'build': test.sh exceeded [verifier].timeout_sec=")
 
 
+async def test_a_turn_whose_verifier_exits_nonzero_masks_the_episode_under_the_dataset_option(tmp_path, monkeypatch):
+    """#5642: a step's verification reads the task's `exit_nonzero` too, and a masked turn masks the episode."""
+    (tmp_path / "datasets" / "ds").mkdir(parents=True)
+    (tmp_path / "datasets" / "ds" / "dataset.toml").write_text('[gym.defaults]\nverifier_exit_nonzero = "mask"\n')
+    steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+    server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
+    passed = SandboxExecResult(stdout="", stderr="", return_code=0)
+    judge_failed = SandboxExecResult(stdout="", stderr="", return_code=1)
+    per_turn = [({"reward.txt": "1\n"}, passed), ({"reward.txt": "0\n"}, judge_failed)]
+
+    def next_verifier():
+        sandbox.verifier_files, sandbox.test_result = per_turn.pop(0)
+
+    server.server_client.turn_hooks.append(next_verifier)
+
+    result = (await server.run_request(request_for(task))).result
+
+    assert [turn.mask_sample for turn in result.turns] == [False, True]
+    assert result.turns[1].failure_kind == "harbor:verifier_exit_nonzero"
+    assert result.mask_sample is True and result.failure_kind == "harbor:verifier_exit_nonzero"
+    assert result.failure_reason.startswith("turn 'build': test.sh exited 1")
+
+
 async def test_a_turn_without_a_reward_file_ends_the_episode_measured(tmp_path, monkeypatch):
     steps = '[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
     server, task, sandbox, _ = multi_turn_server(tmp_path, monkeypatch, steps, {"plan": "P", "build": "B"})
