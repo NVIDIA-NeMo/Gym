@@ -1,4 +1,0 @@
--e nemo-gym[dev,sandbox] @ ../..
-pillow
-numpy
-opencv-python-headless
