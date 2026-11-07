@@ -29,6 +29,7 @@ from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreami
 from nemo_gym.sandbox import SandboxExecResult, read_text, upload_text
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
+from responses_api_agents.opencode_agent.images import ImageAttachment
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
 from responses_api_agents.opencode_agent.runtime import TASK_ENVIRONMENT_PLUGIN_FILE, TASK_ENVIRONMENT_PLUGIN_SOURCE
 from responses_api_agents.opencode_agent.snapshot import snapshot, stored_sessions
@@ -174,6 +175,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     harness_session_id: str | None = None
     message_ids: list[str] = field(default_factory=list)
     system_instructions: str | None = None
+    has_image_input: bool = False
     activation_log: str = ""
     activation_observations: AgentObservationBundle | None = None
     trajectory: TrajectoryRecord | None = None
@@ -303,13 +305,14 @@ class OpenCodeSandboxSession(AgentSessionState):
         self,
         payload: dict[str, JsonValue],
         *,
+        images: tuple[ImageAttachment, ...] = (),
         timeout: float,
         close_timeout: float,
         deadline: float | None = None,
     ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
         artifacts = await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(payload, images=images),
             collect=lambda: self.collect_artifacts(timeout=close_timeout),
             timeout=timeout,
             close_timeout=close_timeout,
@@ -319,7 +322,9 @@ class OpenCodeSandboxSession(AgentSessionState):
             raise asyncio.CancelledError
         return artifacts
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+    async def stage_activation(
+        self, payload: dict[str, JsonValue], *, images: tuple[ImageAttachment, ...] = ()
+    ) -> SandboxCommand:
         """Stage the invocation and return the OpenCode worker command."""
         if payload.get("instructions"):
             await upload_text(
@@ -330,11 +335,24 @@ class OpenCodeSandboxSession(AgentSessionState):
                 TASK_ENVIRONMENT_PLUGIN_SOURCE, f"{self.session.session_dir}/{TASK_ENVIRONMENT_PLUGIN_FILE}"
             )
         directory = self.session.session_dir
+        command = list(payload["command"])
+        if images:
+            # The shared staging callback is cancelled and joined before session cleanup. Destinations
+            # are activation-specific and outside the task tree; bytes never enter shell arguments.
+            with tempfile.TemporaryDirectory(prefix="opencode-images-") as staging:
+                for index, image in enumerate(images, start=1):
+                    name = f"image-{index}.{image.extension}"
+                    local_path = Path(staging) / name
+                    local_path.write_bytes(image.content)
+                    local_path.chmod(0o644)
+                    remote_path = f"{directory}/{name}"
+                    await self.session.sandbox.upload(local_path, remote_path)
+                    command.extend(["-f", remote_path])
         await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
         env = payload["env"]
         params = {
             "cwd": payload["cwd"],
-            "command": payload["command"],
+            "command": command,
             "env": env,
             "stdin": f"{directory}/prompt.txt",
             "stdout": f"{directory}/stdout.jsonl",

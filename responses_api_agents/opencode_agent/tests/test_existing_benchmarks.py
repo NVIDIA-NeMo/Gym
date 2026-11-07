@@ -6,8 +6,13 @@ from pathlib import Path
 import pytest
 from omegaconf import DictConfig, OmegaConf
 
+from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
+from nemo_gym.core import EpisodeId
+from nemo_gym.data import materialize_task
 from nemo_gym.environment import discover_agents
+from nemo_gym.server_runtime import SingleAgentTurnRequest
+from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
 
 
@@ -68,13 +73,63 @@ def test_permission_profile_is_not_a_standalone_agent_variant(monkeypatch: pytes
     assert list(discover_agents()["opencode_agent"].variants) == ["opencode_agent"]
 
 
+def test_multimodal_uses_sessions_and_preserves_images(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = _resolve_config("benchmarks/swebench/multimodal/opencode.yaml", monkeypatch)
+    assert config.environment_routing_mode == "taskset"
+    environment_name = config.environment_server_routes["swebench:multimodal"]
+    assert list(config[environment_name].environment_servers) == ["single_agent_turn"]
+    environment = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        OmegaConf.to_container(get_first_server_config_dict(config, environment_name), resolve=True)
+        | {"name": environment_name}
+    )
+    agent_name = environment.agent_server.name
+    assert list(config[agent_name].responses_api_agents) == ["opencode_agent"]
+    agent = OpenCodeAgentConfig.model_validate(
+        OmegaConf.to_container(get_first_server_config_dict(config, agent_name), resolve=True) | {"name": agent_name}
+    )
+    assert agent.resources_server is None
+    assert agent.num_workers == 1
+    assert environment.resources_tool_transports == []
+    assert not get_first_server_config_dict(config, agent_name).datasets
+    resources_name = environment.resources_server.name
+    resources = get_first_server_config_dict(config, resources_name)
+    assert list(resources.allowed_agents) == ["opencode_agent"]
+    assert resources.num_workers == 1
+    assert resources.sandbox_config.ttl_s > environment.default_episode_timeout_seconds
+    assert [(item.name, item.taskset, item.num_repeats) for item in resources.datasets] == [
+        ("swebench_multimodal", "swebench:multimodal", 3)
+    ]
+    image = "data:image/png;base64,iVBORw0KGgo="
+    content = [
+        {"type": "input_text", "text": "Repair the chart."},
+        {"type": "input_image", "image_url": image, "detail": "high"},
+    ]
+    row = {
+        "instance_id": "chartjs__Chart.js-1",
+        "image_assets": {
+            "test_patch": [
+                {
+                    "path": "test/fixtures/reference.png",
+                    "url": "https://example.com/reference.png",
+                    "content_base64": "aW1hZ2U=",
+                }
+            ]
+        },
+        "responses_create_params": {"input": [{"role": "user", "content": content}]},
+    }
+    task = materialize_task(row, taskset=resources.datasets[0].taskset)
+    request = SingleAgentTurnRequest(episode_id=EpisodeId(rollout_id="multimodal-test", attempt=0), task=task)
+    assert request.task.task_input.responses_create_params.input[0].content == content
+    assert request.task.task_input.task_data["instance_id"] == row["instance_id"]
+    assert request.task.task_input.task_data["image_assets"] == row["image_assets"]
+
+
 @pytest.mark.parametrize(
     ("recipe", "prefix"),
     [
         ("deepswe", "deepswe"),
         ("swebench/verified", "swebench_verified"),
         ("swebench/multilingual", "swebench_multilingual"),
-        ("swebench/multimodal", "swebench_multimodal"),
         ("swebench/pro", "swebench_pro"),
         ("terminal_bench_2_1", "terminal_bench_2_1"),
     ],
