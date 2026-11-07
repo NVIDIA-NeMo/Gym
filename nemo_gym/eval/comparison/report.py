@@ -35,7 +35,7 @@ from nemo_gym.eval.comparison.schema import (
     MetricValue,
     RunFile,
 )
-from nemo_gym.utils.json_codec import dumps_json_bytes
+from nemo_gym.utils.json_codec import dumps_json
 
 
 if TYPE_CHECKING:
@@ -399,7 +399,7 @@ def write_reports(result: ComparisonResult, output_dir: Path, report_format: str
             written.append(markdown_fpath)
         if report_format in ("json", "both"):
             json_fpath = output_dir / JSON_REPORT_NAME
-            json_fpath.write_bytes(dumps_json_bytes(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2))
+            json_fpath.write_bytes(dumps_json(result.model_dump(mode="json"), option=orjson.OPT_INDENT_2))
             written.append(json_fpath)
     except OSError as e:
         raise ConfigError(f"Cannot write the report into '{output_dir}': {e}") from e

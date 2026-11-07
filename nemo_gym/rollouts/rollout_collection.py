@@ -187,7 +187,7 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     failure_observations,
 )
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -1226,7 +1226,7 @@ class _RunRecordWriter:
             if rows is not None:
                 with self.materialized_fpath.open("wb") as file:
                     for row in rows:
-                        file.write(dumps_json_bytes(row) + b"\n")
+                        file.write(dumps_json(row) + b"\n")
                 # A verified run manifest with every row's attempt reserved before the first request, as collection
                 # writes its own: resume and recovery accept the shard, and the Store checks each record's identity
                 # against it. ``rows`` are the copies as dispatched (run id, rollout id and attempt index stamped).
@@ -1316,17 +1316,17 @@ class _RunRecordWriter:
                 if self._status_expected is not None and self._status_written >= self._status_expected:
                     self.flush_status()
                 return None
-            fpath, line = self.failures_fpath, dumps_json_bytes(omitted_rollout_record(result))
+            fpath, line = self.failures_fpath, dumps_json(omitted_rollout_record(result))
         elif result.get(NG_FAILURE_CLASS_KEY) is not None:
             # The cap this attempt ran under travels with it, as collection stamps it from the run manifest.
             fpath = self.failures_fpath
-            line = dumps_json_bytes(
+            line = dumps_json(
                 result
                 if NG_FAILURE_MAX_ATTEMPTS_KEY in result
                 else {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
             )
         else:
-            fpath, line = self.rollouts_fpath, dumps_json_bytes(result)
+            fpath, line = self.rollouts_fpath, dumps_json(result)
         with self._locked() as lock:
             lock.seek(0)
             if lock.read() != self._writer_token:
@@ -3484,7 +3484,7 @@ class RolloutCollectionHelper(BaseModel):
         )
         selected = range(len(examples)) if task_ids is None else select_tasks(examples, task_ids)
         raw_rows = [
-            (idx, dumps_json_bytes(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
+            (idx, dumps_json(examples[idx], option=orjson.OPT_SORT_KEYS).decode(), examples[idx].copy())
             for idx in selected
         ]
         rows = self._preprocess_raw_rows(raw_rows, config)
@@ -3764,7 +3764,7 @@ class RolloutCollectionHelper(BaseModel):
                 ),
                 rows,
                 results,
-                [[dumps_json_bytes(r)] for r in results],
+                [[dumps_json(r)] for r in results],
             )
         with config.materialized_jsonl_fpath.open() as f:
             original_input_rows = list(map(loads_json, tqdm(f, desc="Reading materialized input rows")))
@@ -4269,7 +4269,7 @@ executions → not run again (left to recovery)
                 )
                 upload_spool = output_files.enter_context(upload_spool_fpath.open("w+b"))
                 for record in store.selected_records("success").values():
-                    upload_spool.write(dumps_json_bytes(_rollout_for_export(record.read())) + b"\n")
+                    upload_spool.write(dumps_json(_rollout_for_export(record.read())) + b"\n")
             if run_timing is not None:
 
                 async def _timing_heartbeat() -> None:
@@ -4430,7 +4430,7 @@ executions → not run again (left to recovery)
                     rows.append(row)
                     results.append(result)
                 if upload_spool is not None:
-                    upload_spool.write(dumps_json_bytes(_rollout_for_export(result)) + b"\n")
+                    upload_spool.write(dumps_json(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
                 if completed.run_error is not None:
@@ -4978,7 +4978,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         # Write single file with all agents
         metrics_fpath = aggregate_metrics_path_for(output_fpath)
-        metrics_fpath.write_bytes(dumps_json_bytes(all_agent_metrics, option=orjson.OPT_INDENT_2))
+        metrics_fpath.write_bytes(dumps_json(all_agent_metrics, option=orjson.OPT_INDENT_2))
 
         if raise_on_error and first_error is not None:
             raise first_error
@@ -6143,7 +6143,7 @@ class RolloutAggregationHelper(BaseModel):
             try:
                 with os.fdopen(fd, "wb") as out:
                     for r in results:
-                        out.write(dumps_json_bytes(r) + b"\n")
+                        out.write(dumps_json(r) + b"\n")
                     out.flush()
                     os.fsync(out.fileno())
                 if prior_mode is not None:

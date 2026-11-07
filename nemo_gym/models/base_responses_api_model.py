@@ -98,7 +98,7 @@ from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.utils.json_codec import dumps_json_bytes
+from nemo_gym.utils.json_codec import dumps_json
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -229,7 +229,7 @@ def _orjson_dispatch_response(content: Any) -> Any:
         return content
     if isinstance(content, BaseModel):
         content = content.model_dump(mode="json", by_alias=True)
-    return Response(content=dumps_json_bytes(content), media_type="application/json")
+    return Response(content=dumps_json(content), media_type="application/json")
 
 
 class ModelCheckpointConfig(BaseModel):

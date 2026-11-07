@@ -67,7 +67,7 @@ from nemo_gym.artifacts.exporters.mlflow_config import MLflowExportConfig
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import MLFlowConfig, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 
 
 logger = logging.getLogger(__name__)
@@ -248,7 +248,7 @@ class MLflowExporter(BaseExporter):
 
     @staticmethod
     def _payload_digest(payload: Any) -> bytes:
-        return hashlib.sha256(dumps_json_bytes(payload, option=orjson.OPT_SORT_KEYS)).digest()
+        return hashlib.sha256(dumps_json(payload, option=orjson.OPT_SORT_KEYS)).digest()
 
     def _log_metrics(self, metrics: dict[str, Any], step: Optional[int] = None) -> None:
         client, run_id = self._active()
@@ -287,7 +287,7 @@ class MLflowExporter(BaseExporter):
                 return
         # One JSON blob per row, matching the W&B rollouts table: rollouts have no stable column
         # set across environments. `log_table` appends when the artifact already exists.
-        rows = [dumps_json_bytes(rollout).decode() for rollout in rollouts]
+        rows = [dumps_json(rollout).decode() for rollout in rollouts]
         client.log_table(run_id, data={"Rollout": rows}, artifact_file=self.ROLLOUTS_ARTIFACT_FILE)
         # log_table uploads synchronously. Record only the exact serialized payload acknowledged by that call.
         self._delivered_rollouts.update(self._payload_digest(loads_json(row)) for row in rows)
@@ -380,7 +380,7 @@ class MLflowExporter(BaseExporter):
                 raise RuntimeError("Run artifacts changed during live delivery verification.")
             _write_marker_atomically(
                 marker,
-                dumps_json_bytes(
+                dumps_json(
                     {
                         "version": 1,
                         "run_id": run_id,

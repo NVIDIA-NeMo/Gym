@@ -1130,6 +1130,7 @@ class TestApp:
             pytest.param("{not json", "JSONDecodeError", id="malformed"),
             # Valid JSON that json.loads refuses with a plain ValueError: Python's integer digit limit is 4,300.
             pytest.param('{"n": ' + "9" * 5000 + "}", "ValueError", id="integer-over-digit-limit"),
+            pytest.param("[" * 100_000 + "]" * 100_000, "RecursionError", id="nesting-over-recursion-limit"),
         ],
     )
     async def test_responses_continues_on_malformed_tool_call_arguments(

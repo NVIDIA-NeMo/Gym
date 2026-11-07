@@ -488,14 +488,13 @@ async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, fail
     target = source.with_name("combined.jsonl")
     target.write_bytes(b'{"old": true}\n')
     before = {path.name: path.read_bytes() for path in source.parent.iterdir()}
-    dumps = orjson.dumps
+    dumps = collection.dumps_json
     replace = Path.replace
 
     def serialize(row, *args, **kwargs):
         assert target.read_bytes() == before[target.name]
         if row["_ng_task_index"] == 1 and failure == "serialization":
-            # Not a TypeError: orjson's encode error is TypeError, which the encoder answers with its fallback.
-            raise RuntimeError("interrupted serialization")
+            raise TypeError("interrupted serialization")
         return dumps(row, *args, **kwargs)
 
     def publish(path, destination):
@@ -504,12 +503,12 @@ async def test_failed_merge_keeps_the_original_projection(run, monkeypatch, fail
             raise OSError("interrupted publication")
         return replace(path, destination)
 
-    monkeypatch.setattr(collection.orjson, "dumps", serialize)
+    monkeypatch.setattr(collection, "dumps_json", serialize)
     if failure == "publication":
         monkeypatch.setattr(Path, "replace", publish)
     aggregate = AsyncMock()
     monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
-    with pytest.raises((RuntimeError, OSError), match="interrupted"):
+    with pytest.raises((TypeError, OSError), match="interrupted"):
         await collection.RolloutAggregationHelper().run_from_config(
             collection.RolloutAggregationConfig(
                 input_glob=str(source), output_jsonl_fpath=str(target), disable_health_check=True

@@ -42,7 +42,7 @@ from typing import Any
 
 import orjson
 
-from nemo_gym.utils.json_codec import dumps_json_bytes
+from nemo_gym.utils.json_codec import dumps_json
 
 
 # Increment when fingerprint canonicalization or hash layout changes.
@@ -288,7 +288,7 @@ def _canonical_json(value: Any) -> str:
     """Serialize JSON-compatible prompt content without losing structure."""
     # The shared encoder refuses non-string object keys, so 1 and "1" never collapse into the same fingerprint.
     try:
-        return dumps_json_bytes(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
+        return dumps_json(value, option=orjson.OPT_SORT_KEYS).decode("utf-8")
     except orjson.JSONEncodeError as error:
         raise ValueError(f"unsupported prompt content: {type(value).__name__}") from error
 

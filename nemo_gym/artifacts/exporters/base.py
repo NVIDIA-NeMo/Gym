@@ -30,7 +30,7 @@ from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, heal
 from nemo_gym.artifacts.run_artifacts import RunArtifacts, accepted_stage_omission
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.secret_utils import hide_secrets_in_container
-from nemo_gym.utils.json_codec import dumps_json_bytes, loads_json
+from nemo_gym.utils.json_codec import dumps_json, loads_json
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
@@ -527,7 +527,7 @@ class BaseExporter(Exporter):
             }
             if omitted:
                 receipt["accepted_stage_omissions"] = omitted
-            _write_marker_atomically(marker, dumps_json_bytes(receipt).decode())
+            _write_marker_atomically(marker, dumps_json(receipt).decode())
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
             return ExportResult.failed(f"{type(exc).__name__}: {exc}")

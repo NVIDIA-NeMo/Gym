@@ -29,7 +29,7 @@ from pandas.core.groupby.generic import DataFrameGroupBy
 from pydantic import Field
 from scipy import stats
 
-from nemo_gym.utils.json_codec import dumps_json_bytes
+from nemo_gym.utils.json_codec import dumps_json
 
 
 if TYPE_CHECKING:
@@ -549,17 +549,17 @@ class RewardProfiler:
         )
         with reward_profiling_fpath.open("wb") as f:
             for row in self.prepare_for_serialization(group_level_metrics):
-                f.write(dumps_json_bytes(row) + b"\n")
+                f.write(dumps_json(row) + b"\n")
 
         agent_level_metrics_fpath = base_output_fpath.with_stem(base_output_fpath.stem + "_agent_metrics").with_suffix(
             ".json"
         )
-        agent_level_metrics_fpath.write_bytes(dumps_json_bytes(self.prepare_for_serialization(agent_level_metrics)))
+        agent_level_metrics_fpath.write_bytes(dumps_json(self.prepare_for_serialization(agent_level_metrics)))
 
         repeat_level_metrics_fpath = base_output_fpath.with_stem(
             base_output_fpath.stem + "_repeat_level_metrics"
         ).with_suffix(".json")
-        repeat_level_metrics_fpath.write_bytes(dumps_json_bytes(self.prepare_for_serialization(repeat_level_metrics)))
+        repeat_level_metrics_fpath.write_bytes(dumps_json(self.prepare_for_serialization(repeat_level_metrics)))
 
         return reward_profiling_fpath, agent_level_metrics_fpath, repeat_level_metrics_fpath
 
