@@ -126,7 +126,7 @@ plaintext channel, matching the local compose gateway (`disable_tls = true`).
 
 ## Attribution labels
 
-Every sandbox also gets job attribution labels (`team`, `user`, `workload`, `run`), prefixed by
+Every sandbox also gets job attribution labels (`team`, `user`, `workload`, `cluster`, `run`), prefixed by
 `attribution.key_prefix` (default `nemo-gym.nvidia.com/`), so sandboxes can be listed or cleaned up per
 run, for example `kubectl get pods -l nemo-gym.nvidia.com/run=<id>`. Unset fields auto-detect from
 `NEMO_GYM_*` / Slurm environment variables; see `nemo_gym.sandbox.attribution.AttributionConfig`.
