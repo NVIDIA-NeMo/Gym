@@ -27,7 +27,12 @@ def setup(config, tmp_path, monkeypatch):  # noqa: F811
     monkeypatch.setattr(module, "PARENT_DIR", tmp_path)
     monkeypatch.chdir(component)  # Gym starts resources from their component directory.
     server = module.GdpPdfSandboxResourcesServer(
-        config=module.GdpPdfSandboxConfig(**config.model_dump(), sandbox_provider="sandbox", sandbox_image="tools"),
+        config=module.GdpPdfSandboxConfig(
+            **config.model_dump(),
+            model_server={"type": "responses_api_models", "name": "policy_model"},
+            sandbox_provider="sandbox",
+            sandbox_image="tools",
+        ),
         server_client=MagicMock(spec=ServerClient),
     )
     sandbox = AsyncMock()
@@ -35,11 +40,16 @@ def setup(config, tmp_path, monkeypatch):  # noqa: F811
 
     async def start(spec, callback):
         assert spec.files == {}  # No hidden rubric or reference answer is uploaded.
+        assert spec.provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [{"action": "allow", "target": "192.0.2.10"}],
+        }
         await callback(sandbox)
 
     sandbox.start_with_setup.side_effect = start
     monkeypatch.setattr(module, "AsyncSandbox", lambda _: sandbox)
-    monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"docker": {}}})
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}})
+    monkeypatch.setattr(module, "sandbox_server_url", lambda name: "http://192.0.2.10:8000")
     body = ResourcesSeedSessionRequest(
         resources_session_id="session",
         episode_id={"rollout_id": "run", "attempt": 0},
@@ -56,6 +66,19 @@ def test_session_contract_and_pdf_delivery(setup):
     )
     assert all(call.args == (pdf, module.DOCUMENT_PATH) for call in sandbox.upload.await_args_list)
     assert sandbox.upload.await_count == 2
+
+
+@pytest.mark.parametrize(
+    "provider,url", [("docker", "http://192.0.2.10:8000"), ("opensandbox", "http://127.0.0.1:8000")]
+)
+async def test_unenforceable_network_policy_never_allocates(setup, monkeypatch, provider, url):
+    server, sandbox, body, _ = setup
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {provider: {}}})
+    monkeypatch.setattr(module, "sandbox_server_url", lambda name: url)
+    with pytest.raises(ResourcesSeedRejectedError):
+        await server.seed_session(Request({"type": "http", "session": {}}), body)
+    sandbox.start_with_setup.assert_not_awaited()
+    assert not server._sessions
 
 
 @pytest.mark.parametrize("status,tool_tail", [("completed", False), ("incomplete", False), ("incomplete", True)])

@@ -12,8 +12,9 @@ from fastapi import FastAPI, Request
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import restricted_network_policy, sandbox_server_url
 from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -48,6 +49,7 @@ DOCUMENT_PATH = f"{WORKDIR}/document.pdf"
 
 
 class GdpPdfSandboxConfig(GdpPdfConfig):
+    model_server: ModelServerRef
     sandbox_provider: str
     sandbox_image: str
     sandbox_config: SandboxConfig = Field(default_factory=lambda: SandboxConfig(ttl_s=14400))
@@ -130,7 +132,14 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
                 await self._stop(session_id)
                 pdf = self._source_pdf(body)
                 global_config = get_global_config_dict()
-                sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
+                provider_config = resolve_provider_config(self.config.sandbox_provider, global_config)
+                try:
+                    network_policy = restricted_network_policy(
+                        next(iter(provider_config)), [sandbox_server_url(self.config.model_server.name)]
+                    )
+                except ValueError as error:
+                    raise ResourcesSeedRejectedError(str(error)) from error
+                sandbox = AsyncSandbox(provider_config)
                 session = _Session(body.model_copy(deep=True), sandbox)
                 self._sessions[session_id] = session
                 spec = self.config.sandbox_config.spec(
@@ -140,6 +149,7 @@ class GdpPdfSandboxResourcesServer(GdpPdfResourcesServer):
                     named_configs=global_config,
                     metadata={"nemo_gym_task": body.task_id.task_id[:63]},
                 )
+                spec.provider_options["network_policy"] = network_policy
 
                 async def setup(sandbox: AsyncSandbox) -> None:
                     # Only the source document enters the sandbox: no rubric, reference answer or host mounts.

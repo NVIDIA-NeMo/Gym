@@ -3,6 +3,8 @@
 config_paths:
 - resources_servers/gdp_pdf/configs/gdp_pdf.yaml
 - responses_api_agents/opencode_agent/configs/permissions/default.yaml
+component_extras:
+  resources_servers/gdp_pdf: [sandbox]
 gdp_pdf_simple_agent: null
 gdp_pdf_simple_environment_server: null
 gdp_pdf_sandbox:
@@ -16,6 +18,9 @@ gdp_pdf_sandbox:
       allowed_agents:
       - opencode_agent
       num_workers: 1
+      model_server:
+        type: responses_api_models
+        name: policy_model
       sandbox_provider: sandbox
       sandbox_image: ${gdp_pdf_sandbox_image}
       sandbox_config:
@@ -37,7 +42,7 @@ gdp_pdf_opencode:
         type: resources_servers
         name: gdp_pdf_sandbox
       opencode_version: 1.17.11
-      supports_images: true
+      vision: true
       max_output_tokens: 16384
       timeout: 7200
       system_prompt: The source PDF is /workspace/document.pdf. Use the available
