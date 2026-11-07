@@ -63,6 +63,7 @@ VLLM_COMMON_ARGS=(
     --prefix-match-unit 128
     --use-replayssm
     --replayssm-buffer-len 16
+    --quantization nvfp4_per_token
 )
 # @bxyu-nvidia: Lease duration is set to 180s since to give nodes a chance to pick up the request. Helps with resilience.
 # Four independent TP1/DP1 engines share expert weights on each prefill node.
