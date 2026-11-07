@@ -1,0 +1,31 @@
+name: medxpertqa_text
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: MedXpertQA Text test split, expert-level medical multiple choice (10 options)
+  with the paper's two-round zero-shot CoT protocol and answer cleansing.
+modality: text
+licensing: MIT
+authors:
+- wprazuch
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: medxpertqa
+agent_server: gymnasium_agent
+datasets:
+- name: medxpertqa_text
+  type: benchmark
+  jsonl_fpath: benchmarks/medxpertqa_text/data/medxpertqa_text_benchmark.jsonl
+  prepare_script: benchmarks/medxpertqa_text/prepare.py
+  prompt_config: benchmarks/prompts/eval/medxpertqa/zero_shot_cot.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/eval/medxpertqa/zero_shot_cot.yaml
+lifecycle: active
