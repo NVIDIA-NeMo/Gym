@@ -504,6 +504,12 @@ def test_the_http_session_lifecycle_runs_once_and_refuses_activation_after_close
         session_id = created.json()["agent_session_id"]
         assert client.post("/v1/responses", json={"input": "task"}).status_code == 409
         assert client.post("/ng-rollout/other-1/v1/responses", json={"input": "task"}).status_code == 409
+        refused = client.post(rollout, json={"input": "task", "max_output_tokens": 8})
+        assert refused.status_code == 422 and "max_output_tokens" in refused.text
+        state = agent._session_records[session_id].state
+        assert state.task is None and state.activation_request is None
+        assert not runs
+        # Removing the unsupported budget can start the same session normally.
         first = client.post(rollout, json={"input": "task"})
         assert first.status_code == 200, first.text
         assert first.json()["status"] == "completed"
@@ -551,7 +557,6 @@ def test_the_payload_routes_every_model_call_through_the_rollout_and_forwards_sa
         ],
         temperature=0.6,
         top_p=0.9,
-        max_output_tokens=8,
         metadata={"agent_timeout_sec": "60"},
         tools=[{"type": "function", "name": "get_weather", "parameters": {}, "strict": False}],
     )
@@ -569,7 +574,7 @@ def test_the_payload_routes_every_model_call_through_the_rollout_and_forwards_sa
     kwargs = model["model_kwargs"]
     assert kwargs["api_base"] == "http://10.0.0.5:8000/ng-rollout/rollout/v1"
     assert kwargs["extra_headers"] == {"x-session-id": "rollout"}
-    assert kwargs["extra_body"] == {"max_output_tokens": 8}
+    assert "extra_body" not in kwargs
     assert (kwargs["temperature"], kwargs["top_p"], kwargs["max_retries"]) == (0.6, 0.9, 0)
     # Only mini-SWE's bash tool reaches the model; the request's tools and metadata are not model arguments.
     assert "tools" not in kwargs and "metadata" not in kwargs and "max_output_tokens" not in kwargs

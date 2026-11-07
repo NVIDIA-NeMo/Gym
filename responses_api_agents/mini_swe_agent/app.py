@@ -101,7 +101,7 @@ LOG = logging.getLogger(__name__)
 
 # Request fields an agent session forwards to every model call, as mini-SWE's model_kwargs.
 FORWARDED_REQUEST_FIELDS = frozenset(
-    {"instructions", "temperature", "top_p", "max_output_tokens", "reasoning", "parallel_tool_calls", "tool_choice"}
+    {"instructions", "temperature", "top_p", "reasoning", "parallel_tool_calls", "tool_choice"}
 )
 # Read by the adapter: the input is the task, metadata may carry the task's time budget, and model must match.
 # ``tools`` is not forwarded: mini-SWE offers the model only its bash tool, and granted MCP tools are called through it.
@@ -434,8 +434,19 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             cleanup_confirmed=state.session.cleanup_confirmed,
         )
 
+    @staticmethod
+    def _validate_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse an aggregate budget neither supported execution mode can enforce."""
+        if body.max_output_tokens is not None:
+            raise HTTPException(
+                422,
+                "mini-SWE cannot enforce request max_output_tokens across model calls; "
+                "omit it and configure a per-call limit on the Model Server instead",
+            )
+
     def _validate_request(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
         """Apply, consume or reject every request field, so no control is dropped silently."""
+        self._validate_output_budget(body)
         if body.model is not None and body.model != self._model_name():
             raise HTTPException(422, "mini-SWE request model must match the configured model")
         if body.stream:
@@ -466,7 +477,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             for name, value in body.model_dump(mode="json", exclude_none=True).items()
             if name in FORWARDED_REQUEST_FIELDS
         }
-        max_output_tokens = model_kwargs.pop("max_output_tokens", None)
         directory = state.session.session_dir
         capture_key = state.request.episode_id.capture_key
         model_kwargs.update(
@@ -477,8 +487,6 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             max_retries=0,
             # Ownership of every model call, failed ones included, for the invocation reported at close.
             extra_headers={"x-session-id": capture_key},
-            # LiteLLM's OpenAI adapter raises caps below 16; the Model Server validates the requested cap instead.
-            extra_body={"max_output_tokens": max_output_tokens} if max_output_tokens is not None else {},
         )
         context = state.task_context
         environment_variables = dict(state.request.sandbox_access.env) if state.request.sandbox_access else {}
@@ -691,6 +699,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
     async def run(self, body: MiniSWEAgentRunRequest) -> MiniSWEAgentVerifyResponse:
         if self.config.env is None:
             raise HTTPException(422, "mini-SWE /run requires env (docker or singularity); agent sessions do not")
+        self._validate_output_budget(body.responses_create_params)
         async with self.sem:
             model_server_name = self.config.model_server.name
             global_config_dict = self.server_client.global_config_dict

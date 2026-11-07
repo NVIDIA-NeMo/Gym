@@ -243,6 +243,15 @@ class TestApp:
 
         run_request = create_run_request()
 
+        run_request.responses_create_params.max_output_tokens = 32
+        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+            await server.run(run_request)
+        assert refused.value.status_code == 422
+        mock_get_config_path.assert_not_called()
+        mock_runner_ray_remote.remote.assert_not_called()
+        mock_to_thread.assert_not_called()
+
+        run_request.responses_create_params.max_output_tokens = None
         response = await server.run(run_request)
 
         assert_run_response(response)

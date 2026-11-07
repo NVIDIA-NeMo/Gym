@@ -124,14 +124,23 @@ Every model call goes to the rollout-prefixed Model Server URL as `openai/<model
 episode's capture key, which is also the reported invocation ID. LiteLLM's and mini-SWE's own retries are off; the
 Model Server keeps its retry policy. Request fields are handled as follows:
 
-- Forwarded to every model call: `instructions`, `temperature`, `top_p`, `max_output_tokens` (a per-call cap),
-  `reasoning`, `parallel_tool_calls`, `tool_choice`. LiteLLM drops a field that an OpenAI model in its cost map does
+- Forwarded to every model call: `instructions`, `temperature`, `top_p`, `reasoning`, `parallel_tool_calls`,
+  `tool_choice`. LiteLLM drops a field that an OpenAI model in its cost map does
   not support (`mini.yaml` sets `drop_params`).
 - Read by the adapter: the text of every `input` message in order is the task; `metadata.agent_timeout_sec` and the
   seed's `agent_timeout_sec` can only shorten `sandbox_runner_timeout_seconds`; `model` must match the configured
   model. `tools` is not forwarded: mini-SWE offers the model only its bash tool, and granted tools are reached through it.
   A request with `tools` and no MCP server to reach them is refused with HTTP 422; set `resources_tool_transports: [mcp]`.
 - Any other field with a non-default value is refused with HTTP 422.
+
+Agent sessions and the legacy SWE-Gym `/run` reject request-level `max_output_tokens` with HTTP 422 before binding
+the activation or starting legacy work: mini-SWE cannot enforce a shared output-token budget across its model calls.
+Previously sessions reused this value as a separate cap on every call, while the legacy fork accepted it without
+enforcing it. Remove `responses_create_params.max_output_tokens` from task rows (or omit `max_output_tokens`
+from direct activation requests). To retain a per-call cap with the Chat Completions vLLM Model Server, set
+`policy_model.responses_api_models.vllm_model.extra_body.max_tokens`, for example `8192`; for a Responses-native
+Model Server, set its `extra_body.max_output_tokens` instead. These server settings remain per-call limits. If the
+legacy `/run` uses `policy_base_url` to bypass the Gym Model Server, configure the limit at that model endpoint.
 
 ### Tools
 
