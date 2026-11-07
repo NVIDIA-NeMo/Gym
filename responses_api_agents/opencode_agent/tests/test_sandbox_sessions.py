@@ -1042,6 +1042,26 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
 
 
+def test_with_token_capture_a_seed_refuses_build_steps(setup):
+    agent, sandbox = setup
+    agent.server_client.global_config_dict = OmegaConf.create(
+        {
+            "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
+            "token_id_capture": {"enabled": True, "all_agents": True},
+        }
+    )
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert refused.status_code == 422
+        # OpenCode's last-step prompt is an assistant message, which capture cannot join to the earlier calls.
+        assert "agent.build.steps cannot be used with token capture" in refused.json()["detail"]
+        sandbox.exec.assert_not_awaited()
+        # compaction.auto keeps capture whole, so it stays allowed.
+        agent.config.opencode_config = {"compaction": {"auto": False}}
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+
+
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)
