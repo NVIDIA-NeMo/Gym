@@ -38,10 +38,12 @@ This legacy `/run` path is deprecated and will be removed after the Environment 
 
 The `gdp_pdf/opencode` benchmark gives OpenCode the raw PDF to inspect with shell,
 Python and image tools. Follow the [preparation and evaluation recipe](https://github.com/NVIDIA-NeMo/Gym/tree/main/resources_servers/gdp_pdf#gdppdf-with-opencode)
-to build the tools image, select a sandbox provider, connect an image/tool-capable
+to build the tools image, configure a sandbox provider, connect an image/tool-capable
 model endpoint and configure judge credentials. This evaluates the benchmark;
 the single-turn GDP.pdf recipe instead prepares rendered pages and extracted text.
-Web tools are disabled; network isolation depends on the sandbox provider.
+The Docker recipe uses an internal network to block internet access while allowing
+the Gym model proxy at its gateway. Other providers need equivalent deployment
+isolation. The tools image includes OpenCode for offline startup.
 
 ### Kilo MCP and sandbox ownership
 

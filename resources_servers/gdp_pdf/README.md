@@ -233,26 +233,36 @@ OpenCode receives the raw PDF at `/workspace/document.pdf` and the question.
 It can inspect text/images and run Python; the existing grader scores only the
 final answer. Rubrics and reference answers stay outside the sandbox.
 
+Run Gym on the Linux Docker host. Create an internal network and bind only the
+Gym policy-model server to its gateway; the model server forwards inference to
+your API or vLLM endpoint using the host's network.
+
 ```bash
-docker build -t gdp-pdf-tools resources_servers/gdp_pdf
+docker build -f resources_servers/gdp_pdf/Dockerfile -t gdp-pdf-tools .
+docker network create --internal gdp-pdf
+GDP_MODEL_HOST=$(docker network inspect gdp-pdf --format '{{(index .IPAM.Config 0).Gateway}}')
 gym eval prepare --config benchmarks/gdp_pdf/opencode.yaml \
   +gdp_pdf_sandbox_image=gdp-pdf-tools
 gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
   --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml \
   +gdp_pdf_sandbox_image=gdp-pdf-tools \
-  ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
+  ++sandbox.docker.create.network=gdp-pdf \
+  ++policy_model.responses_api_models.vllm_model.host="$GDP_MODEL_HOST" \
   +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
   +policy_model_name=MODEL --split benchmark --num-repeats 5 \
   --output results/gdp-pdf-opencode.jsonl
 ```
 
-Set judge credentials in private `env.yaml`. `GYM_HOST_IP` must be reachable from
-Docker: the sandbox calls Gym, which forwards to the image/tool-capable inference
-endpoint. Swap the provider config for other deployments. OpenCode 1.17.11 installs
-in the sandbox; preinstall it for offline use. Defaults are eight concurrent episodes,
-16,384 output tokens per model call and a two-hour timeout, with no episode turn cap.
-Web tools are disabled; shell networking follows the provider policy.
+Set judge credentials in private `env.yaml`. Keep the other Gym servers on their
+loopback defaults. Docker's internal network blocks internet access, including
+shell requests, while permitting the model proxy at the gateway. Host services
+bound to that gateway are also reachable, so expose only the model proxy there.
+With Docker in a VM, run Gym inside that VM. Other sandbox providers remain
+supported; configure equivalent network isolation in their deployment.
+OpenCode 1.17.11 and document tools are preinstalled in the image.
+Defaults are eight concurrent episodes, 16,384 output tokens per model call and a
+two-hour timeout, with no episode turn cap.
 
 For your own tasks, override the agent's dataset with GDP.pdf rows (`source_pdf`,
 `prompt`, `criteria` in `verifier_metadata`); never train on benchmark questions.
