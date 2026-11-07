@@ -1,0 +1,30 @@
+name: mcp_atlas
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: agent
+description: MCP-Atlas public set (500 tasks, ScaleAI/MCP-Atlas@8c563b55), tool use against 36 real MCP servers
+  in a per-rollout sandbox; reward 1 when LLM-judged claim coverage is at least 0.75.
+modality: text
+licensing: CC-BY-4.0 AND MIT
+authors:
+- wprazuch
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: mcp_atlas
+agent_server: simple_agent
+datasets:
+- name: mcp_atlas
+  type: benchmark
+  jsonl_fpath: benchmarks/mcp_atlas/data/mcp_atlas_benchmark.jsonl
+  prepare_script: benchmarks/mcp_atlas/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

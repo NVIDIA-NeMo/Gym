@@ -1,0 +1,21 @@
+config_paths:
+  - resources_servers/mcp_atlas/configs/mcp_atlas.yaml
+
+mcp_atlas_benchmark_simple_agent:
+  _inherit_from: mcp_atlas_simple_agent
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: mcp_atlas
+        type: benchmark
+        jsonl_fpath: benchmarks/mcp_atlas/data/mcp_atlas_benchmark.jsonl
+        prepare_script: benchmarks/mcp_atlas/prepare.py
+        num_repeats: 1
+        license: Creative Commons Attribution 4.0 International
+
+mcp_atlas_benchmark_environment_server:
+  _inherit_from: mcp_atlas_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: mcp_atlas_benchmark_simple_agent
