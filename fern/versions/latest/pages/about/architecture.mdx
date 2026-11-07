@@ -39,7 +39,7 @@ Each task attempt is an *episode*. Rollout collection sends every episode to an 
 1. **Seed** — The Environment Server receives a task row from the dataset and seeds a session on the Resources Server, which sets up isolated state for this task. It then seeds a session on the Agent Server, passing along any tool and sandbox access that the Resources Server returned.
 2. **Agent Loop** — The Environment Server activates the agent session. The agent calls a model for inference, then routes tool calls to either its own tools or the Resources Server. This repeats until the agent decides the task is complete.
 3. **Close and Verify** — The Environment Server closes the agent session, then asks the Resources Server to score the attempt. The verifier inspects the final state and returns a reward signal.
-4. **Clean up** — The Environment Server closes the Resources Server session, which releases per-task state such as sandboxes.
+4. **Clean up** — The Environment Server closes the resources session, which releases per-task state such as sandboxes.
 
 ```mermaid
 sequenceDiagram

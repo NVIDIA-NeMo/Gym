@@ -4,7 +4,7 @@
 Servers drive it.
 
 What an episode does (apps, faults, checks, reward) is OfficeEnv's and tested there; these tests
-cover the routes, statuses, session cookies, the Environment Server session contract, the MCP
+cover the routes, statuses, session cookies, the episode session contract, the MCP
 exposure, artifact stores and Gym's response fields, and that the committed example rows still
 match the pinned OfficeEnv release."""
 
@@ -306,10 +306,10 @@ def test_the_row_schema_and_the_seed_request_declare_the_taskspec_alike() -> Non
         assert model.model_config["extra"] == "allow", model
 
 
-# Environment Server episodes: typed seed and close.
+# Episode sessions: episode seed and close.
 
 
-def test_environment_server_sessions_keep_the_resources_session_contract(server: OfficeEnvResourcesServer) -> None:
+def test_episode_sessions_keep_the_resources_session_contract(server: OfficeEnvResourcesServer) -> None:
     def holds_state(session_id: str) -> bool:
         return session_id in server.service.store.sessions or session_id in server.service.notes
 
@@ -343,7 +343,7 @@ def test_an_environment_server_episode_runs_under_its_resources_session_id(
     assert client.post("/seed_session", json=seed.model_dump(mode="json")).status_code == 409
 
 
-def test_a_seed_binds_its_id_to_one_episode_and_close_frees_an_unverified_world(
+def test_a_seed_binds_its_id_to_one_episode_and_close_releases_an_unverified_world(
     client: TestClient, server: OfficeEnvResourcesServer
 ) -> None:
     seed = seed_request()
@@ -358,7 +358,7 @@ def test_a_seed_binds_its_id_to_one_episode_and_close_frees_an_unverified_world(
     assert client.post("/close_session", json=close_body(seed, rollout_id="r2")).status_code == 409
 
 
-def test_a_refused_typed_seed_keeps_officeenvs_code_and_leaves_the_id_free(
+def test_a_refused_episode_seed_keeps_officeenvs_code_and_leaves_the_id_free(
     client: TestClient, server: OfficeEnvResourcesServer
 ) -> None:
     seed = seed_request()
@@ -369,7 +369,7 @@ def test_a_refused_typed_seed_keeps_officeenvs_code_and_leaves_the_id_free(
     assert client.post("/seed_session", json=seed_request().model_dump(mode="json")).status_code == 200
 
 
-def test_retiring_a_session_frees_its_world(client: TestClient, server: OfficeEnvResourcesServer) -> None:
+def test_retiring_a_session_releases_its_world(client: TestClient, server: OfficeEnvResourcesServer) -> None:
     cookies = client.post("/seed_session", json=gym_row(SPEC, PROMPT)).cookies
     (session_id,) = server.service.store.sessions
     asyncio.run(server.retire_session_state(session_id))
@@ -408,7 +408,7 @@ def corpus_row(store: Path) -> dict:
     return row | {"officeenv": externalize(row["officeenv"], store, min_bytes=1024)}
 
 
-def typed_seed(row: dict) -> dict:
+def episode_seed(row: dict) -> dict:
     """The seed an Environment Server sends for ``row``."""
     return ResourcesSeedSessionRequest(
         resources_session_id="rs-1",
@@ -439,9 +439,9 @@ def test_both_seeds_read_a_moved_corpus_back_from_the_store_beside_its_rows(tmp_
     assert seeded.status_code == 200, seeded.text
     assert drive_files(client, seeded.cookies) == (BOOK_B64, LEDGER)
 
-    typed = client.post("/seed_session", json=typed_seed(row))
-    assert typed.status_code == 200, typed.text
-    assert drive_files(client, typed.cookies) == (BOOK_B64, LEDGER)
+    episode_seeded = client.post("/seed_session", json=episode_seed(row))
+    assert episode_seeded.status_code == 200, episode_seeded.text
+    assert drive_files(client, episode_seeded.cookies) == (BOOK_B64, LEDGER)
 
 
 def test_stores_are_searched_in_order(tmp_path: Path) -> None:
@@ -468,8 +468,11 @@ def test_a_row_whose_artifacts_cannot_be_read_is_refused_and_seeds_nothing(tmp_p
         refused = client.post("/seed_session", json=row)
         assert refused.status_code == 400, refused.text
         assert refused.json()["detail"]["error"]["code"] == "missing_artifact"
-        typed = client.post("/seed_session", json=typed_seed(row))
-        assert typed.status_code == 400 and typed.json()["detail"]["error"]["code"] == "missing_artifact"
+        episode_seeded = client.post("/seed_session", json=episode_seed(row))
+        assert (
+            episode_seeded.status_code == 400
+            and episode_seeded.json()["detail"]["error"]["code"] == "missing_artifact"
+        )
         assert len(server.service.store) == 0 and server._episodes == {}
         assert client.post("/seed_session", json=gym_row(DRIVE_SPEC, "x")).status_code == 200  # no references
 

@@ -452,7 +452,7 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
 
         if not disabled:
             assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
-            assert stdout.index("Finished rollout collection") < stdout.index("Rollout checks")
+            assert stdout.index("Finished rollout collection") < stdout.index("run health (failures vs limit)")
             assert not caplog.records
 
     assert artifacts[False] == artifacts[True]
@@ -1458,7 +1458,7 @@ def test_process_pool_success_path_and_explicit_rollout_file(
     result = health.health_check_run_dir(run_dir, workers=2)
 
     assert len(result.rollouts) == 2
-    assert "2 checked" in capsys.readouterr().out
+    assert "rollout quality: 0 healthy / 2 unhealthy / 0 unobserved" in capsys.readouterr().out
 
     custom_path = run_dir / "custom-name.jsonl"
     rollout_path.rename(custom_path)
@@ -3950,8 +3950,8 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
     report = health.format_health_report(
         SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
     )
-    assert "Rollout checks: 1600 checked, 1599 passed, 1 flagged, 0 unobserved" in report
-    assert "Rollout health:" not in report
+    assert "rollout quality: 1599 healthy / 1 unhealthy / 0 unobserved" in report
+    assert "run health (failures vs limit): not evaluated; limit final none, not final none" in report
     if responses is None:
         assert "Model responses:" not in report
     else:
@@ -3959,6 +3959,30 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
         assert f"{responses['unknown']} rollout scopes unobserved" in report
         assert f"{responses['duplicated']} duplicate call IDs" in report
     assert summary == original
+
+
+@pytest.mark.parametrize(
+    ("healthy", "reasons", "status"),
+    [(True, [], "healthy"), (False, ["final failures 3 of 100 (3.0%), limit 2%"], "UNHEALTHY")],
+)
+def test_console_reports_failure_counts_and_the_two_limits(healthy, reasons, status, tmp_path):
+    from types import SimpleNamespace
+
+    artifacts = {
+        "healthy": healthy,
+        "expected": 100,
+        "failed": {"final": 3, "not_final": 5},
+        "limits": {"max_final_failure_fraction": 0.02, "max_not_final_failure_fraction": 0.1},
+        "unhealthy_reasons": reasons,
+    }
+    summary = {
+        "run": {"verdicts": {"healthy": 100, "unhealthy": 0, "unobserved": 0}, "stats": {}, "artifacts": artifacts}
+    }
+    report = health.format_health_report(
+        SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
+    )
+    expected = f"run health (failures vs limit): {status}; failed 3 final, 5 not final of 100 expected; limit final 2%, not final 10%"
+    assert expected + ("; " + reasons[0] if reasons else "") in report
 
 
 @pytest.mark.parametrize("mode", ["enabled", "disabled", "missing", "relative"])
