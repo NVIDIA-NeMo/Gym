@@ -566,6 +566,17 @@ def is_namespaced(name: str) -> bool:
 _WARNED_UNKNOWN: set[str] = set()
 
 
+def failure_domain(name: str) -> str:
+    """The layer that observed a failure: the part of ``name`` before the first ``_`` or ``:``.
+
+    Names are ``<domain>_<condition>``, and an environment's own names are ``<server>:<kind>``, so
+    ``agent_run_error`` is in ``agent``, ``judge_failed`` in ``judge`` and ``myenv:bad_input`` in ``myenv``.
+    A name with neither, such as ``cancelled``, is its own domain. A new name under an existing domain needs
+    no change from a caller that groups failures by domain.
+    """
+    return re.split(r"[_:]", name, maxsplit=1)[0]
+
+
 def validate_failure_kind(name: str | None) -> str | None:
     """Return ``name`` unchanged, warning once per unregistered value.
 

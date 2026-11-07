@@ -116,7 +116,9 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
 # deprecation first. Update this list in the same change.
 EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "PlannedBenchmark": ["plan", "rows"],
-    "TaskResult": ["task_id", "rewards", "results"],
+    "TaskResult": ["task_id", "rewards", "results", "outcomes"],
+    "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output"],
+    "TaskFailure": ["kind", "domain", "reason"],
 }
 
 
@@ -145,7 +147,16 @@ def test_in_process_result_types_keep_their_fields(type_name: str):
 def test_everything_an_external_caller_needs_is_exported_from_the_environment_package():
     import nemo_gym.environment as environment
 
-    for name in ("plan_benchmark", "serve_benchmark", "TaskRunner", "PlannedBenchmark", "TaskResult", "EvalPlan"):
+    for name in (
+        "plan_benchmark",
+        "serve_benchmark",
+        "TaskRunner",
+        "PlannedBenchmark",
+        "TaskResult",
+        "RolloutOutcome",
+        "TaskFailure",
+        "EvalPlan",
+    ):
         assert name in environment.__all__
         assert getattr(environment, name) is not None
 

@@ -15,6 +15,8 @@ if TYPE_CHECKING:
     from nemo_gym.environment.in_process import (
         EvalPlan,
         PlannedBenchmark,
+        RolloutOutcome,
+        TaskFailure,
         TaskResult,
         TaskRunner,
         plan_benchmark,
@@ -33,6 +35,8 @@ _PUBLIC_API = {
     "EvalPlan": "in_process",
     "IGNORE_FILES": "deliverables",
     "PlannedBenchmark": "in_process",
+    "RolloutOutcome": "in_process",
+    "TaskFailure": "in_process",
     "TaskResult": "in_process",
     "TaskRunner": "in_process",
     "discover_agents": "agent_registry",

@@ -17,9 +17,12 @@
 import logging
 import re
 
+import pytest
+
 from nemo_gym.core import failure_kinds
 from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
+    failure_domain,
     is_namespaced,
     is_registered,
     validate_failure_kind,
@@ -66,6 +69,26 @@ class TestNamingConvention:
         undomained = {n for n in FAILURE_KINDS if not n.startswith(domains)} - lifecycle - producer_labels
 
         assert undomained == set()
+
+
+class TestFailureDomain:
+    @pytest.mark.parametrize(
+        ("name", "domain"),
+        [
+            ("agent_run_error", "agent"),
+            ("judge_failed", "judge"),
+            ("session_lost", "session"),
+            ("provider_unavailable", "provider"),
+            ("myenv:bad_input", "myenv"),
+            ("cancelled", "cancelled"),
+        ],
+    )
+    def test_the_domain_is_the_part_before_the_first_separator(self, name: str, domain: str) -> None:
+        assert failure_domain(name) == domain
+
+    def test_every_registered_name_is_grouped_under_a_domain_it_starts_with(self) -> None:
+        for name in FAILURE_KINDS:
+            assert failure_domain(name) and name.startswith(failure_domain(name))
 
 
 class TestRegistryLookup:
