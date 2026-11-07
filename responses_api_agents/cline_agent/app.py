@@ -850,44 +850,66 @@ class ClineAgent(SimpleResponsesAPIAgent):
             )
         access = body.sandbox_access
         owns_sandbox = access is None
-        if owns_sandbox:
-            if not self.config.sandbox_provider:
-                raise AgentSeedRejectedError("Cline requires sandbox_access or a configured sandbox_provider")
-            settings = {"workdir": "/app", **self.config.sandbox_config}
-            settings["metadata"] = {
-                **resolve_provider_metadata(self.config.sandbox_provider, self.server_client.global_config_dict),
-                **(settings.get("metadata") or {}),
-                "gym-agent": "cline",
-                "gym-session": body.agent_session_id[:63],
-                "gym-rollout": body.episode_id.capture_key[:63],
-            }
-            # Provider TTLs outlive this server: cover installation and the run, plus ten minutes for close.
-            settings.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
-            spec = SandboxSpec(**settings)
-            workdir, provider_ref = spec.workdir, self.config.sandbox_provider
-        else:
-            if not isinstance(access.connection, DirectSandboxConnection):
-                raise AgentSeedRejectedError("Cline supports only direct SandboxAccess")
-            workdir, provider_ref = access.workdir, access.connection.provider_config_ref
-        path = PurePosixPath(workdir or "")
-        if (
-            not path.is_absolute()
-            or ".." in path.parts
-            or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
-            or str(path).startswith((SESSION_ROOT, RUNTIME_PREFIX))
-        ):
-            raise AgentSeedRejectedError(
-                "Cline sandbox workdir must be absolute and separate from its session storage"
-            )
+        try:
+            if owns_sandbox:
+                if not self.config.sandbox_provider:
+                    raise AgentSeedRejectedError("Cline requires sandbox_access or a configured sandbox_provider")
+                settings = {"workdir": "/app", **self.config.sandbox_config}
+                settings["metadata"] = {
+                    **resolve_provider_metadata(self.config.sandbox_provider, self.server_client.global_config_dict),
+                    **(settings.get("metadata") or {}),
+                    "gym-agent": "cline",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
+                # Provider TTLs outlive this server: cover installation and the run, plus ten minutes for close.
+                settings.setdefault("ttl_s", self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
+                spec = SandboxSpec(**settings)
+                workdir, provider_ref = spec.workdir, self.config.sandbox_provider
+            else:
+                if not isinstance(access.connection, DirectSandboxConnection):
+                    raise AgentSeedRejectedError("Cline supports only direct SandboxAccess")
+                workdir, provider_ref = access.workdir, access.connection.provider_config_ref
+            if not isinstance(workdir, str):
+                raise AgentSeedRejectedError("Cline sandbox workdir must be an absolute path string")
+            path = PurePosixPath(workdir)
+            if (
+                not path.is_absolute()
+                or ".." in path.parts
+                or path in (PurePosixPath("/"), PurePosixPath("/tmp"))
+                or str(path).startswith((SESSION_ROOT, RUNTIME_PREFIX))
+            ):
+                raise AgentSeedRejectedError(
+                    "Cline sandbox workdir must be absolute and separate from its session storage"
+                )
 
-        provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
+            provider = create_provider(resolve_provider_config(provider_ref, self.server_client.global_config_dict))
+        except AgentSeedRejectedError:
+            raise
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(str(error)) from error
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
         else:
             try:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
             except BaseException:
-                await provider.aclose()
+                try:
+                    await provider.aclose()
+                except BaseException as cleanup_error:
+                    LOG.exception("Cline provider cleanup failed after connect failed")
+                    if isinstance(cleanup_error, NgFailureEvent):
+                        observe_failure(cleanup_error)
+                    else:
+                        cleanup_failure = NgFailureEvent(
+                            boundary="sandbox",
+                            failure_kind="session_release_failed",
+                            failure_reason=f"Cline provider cleanup failed: {type(cleanup_error).__name__}",
+                            operation="aclose",
+                            stage="cleanup",
+                        )
+                        cleanup_failure.__cause__ = cleanup_error
+                        observe_failure(cleanup_failure)
                 raise
         state = ClineSandboxSession(
             request=body,
