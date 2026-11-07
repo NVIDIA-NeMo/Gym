@@ -2031,6 +2031,10 @@ class TestInstruction:
         # query-optimize starts that way, and the legacy server passed it through).
         path.write_text("\nStarts after a blank line.\n")
         assert read_instruction(path) == "\nStarts after a blank line.\n"
+        path.write_bytes(b"\r\nKeep CRLF\r\nand bare CR\rhere.\n")
+        assert read_instruction(path) == "\r\nKeep CRLF\r\nand bare CR\rhere.\n"
+        path.write_bytes(b"<!-- canary marker -->\r\n\r\nKeep CRLF\r\nand CR\rhere.\n")
+        assert read_instruction(path) == "Keep CRLF\r\nand CR\rhere.\n"
 
 
 @pytest.mark.usefixtures("fake_registry")
