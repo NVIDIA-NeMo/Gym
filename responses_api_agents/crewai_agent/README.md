@@ -65,13 +65,14 @@ crewai_agent:
 ```
 
 Put `policy_base_url`, `policy_api_key` and `policy_model_name` in `env.yaml`, and export `OPENSANDBOX_DOMAIN` and
-`OPENSANDBOX_API_KEY`. The benchmark declares `crewai_agent` in its `allowed_agents`. Materialized task rows take no
-request overrides, so put a per-call output cap on the Model Server (`sampling_overrides: {max_tokens: 8192}`) rather
-than on `gym eval run`:
+`OPENSANDBOX_API_KEY`. This is a development pairing: the benchmark does not declare `crewai_agent` in its
+`allowed_agents`, and the full benchmark evaluation is pending. Pass `--allow-unsupported-pairing` to both commands.
+Materialized task rows take no request overrides, so put a per-call output cap on the Model Server
+(`sampling_overrides: {max_tokens: 8192}`) rather than on `gym eval run`:
 
 ```bash
-gym env start --config run.yaml
-gym eval run --no-serve --config run.yaml \
+gym env start --config run.yaml --allow-unsupported-pairing
+gym eval run --no-serve --config run.yaml --allow-unsupported-pairing \
   --input results/tb21-input.jsonl --output results/crewai-tb21/rollouts.jsonl --concurrency 1
 ```
 

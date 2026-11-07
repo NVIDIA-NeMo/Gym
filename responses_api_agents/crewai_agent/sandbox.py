@@ -11,7 +11,7 @@ from shlex import quote
 from typing import Any
 
 from nemo_gym.agents import AgentSessionState, SandboxCommand, SandboxPythonRuntime, SandboxSession
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import read_text, upload_text
 
 
@@ -41,6 +41,7 @@ class CrewAISessionState(AgentSessionState):
     # The sandbox's provider and ID, kept for the close bundle: a released sandbox no longer reports them.
     sandbox_provider: str | None = None
     sandbox_id: str | None = None
+    provider_wait_failure: NgFailureEvent | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = field(default=None)
 

@@ -67,7 +67,7 @@ class ModelServer:
     Once the answers run out, the last one answers every later request, as a server that keeps rejecting does.
     """
 
-    def __init__(self, answers: list[dict | int | None]) -> None:
+    def __init__(self, answers: list[dict | int | tuple[int, dict] | None]) -> None:
         self.answers = list(answers)
         self.requests: list[dict[str, Any]] = []
         self.blocked = threading.Event()
@@ -84,8 +84,13 @@ class ModelServer:
                     server.release.wait(60)
                     return
                 status, answer = (
-                    (answer, {"error": {"message": "rejected"}}) if isinstance(answer, int) else (200, dict(answer))
+                    answer
+                    if isinstance(answer, tuple)
+                    else (answer, {"error": {"message": "rejected"}})
+                    if isinstance(answer, int)
+                    else (200, dict(answer))
                 )
+                answer = dict(answer)
                 cookies = answer.pop(_SET_COOKIES, {})
                 payload = json.dumps(answer).encode()
                 self.send_response(status)

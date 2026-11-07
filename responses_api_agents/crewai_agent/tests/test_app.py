@@ -277,6 +277,8 @@ async def test_an_episode_runs_one_crew_turn_in_the_lent_sandbox(lent_sandbox, r
     assert response.output[0].call_id == response.output[1].call_id == "chatcmpl-1-call-0"
     assert response.output[2].content[0].text == "Wrote hello; the {braces} stay."
     assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (20, 10, 30)
+    assert response.usage.input_tokens_details.cached_tokens is None
+    assert response.usage.output_tokens_details.reasoning_tokens is None
 
     assert close.cleanup_confirmed is True and close.trajectory is None
     [invocation] = _records(close, "agent_invocation")
@@ -708,3 +710,116 @@ async def test_an_owned_sandbox_takes_the_network_policy_and_a_lent_one_refuses_
     agent = _agent(sandbox_provider="sandbox", sandbox_config={"workdir": str(tmp_path)}, network_access="model_only")
     with pytest.raises(AgentSeedRejectedError):
         await agent._seed_agent_session_state(_seed())
+
+
+@pytest.mark.parametrize("provider_config", [{"missing_provider": {}}, {"local": 17}])
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_invalid_provider_configuration_is_a_final_seed_refusal(monkeypatch, provider_config, borrowed):
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"lender": provider_config})
+    monkeypatch.setattr(app, "assert_model_url_reachable_from_sandbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(CrewAIAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    connect, start = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(AsyncSandbox, "connect", connect)
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    agent = _agent(**({} if borrowed else {"sandbox_provider": "lender", "sandbox_config": {"workdir": "/app"}}))
+    seed = _seed(sandbox_access=_access()) if borrowed else _seed()
+
+    from nemo_gym.agents import check_agent_seed_rejected
+
+    assert check_agent_seed_rejected(agent.setup_webserver(), seed)
+    connect.assert_not_awaited()
+    start.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_connect_failure_survives_provider_cleanup_failure(monkeypatch, cleanup_fails):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog
+
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="provider_unavailable", failure_reason="connect failed", stage="seed"
+    )
+    cleanup = NgFailureEvent(
+        boundary="sandbox", failure_kind="session_release_failed", failure_reason="close failed", stage="cleanup"
+    )
+    provider = SimpleNamespace(aclose=AsyncMock(side_effect=cleanup if cleanup_fails else None))
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"lender": {"local": {}}})
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    monkeypatch.setattr(app, "assert_model_url_reachable_from_sandbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(CrewAIAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(AsyncSandbox, "connect", AsyncMock(side_effect=original))
+
+    with RequestFailureLog.capture() as failure_log:
+        with pytest.raises(NgFailureEvent) as raised:
+            await _agent()._seed_agent_session_state(_seed(sandbox_access=_access()))
+    assert raised.value is original
+    assert raised.value.stage == "seed"
+    provider.aclose.assert_awaited_once()
+    if cleanup_fails:
+        assert cleanup.event_id in failure_log.reply_report(original).events
+
+
+@linux_only
+async def test_explicit_context_rejection_keeps_partial_work_gradable(lent_sandbox, runtime, monkeypatch):
+    _, access = lent_sandbox
+    model = _model(monkeypatch, (400, {"error": {"code": "context_length_exceeded", "message": "limit"}}))
+    try:
+        response, close = await _episode(_agent(), access)
+    finally:
+        model.close()
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.metadata["crewai_stop_reason"] == "context_limit"
+    [invocation] = _records(close, "agent_invocation")
+    assert invocation.stop_reason == "context_limit"
+
+
+@pytest.mark.parametrize("with_original_event", [False, True])
+async def test_confirmed_deadline_retains_provider_timeout_and_replays_it_on_close(monkeypatch, with_original_event):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog
+    from responses_api_agents.crewai_agent.sandbox import CrewAISessionState
+
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="provider wait", stage="agent"
+    )
+    failure = TimeoutError("provider wait expired")
+    if with_original_event:
+        failure.__cause__ = original
+    from responses_api_agents.crewai_agent.sandbox_runner import Transcript
+
+    report = {
+        **Transcript(_EPISODE.capture_key).report(),
+        "status": "incomplete",
+        "stop_reason": "wall_time",
+        "error_type": None,
+        "error_message": None,
+    }
+    session = SimpleNamespace(
+        artifacts=report,
+        workdir="/app",
+        stop_request_path="/tmp/stop.request",
+        expired=False,
+        execution_oom=None,
+        sandbox_stopped=False,
+        cleanup_confirmed=True,
+    )
+    state = CrewAISessionState(request=_seed(sandbox_access=_access()), session=session, grants=[])
+    agent = _agent()
+    monkeypatch.setattr(CrewAIAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(CrewAISessionState, "execute", AsyncMock(side_effect=failure))
+    monkeypatch.setattr(CrewAISessionState, "close", AsyncMock())
+    body = _body()
+    state.activation_request = body
+    with RequestFailureLog.capture() as activation_log:
+        response = await agent._activate(state, agent._instruction(state, body))
+    saved = activation_log.reply_report(None)
+    assert response.status == "incomplete"
+    assert saved.failure_id is None
+    observed = saved.events[state.provider_wait_failure.event_id]
+    assert observed.failure_kind == "transport_timeout"
+    assert observed.foreign_error.message == "provider wait expired"
+    if with_original_event:
+        assert observed.cause_id == original.event_id
+        assert original.event_id in saved.events
+    with RequestFailureLog.capture() as close_log:
+        await agent._close_agent_session_state(state)
+    assert close_log.reply_report(None) == saved

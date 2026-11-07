@@ -11,6 +11,7 @@ Agent Server turns the runner's report into the response and the close bundle.
 """
 
 import asyncio
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import PurePosixPath
@@ -41,6 +42,7 @@ from nemo_gym.agents import (
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
@@ -48,6 +50,9 @@ from nemo_gym.core import (
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    observe_failure,
+    sdk_error_details,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -68,6 +73,9 @@ from nemo_gym.trajectory import (
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.crewai_agent.sandbox import SESSION_ROOT, CrewAISessionState
+
+
+LOG = logging.getLogger(__name__)
 
 
 OBSERVATION_SOURCE = "crewai_agent"
@@ -182,7 +190,7 @@ def _text(content: Any) -> str | None:
     return "\n".join(texts)
 
 
-def _usage(usage: Mapping[str, int] | None) -> NeMoGymResponseUsage | None:
+def _usage(usage: Mapping[str, int | None] | None) -> NeMoGymResponseUsage | None:
     if usage is None:
         return None
     return NeMoGymResponseUsage(
@@ -259,8 +267,11 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 )
             provider_ref, workdir = access.connection.provider_config_ref, access.workdir
         elif self.config.sandbox_provider is not None:
-            spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
-            if not PurePosixPath(spec.workdir or "").is_absolute():
+            try:
+                spec = SandboxSpec(**{"workdir": "/app", **self.config.sandbox_config})
+            except (TypeError, ValueError) as error:
+                raise AgentSeedRejectedError(str(error)) from error
+            if not isinstance(spec.workdir, str) or not PurePosixPath(spec.workdir).is_absolute():
                 raise AgentSeedRejectedError("CrewAI needs an absolute sandbox_config.workdir")
             provider_ref, workdir = self.config.sandbox_provider, spec.workdir
         else:
@@ -268,14 +279,15 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 "CrewAI runs in a task sandbox: the session lends none and the agent has no sandbox_provider"
             )
         global_config = get_global_config_dict()
-        provider_config = resolve_provider_config(provider_ref, global_config)
         try:
+            provider_config = resolve_provider_config(provider_ref, global_config)
             # The runner calls the Model Server from inside the sandbox, which cannot reach a loopback address.
             assert_model_url_reachable_from_sandbox(
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
                 provider_name=next(iter(provider_config), None),
             )
-        except ValueError as error:
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
         grants = [
             {
@@ -288,7 +300,6 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             if isinstance(grant, MCPToolAccess)
         ]
 
-        provider = create_provider(provider_config)
         try:
             if spec is None:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
@@ -313,8 +324,23 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 sandbox = AsyncSandbox(provider)
                 await sandbox.start(spec)
         except BaseException:
-            # No session owns the provider yet.
-            await provider.aclose()
+            # Cleanup must not replace the original connection/start failure.
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("CrewAI provider cleanup failed after sandbox setup failed")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason="CrewAI provider cleanup failed",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
             raise
         state = CrewAISessionState(
             request=body,
@@ -342,6 +368,8 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, CrewAISessionState):
             raise TypeError("Expected a CrewAI session state")
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
         await state.close(self.config.session_close_timeout_seconds)
         # No trajectory: rollout collection builds the turns from the captured calls, and joins every call, failed
         # attempts included, to the invocation by its session header.
@@ -472,12 +500,22 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
                 report = await state.execute(
                     payload, timeout=instruction.timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
-            except TimeoutError:
+            except TimeoutError as failure:
                 # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
                 # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
                 report = state.session.artifacts
                 if not (isinstance(report, dict) and report.get("stop_reason") == "wall_time"):
                     raise
+                state.provider_wait_failure = NgFailureEvent(
+                    boundary="sandbox",
+                    failure_kind="transport_timeout",
+                    failure_reason="Sandbox provider wait expired after CrewAI reported its deadline",
+                    operation="exec_wait",
+                    stage="agent",
+                    foreign_error=sdk_error_details(failure, message=str(failure)),
+                )
+                state.provider_wait_failure.__cause__ = failure
+                observe_failure(state.provider_wait_failure)
             if report.get("error") is not None:
                 raise RuntimeError(f"CrewAI sandbox runner failed: {report['error']}\n{report.get('traceback', '')}")
             if report.get("configuration_error") is not None:
@@ -492,7 +530,7 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         status, incomplete_details = _response_status(report)
         metadata = {"crewai_model_calls": str(report["model_calls"]), "crewai_tool_calls": str(report["tool_runs"])}
         if status == "incomplete" and incomplete_details is None:
-            metadata["crewai_stop_reason"] = "timeout"
+            metadata["crewai_stop_reason"] = "context_limit" if report["stop_reason"] == "context_limit" else "timeout"
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
@@ -515,6 +553,8 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
         output; CrewAI's other errors are unknown."""
         failure = native_result.get("model_failure") or {}
         status = failure.get("status")
+        if failure.get("context_limit"):
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         if failure.get("transport"):
@@ -554,7 +594,11 @@ class CrewAIAgent(SimpleResponsesAPIAgent):
             invocation_id=invocation_id,
             # The response's status: a final answer cut off at the output cap makes it incomplete.
             status=_response_status(report)[0],
-            stop_reason="timeout" if report["stop_reason"] == "wall_time" else None,
+            stop_reason="timeout"
+            if report["stop_reason"] == "wall_time"
+            else "context_limit"
+            if report["stop_reason"] == "context_limit"
+            else None,
             error_type=error_type if outcome in ("failed", "oom") else None,
             duration_ms=report["duration_ms"],
             model_calls=[

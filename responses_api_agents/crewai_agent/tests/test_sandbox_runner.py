@@ -159,3 +159,65 @@ async def test_tool_runs_join_the_model_calls_that_asked_for_them():
         "cached_token_usage_unavailable",
         "reasoning_token_usage_unavailable",
     }
+
+
+@pytest.mark.parametrize("missing", ["cached", "reasoning"])
+def test_missing_detail_usage_does_not_become_a_known_zero_or_subtotal(missing):
+    from responses_api_agents.crewai_agent.app import _usage
+
+    transcript = Transcript("rollout")
+    for number in (2, 4):
+        usage = {
+            "prompt_tokens": 10,
+            "completion_tokens": 5,
+            "total_tokens": 15,
+            "prompt_tokens_details": {"cached_tokens": number},
+            "completion_tokens_details": {"reasoning_tokens": number},
+        }
+        if number == 2:
+            del usage["prompt_tokens_details" if missing == "cached" else "completion_tokens_details"]
+        transcript._add_usage(usage)
+    report = transcript.report()
+    result = _usage(report["usage"])
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (20, 10, 30)
+    assert result.input_tokens_details.cached_tokens == (None if missing == "cached" else 6)
+    assert result.output_tokens_details.reasoning_tokens == (None if missing == "reasoning" else 6)
+    assert any(gap["code"] == f"{missing}_token_usage_unavailable" for gap in report["gaps"])
+
+
+@_LINUX_PROCESS_GROUPS
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_deleted_scratch_cannot_disable_command_termination(shell, cancel):
+    shell.timeout_seconds = 1
+    workdir = Path(shell.workdir)
+    running = asyncio.create_task(
+        shell.run(f"rm -rf {shell.scratch}; touch started.txt; (sleep 2; touch late.txt) & sleep 10")
+    )
+    await _eventually(lambda: (workdir / "started.txt").exists())
+    if cancel:
+        running.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(running, 5)
+    else:
+        _, status, error_type = await asyncio.wait_for(running, 5)
+        assert (status, error_type) == ("timeout", "timeout")
+    await asyncio.sleep(2.2)
+    assert not (workdir / "late.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ('{"error": {"code": "context_length_exceeded", "message": "limit"}}', True),
+        ('{"error": {"message": "context_length_exceeded"}}', False),
+        ('{"error": {"code": "invalid_request_error"}}', False),
+        ('{"error": "context_length_exceeded"}', False),
+        ("context_length_exceeded", False),
+    ],
+)
+def test_context_limit_requires_the_explicit_provider_code(body, expected):
+    from responses_api_agents.crewai_agent.sandbox_runner import ModelRequestError
+
+    error = ModelRequestError(400, body)
+    assert error.context_limit is expected
+    assert error.status == 400

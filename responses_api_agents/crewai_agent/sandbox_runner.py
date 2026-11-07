@@ -54,6 +54,13 @@ class ModelRequestError(Exception):
         # The upstream body stays in the message: CrewAI reads a context-limit error from it and summarizes.
         super().__init__(f"Model HTTP {status}: {detail}")
         self.status = status
+        try:
+            document = json.loads(detail)
+        except (TypeError, ValueError):
+            document = None
+        error = document.get("error") if isinstance(document, dict) else None
+        # HTTP status alone cannot prove a context limit; use the provider's explicit error code.
+        self.context_limit = isinstance(error, dict) and error.get("code") == "context_length_exceeded"
 
 
 def _retryable(status: int) -> bool:
@@ -390,7 +397,13 @@ class Transcript:
             "model_calls": self.model_calls,
             "tool_runs": len(self.tool_runs),
             "tool_calls": tool_calls,
-            "usage": self.usage,
+            "usage": None
+            if self.usage is None
+            else {
+                **self.usage,
+                "cached": self.usage["cached"] if self.cached_known else None,
+                "reasoning": self.usage["reasoning"] if self.reasoning_known else None,
+            },
             "finish_reason": self.finish_reason,
             "model_failure": self.model_failure,
             "infrastructure_error": self.infrastructure_error,
@@ -537,8 +550,9 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
                     retry += 1
                     continue
                 transcript.model_call_pending = False
-                transcript.model_failure = {"status": status}
-                raise ModelRequestError(status, detail)
+                failure = ModelRequestError(status, detail)
+                transcript.model_failure = {"status": status, "context_limit": failure.context_limit}
+                raise failure
             # A model call that went through clears an earlier failure that CrewAI recovered from.
             transcript.model_call_pending = False
             transcript.model_failure = None
@@ -588,6 +602,8 @@ async def run(payload: dict[str, Any], *, scratch: Path, task_environment: dict[
     report.update(transcript.report())
     if report["infrastructure_error"] is not None:
         report["status"] = "failed"
+    elif report["status"] == "failed" and (report.get("model_failure") or {}).get("context_limit"):
+        report.update(status="incomplete", stop_reason="context_limit", error_message=None)
     return report
 
 
