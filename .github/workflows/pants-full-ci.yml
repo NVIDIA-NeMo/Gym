@@ -1,0 +1,197 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Pants full CPU CI comparison
+run-name: Pants CPU ${{ inputs.replay_token || github.run_number }} source ${{ inputs.source_sha || github.sha }}
+
+on:
+  push:
+    branches: [glovisotto/pants-pilot]
+    paths:
+      - .github/workflows/pants-full-ci.yml
+      - .github/workflows/pants-full-ci-arm.yml
+      - scripts/pants/**
+      - pants.toml
+      - '**/BUILD'
+      - BUILD
+  workflow_dispatch:
+    inputs:
+      replay_token:
+        description: Unique replay dispatch identifier
+        type: string
+        default: ''
+      cache_namespace:
+        description: Isolated forward-only cache namespace
+        type: string
+        default: live
+      source_sha:
+        description: Main commit to compare (empty selects branch merge-base with main)
+        type: string
+        default: ''
+      force_full:
+        description: Run all core and eight server shards, irrespective of source diff
+        type: boolean
+        default: true
+      execution_mode:
+        description: Reuse declared Pants test results, or force a full execution control
+        type: choice
+        options: [incremental, forced]
+        default: incremental
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: pants-full-ci-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PANTS_LOCAL_EXECUTION_ROOT_DIR: /var/tmp/pants-full-ci
+
+jobs:
+  prepare:
+    name: Prepare shared source and routing
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.source.outputs.source_sha }}
+      core_matrix: ${{ steps.route.outputs.core_matrix }}
+      other_matrix: ${{ steps.route.outputs.other_matrix }}
+      coverage: ${{ steps.route.outputs.coverage }}
+      changed_server_files: ${{ steps.route.outputs.changed_server_files }}
+      cache_contract: ${{ steps.source.outputs.cache_contract }}
+      separate_coverage: ${{ steps.route.outputs.separate_coverage }}
+      uv_version: ${{ steps.route.outputs.uv_version }}
+      coverage_runner: ${{ steps.route.outputs.coverage_runner }}
+      coverage_timeout: ${{ steps.route.outputs.coverage_timeout }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: controller
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Resolve immutable main source
+        id: source
+        working-directory: controller
+        env:
+          REQUESTED_SOURCE: ${{ inputs.source_sha }}
+          REPLAY_TOKEN: ${{ inputs.replay_token }}
+          CACHE_NAMESPACE: ${{ inputs.cache_namespace }}
+        run: |
+          set -euo pipefail
+          [[ "$REPLAY_TOKEN" =~ ^[A-Za-z0-9_-]{0,80}$ ]] || { echo 'Invalid replay token'; exit 1; }
+          [[ "$CACHE_NAMESPACE" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]] || { echo 'Invalid cache namespace'; exit 1; }
+          overlay_base=$(git merge-base HEAD origin/main)
+          source_sha=${REQUESTED_SOURCE:-$overlay_base}
+          [[ "$source_sha" =~ ^[a-f0-9]{40}$ ]] || { echo 'Expected a full commit SHA'; exit 1; }
+          git merge-base --is-ancestor "$source_sha" origin/main
+          echo "source_sha=$source_sha" >> "$GITHUB_OUTPUT"
+          echo "parent_sha=$(git rev-parse "$source_sha^")" >> "$GITHUB_OUTPUT"
+          echo "cache_contract=$(git ls-files -z 'scripts/pants/full_ci*.py' scripts/pants/full_ci.toml scripts/pants/full_ci.BUILD scripts/pants/native_core | xargs -0 sha256sum | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ steps.source.outputs.source_sha }}
+          path: sample
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify sampled source once for both arms
+        id: route
+        env:
+          PARENT: ${{ steps.source.outputs.parent_sha }}
+          FORCE_FULL: ${{ inputs.force_full }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+          CACHE_NAMESPACE: ${{ inputs.cache_namespace }}
+          REPLAY_TOKEN: ${{ inputs.replay_token }}
+        run: |
+          flags=()
+          if [[ "$FORCE_FULL" == true ]]; then flags+=(--force-full); fi
+          python3 controller/scripts/pants/full_ci_report.py prepare \
+            --source sample --parent "$PARENT" --experiment-sha "$GITHUB_SHA" \
+            --execution-mode "$EXECUTION_MODE" --cache-namespace "$CACHE_NAMESPACE" --replay-token "$REPLAY_TOKEN" \
+            --output "$RUNNER_TEMP/routing.json" "${flags[@]}"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-ci-plan
+          path: |
+            ${{ runner.temp }}/routing.json
+          if-no-files-found: error
+          retention-days: 14
+
+  baseline:
+    name: baseline
+    needs: prepare
+    uses: ./.github/workflows/pants-full-ci-arm.yml
+    with:
+      engine: baseline
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      core_matrix: ${{ needs.prepare.outputs.core_matrix }}
+      other_matrix: ${{ needs.prepare.outputs.other_matrix }}
+      coverage: ${{ needs.prepare.outputs.coverage == 'true' }}
+      changed_server_files: ${{ needs.prepare.outputs.changed_server_files }}
+      cache_contract: ${{ needs.prepare.outputs.cache_contract }}
+      execution_mode: ${{ inputs.execution_mode }}
+      cache_namespace: ${{ inputs.cache_namespace }}
+      separate_coverage: ${{ needs.prepare.outputs.separate_coverage == 'true' }}
+      uv_version: ${{ needs.prepare.outputs.uv_version }}
+      coverage_runner: ${{ needs.prepare.outputs.coverage_runner }}
+      coverage_timeout: ${{ fromJSON(needs.prepare.outputs.coverage_timeout) }}
+
+  pants:
+    name: pants
+    needs: prepare
+    uses: ./.github/workflows/pants-full-ci-arm.yml
+    with:
+      engine: pants
+      source_sha: ${{ needs.prepare.outputs.source_sha }}
+      core_matrix: ${{ needs.prepare.outputs.core_matrix }}
+      other_matrix: ${{ needs.prepare.outputs.other_matrix }}
+      coverage: ${{ needs.prepare.outputs.coverage == 'true' }}
+      changed_server_files: ${{ needs.prepare.outputs.changed_server_files }}
+      cache_contract: ${{ needs.prepare.outputs.cache_contract }}
+      execution_mode: ${{ inputs.execution_mode }}
+      cache_namespace: ${{ inputs.cache_namespace }}
+      separate_coverage: ${{ needs.prepare.outputs.separate_coverage == 'true' }}
+      uv_version: ${{ needs.prepare.outputs.uv_version }}
+      coverage_runner: ${{ needs.prepare.outputs.coverage_runner }}
+      coverage_timeout: ${{ fromJSON(needs.prepare.outputs.coverage_timeout) }}
+
+  report:
+    name: Compare outcomes and complete CI timing
+    needs: [prepare, baseline, pants]
+    if: always() && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: full-ci-*
+          path: comparison-inputs
+      - name: Read all measured jobs including cache and setup overhead
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate --slurp "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > jobs.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT" > run.json
+      - name: Require identical outcomes and every required gate
+        run: |
+          python3 scripts/pants/full_ci_report.py report \
+            --route comparison-inputs/full-ci-plan/routing.json --jobs jobs.json --run run.json \
+            --artifacts comparison-inputs --output comparison
+      - name: Publish comparison
+        if: always()
+        run: cat comparison/summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: full-ci-comparison
+          path: |
+            comparison
+            jobs.json
+            run.json
+          retention-days: 14

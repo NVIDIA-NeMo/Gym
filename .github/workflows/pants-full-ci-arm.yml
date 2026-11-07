@@ -1,0 +1,413 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Pants comparison arm
+
+on:
+  workflow_call:
+    inputs:
+      engine:
+        required: true
+        type: string
+      source_sha:
+        required: true
+        type: string
+      core_matrix:
+        required: true
+        type: string
+      other_matrix:
+        required: true
+        type: string
+      coverage:
+        required: true
+        type: boolean
+      changed_server_files:
+        required: true
+        type: string
+      cache_contract:
+        required: true
+        type: string
+      cache_namespace:
+        required: true
+        type: string
+      separate_coverage:
+        required: true
+        type: boolean
+      uv_version:
+        required: true
+        type: string
+      coverage_runner:
+        required: true
+        type: string
+      coverage_timeout:
+        required: true
+        type: number
+      execution_mode:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PANTS_LOCAL_EXECUTION_ROOT_DIR: /var/tmp/pants-full-ci
+
+jobs:
+  core:
+    name: ${{ matrix.job }} / ${{ matrix.shard }}
+    if: inputs.coverage
+    runs-on: ${{ matrix.runner }}
+    # Match sampled main's whole-job budgets, including setup and cache transfers.
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.core_matrix) }}
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: sample
+          submodules: recursive
+          persist-credentials: false
+      - name: Reclaim runner disk
+        if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        working-directory: sample
+        run: ./scripts/ci/reclaim_runner_disk.sh
+      - name: Configure portable cache paths
+        run: |
+          echo "UV_CACHE_DIR=$HOME/.cache/uv" >> "$GITHUB_ENV"
+          echo "PANTS_GLOBAL_WORKDIR=$HOME/.cache/pants/full-ci" >> "$GITHUB_ENV"
+          echo "PANTS_NAMED_CACHES_DIR=$HOME/.cache/pants/named_caches" >> "$GITHUB_ENV"
+          echo "PANTS_LOCAL_STORE_DIR=$HOME/.cache/pants/lmdb_store" >> "$GITHUB_ENV"
+      - name: Cache uv dependencies (isolated per arm, same policy)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/uv
+          key: pants-full-v2-uv-${{ inputs.cache_namespace }}-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
+          restore-keys: |
+            pants-full-v2-uv-${{ inputs.cache_namespace }}-${{ inputs.engine }}-${{ runner.os }}-
+      - name: Restore ARC Pants launcher
+        id: launcher-cache
+        if: inputs.engine == 'pants' && matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: pants-full-launcher-v1-${{ inputs.cache_namespace }}-arc-${{ runner.os }}-${{ runner.arch }}-2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0-pants-2.30.2
+      # Each native job owns its reusable process results; forced results and
+      # named dependency trees stay local instead of duplicating large archives.
+      - name: Restore reusable Pants test results
+        id: pants-results
+        if: inputs.engine == 'pants' && inputs.execution_mode == 'incremental'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/pants/lmdb_store/reusable
+          key: pants-full-results-v1-${{ inputs.cache_namespace }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          restore-keys: |
+            pants-full-results-v1-${{ inputs.cache_namespace }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ matrix.shard }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+      - name: Install system test dependencies
+        if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        working-directory: sample
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+      - name: Check shared test-data inventory
+        if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        working-directory: sample
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+      - name: Install Pants launcher
+        if: inputs.engine == 'pants'
+        working-directory: controller
+        timeout-minutes: 7
+        run: |
+          pants_bin="$RUNNER_TEMP/pants-launcher/pants"
+          mkdir -p "$(dirname "$pants_bin")"
+          curl --fail --location --retry 3 \
+            https://github.com/pantsbuild/scie-pants/releases/download/v0.13.4/scie-pants-linux-x86_64 \
+            --output "$pants_bin"
+          echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
+          chmod +x "$pants_bin"
+          # Retry launcher bootstrap only; the measured CI command runs once.
+          for attempt in 1 2 3; do
+            if pants_version=$(timeout --kill-after=10s 120s "$pants_bin" \
+                --no-pantsd --version); then
+              if [[ "$pants_version" != '2.30.2' ]]; then
+                echo "Unexpected Pants version: $pants_version" >&2
+                exit 1
+              fi
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              echo "Pants bootstrap failed after three attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
+      - name: Install pinned uv for both core and sandbox arms
+        env:
+          UV_VERSION: ${{ inputs.uv_version }}
+        run: |
+          [[ "$UV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          uv_bin_dir="$RUNNER_TEMP/pants-native-uv-$UV_VERSION"
+          if command -v uv >/dev/null 2>&1 && [[ "$(uv --version | awk '{print $2}')" == "$UV_VERSION" ]]; then
+            uv_bin_dir="$(dirname "$(command -v uv)")"
+          else
+            curl --fail --location --retry 5 --retry-all-errors --connect-timeout 30 --max-time 120 \
+              "https://astral.sh/uv/$UV_VERSION/install.sh" \
+              --output "$RUNNER_TEMP/pants-native-uv-install.sh"
+            env UV_UNMANAGED_INSTALL="$uv_bin_dir" sh "$RUNNER_TEMP/pants-native-uv-install.sh"
+          fi
+          test "$("$uv_bin_dir/uv" --version | awk '{print $2}')" = "$UV_VERSION"
+          echo "$uv_bin_dir" >> "$GITHUB_PATH"
+      - name: Run identical routed workload
+        working-directory: sample
+        env:
+          ENGINE: ${{ inputs.engine }}
+          JOB: ${{ matrix.job }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+          CHANGED_SERVER_FILES: ${{ inputs.changed_server_files }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+        run: |
+          python3 ../controller/scripts/pants/full_ci.py \
+            --engine "$ENGINE" --job "$JOB" --shard "$SHARD" --shards "$SHARDS" \
+            --execution-mode "$EXECUTION_MODE" \
+            --output results/full-ci --changed-server-files "$CHANGED_SERVER_FILES"
+      - name: Upload execution, test outcomes and raw coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-ci-${{ inputs.engine }}-${{ matrix.job }}-${{ matrix.shard }}
+          path: sample/results/full-ci
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      # Share one launcher archive across ARC jobs; hosted jobs bootstrap independently.
+      - name: Save ARC Pants launcher
+        if: success() && inputs.engine == 'pants' && ((matrix.job == 'core' && matrix.shard == 3) || matrix.job == 'legacy-core') && steps.launcher-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: ${{ steps.launcher-cache.outputs.cache-primary-key }}
+
+      - name: Check reusable result cache budget
+        id: result-budget
+        if: success() && inputs.engine == 'pants' && inputs.execution_mode == 'incremental'
+        env:
+          RESULT_BUDGET_BYTES: ${{ (matrix.job == 'core' || matrix.job == 'legacy-core') && matrix.shard == 0 && '1073741824' || '536870912' }}
+        run: |
+          eligible=$(python3 - <<'PYTHON'
+          import json
+          from pathlib import Path
+          reports = list(Path("sample/results/full-ci/native").rglob("test-accounting.json"))
+          if not reports:
+              raise ValueError("Native job omitted test accounting")
+          batches = [batch for path in reports for batch in json.loads(path.read_text())["batches"]]
+          print("true" if any(batch["mode"] == "cacheable" and batch["targets"] for batch in batches) else "false")
+          PYTHON
+          )
+          if [[ "$eligible" != true ]]; then
+            echo 'populated=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          result_store="$PANTS_LOCAL_STORE_DIR/reusable"
+          if [[ ! -d "$result_store" ]] || [[ -z "$(find "$result_store" -type f -print -quit)" ]]; then
+            echo 'Eligible native batch produced no reusable store' >&2
+            exit 1
+          fi
+          apparent=$(du --apparent-size --summarize --block-size=1 "$result_store" | cut -f1)
+          allocated=$(du --summarize --block-size=1 "$result_store" | cut -f1)
+          bytes=$(( apparent > allocated ? apparent : allocated ))
+          echo "Reusable result store: $apparent apparent, $allocated allocated bytes"
+          # Core shard zero gets 1 GiB for the migration test; the other four
+          # native slots get 512 MiB each (3 GiB total). The retention monitor
+          # removes older generations and enforces the aggregate 5 GiB cap.
+          if (( bytes > RESULT_BUDGET_BYTES )); then
+            echo "Reusable result store exceeds its $RESULT_BUDGET_BYTES byte shard budget" >&2
+            exit 1
+          fi
+          echo 'populated=true' >> "$GITHUB_OUTPUT"
+      - name: Save reusable Pants test results
+        if: success() && steps.result-budget.outputs.populated == 'true' && steps.pants-results.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/pants/lmdb_store/reusable
+          key: ${{ steps.pants-results.outputs.cache-primary-key }}
+
+  other:
+    name: ${{ matrix.job }} / ${{ matrix.shard }}
+    runs-on: ${{ matrix.runner }}
+    # Lint has no explicit timeout on main (GitHub's default is 360 minutes).
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.other_matrix) }}
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          path: controller
+          persist-credentials: false
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: sample
+          submodules: recursive
+          persist-credentials: false
+      - name: Reclaim runner disk
+        if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        working-directory: sample
+        run: ./scripts/ci/reclaim_runner_disk.sh
+      - name: Configure portable cache paths
+        run: |
+          echo "UV_CACHE_DIR=$HOME/.cache/uv" >> "$GITHUB_ENV"
+          echo "PANTS_GLOBAL_WORKDIR=$HOME/.cache/pants/full-ci" >> "$GITHUB_ENV"
+          echo "PANTS_NAMED_CACHES_DIR=$HOME/.cache/pants/named_caches" >> "$GITHUB_ENV"
+          echo "PANTS_LOCAL_STORE_DIR=$HOME/.cache/pants/lmdb_store" >> "$GITHUB_ENV"
+      - name: Cache uv dependencies (isolated per arm, same policy)
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/uv
+          key: pants-full-v2-uv-${{ inputs.cache_namespace }}-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('sample/uv.lock') }}
+          restore-keys: |
+            pants-full-v2-uv-${{ inputs.cache_namespace }}-${{ inputs.engine }}-${{ runner.os }}-
+      - name: Restore ARC Pants launcher
+        id: launcher-cache
+        if: inputs.engine == 'pants' && matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/nce
+          key: pants-full-launcher-v1-${{ inputs.cache_namespace }}-arc-${{ runner.os }}-${{ runner.arch }}-2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0-pants-2.30.2
+      - name: Restore compatible Pants artifacts
+        id: pants-cache
+        if: inputs.engine == 'pants'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/pants/full-ci
+            ~/.cache/pants/named_caches
+            ~/.cache/pants/lmdb_store
+          key: pants-full-engine-v4-${{ inputs.cache_namespace }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-${{ inputs.source_sha }}
+          restore-keys: |
+            pants-full-engine-v4-${{ inputs.cache_namespace }}-${{ runner.os }}-${{ runner.arch }}-${{ matrix.job }}-${{ inputs.cache_contract }}-${{ hashFiles('controller/scripts/pants/full_ci.toml', 'sample/uv.lock') }}-
+      - name: Install system test dependencies
+        if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        working-directory: sample
+        timeout-minutes: 20
+        run: bash scripts/ci/install_test_dependencies.sh
+      - name: Check shared test-data inventory
+        if: matrix.runner == 'nemo-ci-aws-cpu-4-16'
+        working-directory: sample
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
+      - name: Install Pants launcher
+        if: inputs.engine == 'pants'
+        working-directory: controller
+        timeout-minutes: 7
+        run: |
+          pants_bin="$RUNNER_TEMP/pants-launcher/pants"
+          mkdir -p "$(dirname "$pants_bin")"
+          curl --fail --location --retry 3 \
+            https://github.com/pantsbuild/scie-pants/releases/download/v0.13.4/scie-pants-linux-x86_64 \
+            --output "$pants_bin"
+          echo "2acdb810465f5c1764c116688bdd8425ccdaf98e92fb1f54f2455729407728f0  $pants_bin" | sha256sum --check
+          chmod +x "$pants_bin"
+          # Retry launcher bootstrap only; the measured CI command runs once.
+          for attempt in 1 2 3; do
+            if pants_version=$(timeout --kill-after=10s 120s "$pants_bin" \
+                --no-pantsd --version); then
+              if [[ "$pants_version" != '2.30.2' ]]; then
+                echo "Unexpected Pants version: $pants_version" >&2
+                exit 1
+              fi
+              break
+            fi
+            if [[ "$attempt" == 3 ]]; then
+              echo "Pants bootstrap failed after three attempts" >&2
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          echo "PANTS_BIN=$pants_bin" >> "$GITHUB_ENV"
+      - name: Run identical routed workload
+        working-directory: sample
+        env:
+          ENGINE: ${{ inputs.engine }}
+          JOB: ${{ matrix.job }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ matrix.shards }}
+          CHANGED_SERVER_FILES: ${{ inputs.changed_server_files }}
+          EXECUTION_MODE: ${{ inputs.execution_mode }}
+        run: |
+          python3 ../controller/scripts/pants/full_ci.py \
+            --engine "$ENGINE" --job "$JOB" --shard "$SHARD" --shards "$SHARDS" \
+            --execution-mode "$EXECUTION_MODE" \
+            --output results/full-ci --changed-server-files "$CHANGED_SERVER_FILES"
+      - name: Upload execution, test outcomes and raw coverage
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-ci-${{ inputs.engine }}-${{ matrix.job }}-${{ matrix.shard }}
+          path: sample/results/full-ci
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload server worker logs
+        if: always() && matrix.job == 'servers'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: full-ci-worker-logs-${{ inputs.engine }}-${{ matrix.shard }}
+          path: sample/results/server-workers
+          if-no-files-found: warn
+          retention-days: 14
+
+      # Shared job-type keys have one writer; other shards must not compress losing archives.
+      - name: Save compatible Pants artifacts
+        if: success() && inputs.engine == 'pants' && matrix.shard == 0 && steps.pants-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cache/pants/full-ci
+            ~/.cache/pants/named_caches
+            ~/.cache/pants/lmdb_store
+          key: ${{ steps.pants-cache.outputs.cache-primary-key }}
+
+  coverage:
+    name: combined coverage
+    needs: core
+    if: always() && inputs.coverage && inputs.separate_coverage
+    runs-on: ${{ inputs.coverage_runner }}
+    timeout-minutes: ${{ inputs.coverage_timeout }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: ~/.cache/uv
+          key: pants-full-v2-uv-${{ inputs.cache_namespace }}-${{ inputs.engine }}-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: pants-full-v2-uv-${{ inputs.cache_namespace }}-${{ inputs.engine }}-${{ runner.os }}-
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: full-ci-${{ inputs.engine }}-*
+          path: results/inputs
+      - name: Enforce unchanged combined coverage gate
+        run: |
+          mkdir -p results/core-coverage
+          find results/inputs -type f -name '.coverage.*' -exec cp '{}' results/core-coverage/ \;
+          source ./scripts/ci/setup_dev.sh
+          python3 scripts/ci/combine_core_coverage.py results/core-coverage
