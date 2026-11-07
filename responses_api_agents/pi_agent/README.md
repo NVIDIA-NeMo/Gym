@@ -141,7 +141,8 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   differ by a `_<suffix>` (such as `web` and `web_v2`), since their tools could not be told apart. An optional
   grant with either problem is left out and recorded as an `mcp_server_skipped` observation gap. A tool name
   that does not fit is found only at setup in the sandbox.
-- Tool discovery waits up to 30 seconds per request. Each tool call waits up to
+- Tool discovery waits up to `sandbox_mcp_discovery_timeout_seconds` per request (default 30, and never more
+  than a tool call). Each tool call waits up to
   `sandbox_mcp_timeout_seconds` (default 300); a call that times out keeps running on the server, so set
   it above the slowest call the server makes. Tool errors from the server reach the model.
 - A required grant that Pi cannot set up stops Pi before the first model call. The error and an
@@ -245,6 +246,9 @@ detail, not a separate endpoint or a setup step users must run.
 - `workspace_root`: where per-request HOMEs are created and deleted
 - `thinking`: passed to `--thinking` (off, minimal, low, medium, high, xhigh)
 - `system_prompt`: appended via `--append-system-prompt`
+- `plain_system_prompt`: leave out of Pi's default system prompt the block pointing at Pi's documentation, whose
+  paths name the runtime's folder, and the line with the machine's date, for tasks whose prompt sets their own time
+  (default off)
 - `timeout`: seconds for the `pi` run
 - `extra_args`: extra Pi flags for local compatibility calls
 - `models_config`: provider configuration for local compatibility calls
@@ -258,6 +262,8 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
+- `sandbox_mcp_discovery_timeout_seconds`: maximum time of each request that sets up the granted MCP tools
+  (default 30, at most `sandbox_mcp_timeout_seconds`); raise it for a server that may be busy for longer
 - `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
   grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)

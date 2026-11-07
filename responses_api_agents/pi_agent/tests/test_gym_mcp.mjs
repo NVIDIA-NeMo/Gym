@@ -133,6 +133,20 @@ test("a deadline that ends the response body is reported as a timeout", async (t
   await assert.rejects(a.tools[0].execute("a", { query: "x" }), (e) => e.name === "TimeoutError");
 });
 
+test("discovery waits its own deadline, which a server busy with other episodes may need, within a call's", async (t) => {
+  const f = await fixture(t, async (body) => {
+    if (body.method === "initialize") await new Promise((resolve) => setTimeout(resolve, 300));
+    return false;
+  });
+  const timedOut = (e) => e.message.startsWith("tavily: TimeoutError at ");
+  await assert.rejects(registerGymTools(agent(), { tavily: { ...f.config, discovery_timeout: 100 } }), timedOut);
+  const a = agent();
+  await registerGymTools(a, { tavily: { ...f.config, discovery_timeout: 1000 } });
+  assert.deepEqual(a.tools.map((tool) => tool.name), ["tavily_web_search"]);
+  // no request of discovery outwaits a tool call
+  await assert.rejects(registerGymTools(agent(), { tavily: { ...f.config, timeout: 100, discovery_timeout: 1000 } }), timedOut);
+});
+
 test("does not connect disabled entries", async () => {
   const a = agent();
   await registerGymTools(a, { unused: { enabled: false } });
