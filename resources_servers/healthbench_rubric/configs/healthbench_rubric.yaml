@@ -1,0 +1,44 @@
+healthbench_rubric:
+  resources_servers:
+    healthbench_rubric:
+      entrypoint: app.py
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_chat_completion_params:
+        messages: []
+        temperature: 0.5
+        max_tokens: 2048
+      judge_endpoint_max_concurrency: 64
+      judge_max_attempts: 3
+      judge_timeout_seconds: 120
+      length_adjustment_center: null
+      length_adjustment_penalty_per_500_chars: null
+      reward_metric: overall_score
+      domain: knowledge
+      verified: false
+      description: HealthBench-style clinical conversations scored with rubric LLM judge
+      value: Evaluate medical response quality against private rubric criteria
+
+healthbench_rubric_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: healthbench_rubric
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/healthbench_rubric/data/example.jsonl
+
+healthbench_rubric_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: healthbench_rubric_simple_agent

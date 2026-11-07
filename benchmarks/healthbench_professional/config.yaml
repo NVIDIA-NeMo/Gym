@@ -1,0 +1,40 @@
+config_paths:
+  - resources_servers/healthbench_rubric/configs/healthbench_rubric.yaml
+
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.select:judge_base_url,${oc.env:JUDGE_MODEL_API_BASE,https://api.openai.com/v1}}
+      openai_api_key: ${oc.select:judge_api_key,${oc.env:OPENAI_API_KEY,dummy}}
+      openai_model: ${oc.select:judge_model_name,${oc.env:JUDGE_MODEL,gpt-5.4-2026-03-05}}
+      openai_default_headers: {}
+
+healthbench_professional_healthbench_rubric_resources_server:
+  _inherit_from: healthbench_rubric
+  resources_servers:
+    healthbench_rubric:
+      judge_system_prompt: null
+      judge_responses_create_params:
+        input: []
+        reasoning:
+          effort: low
+        max_output_tokens: 4096
+      length_adjustment_center: 2000
+      length_adjustment_penalty_per_500_chars: 0.0147
+      reward_metric: overall_score_length_adjusted
+
+healthbench_professional_benchmark_simple_agent:
+  _inherit_from: healthbench_rubric_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: healthbench_professional_healthbench_rubric_resources_server
+      datasets:
+        - name: healthbench_professional
+          type: benchmark
+          jsonl_fpath: benchmarks/healthbench_professional/data/healthbench_professional_benchmark.jsonl
+          prompt_config: null
+          prepare_script: benchmarks/healthbench_professional/prepare.py
+          num_repeats: 1
+          license: MIT
