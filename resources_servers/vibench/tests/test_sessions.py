@@ -4,6 +4,7 @@
 
 import asyncio
 import dataclasses
+import shutil
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -353,13 +354,7 @@ def test_a_fatal_tar_error_is_a_build_failure(server, root, stopped, graded, mon
 def test_a_missing_app_directory_is_a_build_failure(server, root, stopped, graded, monkeypatch):
     client = TestClient(server.setup_webserver())
     _post_seed(client, _seed())
-    real_exec = AsyncSandbox.exec
-
-    async def exec_from_elsewhere(self, command, **kwargs):
-        # The local provider runs in the app directory, so remove it inside the command, the way a model could.
-        return await real_exec(self, f"cd / && rm -rf {root} && {command}", **kwargs)
-
-    monkeypatch.setattr(AsyncSandbox, "exec", exec_from_elsewhere)
+    shutil.rmtree(root)
 
     verified = _verify(client)
 
@@ -643,3 +638,67 @@ def test_close_follows_the_session_contract(server, root, graded):
         holds_state=lambda resources_session_id: resources_session_id in server._sessions,
         verify_body=_verify_body(),
     )
+
+
+@pytest.mark.parametrize("operation", ["upload", "serialize"])
+def test_failed_setup_retains_cleanup_until_close(server, root, monkeypatch, operation):
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed()
+    monkeypatch.setattr(AsyncSandbox, operation, AsyncMock(side_effect=OSError("setup failed")))
+    stop = AsyncMock(side_effect=[OSError("stop failed"), None])
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+
+    assert _post_seed(client, seed).status_code == 500
+    session = server._sessions[seed.resources_session_id]
+    assert session.sandbox is not None and not session.ready
+    assert _post_seed(client, seed).status_code == 409
+    assert _verify(client)["mask_sample"] is True
+    assert _close(client, seed).status_code == 200
+    assert stop.await_count == 2
+    assert server._sessions == {}
+    assert not session.scratch_dir.exists()
+
+
+def test_retirement_retries_failed_teardown_and_fences_session(server, root, monkeypatch):
+    client = TestClient(server.setup_webserver())
+    seed = _seed()
+    _post_seed(client, seed)
+    session = server._sessions[seed.resources_session_id]
+    stop = AsyncMock(side_effect=[OSError("stop failed"), None])
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    with pytest.raises(OSError, match="stop failed"):
+        asyncio.run(server.retire_session_state(seed.resources_session_id))
+    assert server._sessions[seed.resources_session_id] is session
+    asyncio.run(server.retire_session_state(seed.resources_session_id))
+    asyncio.run(server.retire_session_state(seed.resources_session_id))
+    assert stop.await_count == 2
+    assert not session.scratch_dir.exists()
+    assert server._sessions == {}
+    assert _post_seed(client, seed).status_code == 409
+
+
+def test_harvested_session_cannot_be_lent_when_stop_failed(server, root, graded, monkeypatch):
+    client = TestClient(server.setup_webserver())
+    seed = _seed()
+    _post_seed(client, seed)
+    _build(root)
+    monkeypatch.setattr(AsyncSandbox, "stop", AsyncMock(side_effect=OSError("stop failed")))
+    assert _verify(client)["reward"] == 1.0
+    assert _post_seed(client, seed).status_code == 409
+
+
+def test_failed_initial_prd_delivery_retains_cleanup(server, root, monkeypatch):
+    from nemo_gym.sandbox.providers.local.provider import LocalProvider
+
+    client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
+    seed = _seed()
+    monkeypatch.setattr(LocalProvider, "upload_file", AsyncMock(side_effect=OSError("delivery failed")))
+    stop = AsyncMock(side_effect=[OSError("stop failed"), OSError("stop failed"), None])
+    monkeypatch.setattr(AsyncSandbox, "stop", stop)
+    assert _post_seed(client, seed).status_code == 500
+    session = server._sessions[seed.resources_session_id]
+    assert session.sandbox is not None and not session.ready
+    assert _post_seed(client, seed).status_code == 409
+    assert _close(client, seed).status_code == 200
+    assert stop.await_count == 3
+    assert not session.scratch_dir.exists()

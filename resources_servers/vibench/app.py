@@ -301,6 +301,8 @@ class _BuildSession:
     sandbox: Optional[AsyncSandbox]
     # Holds the harvested tarball; removed at close.
     scratch_dir: Path
+    # Only fully staged sessions can be lent or verified. Failed setup remains owned for cleanup.
+    ready: bool = False
     # Set once a verify has harvested: the tarball, or None when the model left nothing to archive. A provider
     # failure leaves it unset and the sandbox running, so a resent verify can harvest again.
     harvested: bool = False
@@ -703,8 +705,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
                     raise ResourcesSessionConflictError(
                         "resources_session_id is already bound to another episode or task"
                     )
-                if session.sandbox is None:
-                    raise ResourcesSessionConflictError("The build sandbox of this session was already harvested")
+                if not session.ready or session.harvested or session.sandbox is None:
+                    raise ResourcesSessionConflictError(
+                        "The build sandbox is not available for seeding (setup incomplete or already harvested)"
+                    )
                 request.session[SESSION_ID_KEY] = session_id
                 return await self._seed_response(session_id, session)
             try:
@@ -721,27 +725,26 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
             # Made before the sandbox starts, so that nothing can fail between the start and the session holding it.
             scratch_dir = Path(tempfile.mkdtemp(prefix=f"vibench-build-{_label(task.app)}-"))
-            try:
-                sandbox = await self._start_build_sandbox(prd_text, [d for d in asset_dirs if d.is_dir()])
-            except BaseException:
-                await asyncio.to_thread(shutil.rmtree, scratch_dir, ignore_errors=True)
-                raise
             session = _BuildSession(
                 episode_id=body.episode_id,
                 task_id=body.task_id,
-                sandbox=sandbox,
+                sandbox=None,
                 scratch_dir=scratch_dir,
             )
-            try:
-                response = await self._seed_response(session_id, session)
-            except BaseException:
-                await self._release(session)
-                raise
             self._sessions[session_id] = session
+            try:
+                await self._start_build_sandbox(session, prd_text, [d for d in asset_dirs if d.is_dir()])
+                response = await self._seed_response(session_id, session)
+                session.ready = True
+            except BaseException:
+                # Keep ownership if teardown fails; close/retire can retry, but seed cannot lend partial setup.
+                await self._release(session)
+                del self._sessions[session_id]
+                raise
             request.session[SESSION_ID_KEY] = session_id
             return response
 
-    async def _start_build_sandbox(self, prd_text: str, asset_dirs: List[Path]) -> AsyncSandbox:
+    async def _start_build_sandbox(self, session: _BuildSession, prd_text: str, asset_dirs: List[Path]) -> None:
         """Start a build box with the PRD staged before anything runs, then upload the PRD assets."""
         if not self.config.sandbox_provider:
             raise ValueError("Set sandbox_provider to run ViBench sessions; see resources_servers/vibench/README.md")
@@ -761,18 +764,13 @@ class VibenchResourcesServer(SimpleResourcesServer):
             named_configs=global_config_dict,
         )
         sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config_dict))
+        # Own the handle before start: initial file delivery can fail after provider creation.
+        session.sandbox = sandbox
         await sandbox.start(spec)
-        # Past start(), a sandbox exists; stop it on any failure, since no session holds it yet.
-        try:
-            for asset_dir in asset_dirs:
-                for item in sorted(asset_dir.rglob("*")):
-                    if item.is_file():
-                        await sandbox.upload(item, f"{workdir}/assets/{item.relative_to(asset_dir).as_posix()}")
-        except BaseException:
-            with suppress(Exception):
-                await sandbox.stop()
-            raise
-        return sandbox
+        for asset_dir in asset_dirs:
+            for item in sorted(asset_dir.rglob("*")):
+                if item.is_file():
+                    await sandbox.upload(item, f"{workdir}/assets/{item.relative_to(asset_dir).as_posix()}")
 
     async def _seed_response(self, session_id: str, session: _BuildSession) -> ResourcesSeedSessionResponse:
         return ResourcesSeedSessionResponse(
@@ -806,6 +804,15 @@ class VibenchResourcesServer(SimpleResourcesServer):
         request.session.pop(SESSION_ID_KEY, None)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
+    async def retire_session_state(self, session_id: str) -> None:
+        """Release resources when checkpoint retirement ends an attempt."""
+        async with self._locks.locked(session_id):
+            session = self._sessions.get(session_id)
+            if session is not None:
+                await self._release(session)
+                del self._sessions[session_id]
+                self._fences.fence(session_id, session.episode_id)
+
     async def _release_sandbox(self, session: _BuildSession) -> None:
         if session.sandbox is not None:
             await session.sandbox.stop()
@@ -823,7 +830,8 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 print(
                     f"Failed to stop the build sandbox of ViBench session {session_id}", format_exc(), file=sys.stderr
                 )
-        self._sessions.clear()
+            else:
+                del self._sessions[session_id]
         self._fences.clear()
 
     async def _harvest_app(self, session: _BuildSession) -> Optional[Path]:
@@ -847,6 +855,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
                 result = await session.sandbox.exec(
                     f"[ -d {workdir} ] || exit {_NO_APP_DIR_EXIT}; cd {workdir} && tar "
                     f"{HARVEST_EXCLUDES} --exclude={PRD_FILENAME} -cf {quote(REMOTE_ARCHIVE)} .",
+                    cwd="/",
                     timeout_s=self.config.harvest_timeout_s,
                 )
             except Exception as error:
@@ -924,7 +933,7 @@ class VibenchResourcesServer(SimpleResourcesServer):
             # grades as a build failure. Grading runs outside the lock, on this verify's own copy in work_dir.
             async with self._locks.locked(session_id):
                 session = self._sessions.get(session_id)
-                if session is None:
+                if session is None or not session.ready:
                     # Closed while this verify waited for the lock.
                     return self._lost(body)
                 try:

@@ -879,6 +879,7 @@ def _register_session(server: VibenchResourcesServer, tmp_path: Path, archive: P
         task_id=TaskId(taskset="vibench:example", task_id="notes-mvp"),
         sandbox=None,
         scratch_dir=tmp_path / "scratch",
+        ready=True,
         harvested=True,
         archive=archive,
     )
