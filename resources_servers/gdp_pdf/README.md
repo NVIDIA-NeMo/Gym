@@ -234,29 +234,25 @@ It can inspect text/images and run Python; the existing grader scores only the
 final answer. Rubrics and reference answers stay outside the sandbox.
 
 ```bash
-docker build -f resources_servers/gdp_pdf/Dockerfile -t REGISTRY/gdp-pdf-tools .
-docker push REGISTRY/gdp-pdf-tools
+docker build -t gdp-pdf-tools resources_servers/gdp_pdf
 gym eval prepare --config benchmarks/gdp_pdf/opencode.yaml \
-  +gdp_pdf_sandbox_image=REGISTRY/gdp-pdf-tools
+  +gdp_pdf_sandbox_image=gdp-pdf-tools
 gym eval run --config benchmarks/gdp_pdf/opencode.yaml \
-  --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
   --config responses_api_models/vllm_model/configs/vllm_model.yaml \
-  +gdp_pdf_sandbox_image=REGISTRY/gdp-pdf-tools \
+  +gdp_pdf_sandbox_image=gdp-pdf-tools \
   ++policy_model.responses_api_models.vllm_model.host=GYM_HOST_IP \
   +policy_base_url=http://HOST:8000/v1 +policy_api_key=unused \
   +policy_model_name=MODEL --split benchmark --num-repeats 5 \
   --output results/gdp-pdf-opencode.jsonl
 ```
 
-Set judge credentials in private `env.yaml`, and set `OPENSANDBOX_DOMAIN` and
-`OPENSANDBOX_API_KEY` for your OpenSandbox deployment. Use its `dns+nft` egress mode:
-the sandbox denies outbound traffic except to the Gym model-server host,
-which must be reachable at `GYM_HOST_IP`. Shell commands cannot access the public
-Internet; disabling web tools alone would not prevent that. Other sandbox providers
-are rejected because Gym's shared network-policy helper requires OpenSandbox.
-OpenCode 1.17.11 and document tools are preinstalled in the image.
-Defaults are eight concurrent episodes,
+Set judge credentials in private `env.yaml`. `GYM_HOST_IP` must be reachable from
+Docker: the sandbox calls Gym, which forwards to the image/tool-capable inference
+endpoint. Swap the provider config for other deployments. OpenCode 1.17.11 installs
+in the sandbox; preinstall it for offline use. Defaults are eight concurrent episodes,
 16,384 output tokens per model call and a two-hour timeout, with no episode turn cap.
+Web tools are disabled; shell networking follows the provider policy.
 
 For your own tasks, override the agent's dataset with GDP.pdf rows (`source_pdf`,
 `prompt`, `criteria` in `verifier_metadata`); never train on benchmark questions.

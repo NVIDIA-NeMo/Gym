@@ -6,7 +6,4 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir pymupdf==1.26.7 pillow==12.0.0 pandas==2.3.3
 WORKDIR /workspace
-# Reuse Gym's installer at build time: task sandboxes have no download egress.
-COPY responses_api_agents/opencode_agent/install_opencode_runtime.sh /tmp/install-opencode.sh
-RUN bash /tmp/install-opencode.sh /tmp/nemo-gym-opencode-runtime-1.17.11 1.17.11 \
-    && rm /tmp/install-opencode.sh
+# The shared OpenCode adapter installs its configured, pinned runtime during session setup.
