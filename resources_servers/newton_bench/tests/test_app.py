@@ -13,15 +13,20 @@
 # limitations under the License.
 
 import asyncio
+import importlib
+import json
 import math
 import time
 from unittest.mock import MagicMock, patch
 
+import requests
 from fastapi import HTTPException, Request
-from pytest import fixture, mark, raises
+from fastapi.responses import JSONResponse
+from pytest import MonkeyPatch, fixture, mark, raises
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.verification import judge_failsafe
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
     ExecutePythonRequest,
@@ -1240,3 +1245,100 @@ result
         mock_response = self._make_response_with_law("<final_law></final_law>")
         extracted = server._extract_law_from_response(mock_response)
         assert extracted == ""
+
+    # ============================================================================
+    # 6. Symbolic Judge Availability Tests
+    # ============================================================================
+    # The m0_gravity easy v0 ground truth itself, so its RMSLE is 0 and only the judge can lower the reward.
+    EXACT_GRAVITY_LAW = (
+        "def discovered_law(mass1, mass2, distance):\n    return 6.674e-5 * mass1 * mass2 / distance ** 1.5"
+    )
+
+    @fixture
+    def judge_keys(self, monkeypatch: MonkeyPatch) -> dict:
+        """NewtonBench's judge API keys, cleared; the judge resolves its provider from this dict on every call."""
+        keys = importlib.import_module("utils.call_llm_api").keys
+        monkeypatch.setitem(keys, "oa", None)
+        monkeypatch.setitem(keys, "or", None)
+        return keys
+
+    def _judge_reply(self, status_code: int, content: str = "") -> requests.Response:
+        reply = requests.Response()
+        reply.status_code = status_code
+        reply.reason = "Too Many Requests" if status_code == 429 else "OK"
+        reply.url = "https://openrouter.ai/api/v1/chat/completions"
+        reply._content = json.dumps({"choices": [{"message": {"content": content}}]}).encode()
+        return reply
+
+    async def _verify_exact_law(self, server: NewtonBenchResourcesServer, mock_request: Request):
+        """Verify the exact law with NewtonBench's real evaluate_law, wrapped in judge_failsafe as /verify is."""
+        await server.seed_session(
+            mock_request,
+            NewtonBenchSeedSessionRequest(
+                module_name="m0_gravity",
+                difficulty="easy",
+                system="vanilla_equation",
+                noise_level=0.0,
+                law_version="v0",
+            ),
+        )
+        verify_request = NewtonBenchVerifyRequest(
+            responses_create_params={"input": [{"role": "user", "content": "test", "type": "message"}]},
+            response=self._make_response_with_law(f"<final_law>\n{self.EXACT_GRAVITY_LAW}\n</final_law>"),
+        )
+        return await judge_failsafe(server.verify)(mock_request, verify_request)
+
+    def test_setup_webserver_refuses_to_start_without_judge_key(
+        self, server: NewtonBenchResourcesServer, judge_keys: dict
+    ) -> None:
+        with raises(ValueError, match="OPENAI_API_KEY or OPENROUTER_API_KEY"):
+            server.setup_webserver()
+
+    def test_setup_webserver_starts_with_judge_key(
+        self, server: NewtonBenchResourcesServer, judge_keys: dict, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(judge_keys, "oa", "test-key")
+        app = server.setup_webserver()
+        assert "/run_experiment_m0_gravity" in {route.path for route in app.routes}
+
+    @mark.asyncio
+    async def test_verify_masks_judge_without_key(
+        self, server: NewtonBenchResourcesServer, mock_request: Request, judge_keys: dict
+    ) -> None:
+        """Every judge attempt fails without a key; the exact law is masked, not scored 0.4 as "not equivalent"."""
+        response = await self._verify_exact_law(server, mock_request)
+        assert isinstance(response, JSONResponse)
+        row = json.loads(response.body)
+        assert row["mask_sample"] is True
+        assert row["failure_kind"] == "judge_failed"
+        assert row["reward"] == 0.0
+        assert "No available API key" in row["failure_reason"]
+
+    @mark.asyncio
+    async def test_verify_masks_judge_rate_limited_on_every_attempt(
+        self, server: NewtonBenchResourcesServer, mock_request: Request, judge_keys: dict, monkeypatch: MonkeyPatch
+    ) -> None:
+        monkeypatch.setitem(judge_keys, "or", "test-key")
+        post = MagicMock(return_value=self._judge_reply(429))
+        monkeypatch.setattr("requests.post", post)
+        response = await self._verify_exact_law(server, mock_request)
+        assert post.call_count == 3
+        assert isinstance(response, JSONResponse)
+        row = json.loads(response.body)
+        assert row["mask_sample"] is True
+        assert row["failure_kind"] == "judge_failed"
+        assert "429" in row["failure_reason"]
+
+    @mark.asyncio
+    async def test_verify_scores_judge_verdict_after_rate_limit(
+        self, server: NewtonBenchResourcesServer, mock_request: Request, judge_keys: dict, monkeypatch: MonkeyPatch
+    ) -> None:
+        """A failed attempt the judge recovers from still yields its verdict and the full reward."""
+        monkeypatch.setitem(judge_keys, "or", "test-key")
+        post = MagicMock(side_effect=[self._judge_reply(429), self._judge_reply(200, "Answer: YES")])
+        monkeypatch.setattr("requests.post", post)
+        response = await self._verify_exact_law(server, mock_request)
+        assert isinstance(response, NewtonBenchVerifyResponse)
+        assert response.symbolic_equivalent is True
+        assert response.rmsle == 0.0
+        assert math.isclose(response.reward, 1.0)
