@@ -219,6 +219,31 @@ async def test_agent_owns_loop_and_replays_exact_result(fixture):
     assert len(f.harnesses) == 1
 
 
+async def test_setup_deadline_uses_the_event_loop_clock(fixture, monkeypatch):
+    # `asyncio.timeout_at` reads the loop's clock; uvloop's can run ahead of `time.monotonic()` (macOS), and a
+    # deadline taken from `monotonic()` would then already be past, cancelling setup at once.
+    f = fixture
+    loop = asyncio.get_running_loop()
+    monkeypatch.setattr(module, "monotonic", lambda: loop.time() - 10_000)
+    original = module.MiniSWEHarness
+
+    def yielding_harness(**kwargs):
+        instance = original(**kwargs)
+        recorded = instance.setup
+
+        async def setup():
+            await asyncio.sleep(0)  # a real setup awaits the sandbox; an expired deadline fires here
+            await recorded()
+
+        instance.setup = setup
+        return instance
+
+    monkeypatch.setattr(module, "MiniSWEHarness", yielding_harness)
+    result = await f.agent.run(f.request, f.body)
+    assert result.reward == 0.75 and result.evaluation_completed
+    assert "setup" in f.events
+
+
 @pytest.mark.parametrize("field", ["task_name", "task_ref", "dataset_ref"])
 async def test_bad_pins_rejected_before_allocation(fixture, field):
     f = fixture

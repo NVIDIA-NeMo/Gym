@@ -120,16 +120,34 @@ tool in to that registry, and give OpenSandbox the pull credentials in `images.a
 
 ## The sandbox cannot reach the Model Server
 
-**Symptom.** Episodes fail after the agent starts, with a connection error or a request timeout in the failure
+**Symptom.** The run stops before any episode with `... so use_absolute_ip=true cannot advertise this host to a
+sandbox`. Or episodes fail after the agent starts, with a connection error or a request timeout in the failure
 reason, and the collector retries them.
 
 **Cause.** Some harnesses, such as `hermes_agent` and `codex_agent`, call the Model Server from inside the sandbox.
 For them, `gym eval run` makes the Model Server advertise the machine's network address instead of loopback, which
 a sandbox reaches only when the network routes to it and no firewall blocks the port.
 
-**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. A deployment that
+When the hostname does not resolve, or resolves to loopback, Gym advertises the address of the interface the
+default route uses. The run stops only when there is no such route, for example offline.
+
+**Fix.** Run `gym` on a host the sandboxes can reach, such as a node inside the cluster network. Offline, or when the
+default route's interface is not the one the sandboxes reach (a VPN, several networks), add
+`+default_host=<an address the sandboxes reach>`. A deployment that
 needs other servers reachable sets `absolute_ip_server_types` or `default_host` (see
 [Multi-Node Configuration](/main/reference/configuration#multi-node-configuration)).
+
+## The model rejects every request
+
+**Symptom.** Every episode fails at the agent stage, ungraded, with a failure reason such as
+`HTTP 400: max_tokens is too large`. The failure's partial response names `model_request_rejected` in
+`metadata.ng_agent_outcome`.
+
+**Cause.** The endpoint refused the request as invalid before the model answered, so the run's settings are at
+fault and the episode is not graded. A common case is a harness output limit above the model's cap: OpenCode asks
+for up to 131,072 output tokens, and gpt-4.1 allows 32,768.
+
+**Fix.** Lower the limit with `--max-output-tokens <n>`, within the model's cap.
 
 ## A harness cannot install its runtime in the sandbox
 

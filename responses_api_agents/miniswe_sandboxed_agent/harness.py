@@ -267,7 +267,8 @@ class MiniSWEHarness:
             timeout_s=self.context.setup_timeout_sec,
         )
         if result.return_code:
-            raise RuntimeError(f"mini-SWE installation failed: {result.stdout}\n{result.stderr}")
+            # stderr first: the failing pip or uv line is there, and callers truncate long details.
+            raise RuntimeError(f"mini-SWE installation failed: {result.stderr}\n{result.stdout}")
 
     async def close(self) -> None:
         """Stop the agent and its shell process groups before verification."""
@@ -308,8 +309,11 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
     time.sleep(0.2)
 """.replace("MARKER", repr(f"MSWEA_GLOBAL_CONFIG_DIR={self.remote_directory}/config".encode()))
         registry = f"{self.remote_directory}/processes"
+        python = quote(self.remote_directory + "/venv/bin/python")
         result = await self.sandbox.exec(
-            f"{quote(self.remote_directory + '/venv/bin/python')} -c {quote(script)} && "
+            # Setup that stopped before the venv was installed has started no mini-SWE process to find, and a missing
+            # interpreter would only replace setup's own error with this one.
+            f"{{ [ ! -x {python} ] || {python} -c {quote(script)}; }} && "
             f"if [ -f {quote(registry)} ]; then "
             f"while read pid; do kill -TERM -- -$pid 2>/dev/null || true; done < {quote(registry)}; "
             "sleep 0.2; "
