@@ -22,7 +22,12 @@ class TaskData(BaseModel):
             "JSON-encoded list of expected floats, one per required tool-call solution, e.g. "
             "'[-3.0, 0.5, 9.9, 0.28366218546322625]'. verify() json.loads it and float-compares "
             "against the json.loads(output)['solution'] values scavenged from function_call_output "
-            "items. The wire model also admits a bare list[float], but that branch crashes verify()."
+            "items; the last len(ground_truth) answers (the last number of each line, list item or "
+            "clause, ignoring parenthesised text other than plain numbers) stated in the final "
+            "assistant message (the last item of the response other than reasoning, not marked "
+            "commentary) must also match the "
+            "list in order, to about three significant figures. The wire model also admits a bare "
+            "list[float], but that branch crashes verify()."
         ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
