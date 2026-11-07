@@ -318,6 +318,40 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
+def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
+    """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
+
+    The adapter owns the model, provider, prompt and plugins of a sandbox session, so it accepts only:
+
+    - ``permission`` and ``tools``, OpenCode's tool access.
+    - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
+      summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
+      context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
+    - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
+      runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+      asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
+      Other agent fields would replace the adapter's prompt, model or sampling. The seed refuses it with token
+      capture on.
+    """
+    unsupported = sorted(opencode_config.keys() - {"permission", "tools", "compaction", "agent"})
+    if unsupported:
+        return f"supports permission, tools, compaction.auto and agent.build.steps only; unsupported: {unsupported}"
+    compaction = opencode_config.get("compaction", {})
+    if not isinstance(compaction, Mapping) or compaction.keys() - {"auto"}:
+        return "compaction supports only auto"
+    if "auto" in compaction and not isinstance(compaction["auto"], bool):
+        return "compaction.auto must be true or false"
+    agent = opencode_config.get("agent", {})
+    if not isinstance(agent, Mapping) or agent.keys() - {"build"}:
+        return "agent supports only build, the agent a session runs"
+    build = agent.get("build", {})
+    if not isinstance(build, Mapping) or build.keys() - {"steps"}:
+        return "agent.build supports only steps"
+    if "steps" in build and (type(build["steps"]) is not int or build["steps"] <= 0):
+        return "agent.build.steps must be a positive integer"
+    return None
+
+
 class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: Optional[ModelServerRef] = None
@@ -939,11 +973,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
-        if unsupported:
-            raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
-            )
+        config_error = _session_opencode_config_error(self.config.opencode_config)
+        if (
+            config_error is None
+            and self._token_id_capture_enabled()
+            and "steps" in self.config.opencode_config.get("agent", {}).get("build", {})
+        ):
+            # OpenCode sends its last-step prompt as an assistant message, so capture cannot join that call to the
+            # earlier calls of the rollout.
+            config_error = "agent.build.steps cannot be used with token capture"
+        if config_error is not None:
+            raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
@@ -1318,6 +1358,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
                 continue
+            # NeMo RL sets max_output_tokens on every row. It changes nothing when OpenCode's own limit for each
+            # model call (config.max_output_tokens) already stays within it. A tighter limit is refused below.
+            if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
+                continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
                     422,
@@ -1628,11 +1672,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     },
                 }
             },
-            **_without_empty_tools(self.config.opencode_config),
+            # A copy: the replacement prompt and the request sampling below are per session and must not reach
+            # the shared configuration.
+            **copy.deepcopy(_without_empty_tools(self.config.opencode_config)),
         }
         sampling = {name: value for name in ("temperature", "top_p") if (value := getattr(body, name)) is not None}
         if sampling:
-            config["agent"] = {agent: dict(sampling) for agent in _OPENCODE_AGENTS[self.config.opencode_version]}
+            # Merged into each agent, so a configured agent.build.steps stays.
+            agents = config.setdefault("agent", {})
+            for agent in _OPENCODE_AGENTS[self.config.opencode_version]:
+                agents.setdefault(agent, {}).update(sampling)
             if "temperature" in sampling:
                 # OpenCode sends temperature only for models that declare the capability.
                 config["provider"]["nemo_gym"]["models"][self.config.sandbox_model_id]["temperature"] = True
@@ -1653,7 +1702,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # System instructions are separate from the user's task and applied to every OpenCode model turn.
         if system:
             if self.config.system_prompt_mode == "replace":
-                # Added to the build agent, which keeps the request sampling set above.
+                # Added to the build agent, beside the request sampling and a configured agent.build.steps.
                 config.setdefault("agent", {}).setdefault("build", {})["prompt"] = system
             else:
                 config["instructions"] = [f"{state.session.session_dir}/instructions.md"]

@@ -144,8 +144,10 @@ receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one text task, optional system/developer text and
 `instructions`. Request `temperature` and `top_p` are applied to every OpenCode agent
-(see [Owner extensions](#owner-extensions)). Other controls, images, history replay and
-required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
+(see [Owner extensions](#owner-extensions)). A request `max_output_tokens` passes when it is at
+least the configured `max_output_tokens`, because OpenCode's limit for each model call already
+stays within it. NeMo RL sets it on every row. A smaller value returns 422. Other controls, images,
+history replay and required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
 fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
@@ -156,11 +158,21 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools`, `compaction.auto` and
+`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
+`agent.build.steps` (see below).
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
 adapter then omits `tools` and passes `permission` exactly as given.
+Setting `compaction.auto: false` keeps OpenCode from
+summarizing the session and continuing from the summary, in model calls that training cannot join
+to the scored call; a run that fills the context then ends with a context-limit error.
+`agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
+prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
+the limit. Token capture cannot join a call that carries this message to the earlier calls of the
+rollout, so with token capture on a session refuses `agent.build.steps`.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
@@ -218,7 +230,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish

@@ -654,6 +654,18 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("limit", [4096, 16384])
+def test_a_nemo_rl_row_output_limit_passes_when_opencode_stays_within_it(setup, limit):
+    """NeMo RL sets max_output_tokens on every row. OpenCode's own limit for each model call (4096 here) obeys it."""
+    agent, sandbox = setup
+    row = {"input": "task", "temperature": 1.0, "top_p": 1.0, "max_output_tokens": limit}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=row)
+        assert result.status_code == 200, result.text
+    assert sandbox.params()["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "4096"
+
+
 def test_rejected_request_does_not_consume_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
@@ -804,6 +816,107 @@ def test_instructions_and_text_parts_reach_opencode(setup, mode):
             assert sandbox.files[config["instructions"][0]] == "outer\n\nsystem"
         assert payload["prompt"] == "task"
         assert config["enabled_providers"] == ["nemo_gym"]
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_compaction_and_build_steps_reach_opencode(setup, mode):
+    agent, sandbox = setup
+    agent.config.system_prompt_mode = mode
+    agent.config.system_prompt = "Answer briefly"
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["compaction"] == {"auto": False}
+    if mode == "replace":
+        # The replacement prompt joins the configured step limit instead of replacing the agent entry.
+        assert config["agent"] == {"build": {"steps": 8, "prompt": "Answer briefly"}}
+    else:
+        assert config["agent"] == {"build": {"steps": 8}}
+    # The session's prompt stays out of the configuration that later sessions copy.
+    assert agent.config.opencode_config == {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+
+
+def test_request_sampling_joins_the_configured_build_steps(setup):
+    agent, sandbox = setup
+    agent.config.opencode_config = {"agent": {"build": {"steps": 8}}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task", "temperature": 0.6})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    assert config["agent"]["build"] == {"steps": 8, "temperature": 0.6}
+    assert config["agent"]["plan"] == {"temperature": 0.6}
+    # The request's sampling stays out of the configuration that later sessions copy.
+    assert agent.config.opencode_config == {"agent": {"build": {"steps": 8}}}
+
+
+@pytest.mark.parametrize(
+    ("opencode_config", "detail"),
+    [
+        ({"provider": {"other": {}}}, "unsupported: ['provider']"),
+        ({"compaction": {"auto": False, "prune": True}}, "compaction supports only auto"),
+        ({"compaction": {"auto": "false"}}, "compaction.auto must be true or false"),
+        ({"compaction": None}, "compaction supports only auto"),
+        ({"agent": {"plan": {"steps": 4}}}, "agent supports only build"),
+        ({"agent": {"build": {"prompt": "other"}}}, "agent.build supports only steps"),
+        ({"agent": {"build": {"steps": 0}}}, "agent.build.steps must be a positive integer"),
+        ({"agent": {"build": {"steps": True}}}, "agent.build.steps must be a positive integer"),
+    ],
+)
+def test_seed_rejects_opencode_config_outside_the_session_allowlist(setup, opencode_config, detail):
+    agent, sandbox = setup
+    agent.config.opencode_config = opencode_config
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422
+    assert detail in response.json()["detail"]
+    sandbox.exec.assert_not_awaited()
+
+
+def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
+    agent, sandbox = setup
+    agent.server_client.global_config_dict = OmegaConf.create(
+        {
+            "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
+            "token_id_capture": {"enabled": True, "all_agents": True},
+        }
+    )
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+    # OpenCode can reach only the Gym provider, for its main and small model alike.
+    assert config["enabled_providers"] == ["nemo_gym"]
+    assert config["model"].startswith("nemo_gym/") and config["small_model"].startswith("nemo_gym/")
+    assert list(config["provider"]) == ["nemo_gym"]
+    assert (
+        config["provider"]["nemo_gym"]["options"]["baseURL"]
+        == "http://model.example:9000/ng-rollout/opencode-smoke-a2/training-token-capture/v1"
+    )
+
+
+def test_with_token_capture_a_seed_refuses_build_steps(setup):
+    agent, sandbox = setup
+    agent.server_client.global_config_dict = OmegaConf.create(
+        {
+            "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
+            "token_id_capture": {"enabled": True, "all_agents": True},
+        }
+    )
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    with TestClient(agent.setup_webserver()) as client:
+        refused = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert refused.status_code == 422
+        # OpenCode's last-step prompt is an assistant message, which capture cannot join to the earlier calls.
+        assert "agent.build.steps cannot be used with token capture" in refused.json()["detail"]
+        sandbox.exec.assert_not_awaited()
+        # compaction.auto keeps capture whole, so it stays allowed.
+        agent.config.opencode_config = {"compaction": {"auto": False}}
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
