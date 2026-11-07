@@ -25,7 +25,8 @@ def _job_artifact(harness: str, jobs: list[dict], files: list[dict], *, run_id: 
     for artifact in files:
         suffix = artifact["name"].removeprefix(prefix)
         if (
-            suffix.isdecimal()
+            artifact["name"].startswith(prefix)
+            and suffix.isdecimal()
             and 1 <= int(suffix) <= int(attempt)
             and not artifact["expired"]
             # GitHub retains successful jobs on partial reruns, copying their

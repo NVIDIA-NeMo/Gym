@@ -96,6 +96,7 @@ def test_failed_download_invalidates_partial_result_and_continues(tmp_path, monk
         ([job("pi")], [evidence("pi", 3)]),  # A newer attempt must not affect this report.
         ([job("pi")], [evidence("pi", 1, expired=True)]),
         ([job("pi", status="in_progress")], [evidence("pi", 2)]),
+        ([job("pi")], [{**evidence("pi", 2), "name": "2"}]),  # Unrelated numeric artifact name.
         ([], [evidence("pi", 1)]),
     ],
 )
