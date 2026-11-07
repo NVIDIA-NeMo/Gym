@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import collections
+import dataclasses
 import datetime
+import enum
 import json
 import threading
 import time
@@ -101,6 +103,24 @@ def test_fallback_writes_other_types_as_orjson_does() -> None:
     assert dumps_json({"n": WIDE, "x": object()}, default=lambda _: "custom") == (
         b'{"n":1180591620717411303424,"x":"custom"}'
     )
+
+
+@dataclasses.dataclass
+class _Call:
+    name: str
+    arguments: dict
+
+
+class _Size(enum.Enum):
+    WIDE = 2**70
+
+
+def test_dataclasses_and_enums_holding_a_wide_integer_are_written_not_passed_to_default() -> None:
+    narrow = _Call("f", {"n": 1})
+    assert dumps_json(narrow, default=str) == orjson.dumps(narrow)
+
+    assert dumps_json(_Call("f", {"n": WIDE}), default=str) == b'{"name":"f","arguments":{"n":1180591620717411303424}}'
+    assert dumps_json({"size": _Size.WIDE}, default=str) == b'{"size":1180591620717411303424}'
 
 
 def test_nesting_deeper_than_orjson_allows_round_trips() -> None:

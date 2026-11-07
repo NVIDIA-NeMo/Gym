@@ -24,6 +24,8 @@ accepts must keep their bytes, so the fallback follows the same rule rather than
 whether it also holds a wide integer.
 """
 
+import dataclasses
+import enum
 import json
 import logging
 import math
@@ -183,8 +185,14 @@ def _json_ready(value: Any, default: Callable[[Any], Any] | None) -> Any:
         return {key: _json_ready(item, default) for key, item in value.items()}
     if isinstance(value, list) or type(value) is tuple:
         return [_json_ready(item, default) for item in value]
+    # Containers ``orjson`` writes natively are unpacked here, so a wide integer inside one is written, not passed
+    # to ``default`` with the whole container.
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: _json_ready(getattr(value, field.name), default) for field in dataclasses.fields(value)}
+    if isinstance(value, enum.Enum):
+        return _json_ready(value.value, default)
     try:
-        # Other types ``orjson`` writes natively (datetime, UUID, enum, dataclass) are written as it writes them.
+        # Other types ``orjson`` writes natively, such as datetime and UUID, are written as it writes them.
         return orjson.loads(orjson.dumps(value))
     except TypeError:
         if default is None:
