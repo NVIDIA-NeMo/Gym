@@ -70,6 +70,7 @@ from resources_servers.swe_rebench.verification import (
 )
 from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
+    CaptureCommandError,
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
@@ -344,17 +345,23 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
             capture = PatchCapture.static(body.patch, mode, "golden")
         else:
 
-            async def capture_or_fallback() -> tuple[PatchCapture, str | None]:
+            async def capture_or_fallback() -> tuple[PatchCapture, str | None, bool]:
                 try:
-                    return await self._extract_model_patch(
-                        session_id, repo_directory(body.repo), body.base_commit
-                    ), None
+                    capture = await self._extract_model_patch(session_id, repo_directory(body.repo), body.base_commit)
+                    return capture, None, False
+                except CaptureCommandError as exc:
+                    # A real git failure can reflect a repository damaged by the agent. Keep its empty-patch
+                    # grading behavior; unavailable execution belongs to the infrastructure denominator.
+                    incomplete = exc.error_type is not None or not isinstance(exc.return_code, int)
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", incomplete
                 except Exception as exc:
-                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}"
+                    return PatchCapture.static("", mode, "none"), f"Failed to extract model patch: {exc}", True
 
-            capture, extraction_error = await self.capture_task_sandbox_patch(session_id, capture_or_fallback)
+            capture, extraction_error, capture_incomplete = await self.capture_task_sandbox_patch(
+                session_id, capture_or_fallback
+            )
             await self.stop_task_sandbox_after_capture(session_id)
-            if extraction_error is not None:
+            if capture_incomplete:
                 # An unavailable patch is not evidence that the agent submitted an empty patch.
                 return self._incomplete_response(
                     body, extraction_error, **capture.response_fields(self.config.include_model_patch_in_response)

@@ -27,7 +27,7 @@ from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources
 from resources_servers.swe_rebench import app as swe_rebench_app
 from resources_servers.swe_rebench.app import SWERebenchResourcesServer, SWERebenchResourcesServerConfig
 from resources_servers.swe_rebench.verification import VerificationResult
-from resources_servers.swebench.patch_capture import PatchCapture
+from resources_servers.swebench.patch_capture import CaptureCommandError, PatchCapture
 
 
 _ROW = {
@@ -146,6 +146,38 @@ def test_agent_run_seed_still_returns_the_sandbox_handle(monkeypatch: MonkeyPatc
 def test_session_conformance(monkeypatch: MonkeyPatch) -> None:
     server, _ = _server(monkeypatch)
     check_resources_session_contract(server.setup_webserver(), _seed("conformance-session"), keeps_state=True)
+
+
+@pytest.mark.parametrize("typed", [False, True])
+@pytest.mark.parametrize("error_type", [None, "timeout", "sandbox"])
+def test_git_failure_and_provider_failure_have_distinct_denominators(
+    monkeypatch: MonkeyPatch, typed: bool, error_type: str | None
+) -> None:
+    server, sandboxes = _server(monkeypatch)
+    monkeypatch.setattr(
+        swe_rebench_app,
+        "capture_model_patch",
+        AsyncMock(side_effect=CaptureCommandError("git failed", return_code=128, error_type=error_type)),
+    )
+    monkeypatch.setattr(
+        swe_rebench_app,
+        "run_verification",
+        AsyncMock(return_value=VerificationResult(True, False, True, {}, "failed")),
+    )
+    with TestClient(server.setup_webserver()) as client:
+        seed = _seed().model_dump(mode="json") if typed else _ROW
+        assert client.post("/seed_session", json=seed).status_code == 200
+        response = client.post("/verify", json=_VERIFY).json()
+        assert response["reward"] == 0.0
+        assert response["evaluation_completed"] is (error_type is None)
+        assert response["mask_sample"] is (error_type is not None)
+        assert "git failed" in response["error"]
+        if error_type is None:
+            assert len(sandboxes) == 2
+            assert swe_rebench_app.run_verification.await_args.kwargs["inputs"].patch == ""
+        else:
+            assert len(sandboxes) == 1
+            swe_rebench_app.run_verification.assert_not_awaited()
 
 
 def test_outer_task_identity_need_not_equal_the_benchmark_instance(monkeypatch: MonkeyPatch) -> None:
