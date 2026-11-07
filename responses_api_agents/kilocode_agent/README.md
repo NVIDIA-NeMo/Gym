@@ -4,8 +4,6 @@ Runs the [Kilo Code](https://kilo.ai) CLI (`kilo run`). Kilo Code is a fork of O
 agent mirrors the `opencode_agent`: Kilo runs its own tools internally, and its JSON event stream
 (`--format json`) is parsed into Gym format and verified by the resources server.
 
-Minimal and meant to be extended.
-
 Training token-ID capture is off by default. With `model_server`, model calls go to the Gym Model Server under
 the rollout's prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
 `token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
