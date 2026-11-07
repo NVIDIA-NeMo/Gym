@@ -95,6 +95,10 @@ class SingleAgentTurnEnvironmentServerConfig(BaseEnvironmentServerConfig):
     agent_server: AgentServerRef
     agent_outcome_policy: AgentOutcomePolicyConfig = Field(default_factory=AgentOutcomePolicyConfig)
     resources_tool_transports: list[Literal["direct_http", "mcp"]] = Field(default_factory=list)
+    mask_incomplete_for_training: bool = Field(
+        default=False,
+        description="Exclude unfinished harness executions and incomplete verification from training loss.",
+    )
 
 
 class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequest, SingleAgentTurnResponse]):
@@ -478,6 +482,15 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # Preserve explicit process evidence even when verification omits
                 # response metadata. Never infer it from model completion status.
                 result = result.model_copy(update={"agent_execution_finished": finished == "true"})
+            fields = result.model_extra or {}
+            if self.config.mask_incomplete_for_training and (
+                fields.get("evaluation_completed") is False or fields.get("agent_execution_finished") is False
+            ):
+                # Training loss validity is separate from the verifier's quality
+                # mask. Keep its verdict/reward and any existing instance fields.
+                instance_config = dict(fields.get("instance_config") or {})
+                instance_config["mask_sample"] = True
+                result = result.model_copy(update={"instance_config": instance_config})
             explicit_terminal = (result.model_extra or {}).get(TERMINAL_RESPONSE_ID_KEY)
             if not (isinstance(explicit_terminal, str) and explicit_terminal):
                 terminal = (agent_response.metadata or {}).get(TERMINAL_RESPONSE_ID_KEY)

@@ -63,6 +63,10 @@ from nemo_gym.token_id_capture.records import EngineRefusalRecord, ParentResolut
 from nemo_gym.token_id_capture.staging.records import CaptureLedgerCommit
 
 
+# Worker acknowledgement that a call was refused before generation or staging.
+CAPTURE_REFUSAL_HEADER = "x-ng-capture-refused"
+
+
 class RolloutRemovalPayload(TypedDict):
     """The result of retiring or deleting rollouts, as plain wire data.
 

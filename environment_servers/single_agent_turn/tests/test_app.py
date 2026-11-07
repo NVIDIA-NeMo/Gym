@@ -307,6 +307,29 @@ async def test_process_completion_survives_verifier_omitting_response_metadata(f
     assert reply.result.reward == 1.0
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("finished,evaluated", [("true", True), ("false", True), ("true", False)])
+async def test_training_mask_is_opt_in_and_keeps_verifier_quality_and_rewards(enabled, finished, evaluated):
+    environment, client = _environment_server(token_capture=True)
+    environment.config.mask_incomplete_for_training = enabled
+    client.responses[2] = _Response(
+        _agent_response()
+        .model_copy(update={"metadata": {"agent_execution_finished": finished}})
+        .model_dump(mode="json")
+    )
+    verification = orjson.loads(client.responses[4].body)
+    verification.update(evaluation_completed=evaluated, instance_config={"custom": "preserved"}, mask_sample=False)
+    client.responses[4] = _Response(verification)
+
+    reply = await environment.run_request(_request())
+
+    fields = reply.result.model_dump(mode="json")
+    assert fields["instance_config"]["custom"] == "preserved"
+    assert fields["instance_config"].get("mask_sample", False) is (enabled and (finished == "false" or not evaluated))
+    assert fields["mask_sample"] is False
+    assert fields["reward"] == 1.0
+
+
 @pytest.mark.parametrize(
     "verifier_fields",
     [
