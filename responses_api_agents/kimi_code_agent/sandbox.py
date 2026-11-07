@@ -12,6 +12,7 @@ from shlex import quote
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    AgentSeedRejectedError,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
@@ -36,6 +37,8 @@ KIMI_RELEASE_URL = f"https://code.kimi.com/kimi-code/binaries/{KIMI_VERSION}"
 SESSION_ROOT = "/tmp/nemo-gym-kimi-sessions"
 RUNTIME_ROOT = "/tmp/nemo-gym-kimi-runtime"
 INSTALLER = "install_kimi_runtime.sh"
+# install_kimi_runtime.sh exit status for an image without glibc.
+NO_GLIBC_EXIT = 3
 # Bounds the stderr tail copied back to the agent server.
 STDERR_TAIL_BYTES = 1024 * 1024
 
@@ -95,7 +98,7 @@ class KimiSession(AgentSessionState):
             (arch.stdout or "").strip(), (arch.stdout or "").strip()
         )
         if arch_name not in KIMI_BINARY_SHA256:
-            raise RuntimeError(f"No Kimi Code {KIMI_VERSION} release for sandbox architecture {arch_name!r}")
+            raise AgentSeedRejectedError(f"No Kimi Code {KIMI_VERSION} release for sandbox architecture {arch_name!r}")
         name = kimi_binary_name(arch_name)
         local = await cached_download(
             f"{KIMI_RELEASE_URL}/{name}", sha256=KIMI_BINARY_SHA256[arch_name], timeout=timeout
@@ -108,6 +111,8 @@ class KimiSession(AgentSessionState):
             cwd="/",
             timeout_s=timeout,
         )
+        if result.return_code == NO_GLIBC_EXIT and not result.error_type:
+            raise AgentSeedRejectedError(f"Kimi Code {KIMI_VERSION} needs a glibc sandbox image")
         if result.return_code != 0 or result.error_type:
             details = "\n".join(part for part in (result.stderr, result.stdout) if part)
             raise RuntimeError(
@@ -139,11 +144,8 @@ class KimiSession(AgentSessionState):
     async def collect(self) -> KimiArtifacts:
         """Copy stdout, the stderr tail and the session store after the supervisor confirms termination."""
         sandbox, directory = self.session.sandbox, self.session.session_dir
-        try:
-            stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")
-        except Exception:
-            LOG.warning("Kimi stdout unavailable", exc_info=True)
-            stdout = ""
+        # A failed read raises, so a transient capture error is retried instead of graded as an empty answer.
+        stdout = await read_text(sandbox, path=f"{directory}/stdout.jsonl")
         stderr = ""
         tail = await sandbox.exec(
             f"tail -c {STDERR_TAIL_BYTES} {quote(f'{directory}/stderr.log')} > {quote(f'{directory}/stderr.tail')}",

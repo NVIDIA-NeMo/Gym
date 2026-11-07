@@ -46,6 +46,8 @@ agents_md = home / "AGENTS.md"
     "agents_md": agents_md.read_text() if agents_md.exists() else None,
     "env": {k: v for k, v in os.environ.items() if k.startswith(("KIMI_", "OPENAI_"))},
 }))
+if mode == "hang":
+    time.sleep(60)
 subprocess.run(["bash", "-c", 'printf "%s\n%s\n" "$HOME" "$TASK_TEST" > proof.txt'], check=True)
 def usage(tokens):
     return {"type": "usage.record", "usage": {"inputOther": tokens, "output": 1, "inputCacheRead": 2}}
@@ -74,6 +76,10 @@ for message in messages:
     print(json.dumps(message), flush=True)
 if mode == "sleep":
     time.sleep(60)
+causes = {"overflow": "context.overflow: Context overflow", "auth": "provider.auth_error: 401 Unauthorized"}
+if mode in causes:
+    sys.stderr.write("error: failed to run prompt: " + causes[mode] + "\n")
+    sys.exit(1)
 print(json.dumps({"role": "meta", "type": "session.resume_hint", "session_id": "session_1"}))
 sys.exit(1 if mode == "crash" else 0)
 """.replace("__VERSION__", KIMI_VERSION)
@@ -193,7 +199,11 @@ def test_config_routes_every_model_through_the_rollout_and_keeps_its_providers()
         subagent_model_server={"type": "responses_api_models", "name": "lightning"},
         subagent_model_force=True,
         subagents=False,
-        kimi_config={"providers": {"policy": {"base_url": "http://elsewhere"}}, "extra": {"x": 1}},
+        kimi_config={
+            "providers": {"policy": {"base_url": "http://elsewhere"}},
+            "extra": {"x": 1},
+            "loop_control": {"max_steps_per_turn": 5},
+        },
     )
     state = MagicMock(request=seed())
 
@@ -208,6 +218,9 @@ def test_config_routes_every_model_through_the_rollout_and_keeps_its_providers()
     # Web tools stay off by default.
     assert {"Agent", "AgentSwarm", "WebSearch", "FetchURL"} <= set(config["tools"]["disabled"])
     assert config["extra"] == {"x": 1}
+    # Unset typed fields leave the user's kimi_config alone.
+    assert config["loop_control"] == {"max_steps_per_turn": 5}
+    assert config["providers"]["subagent"]["custom_headers"] == {"x-session-id": "rollout-1"}
 
 
 @pytest.mark.parametrize("capture", [True, False])
@@ -216,6 +229,10 @@ def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
         subagent_model_server={"type": "responses_api_models", "name": "lightning"}, token_id_capture=capture
     )
     server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    if capture:
+        # Capture would record the subagent server's calls under the policy rollout.
+        reason = "Kimi Code token capture would record subagent_model_server calls as policy"
+        assert check_agent_seed_rejected(server.setup_webserver(), seed()) == reason
     server.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['name']}:9000"
     with patch(
         "nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict",
@@ -304,9 +321,11 @@ def owned_sandbox(monkeypatch):
 )
 async def test_owned_sandbox_egress_allows_only_the_model_host(owned_sandbox, network_access, subagent_server, policy):
     subagent = (
-        {"subagent_model_server": {"type": "responses_api_models", "name": subagent_server}} if subagent_server else {}
+        {"subagent_model_server": {"type": "responses_api_models", "name": subagent_server}, "subagent_model": "child"}
+        if subagent_server
+        else {}
     )
-    server = agent(network_access=network_access, sandbox_provider="sandbox", subagent_model="child", **subagent)
+    server = agent(network_access=network_access, sandbox_provider="sandbox", **subagent)
     await server._seed_agent_session_state(seed(borrowed=False))
     assert owned_sandbox.start.await_args.args[0].provider_options.get("network_policy") == policy
 
@@ -403,19 +422,27 @@ async def test_real_run_maps_output_usage_and_subagents(tmp_path):
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
 @pytest.mark.parametrize(
-    ("mode", "status", "failure_kind"), [("crash", "failed", "unknown"), ("silent", "failed", "agent_invalid_output")]
+    ("mode", "status", "failure_kind"),
+    [
+        ("crash", "failed", "unknown"),
+        ("silent", "failed", "agent_invalid_output"),
+        ("auth", "failed", "model_request_error"),
+    ],
 )
 async def test_failed_runs_report_an_outcome(tmp_path, mode, status, failure_kind):
     response, close, _, _, _ = await activate(tmp_path, mode)
     assert response.status == status
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["failure_kind"] == failure_kind
+    outcome = json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])
+    assert outcome["failure_kind"] == failure_kind and outcome.get("status_code") == (401 if mode == "auth" else None)
     assert close.cleanup_confirmed
 
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(sys.platform != "linux", reason="Shared process supervisor requires Linux")
-async def test_timeout_keeps_partial_work_as_incomplete(tmp_path):
-    response, close, _, state, _ = await activate(tmp_path, "sleep", timeout=3)
-    assert state.session.cleanup["timed_out"] and response.status == "incomplete"
-    assert response.output[-1].content[0].text == "Done."
-    assert close.agent_observations.records[-1].outcome == "timeout"
+@pytest.mark.parametrize("mode", ["sleep", "hang", "overflow"])
+async def test_deadlines_and_native_limits_are_incomplete(tmp_path, mode):
+    response, close, _, state, _ = await activate(tmp_path, mode, timeout=3)
+    assert response.status == "incomplete" and AGENT_OUTCOME_METADATA_KEY not in response.metadata
+    # A deadline before Kimi printed anything is still graded.
+    assert response.output[-1].content[0].text == "Done." if mode != "hang" else response.output == []
+    assert state.session.cleanup["timed_out"] == (mode != "overflow")

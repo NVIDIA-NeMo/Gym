@@ -6,6 +6,7 @@ subagents."""
 import asyncio
 import io
 import logging
+import re
 import tarfile
 import tempfile
 from collections.abc import Mapping
@@ -18,7 +19,7 @@ from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import Field, JsonValue
+from pydantic import Field, JsonValue, model_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -78,6 +79,10 @@ LOG = logging.getLogger(__name__)
 MAX_PROMPT_BYTES = 128 * 1024
 # harness_runner.sh exit statuses when Kimi itself never ran.
 RUNNER_FAILURES = (125, 126, 127)
+# A failed print turn ends with "error: failed to run prompt: <code>: <message>" on stderr.
+TURN_FAILURE = re.compile(r"failed to run prompt: ([\w.]+): (.*)")
+# Native limit stops, graded as incomplete.
+LIMIT_CODES = ("context.overflow", "loop.max_steps_exceeded")
 
 
 class KimiCodeAgentConfig(BaseResponsesAPIAgentConfig):
@@ -123,6 +128,13 @@ class KimiCodeAgentConfig(BaseResponsesAPIAgentConfig):
         ),
     )
 
+    @model_validator(mode="after")
+    def require_subagent_server(self) -> "KimiCodeAgentConfig":
+        # Gym model servers overwrite the request's model, so these act only on a separate subagent server.
+        if (self.subagent_model or self.subagent_model_force) and not self.subagent_model_server:
+            raise ValueError("subagent_model and subagent_model_force require subagent_model_server")
+        return self
+
 
 def _text(content: Any) -> str:
     if isinstance(content, str):
@@ -147,7 +159,9 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
         self._sem = asyncio.Semaphore(self.config.concurrency)
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        return AgentOutcome(failure_kind=native_result.get("failure_kind", "unknown"))
+        return AgentOutcome(
+            failure_kind=native_result.get("failure_kind", "unknown"), status_code=native_result.get("status_code")
+        )
 
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
         return state.session if isinstance(state, KimiSession) else None
@@ -160,6 +174,8 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.kimi_version != KIMI_VERSION:
             raise AgentSeedRejectedError(f"Kimi Code sessions pin release checksums for kimi_version {KIMI_VERSION}")
+        if self.config.subagent_model_server and self._token_id_capture_enabled():
+            raise AgentSeedRejectedError("Kimi Code token capture would record subagent_model_server calls as policy")
         access = body.sandbox_access
         owns_sandbox = access is None
         if self.config.network_access == "model_and_tools":
@@ -306,7 +322,12 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
 
         def provider(server: ModelServerRef) -> dict[str, str]:
             base_url = self.model_endpoint(model_server=server, rollout_id=rollout_id).base_url
-            return {"type": "openai", "base_url": base_url, "api_key": "gym"}  # pragma: allowlist secret
+            return {
+                "type": "openai",
+                "base_url": base_url,
+                "api_key": "gym",  # pragma: allowlist secret
+                "custom_headers": {"x-session-id": rollout_id},
+            }
 
         model = {"max_context_size": self.config.max_context_size, "capabilities": ["thinking", "tool_use"]}
         config: dict[str, Any] = {
@@ -316,9 +337,11 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             "providers": {"policy": provider(self.config.model_server)},
             "models": {"policy": model | {"provider": "policy", "model": self.config.model}},
             "tools": {"disabled": list(self.config.disabled_tools)},
-            "loop_control": {"max_steps_per_turn": self.config.max_steps_per_turn},
-            "background": {"print_max_turns": self.config.print_max_turns},
         }
+        if self.config.max_steps_per_turn is not None:
+            config["loop_control"] = {"max_steps_per_turn": self.config.max_steps_per_turn}
+        if self.config.print_max_turns is not None:
+            config["background"] = {"print_max_turns": self.config.print_max_turns}
         if self.config.thinking_effort:
             config["thinking"] = {"effort": self.config.thinking_effort}
         if not self.config.subagents:
@@ -347,7 +370,8 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             "KIMI_DISABLE_TELEMETRY": "1",
             "KIMI_CODE_NO_AUTO_UPDATE": "1",
             "KIMI_DISABLE_CRON": "1",
-            "KIMI_CODE_TRUST_WORKSPACE": "1",
+            # Native assets go to the runtime's cache, which the installer's version check fills, not the task's HOME.
+            "KIMI_CODE_CACHE_DIR": f"{state.runtime}/cache",
         }
         if self.config.swarm_max_concurrency:
             env["KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY"] = str(self.config.swarm_max_concurrency)
@@ -364,12 +388,11 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
 
     @staticmethod
     def _read_sessions(archive: bytes, session_id: str | None) -> tuple[NeMoGymResponseUsage | None, list[dict]]:
-        if session_id is None:
-            return None, []
         with tempfile.TemporaryDirectory(prefix="gym-kimi-sessions-") as temporary:
             with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
                 tar.extractall(temporary, filter="data")
-            matches = list(Path(temporary, "sessions").glob(f"*/{session_id}"))
+            # Without the resume hint (a timed-out or failed run), only a single session is unambiguous.
+            matches = [path for path in Path(temporary, "sessions").glob(f"*/{session_id or '*'}") if path.is_dir()]
             return parse_session(matches[0]) if len(matches) == 1 else (None, [])
 
     def _observations(
@@ -418,8 +441,7 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
                 error_type=error_type,
             )
         )
-        # Kimi 2.1.1 sends no per-call session header to the model server.
-        gaps = ["model_call_ownership_unavailable", "harness_tool_timing_unavailable"]
+        gaps = ["harness_tool_timing_unavailable"]
         if not usage_known:
             gaps.append("usage_unavailable")
         gaps += ["optional_tool_grant_skipped" for _ in self.effective_tool_accesses(state.request)]
@@ -460,16 +482,19 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             )
         answered = any(getattr(item, "type", None) == "message" for item in output)
 
-        status, failure_kind = "completed", None
-        if timed_out:
-            if not output:
-                raise RuntimeError("Kimi Code timed out before any model response")
+        status, outcome = "completed", {}
+        cause = TURN_FAILURE.findall(artifacts.stderr) if return_code else []
+        code, message = cause[-1] if cause else (None, "")
+        http = re.match(r"(?:Error: )?([45]\d\d)\b", message)
+        if timed_out or code in LIMIT_CODES:
+            # A deadline or rollout stop keeps whatever the model did, even before Kimi printed anything.
             status = "incomplete"
+        elif code and code.startswith("provider.") and http:
+            status, outcome = "failed", {"failure_kind": "model_request_error", "status_code": int(http[1])}
         elif return_code != 0:
-            # Kimi 2.1.1 reports no structured cause for a failed print-mode run; the episode may be retried.
-            status, failure_kind = "failed", "unknown"
+            status, outcome = "failed", {"failure_kind": "unknown"}
         elif not answered:
-            status, failure_kind = "failed", "agent_invalid_output"
+            status, outcome = "failed", {"failure_kind": "agent_invalid_output"}
 
         state.observations = self._observations(
             state,
@@ -487,6 +512,12 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
             output=output,
             usage=usage,
             status=status,
+            error={
+                "code": "server_error",
+                "message": f"{code}: {message}" if code else f"Kimi Code exit {return_code}",
+            }
+            if status == "failed"
+            else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -500,7 +531,7 @@ class KimiCodeAgent(SimpleResponsesAPIAgent):
         )
         if status == "failed":
             LOG.warning("Kimi Code run failed (exit %s); stderr tail: %s", return_code, artifacts.stderr[-2048:])
-            return self.report_outcome(response, {"failure_kind": failure_kind})
+            return self.report_outcome(response, outcome)
         return self.report_rollout_stop(response, state.session)
 
     async def responses(

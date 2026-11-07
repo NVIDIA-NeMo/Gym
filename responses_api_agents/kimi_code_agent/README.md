@@ -11,7 +11,8 @@ observation bundle with one invocation per subagent.
 
 Training token-ID capture is off by default. Root and subagent model calls go to Gym Model Servers under the rollout's
 prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
-`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`. A seed with capture on and a
+`subagent_model_server` is refused, since that server's calls would be recorded under the policy rollout.
 
 ## Configure and run
 
@@ -53,7 +54,7 @@ gym eval run --no-serve \
 |---|---:|---|
 | `kimi_version` | `2.1.1` | Release whose binary checksums are pinned in the adapter. Other values are refused. |
 | `model` | `${policy_model_name}` | Model name Kimi sends for the root. |
-| `subagent_model_server`, `subagent_model` | `null` | A second Model Server (and model name) for `Agent`/`AgentSwarm` children, Kimi's `[secondary_model]` default. `subagent_model_force: true` pins every child to it. |
+| `subagent_model_server`, `subagent_model` | `null` | A second Model Server (and model name) for `Agent`/`AgentSwarm` children, Kimi's `[secondary_model]` default. `subagent_model_force: true` pins every child to it. `subagent_model` and `subagent_model_force` require `subagent_model_server`. |
 | `subagents` | `true` | `false` disables `Agent` and `AgentSwarm`, for a solo control. |
 | `swarm_max_concurrency` | `null` | `KIMI_CODE_AGENT_SWARM_MAX_CONCURRENCY`; `null` keeps Kimi's own ramp. |
 | `max_steps_per_turn`, `print_max_turns` | `null` | Kimi's `loop_control.max_steps_per_turn` and `background.print_max_turns`. |
@@ -71,9 +72,11 @@ gym eval run --no-serve \
 Kimi Code ships one self-contained glibc binary per platform (about 190 MB). Session setup installs the binary for
 the sandbox's architecture under `/tmp/nemo-gym-kimi-runtime-2.1.1`. The agent server downloads it from
 `code.kimi.com` once into its asset cache, checks the SHA-256 pinned in `sandbox.py` from the release manifest, and
-uploads it; the sandbox checks the checksum again, checks the version Kimi reports, and reuses a runtime that already
-reports it. The sandbox needs a glibc image, bash and `sha256sum`, and no internet access; Alpine/musl images are not
-supported by the release binaries.
+uploads it; the sandbox checks the checksum again, checks the version Kimi reports, and reuses a runtime whose
+checksum and version match. The sandbox needs a glibc image, bash, `sha256sum` and `timeout`, and no internet access. Alpine/musl
+images and other architectures are refused at seed. Kimi's `Grep` and `Glob` use `rg` from `PATH`. Without it, Kimi
+downloads ripgrep from `code.kimi.com` on each run, which fails in an offline or `model_only` sandbox, so the image
+should provide `rg`. Kimi's native assets are extracted under the runtime directory, not the task's `HOME`.
 
 Kimi runs in `SandboxAccess.workdir` through the shared `harness_runner.sh` under the process supervisor. Its config,
 global `AGENTS.md`, sessions and logs live under `KIMI_CODE_HOME` in a private session directory, so tool shells keep
@@ -101,15 +104,17 @@ prints, so kimi processes the agent starts itself are not counted). Response met
 | Kimi Code 2.1.1 ending | Response |
 |---|---|
 | Exit 0 with an assistant message | `completed` |
-| Supervisor deadline, with model output | `incomplete` (verified); without any output, the activation fails |
-| Nonzero exit | `failed`, `unknown` (Kimi reports no structured cause; the episode may be retried) |
+| Supervisor deadline or rollout stop, with or without output | `incomplete` (verified) |
+| `context.overflow` or `loop.max_steps_exceeded` on stderr | `incomplete` (verified) |
+| `provider.*` error with an HTTP status on stderr | `failed`, `model_request_error` with `status_code` |
+| Any other nonzero exit, including a bare 137 | `failed`, `unknown` (the episode may be retried) |
 | Exit 0 without an assistant message | `failed`, `agent_invalid_output` |
 | Kimi never started | The activation raises |
 
 ## Limitations
 
-- Model-call ownership and tool timing are not reported (`model_call_ownership_unavailable`,
-  `harness_tool_timing_unavailable`): Kimi sends no per-call session header.
+- Tool timing is not reported (`harness_tool_timing_unavailable`). Every model call carries the rollout's
+  `x-session-id` header.
 - Required tool grants are refused at seed; optional grants are skipped and reported. A `SandboxAccess` user override
   is refused.
 - One activation per session; there is no host execution path.

@@ -13,7 +13,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.models import ResponsesConverter
+from nemo_gym.models import ChatCompletionsConverter
 
 
 def _toml_str(value: Any) -> str:
@@ -62,7 +62,7 @@ def parse_stream_json(stdout: str) -> list[Any]:
 
     Gym model servers return reasoning inside `<think>` tags in the content, which the converter splits off again.
     """
-    converter = ResponsesConverter(return_token_id_information=False)
+    converter = ChatCompletionsConverter(return_token_id_information=False)
     output = []
     for message in map(_json_or_none, stdout.splitlines()):
         if not isinstance(message, dict):
@@ -82,8 +82,11 @@ def parse_stream_json(stdout: str) -> list[Any]:
 
 
 def parse_session(session_dir: Path) -> tuple[NeMoGymResponseUsage | None, list[dict[str, Any]]]:
-    """Sum model usage over the root and every subagent, and list the subagents from the wire logs."""
-    usages, subagents = [], {}
+    """Sum model usage over the root and every subagent, and list the subagents from the wire logs.
+
+    Kimi records a call without usage as all zeros, which leaves the total unknown.
+    """
+    usages, subagents, missing = [], {}, False
     for wire in sorted(session_dir.glob("agents/*/wire.jsonl")):
         for event in map(_json_or_none, wire.read_text(errors="replace").splitlines()):
             if not isinstance(event, dict):
@@ -93,6 +96,7 @@ def parse_session(session_dir: Path) -> tuple[NeMoGymResponseUsage | None, list[
                 usage = event.get("usage") or {}
                 cached = usage.get("inputCacheRead", 0)
                 input_tokens = usage.get("inputOther", 0) + cached + usage.get("inputCacheCreation", 0)
+                missing |= input_tokens == 0
                 usages.append(
                     NeMoGymResponseUsage(
                         input_tokens=input_tokens,
@@ -113,7 +117,7 @@ def parse_session(session_dir: Path) -> tuple[NeMoGymResponseUsage | None, list[
                     "background": event.get("runInBackground", False),
                     "status": "incomplete",
                 }
-            elif kind in ("subagent.started", "subagent.completed", "subagent.failed") and (
+            elif kind in ("subagent.started", "subagent.completed", "subagent.failed", "subagent.cancelled") and (
                 event.get("subagentId") in subagents
             ):
                 # Other subagent.* events (progress and the like) do not end a subagent.
@@ -122,8 +126,10 @@ def parse_session(session_dir: Path) -> tuple[NeMoGymResponseUsage | None, list[
                     child["started"] = event.get("time")
                 else:
                     child["ended"] = event.get("time")
-                    child["status"] = "completed" if kind == "subagent.completed" else "failed"
-    usage = NeMoGymResponseUsage.sum_from_list(usages) if usages else None
+                    child["status"] = {"subagent.completed": "completed", "subagent.failed": "failed"}.get(
+                        kind, "incomplete"
+                    )
+    usage = NeMoGymResponseUsage.sum_from_list(usages) if usages and not missing else None
     return usage, list(subagents.values())
 
 
