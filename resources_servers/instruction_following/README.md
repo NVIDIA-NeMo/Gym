@@ -11,6 +11,9 @@ See [IndicIFEval-Trans](../../benchmarks/indic/ifeval/README.md) for the support
 12 languages, data preparation, generation defaults, and scoring details.
 The default `instruction_backend: english` preserves the original evaluator.
 
+Empty or whitespace-only responses fail every instruction and receive zero
+reward in both `binary` and `fraction` grading modes.
+
 ### Input schema
 - `responses_create_params`: OpenAI Responses create params.
 - `verifier_metadata` (required): Scoring fields read by the verifier:

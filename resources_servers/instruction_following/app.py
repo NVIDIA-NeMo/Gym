@@ -195,8 +195,8 @@ class InstructionFollowingResourcesServer(SimpleResourcesServer):
                 # Build the instruction description with the provided kwargs
                 instruction.build_description(**filtered_kwargs)
 
-                # Check if the response follows the instruction
-                if instruction.check_following(final_response_text):
+                # Empty responses must not satisfy negative or upper-bound constraints.
+                if final_response_text.strip() and instruction.check_following(final_response_text):
                     is_following_list.append(True)
                 else:
                     is_following_list.append(False)
