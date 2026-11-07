@@ -89,7 +89,17 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
     injected: set[str] = set()
     while True:
         try:
-            return parser.parse_no_environment(initial_global_config_dict=working)
+            # Listing only reads configs, so it parses offline.
+            # Offline parsing never looks up this host for `use_absolute_ip`, probes ports, or sets environment variables.
+            return parser.parse(
+                parse_config=GlobalConfigDictParserConfig(
+                    dotenv_path=None,
+                    initial_global_config_dict=working,
+                    skip_load_from_cli=True,
+                    skip_load_from_dotenv=True,
+                    offline=True,
+                )
+            )
         except InterpolationKeyError as e:
             # The missing key name is only in the message text — omegaconf never stores it on an attribute
             # (`e.key`/`e.full_key` point at the containing node), so a regex is the only way to read it.
