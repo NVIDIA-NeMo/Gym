@@ -7,6 +7,7 @@ import subprocess
 import sys
 
 import pytest
+from scripts.harness_conformance import ci
 from scripts.harness_conformance.ci import ROOT, install_runtime
 from scripts.harness_conformance.registry import HARNESSES
 
@@ -15,6 +16,7 @@ from scripts.harness_conformance.registry import HARNESSES
 def test_install_uses_locked_adapter_project(monkeypatch, harness):
     calls = []
     monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append((command, kwargs)))
+    monkeypatch.setattr(ci, "_build_crewai_sandbox_runtime", lambda: None)
 
     install_runtime(harness)
 
@@ -38,3 +40,20 @@ def test_openclaw_install_leaves_runtime_to_session(monkeypatch):
 
     monkeypatch.setattr(importlib, "import_module", unexpected_setup)
     install_runtime("openclaw")
+
+
+def test_crewai_install_syncs_its_locked_project_and_builds_its_sandbox_runtime(monkeypatch):
+    import importlib
+
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+    monkeypatch.setattr(ci, "_build_crewai_sandbox_runtime", lambda: calls.append("sandbox runtime"))
+
+    def unexpected_setup(name):
+        raise AssertionError(f"CrewAI has no runtime setup module: {name}")
+
+    monkeypatch.setattr(importlib, "import_module", unexpected_setup)
+    install_runtime("crewai")
+
+    # The probes' first seed finds the runtime built, instead of building it within one episode's time limit.
+    assert calls[1:] == ["sandbox runtime"]

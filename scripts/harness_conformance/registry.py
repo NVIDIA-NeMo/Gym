@@ -13,4 +13,5 @@ HARNESSES = {
     "stirrup": "StirrupAgentWrapper",
     "openclaw": "OpenClawAgent",
     "nooa": "NOOAAgent",
+    "crewai": "CrewAIAgent",
 }

@@ -1,0 +1,22 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# CrewAI runs inside the task sandbox, one crew turn per agent session: the SandboxAccess the Environment Server
+# forwards, or, with sandbox_provider, a sandbox the agent starts itself. MCP tool grants add the benchmark's tools.
+# The run configuration binds the benchmark and this agent; see the README for compositions.
+crewai_agent:
+  responses_api_agents:
+    crewai_agent:
+      entrypoint: app.py
+      num_workers: 1
+      resources_server: null
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      timeout: 1800
+      max_iter: 50
+      # The policy model's context window. Unset, CrewAI assumes 4,096 tokens and summarizes the conversation early.
+      context_window_size: 131072
+      shell_timeout_seconds: 600
+      session_close_timeout_seconds: 60
