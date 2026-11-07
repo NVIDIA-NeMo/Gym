@@ -29,7 +29,7 @@ talks to it.
 This is the API for callers outside Gym. They import the names `nemo_gym.environment` exports (`plan_benchmark`,
 `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`)
 and `ConfigError` from
-`nemo_gym.config`. Signatures and result fields change only additively, and tests pin them. `TaskResult.results`
+`nemo_gym.config`. It is experimental: signatures and result fields may change without a deprecation period, and tests pin the current ones. `TaskResult.results`
 holds Gym's raw `/run` responses (the failure record for a failed `/run`), whose keys can change: depend on
 `rewards` and `outcomes`, and use `results` for debugging.
 """
@@ -68,6 +68,7 @@ from nemo_gym.eval.eval_plan import EvalPlan
 from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
 from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
+from nemo_gym.utils.decorators import experimental
 
 
 @dataclass(frozen=True)
@@ -117,7 +118,6 @@ class TaskFailure:
     """
 
     kind: str
-    domain: str
     source: Literal["environment", "collector"]
     delivery: Literal["not_sent", "possibly_delivered", "delivered"]
     stage: Optional[FailureStage] = None
@@ -125,6 +125,10 @@ class TaskFailure:
     reason: Optional[str] = None
     http_status: Optional[int] = None
     exception_type: Optional[str] = None
+
+    @property
+    def domain(self) -> str:
+        return failure_domain(self.kind)
 
 
 @dataclass(frozen=True)
@@ -157,6 +161,7 @@ class TaskResult:
     outcomes: list[RolloutOutcome] = field(default_factory=list)
 
 
+@experimental
 def plan_benchmark(
     benchmark: str,
     *,
@@ -186,6 +191,7 @@ def plan_benchmark(
     return PlannedBenchmark(plan=plan, rows=rows)
 
 
+@experimental
 @contextmanager
 def serve_benchmark(
     benchmark: str,
@@ -289,6 +295,7 @@ class TaskRunner:
     event loop are supported.
     """
 
+    @experimental
     def __init__(self, rows: Sequence[Mapping[str, Any]], *, registry_server: BaseServerConfig):
         self._helper = RolloutCollectionHelper()
         self._registry_server = registry_server
@@ -343,7 +350,6 @@ def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome
     if kind:
         failure = TaskFailure(
             kind=str(kind),
-            domain=failure_domain(str(kind)),
             source="environment",
             delivery="delivered",
             reason=None if reason is None else str(reason),
@@ -363,7 +369,6 @@ def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
     kind = record.failure.failure_kind or _fallback_kind(record)
     return TaskFailure(
         kind=kind,
-        domain=failure_domain(kind),
         source=record.source,
         delivery=record.delivery,
         stage=record.failure.stage,

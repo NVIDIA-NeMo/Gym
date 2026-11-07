@@ -120,7 +120,6 @@ EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output"],
     "TaskFailure": [
         "kind",
-        "domain",
         "source",
         "delivery",
         "stage",

@@ -110,12 +110,14 @@ command-line arguments and does not set Gym's process-wide configuration, so a l
 Start the servers with `gym env start --benchmark NAME` first. The registry server is the server that serves the
 run's config and the other servers' addresses.
 
-### What is stable
+### What is experimental
 
 Import everything from `nemo_gym.environment`: `plan_benchmark`, `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`,
-`TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`. Signatures and the fields of the result
-types change only additively: a new parameter is optional and keyword-only, and a parameter is deprecated before it is
-removed or renamed. A test pins them.
+`TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`.
+
+This API is experimental: signatures, result fields and behaviour may change or be removed without a deprecation
+period. `plan_benchmark`, `serve_benchmark` and `TaskRunner` warn on stderr when they are used. A test pins the current
+names and fields so that a change is deliberate.
 
 A `TaskResult` has one `RolloutOutcome` per rollout in `outcomes`: the `reward` (None when none exists, as for a failed
 `/run`), a `TaskFailure` when a failure was reported, whether it was `masked`, and the `prompt` and `output` as JSON text
@@ -126,7 +128,7 @@ A failure reports what Gym observed and leaves the decision to you:
 
 | Field | Meaning |
 | --- | --- |
-| `kind`, `domain` | Gym's failure kind and the layer that observed it (the part of the kind before the first `_` or `:`, such as `agent`, `judge`, `session` or `provider`). When the reporter named no cause, the kind is `environment_server_failed`, `agent_run_error` or `agent_request_failed`. |
+| `kind`, `domain` | Gym's failure kind and, derived from it, the layer that observed it (the part of the kind before the first `_` or `:`, such as `agent`, `judge`, `session` or `provider`). When the reporter named no cause, the kind is `environment_server_failed`, `agent_run_error` or `agent_request_failed`. |
 | `source` | Who reported it: `environment` or `collector`. |
 | `delivery` | Gym's evidence about whether the request reached the agent: `not_sent`, `possibly_delivered` or `delivered`. |
 | `stage`, `terminal` | Where in the episode it happened, when known, and the reporter's statement that the episode must not be attempted again. |

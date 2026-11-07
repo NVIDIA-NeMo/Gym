@@ -126,7 +126,6 @@ class TestOutcomes:
                 reward=0.0,
                 failure=TaskFailure(
                     kind="judge_failed",
-                    domain="judge",
                     source="environment",
                     delivery="delivered",
                     reason="no verdict",
@@ -143,8 +142,9 @@ class TestOutcomes:
 
         outcome = (await runner.run_task("a")).outcomes[0]
 
+        assert outcome.failure.domain == "session"
         assert outcome.failure == TaskFailure(
-            kind="session_lost", domain="session", source="environment", delivery="delivered", reason=None
+            kind="session_lost", source="environment", delivery="delivered", reason=None
         )
 
 
@@ -185,7 +185,6 @@ class TestFailedRuns:
             reward=None,
             failure=TaskFailure(
                 kind="model_request_error",
-                domain="model",
                 source="collector",
                 delivery="delivered",
                 stage="agent",

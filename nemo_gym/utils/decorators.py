@@ -27,7 +27,7 @@ def experimental(fn):
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
         _stderr.print(
-            f"[yellow]Warning:[/yellow] [bold]{fn.__name__}[/bold] is experimental and may change or be removed without notice."
+            f"[yellow]Warning:[/yellow] [bold]{fn.__qualname__}[/bold] is experimental and may change or be removed without notice."
         )
         return fn(*args, **kwargs)
 
