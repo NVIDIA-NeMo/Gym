@@ -4,11 +4,11 @@ Runs [Goose](https://github.com/aaif-goose/goose) **1.54.0** (Apache-2.0) headle
 task sandbox. The Environment Server seeds the Resources and agent sessions, activates Goose once, closes the agent,
 verifies the task, and closes Resources. Goose runs its own tools and calls a Gym Model Server for inference.
 
-The adapter returns the root session as Responses items and an observation bundle with explicit gaps.
+Capability level: **Evaluation**. The adapter returns the root session as Responses items and an observation bundle
+with explicit gaps.
 
-Training token-ID capture is off by default. Goose's model calls go to the Gym Model Server under the rollout's
-prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
-`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
+Model calls already use the rollout's capture route, but no training capture run has validated this harness yet.
+The harness conformance probes are not run at the Evaluation level.
 
 Goose's native subagents come from its built-in `summon` extension: the `delegate` tool runs a subagent in its own
 session, synchronously or with `async: true` followed by `load(task_id)`. Several delegate calls in one turn run
@@ -38,6 +38,8 @@ single_agent_turn_legacy:
 
 Supply a `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox` provider configuration in
 `model-provider.yaml`. The task sandbox must be able to reach the Model Server.
+The SWE-bench Pro pairing is undeclared (this agent is not in that Resources server's `allowed_agents`), so
+`gym env start` needs `--allow-unsupported-pairing`.
 
 ```bash
 python benchmarks/swebench/pro/prepare.py
