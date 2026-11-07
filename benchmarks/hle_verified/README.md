@@ -95,3 +95,7 @@ gym eval run --no-serve \
 
 `mean/reward` is the headline metric. `judgement_parsing_issue_rate` reports the
 fraction of judged rollouts with parsing issues.
+
+Both text and vision configurations report category, raw-subject and text/vision accuracy,
+output tokens and repeat-level intervals. See [HLE domain metrics](../hle/README.md#domain-metrics)
+for metric keys, uncertainty interpretation and missing-data behavior.
