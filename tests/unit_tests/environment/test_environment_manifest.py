@@ -452,3 +452,53 @@ def test_neutral_example_matches_manifest_contract() -> None:
 
     assert manifest.name == "example_environment"
     assert manifest.integration_profile == IntegrationProfile.CUSTOM_GYM_VERIFIER
+
+
+def _harbor_manifest() -> dict:
+    raw = _manifest(kind="benchmark", profile="custom-gym-agent-loop")
+    raw.update(
+        harbor_target="terminal_bench_4",
+        resources_server=None,
+        agent_server="miniswe_sandboxed_agent",
+        datasets=[],
+        prompt_source="agent",
+    )
+    raw.pop("standard_prompt_config")
+    return raw
+
+
+@pytest.mark.parametrize("backend", ["pydantic", "schema"])
+@pytest.mark.parametrize(
+    "change,valid",
+    [
+        ({}, True),
+        ({"prompt_source": "prepared"}, True),
+        # Its rows are the target's tasks: a dataset of its own, or a prompt template applied to rows, is refused.
+        ({"datasets": "declared"}, False),
+        ({"prompt_source": "template", "standard_prompt_config": "prompts/standard.yaml"}, False),
+        # Without a target the manifest needs its datasets again.
+        ({"harbor_target": None}, False),
+    ],
+)
+def test_harbor_target_replaces_the_datasets(backend: str, change: dict, valid: bool) -> None:
+    raw = _harbor_manifest()
+    raw.update(change)
+    if raw["datasets"] == "declared":
+        raw["datasets"] = _manifest(kind="benchmark")["datasets"]
+        raw["datasets"][0].pop("prompt_config")
+    if raw["harbor_target"] is None:
+        raw.pop("harbor_target")
+    if backend == "schema":
+        assert Draft202012Validator(manifest_json_schema()).is_valid(raw) == valid
+    elif valid:
+        manifest = EnvironmentManifest.model_validate(raw)
+        dumped = yaml.safe_load(dump_manifest(manifest))
+        assert dumped["harbor_target"] == "terminal_bench_4" and dumped["datasets"] == []
+        assert EnvironmentManifest.model_validate(dumped) == manifest
+    else:
+        with pytest.raises(ValidationError, match="datasets|prompt_source"):
+            EnvironmentManifest.model_validate(raw)
+
+
+def test_manifests_without_a_harbor_target_dump_as_before() -> None:
+    assert "harbor_target" not in yaml.safe_load(dump_manifest(EnvironmentManifest.model_validate(_manifest())))

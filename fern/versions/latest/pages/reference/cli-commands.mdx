@@ -128,6 +128,10 @@ behave identically.
 
 Run `gym list agents` to see the harnesses you can pass.
 
+For a benchmark whose config names a Harbor target (`harbor_target`), `--agent-type` on `gym eval run` selects the
+harness the per-taskset environment server binds, in place of the benchmark's own agent instance; no composition or
+renaming is involved, and the dataset's `[gym] allowed_agents` is the compatibility check.
+
 **The composed server instance is renamed after the agent that runs it**, so metrics and `gym env status`
 report the harness actually used: composing `terminus_2_sandboxed_agent` onto
 `terminal_bench_2_1_opencode_sandboxed_agent` produces `terminal_bench_2_1_terminus_2_sandboxed_agent`.
@@ -836,7 +840,7 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Refer to [Harbor Tasks](/main/data/harbor-tasks) for the layout and the `--sandbox`, `--only-tasks` and `--exclude-tasks` options that apply to such a target. A benchmark whose config sets `harbor_target` runs that target under `--benchmark`, with the benchmark's harness or the one `--agent-type` names (refer to [A benchmark config that names a target](/main/data/harbor-tasks#a-benchmark-config-that-names-a-target)).
 
 | Option | Description |
 | --- | --- |

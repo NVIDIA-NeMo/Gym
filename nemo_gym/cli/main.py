@@ -798,6 +798,29 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _harbor_benchmark(args: argparse.Namespace):
+    """The Harbor-backed benchmark `--benchmark` selects, if any (refused with a usage error when it cannot run)."""
+    if not getattr(args, "benchmark", None):
+        return None
+    from nemo_gym.cli.eval import harbor_benchmark_from_args
+
+    try:
+        return harbor_benchmark_from_args(args)
+    except (ValueError, OSError) as exc:
+        args._parser.error(str(exc))
+
+
+def _eval_prepare(args: argparse.Namespace, overrides: list[str]) -> None:
+    benchmark = _harbor_benchmark(args)
+    if benchmark is not None:
+        # The benchmark's config names a Harbor target: prepare its tasks as `gym eval run` would.
+        from nemo_gym.cli.eval import prepare_harbor_benchmark
+
+        prepare_harbor_benchmark(args, overrides, benchmark)
+        return
+    dispatch("nemo_gym.cli.eval:prepare_benchmark", overrides)
+
+
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
     target = getattr(args, "target", None)
     if target:
@@ -806,11 +829,19 @@ def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
 
         run_target(args, overrides)
         return
+    benchmark = _harbor_benchmark(args)
+    if benchmark is not None:
+        # The benchmark's config names a Harbor target: run it like `gym eval run <target>` with its harness.
+        from nemo_gym.cli.eval import run_target
+
+        run_target(args, overrides, benchmark=benchmark)
+        return
     if getattr(args, "only_tasks", None) or getattr(args, "exclude_tasks", None):
         # Register-only flags: without a TARGET nothing consumes them, and a silently ignored selection
         # would run every task.
         args._parser.error(
-            "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference"
+            "--only-tasks and --exclude-tasks apply to a task TARGET; pass a Harbor task folder or harbor: reference, "
+            "or a --benchmark whose config names one"
         )
     target = "nemo_gym.cli.eval:collect_rollouts" if args.no_serve else "nemo_gym.cli.eval:e2e_rollout_collection"
     dispatch(target, overrides)
@@ -1443,7 +1474,7 @@ COMMANDS = {
     ),
     "env status": Command(target="nemo_gym.cli.env:status", summary="Print the server status.", flags=(JSON,)),
     "eval prepare": Command(
-        target="nemo_gym.cli.eval:prepare_benchmark",
+        target=_eval_prepare,
         summary="Prepare benchmark data and dump it to disk.",
         flags=(CONFIG, BENCHMARK, SEARCH_DIR),
     ),
