@@ -102,6 +102,11 @@ def _store_for_rollout(rollout_id: str, capture_dirs: list[Path]) -> Optional[Ca
     return None
 
 
+def _has_pending_capture(rollout_id: str, capture_dirs: list[Path]) -> bool:
+    """Blocking: True while any capture dir holds a claimed write for this rollout."""
+    return any(CaptureStore(directory).has_pending(rollout_id) for directory in capture_dirs)
+
+
 async def await_model_call_capture_quiescence(
     rollout_id: str,
     capture_dirs: list[Path],
@@ -115,14 +120,16 @@ async def await_model_call_capture_quiescence(
     ``_CaptureMiddleware``), so the row can land after the rollout record is snapshotted and be
     missing from ``ng_model_call_capture`` while present on disk. Returns False on timeout, which
     the merge turns into a ``model_call_capture_pending`` gap rather than a silent omission.
+
+    Each check touches the filesystem, so it runs in a worker thread: on a network filesystem it can
+    take long enough to stall every other coroutine on the event loop.
     """
     if not capture_dirs:
         return True
-    stores = [CaptureStore(directory) for directory in capture_dirs]
     deadline = time.monotonic() + timeout_s
     while True:
         try:
-            if not any(store.has_pending(rollout_id) for store in stores):
+            if not await asyncio.to_thread(_has_pending_capture, rollout_id, capture_dirs):
                 return True
         except OSError:
             logger.warning("Could not poll model-call capture claims for rollout %s.", rollout_id, exc_info=True)

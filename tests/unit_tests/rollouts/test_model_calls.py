@@ -311,3 +311,147 @@ def test_clear_captures_for_rollouts_drops_stale_pending_claims(tmp_path):
     clear_model_call_captures_for_rollouts([{"_ng_task_index": 5, "_ng_rollout_index": 0}], [tmp_path])
 
     assert store.has_pending("5-0") is False
+
+
+def _store_with_finished_captures(tmp_path, finished=50):
+    store = CaptureStore(tmp_path)
+    for index in range(finished):
+        store.record(f"{index}-0", {"dialect": "chat", "request": {}, "response": {}})
+    return store
+
+
+def test_pending_claims_live_in_their_own_directory(tmp_path):
+    store = _store_with_finished_captures(tmp_path)
+
+    store.mark_pending("1-0-retry1", "call-1")
+
+    claim = store.pending_path_for("1-0-retry1", "call-1")
+    assert claim.parent == tmp_path / ".pending"
+    assert claim.exists()
+    assert not list(tmp_path.glob("*.capture.pending"))
+    # The dot after the rollout id still keeps `1-0` from matching `1-0-retry1`.
+    assert store.has_pending("1-0-retry1") is True
+    assert store.has_pending("1-0") is False
+    store.mark_pending("1-0", "call-2")
+    store.clear_all_pending("1-0")
+    assert store.has_pending("1-0") is False
+    assert store.has_pending("1-0-retry1") is True
+
+
+def test_pending_checks_list_only_the_claims_directory(tmp_path, monkeypatch):
+    """The cost of a claim check must not grow with the number of finished captures in the root."""
+    from pathlib import Path
+
+    store = _store_with_finished_captures(tmp_path)
+    store.mark_pending("7-0", "call-1")
+    listed = []
+    real_glob = Path.glob
+
+    def spy(self, pattern, **kwargs):
+        listed.append(str(self))
+        return real_glob(self, pattern, **kwargs)
+
+    monkeypatch.setattr(Path, "glob", spy)
+
+    assert store.has_pending("7-0") is True
+    assert store.has_pending("8-0") is False
+    store.clear_all_pending("7-0")
+
+    assert listed and set(listed) == {str(tmp_path / ".pending")}
+
+
+def test_pending_checks_tolerate_a_missing_claims_directory(tmp_path):
+    (tmp_path / "3-0.capture.jsonl").write_text("")
+    reader = CaptureStore(tmp_path, create=False)
+
+    assert reader.has_pending("3-0") is False
+    reader.clear_all_pending("3-0")
+    assert not (tmp_path / ".pending").exists()
+
+    # A writer whose claims directory vanished recreates it instead of losing the claim.
+    store = CaptureStore(tmp_path)
+    (tmp_path / ".pending").rmdir()
+    store.mark_pending("3-0", "call-1")
+    assert store.has_pending("3-0") is True
+
+
+def test_claims_left_in_the_root_by_an_earlier_version_are_ignored(tmp_path):
+    store = CaptureStore(tmp_path)
+    (tmp_path / "6-0.call-1.capture.pending").touch()
+
+    assert store.has_pending("6-0") is False
+
+
+@pytest.mark.asyncio
+async def test_quiescence_polling_runs_off_the_event_loop(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    from nemo_gym.rollouts.model_calls import await_model_call_capture_quiescence
+
+    polls = []
+
+    def slow_has_pending(self, rollout_id):
+        polls.append(rollout_id)
+        time.sleep(0.2)
+        return len(polls) < 2
+
+    monkeypatch.setattr(CaptureStore, "has_pending", slow_has_pending)
+    ticks = []
+
+    async def ticker():
+        while True:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(ticker())
+    try:
+        assert await await_model_call_capture_quiescence("9-0", [tmp_path], poll_s=0.01) is True
+    finally:
+        task.cancel()
+
+    # Two blocking polls of 0.2 s each; a ticker sharing the loop with them would have ticked about twice.
+    assert len(polls) == 2
+    assert len(ticks) >= 10
+
+
+@pytest.mark.asyncio
+async def test_enrich_run_result_keeps_capture_io_off_the_event_loop(tmp_path, monkeypatch):
+    import asyncio
+    import time
+
+    from nemo_gym.rollouts.rollout_collection import enrich_run_result
+
+    store = CaptureStore(tmp_path)
+    store.record("0-0", _capture_exchange("responses", "A", {}, {"id": "resp-A"}))
+    real_has_pending = CaptureStore.has_pending
+    real_clear = CaptureStore.clear_all_pending
+
+    def slow_has_pending(self, rollout_id):
+        time.sleep(0.15)
+        return real_has_pending(self, rollout_id)
+
+    def slow_clear(self, rollout_id):
+        time.sleep(0.15)
+        real_clear(self, rollout_id)
+
+    monkeypatch.setattr(CaptureStore, "has_pending", slow_has_pending)
+    monkeypatch.setattr(CaptureStore, "clear_all_pending", slow_clear)
+    ticks = []
+
+    async def ticker():
+        while True:
+            ticks.append(time.monotonic())
+            await asyncio.sleep(0.01)
+
+    task = asyncio.create_task(ticker())
+    try:
+        result = {"response": {"output": []}, "reward": 0.0}
+        row = {"_ng_task_index": 0, "_ng_rollout_index": 0}
+        await enrich_run_result(row, result, capture_dirs=[tmp_path], observability_enabled=True, delete_capture=True)
+    finally:
+        task.cancel()
+
+    assert result["ng_model_call_capture"]["calls"]
+    # The claim check, the merge and the cleanup each block for 0.15 s or more, and the ticker kept running.
+    assert len(ticks) >= 10

@@ -130,6 +130,10 @@ class ModelCallCaptureConfig(BaseModel):
 
 
 _PENDING_SUFFIX = ".capture.pending"
+# Claims live in their own directory under the capture root. The root accumulates one file per finished
+# rollout, so listing it costs more as a run progresses (a lot more on a network filesystem); the claims
+# directory only holds the calls in flight.
+_PENDING_DIRNAME = ".pending"
 
 
 def _pending_token(model_call_id: str) -> str:
@@ -150,11 +154,16 @@ class CaptureStore:
     def __init__(self, root: str | Path, *, create: bool = True) -> None:
         self._root = Path(root)
         if create:
-            self._root.mkdir(parents=True, exist_ok=True)
+            self.pending_dir.mkdir(parents=True, exist_ok=True)
 
     @property
     def root(self) -> Path:
         return self._root
+
+    @property
+    def pending_dir(self) -> Path:
+        """Where claimed writes are marked. Claims left in the root by an earlier version are ignored."""
+        return self._root / _PENDING_DIRNAME
 
     def path_for(self, rollout_id: str) -> Path:
         return self._root / f"{_validate_rollout_id(rollout_id)}.capture.jsonl"
@@ -169,12 +178,20 @@ class CaptureStore:
         return self.incomplete_path_for(rollout_id).exists()
 
     def pending_path_for(self, rollout_id: str, model_call_id: str) -> Path:
-        return self._root / f"{_validate_rollout_id(rollout_id)}.{_pending_token(model_call_id)}{_PENDING_SUFFIX}"
+        return (
+            self.pending_dir / f"{_validate_rollout_id(rollout_id)}.{_pending_token(model_call_id)}{_PENDING_SUFFIX}"
+        )
 
     def mark_pending(self, rollout_id: str, model_call_id: str) -> None:
         """Claim a write before it is queued, so a reader can tell 'not yet' from 'never'."""
+        path = self.pending_path_for(rollout_id, model_call_id)
         try:
-            self.pending_path_for(rollout_id, model_call_id).touch(exist_ok=True)
+            try:
+                path.touch(exist_ok=True)
+            except FileNotFoundError:
+                # The claims directory was removed after the store was created.
+                self.pending_dir.mkdir(parents=True, exist_ok=True)
+                path.touch(exist_ok=True)
         except OSError:
             logger.warning("Could not mark model-call capture pending for rollout %s.", rollout_id, exc_info=True)
 
@@ -188,13 +205,14 @@ class CaptureStore:
         """True while any claimed write for this rollout has not finished.
 
         The literal dot after the rollout id keeps `1-0` from matching `1-0-retry1`.
+        Only the claims directory is listed, so the cost does not grow with the finished captures in the root.
         """
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
-        return any(self._root.glob(pattern))
+        return any(self.pending_dir.glob(pattern))
 
     def clear_all_pending(self, rollout_id: str) -> None:
         pattern = f"{_validate_rollout_id(rollout_id)}.*{_PENDING_SUFFIX}"
-        for marker in self._root.glob(pattern):
+        for marker in self.pending_dir.glob(pattern):
             marker.unlink(missing_ok=True)
 
     def record(self, rollout_id: str, exchange: dict[str, Any]) -> None:
