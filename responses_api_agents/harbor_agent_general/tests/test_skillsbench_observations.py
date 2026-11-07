@@ -96,6 +96,20 @@ async def test_failed_verifier_exec_cannot_leave_stale_success(tmp_path, error):
 
 
 @pytest.mark.asyncio
+async def test_unknown_verifier_exit_discards_sandbox_without_witness(tmp_path):
+    env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
+    await env.start(force_build=False)
+    path = env.trial_paths.result_path.parent / VERIFIER_EXECUTION_FILE
+    path.write_text('{"return_code": 0}')
+    _provider().queue_exec_result(SandboxExecResult(return_code=-1, error_type=None, stdout=None, stderr=None))
+    with pytest.raises(RuntimeError, match="Verifier command outcome is unknown"):
+        await env.exec(verifier_command())
+    assert env._sandbox is None
+    assert _provider().closed_handles == ["sbx-123"]
+    assert not path.exists()
+
+
+@pytest.mark.asyncio
 async def test_agent_command_cannot_create_verifier_witness(tmp_path):
     env = _make_environment(tmp_path, environment_class=SkillsBenchSandboxEnvironment, skill_mode="no-skill")
     await env.start(force_build=False)
@@ -112,7 +126,9 @@ async def test_agent_command_cannot_create_verifier_witness(tmp_path):
         await env.stop(delete=True)
 
 
-@pytest.mark.parametrize("defect", ["missing", "stale", "boolean_exit", "unfinished", "no_reward", "timeout"])
+@pytest.mark.parametrize(
+    "defect", ["missing", "stale", "boolean_exit", "unknown_exit", "unfinished", "no_reward", "timeout"]
+)
 def test_incomplete_verifier_evidence_is_not_certified(tmp_path, defect):
     phase = SimpleNamespace(
         started_at=datetime.fromtimestamp(100, timezone.utc),
@@ -124,6 +140,8 @@ def test_incomplete_verifier_evidence_is_not_certified(tmp_path, defect):
         witness.update(started_at=1, finished_at=2)
     elif defect == "boolean_exit":
         witness["return_code"] = True
+    elif defect == "unknown_exit":
+        witness["return_code"] = -1
     elif defect == "unfinished":
         phase.finished_at = None
     elif defect == "no_reward":
@@ -234,7 +252,7 @@ def test_sdk_registers_wrapped_policy_metrics_in_real_conversation(tmp_path):
         conversation.close()
 
 
-@pytest.mark.parametrize("exit_code", [None, 0, 1, 124, 125])
+@pytest.mark.parametrize("exit_code", [None, -1, 0, 1, 124, 125])
 def test_host_verifier_evidence_survives_response_and_collection(tmp_path, monkeypatch, exit_code):
     from nemo_gym.orchestration.recovery import grading_artifact
     from tests.unit_tests.orchestration.test_eval_resubmit_decision import (
@@ -293,7 +311,7 @@ def test_host_verifier_evidence_survives_response_and_collection(tmp_path, monke
     assert response["ng_agent_observations"]["records"][0]["conversation"][1]["output"] == "done"
     job = write_job_dir(tmp_path / "collected", n=1, results=[response], failures=[])
     [collected] = collect_with_score(job, "[]").results
-    assert grading_artifact(collected) == (None if exit_code is None else "test_execution")
-    if exit_code is not None:
+    assert grading_artifact(collected) == (None if exit_code in (None, -1) else "test_execution")
+    if exit_code not in (None, -1):
         assert collected["_ng_collected_grading_facts"]["verifier_exit_code"] == exit_code
         assert collected["_ng_collected_grading_binding"]

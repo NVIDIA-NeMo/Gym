@@ -55,6 +55,9 @@ class SkillsBenchSandboxEnvironment(NemoGymSandboxEnvironment):
             witness.unlink(missing_ok=True)
         started = time.time()
         result = await super().exec(command, *args, **kwargs)
+        if verifying and result.return_code == -1:
+            await self.stop(delete=True)
+            raise RuntimeError("Verifier command outcome is unknown; remote termination is unconfirmed")
         if verifying:
             witness.write_text(
                 json.dumps(

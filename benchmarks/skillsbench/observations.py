@@ -60,6 +60,7 @@ def verifier_exit_code(trial_dir: Path, trial: TrialResult) -> int | None:
         if (
             witness["command"] == command
             and type(code) is int
+            and code != -1
             and type(start) in (int, float)
             and type(end) in (int, float)
             and phase.started_at.timestamp() <= start <= end <= phase.finished_at.timestamp()
