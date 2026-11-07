@@ -8,6 +8,10 @@ This is a resources server that trains a policy model to abstain from answering 
 
 Correctness is verified by an LLM judge using the OMNISCIENCE_GRADER template instead of string matching. The judge grades the model's extracted answer against the gold target as one of CORRECT, INCORRECT, or NOT_ATTEMPTED.
 
+The judge parser accepts standalone `A`, `B`, and `C` tokens, including responses such as `Answer: B` and `C: NOT_ATTEMPTED`. A bare grade on the final line takes precedence over earlier text. Otherwise, missing or conflicting grades use the existing incorrect-answer fallback. Letters inside words such as `Answer` or `NOT_ATTEMPTED` do not count as grades.
+
+This changes rewards for responses that previously matched a letter inside a word or selected `A` from conflicting grades. Bare-letter responses and explicit `[IDK]` abstentions are unchanged.
+
 The default dataset is [NVIDIA Nemotron-RL-QA-Abstention-v1](https://huggingface.co/datasets/nvidia/Nemotron-RL-QA-Abstention-v1). Its public `train` split contains 3,150 examples: 450 HotPotQA questions and 900 each from Go documentation, health, and law. The release has no validation split.
 
 The published JSONL already includes the question, gold answer, `abstention_simple_agent` reference, and answer/abstention prompt in Gym format. No preprocessing is required. Five examples covering all four sources are included for smoke testing, normalized to the environment's task schema by retaining `id`, `question`, `answer`, `agent_ref`, and `responses_create_params`.
