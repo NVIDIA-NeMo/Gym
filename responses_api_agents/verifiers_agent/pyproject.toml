@@ -10,6 +10,7 @@ dependencies = [
     "verifiers@ git+https://github.com/PrimeIntellect-ai/verifiers.git@b2e4e8157783b2c0dffc7821044c87f29f1c3ccf",
     "acereason-math",
     "automationbench-env",
+    "ab-synth-env",
 ]
 
 [tool.uv]
@@ -56,6 +57,7 @@ required-version = ">=0.13.4"
 [tool.uv.sources]
 "nemo-gym" = { path = "../..", editable = true }
 "automationbench-env" = { path = "../../benchmarks/automationbench", editable = true }
+"ab-synth-env" = { path = "../../environments/ab_synth", editable = true }
 
 [tool.uv.sources.nemo-lens]
 git = "https://github.com/NVIDIA-NeMo/Lens.git"
