@@ -1484,7 +1484,11 @@ async def test_a_multi_step_task_longer_than_the_default_gets_its_own_budget(tmp
     assert server._task_budget_s(task) == pytest.approx(2.2)
     # The episode deadline (opened before the seed) and the sandbox lifetime follow the whole bound.
     assert server._episode_budget_s(task) == pytest.approx(seed_bound + 1.2)
-    assert await server.episode_timeout_seconds(request_for(task)) == pytest.approx(seed_bound + 1.2)
+    # The lookup is bounded by the 0.1 s default and falls back to it when the snapshot is still copying (a slow
+    # runner), so snapshot the task first: this asserts the budget, not the copy speed.
+    request = request_for(task)
+    await server._resolve_task(request.task.task_id, request.task.task_input.task_data)
+    assert await server.episode_timeout_seconds(request) == pytest.approx(seed_bound + 1.2)
     # A single-turn task keeps the run-wide cap.
     single_server, single_task, _, _ = make_server(
         tmp_path / "single", monkeypatch, default_episode_timeout_seconds=0.1
@@ -1904,7 +1908,7 @@ async def test_a_steps_workdir_is_merged_into_the_working_directory_before_its_a
     # The one root exec clears a link the previous turn's agent planted at any shipped name before it extracts, so
     # a BusyBox tar (which follows a link at a directory member's path) lands the merge where GNU tar and Harbor's
     # docker cp do: the listing loop precedes the extraction in the same shell line (the real tars are exercised in
-    # tests/unit_tests/test_sandbox_transfer.py).
+    # tests/unit_tests/sandbox/test_sandbox_transfer.py).
     extraction = sandbox.execs[index]["command"]
     assert 'if [ -L /app/"$m" ]; then rm -- /app/"$m"; fi; done; tar -xzf' in extraction
     assert extraction.index("tar -tzf") < extraction.index("tar -xzf")
@@ -2664,7 +2668,7 @@ async def test_a_collection_the_sandbox_cannot_serve_masks_the_turn_as_an_outage
 
 
 SLOPCODEBENCH_TASK = (
-    Path(__file__).parents[3] / "tests" / "unit_tests" / "fixtures" / "harbor_slopcodebench" / "code_search"
+    Path(__file__).parents[3] / "tests/unit_tests/data/tasks/harbor/fixtures/harbor_slopcodebench/code_search"
 )
 
 

@@ -82,13 +82,17 @@ def install_fake_server_client(monkeypatch: pytest.MonkeyPatch, post: AsyncMock)
     return server_client
 
 
-@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code"])
+@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code", "by_failure_class"])
 def test_boundary_rejects_unsupported_actions_at_load(field):
     def value(action):
         return (
             action
             if field == "default_action"
-            else {MODEL_POLICY_RESPONSE_TIMEOUT if field == "by_failure_kind" else 500: action}
+            else {
+                MODEL_POLICY_RESPONSE_TIMEOUT
+                if field == "by_failure_kind"
+                else ("model" if field == "by_failure_class" else 500): action
+            }
         )
 
     with pytest.raises(ValidationError, match="does not support verify"):

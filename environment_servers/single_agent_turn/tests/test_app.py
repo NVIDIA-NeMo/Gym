@@ -52,7 +52,7 @@ from nemo_gym.server_runtime import (
     is_retryable_dependency_error,
 )
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
-from tests.single_agent_turn_helpers import _agent_response, _Client, _environment_server, _request, _Response
+from tests.helpers.single_agent_turn import _agent_response, _Client, _environment_server, _request, _Response
 
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -322,7 +322,7 @@ async def test_a_resources_seed_refusal_fails_the_episode_once_with_the_servers_
     ("stage", "path", "status", "detail"),
     [
         ("agent", "/ng-rollout/rollout-a2/v1/responses", 422, "Agent turn refused: unsupported tool_choice"),
-        ("cleanup", "/v1/agent_sessions/close", 409, "Agent close receipt has expired"),
+        ("cleanup", "/v1/agent_sessions/close", 409, "Agent session is no longer available"),
         ("verification", "/verify", 422, "verify refused: task_data is missing expected_answer"),
     ],
 )
@@ -1631,6 +1631,7 @@ async def test_seed_observation_is_appended_only_to_the_agent_request(
         **request.task.task_input.task_data,
         "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
         "response": _agent_response().model_dump(mode="json"),
+        "failure_report": None,
     }
     assert verify_call["cookies"] == {"session": "updated-cookie"}
     assert request.task.task_input.responses_create_params is params
