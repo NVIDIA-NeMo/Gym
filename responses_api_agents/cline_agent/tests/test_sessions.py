@@ -1027,3 +1027,45 @@ async def test_deadline_marks_the_running_tool_call_as_timed_out():
     assert [item.type for item in response.output] == ["function_call"]
     tool_call = next(record for record in state.observations.records if isinstance(record, ToolCallObservation))
     assert (tool_call.tool_call_id, tool_call.status) == ("call-1", "timeout")
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("ensure_ascii", [False, True])
+@pytest.mark.parametrize("line_ending", ["\n", "\r\n"])
+async def test_jsonl_preserves_unicode_text_final_status_usage_and_tool_evidence(separator, ensure_ascii, line_ending):
+    value = f"before{separator}after"
+    records = [
+        tool("content_start", "unicode-call", toolName="run_commands", input={"commands": [value]}),
+        tool("content_end", "unicode-call", toolName="run_commands", output=value),
+        text(value),
+        run_result("completed", model={"id": value}, aggregateUsage={"inputTokens": 12, "outputTokens": 3}),
+    ]
+    stdout = (
+        line_ending.join(
+            json.dumps({"ts": f"2026-11-03T00:00:{i:02d}.000Z", **record}, ensure_ascii=ensure_ascii)
+            for i, record in enumerate(records)
+        )
+        + line_ending
+    )
+    instance = agent()
+    state = state_with(FakeSession(artifacts=adapter.ClineArtifacts(stdout=stdout, stderr=""), cleanup=cleanup()))
+    response = await instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
+    assert response.status == "completed"
+    assert response.usage.input_tokens == 12
+    assert response.usage.output_tokens == 3
+    assert response.usage.total_tokens == 15
+    assert any(item.type == "message" and item.content[0].text == value for item in response.output)
+    assert any(item.type == "function_call_output" and item.output == value for item in response.output)
+    invocation = next(item for item in state.observations.records if isinstance(item, AgentInvocation))
+    observed_tool = next(item for item in state.observations.records if isinstance(item, ToolCallObservation))
+    assert invocation.stop_reason == "completed" and invocation.duration_ms == 1200
+    assert observed_tool.tool_call_id == "unicode-call" and observed_tool.duration_ms == 1000
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_jsonl_preserves_terminal_error_with_unicode_separator(separator):
+    record = error_event("ApiError", f"bad{separator}request", error_class="api")
+    assert app._terminal_error(json.dumps(record, ensure_ascii=False) + "\n") == {
+        "error": record["event"]["error"],
+        "errorClass": "api",
+    }

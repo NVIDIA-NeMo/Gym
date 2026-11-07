@@ -65,7 +65,7 @@ def build_cline_observations(
     tools: dict[str, ToolCallObservation] = {}
     duration_ms: Optional[float] = None
     stop_reason: Optional[str] = None
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         try:
             record = json.loads(line)
         except json.JSONDecodeError:

@@ -133,7 +133,7 @@ def _session_usage(stdout: str) -> Optional[NeMoGymResponseUsage]:
     for this provider, so that stays unknown unless it does.
     """
     totals: Optional[tuple[Any, Any, Any, Optional[int]]] = None
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
@@ -164,7 +164,7 @@ def _session_usage(stdout: str) -> Optional[NeMoGymResponseUsage]:
 def _run_result_finish(stdout: str) -> Optional[str]:
     """``finishReason`` of Cline's final ``run_result``, or None without one; a ``done`` event alone is not a result."""
     finish = None
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
@@ -177,7 +177,7 @@ def _run_result_finish(stdout: str) -> Optional[str]:
 def _terminal_error(stdout: str) -> dict[str, Any]:
     """The last `error` agent event of a `cline --json` stream: its error and Cline's error class."""
     terminal: dict[str, Any] = {}
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         try:
             record = json.loads(line)
         except json.JSONDecodeError:
@@ -291,7 +291,7 @@ def parse_cline_events(stdout: str) -> tuple[list[Any], dict[str, Any]]:
             reasoning_consumed = True
         output_items.append(_message(len(output_items), text))
 
-    for line in stdout.splitlines():
+    for line in stdout.split("\n"):
         line = line.strip()
         if not line:
             continue
