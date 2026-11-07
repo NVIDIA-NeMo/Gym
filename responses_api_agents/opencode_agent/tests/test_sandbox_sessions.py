@@ -652,6 +652,18 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
     sandbox.launch.assert_not_awaited()
 
 
+@pytest.mark.parametrize("limit", [4096, 16384])
+def test_a_nemo_rl_row_output_limit_passes_when_opencode_stays_within_it(setup, limit):
+    """NeMo RL sets max_output_tokens on every row. OpenCode's own limit for each model call (4096 here) obeys it."""
+    agent, sandbox = setup
+    row = {"input": "task", "temperature": 1.0, "top_p": 1.0, "max_output_tokens": limit}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=row)
+        assert result.status_code == 200, result.text
+    assert sandbox.params()["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] == "4096"
+
+
 def test_rejected_request_does_not_consume_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:
