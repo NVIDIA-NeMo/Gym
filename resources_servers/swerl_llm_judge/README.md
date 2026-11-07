@@ -2,7 +2,7 @@
 
 ### Overview
 Verifies LLM-as-a-judge capability of models for software engineering tasks. 
-It consumes agent candidated patches and returns a reward based on whether the assistant’s final output matches the gold answer.
+It consumes agent candidate patches and returns a reward based on whether the assistant’s final output matches the gold answer.
 
 ### Input schema
 Required fields:
@@ -12,7 +12,7 @@ Required fields:
 - `expected_answer` (required): The gold letter (single character). Must be one of the letters present in `options`
 
 Optional fields:
-- `grading_mode`: Answer extraction method (either `"lenient"` or `"strict"`. `"strict"` mode only allows one letter in the solution block. default: `"strict"`)
+- `grading_mode`: Answer extraction method (either `"lenient"` or `"strict"`. `"strict"` mode only allows one letter in the solution block. default: `"lenient"`)
 - `instance_id`: Unique identifier for the underlying instance
 - `dataset_name`: Identifier for the dataset
 - `dataset_split`: Split name (e.g., `train`)
@@ -22,10 +22,10 @@ Notes:
 - Letters are validated against the keys present in `options`
 
 ### Grading modes
-- `strict` (default)
+- `strict` 
   - Requires exactly one letter inside a solution box.
   - Example it accepts: `<solution>C</solution>`
-- `lenient`
+- `lenient` (default)
   - Accepts more words or other characters inside the solution box. Takes the first non-word character that is among the options.
 
 ### Example dataset row (standard format)
