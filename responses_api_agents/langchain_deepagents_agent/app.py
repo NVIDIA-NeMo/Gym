@@ -20,6 +20,7 @@ Custom in-process graphs may still override build_agent(model).
 """
 
 import asyncio
+import logging
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -48,13 +49,17 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
+    NgFailureEvent,
     accumulate_response_usage,
+    observe_failure,
+    sdk_error_details,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider, resolve_provider_config
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
@@ -74,12 +79,16 @@ from responses_api_agents.simple_agent.app import (
 )
 
 
+LOG = logging.getLogger(__name__)
+
+
 OBSERVATION_SOURCE = "langchain_deepagents_agent"
 # How the graph's run ended, as the runner reports it, for the sandbox record of the close bundle.
 # A run that hit the graph's step limit ended on its own, so its sandbox work completed.
 _SANDBOX_OUTCOMES = {
     "completed": "completed",
     "max_iterations": "completed",
+    "context_limit": "completed",
     "failed": "failed",
     "wall_time": "timeout",
     "cancelled": "cancelled",
@@ -238,30 +247,49 @@ class DeepAgentsAgent(SimpleAgent):
             if not PurePosixPath(access.workdir).is_absolute():
                 raise AgentSeedRejectedError("Sandboxed DeepAgents requires an absolute sandbox workdir")
             provider_ref, workdir = access.connection.provider_config_ref, access.workdir
-        provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
         try:
+            provider_config = resolve_provider_config(provider_ref, get_global_config_dict())
             # The runner calls the Model Server from inside the sandbox, which cannot reach a loopback address.
             assert_model_url_reachable_from_sandbox(
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
                 provider_name=next(iter(provider_config), None),
             )
-        except ValueError as error:
-            raise AgentSeedRejectedError(str(error)) from error
-        provider = create_provider(provider_config)
-        try:
+            spec = None
             if access is None:
-                sandbox = AsyncSandbox(provider)
                 sandbox_config = dict(self.config.sandbox_config)
                 # Provider TTLs outlive this server; reserve ten minutes for setup and cleanup.
                 sandbox_config.setdefault(
                     "ttl_s",
                     self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
                 )
-                await sandbox.start(SandboxSpec(**sandbox_config))
+                spec = SandboxSpec(**sandbox_config)
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(str(error)) from error
+        try:
+            if access is None:
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
             else:
                 sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
         except BaseException:
-            await provider.aclose()
+            # Cleanup must not replace the original connection/start failure.
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("DeepAgents provider cleanup failed after sandbox setup failed")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason="DeepAgents provider cleanup failed",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
             raise
         state = DeepAgentsSandboxSession(
             request=body,
@@ -322,6 +350,8 @@ class DeepAgentsAgent(SimpleAgent):
         """Stop the activation. A close whose activation does not stop in time raises, which keeps the session for the
         Environment Server's close retry."""
         if isinstance(state, DeepAgentsSandboxSession):
+            if state.provider_wait_failure is not None:
+                observe_failure(state.provider_wait_failure)
             await state.close(self.config.session_close_timeout_seconds)
             return AgentCloseSessionResponse(
                 agent_session_id=state.request.agent_session_id, agent_observations=self._observations(state)
@@ -366,6 +396,8 @@ class DeepAgentsAgent(SimpleAgent):
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
         """The Model Server's HTTP status, or a transport failure, that ended the run, as the runner reported it."""
+        if native_result.get("model_context_limit"):
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
@@ -413,12 +445,22 @@ class DeepAgentsAgent(SimpleAgent):
                 timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds),
                 close_timeout=self.config.session_close_timeout_seconds,
             )
-        except TimeoutError:
+        except TimeoutError as failure:
             # The runner normally stops at the deadline and writes its partial report. If the supervisor overran
             # too, the episode is still a timeout when that report is there, and an infrastructure failure when not.
             output = state.session.artifacts
             if not (isinstance(output, dict) and output.get("stop_reason") == "wall_time"):
                 raise
+            state.provider_wait_failure = NgFailureEvent(
+                boundary="sandbox",
+                failure_kind="transport_timeout",
+                failure_reason="Sandbox provider wait expired after DeepAgents reported its deadline",
+                operation="exec_wait",
+                stage="agent",
+                foreign_error=sdk_error_details(failure, message=str(failure)),
+            )
+            state.provider_wait_failure.__cause__ = failure
+            observe_failure(state.provider_wait_failure)
         response = to_responses(messages_from_dict(output["messages"]), self.config.model_server.name)
         response.update(
             id=f"deepagents-{capture_key}",

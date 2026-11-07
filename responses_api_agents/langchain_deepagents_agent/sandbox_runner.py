@@ -51,6 +51,13 @@ class ModelRequestError(RuntimeError):
     def __init__(self, status: int, body: str) -> None:
         super().__init__(f"Model Server HTTP {status}: {body[:2000]}")
         self.status = status
+        try:
+            document = json.loads(body)
+        except (TypeError, ValueError):
+            document = None
+        error = document.get("error") if isinstance(document, dict) else None
+        # HTTP status alone cannot prove a context limit; use the provider's explicit error code.
+        self.context_limit = isinstance(error, dict) and error.get("code") == "context_length_exceeded"
 
 
 class ModelTransportError(RuntimeError):
@@ -117,6 +124,8 @@ class TaskShellBackend(LocalShellBackend):
         limit = timeout if timeout is not None else self._default_timeout
         if limit <= 0:
             raise ValueError(f"timeout must be positive, got {limit}")
+        # Commands may remove the scratch directory; recreate it as the task's user before the next call.
+        self._scratch.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryFile(dir=self._scratch) as stdout, tempfile.TemporaryFile(dir=self._scratch) as stderr:
             try:
                 process = await asyncio.create_subprocess_shell(
@@ -213,7 +222,13 @@ async def run(payload: dict[str, Any], scratch: Path) -> dict[str, Any]:
         except GraphRecursionError:
             report.update(status="incomplete", stop_reason="max_iterations")
         except ModelRequestError as error:
-            report.update(status="failed", model_error=str(error), model_error_status=error.status)
+            report.update(
+                status="incomplete" if error.context_limit else "failed",
+                stop_reason="context_limit" if error.context_limit else None,
+                model_error=None if error.context_limit else str(error),
+                model_error_status=error.status,
+                model_context_limit=error.context_limit,
+            )
         except ModelTransportError as error:
             report.update(status="failed", model_error=str(error), model_transport_error=True)
     return {

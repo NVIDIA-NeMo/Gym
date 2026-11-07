@@ -371,3 +371,119 @@ async def test_a_request_with_its_own_tools_is_refused(lent_sandbox, runtime):
         await agent._close_agent_session_state(state)
 
     assert refused.value.status_code == 422
+
+
+@pytest.mark.parametrize("provider_config", [{"missing_provider": {}}, {"local": 17}])
+@pytest.mark.parametrize("borrowed", [False, True])
+def test_invalid_provider_configuration_is_a_final_seed_refusal(monkeypatch, provider_config, borrowed):
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"lender": provider_config})
+    monkeypatch.setattr(app, "assert_model_url_reachable_from_sandbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    connect, start = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(AsyncSandbox, "connect", connect)
+    monkeypatch.setattr(AsyncSandbox, "start", start)
+    agent = _agent(**({} if borrowed else {"sandbox_provider": "lender", "sandbox_config": {"workdir": "/app"}}))
+    seed = _seed(sandbox_access=_access()) if borrowed else _seed()
+
+    from nemo_gym.agents import check_agent_seed_rejected
+
+    assert check_agent_seed_rejected(agent.setup_webserver(), seed)
+    connect.assert_not_awaited()
+    start.assert_not_awaited()
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_connect_failure_survives_provider_cleanup_failure(monkeypatch, cleanup_fails):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog
+
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="provider_unavailable", failure_reason="connect failed", stage="seed"
+    )
+    cleanup = NgFailureEvent(
+        boundary="sandbox", failure_kind="session_release_failed", failure_reason="close failed", stage="cleanup"
+    )
+    provider = SimpleNamespace(aclose=AsyncMock(side_effect=cleanup if cleanup_fails else None))
+    monkeypatch.setattr(app, "get_global_config_dict", lambda: {"lender": {"local": {}}})
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    monkeypatch.setattr(app, "assert_model_url_reachable_from_sandbox", lambda *args, **kwargs: None)
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(AsyncSandbox, "connect", AsyncMock(side_effect=original))
+
+    with RequestFailureLog.capture() as failure_log:
+        with pytest.raises(NgFailureEvent) as raised:
+            await _agent()._seed_agent_session_state(_seed(sandbox_access=_access()))
+    assert raised.value is original
+    assert raised.value.stage == "seed"
+    provider.aclose.assert_awaited_once()
+    if cleanup_fails:
+        assert cleanup.event_id in failure_log.reply_report(original).events
+
+
+@linux_only
+async def test_explicit_context_rejection_is_incomplete_in_the_response(lent_sandbox, runtime, monkeypatch):
+    # Run the same public session path as the other sandbox episode tests.
+    model = ModelServer([(400, {"error": {"code": "context_length_exceeded", "message": "limit"}})])
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda self, *args, **kwargs: model.base_url)
+    agent, request = _agent(), _request()
+    _, access = lent_sandbox
+    try:
+        await agent.seed_agent_session(request, _seed(sandbox_access=access))
+        response = await agent.responses(
+            request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="Do the task.")
+        )
+        await agent.close_agent_session(request, _close_body())
+    finally:
+        model.close()
+    assert response.status == "incomplete"
+    assert response.error is None
+    assert response.metadata["stop_reason"] == "context_limit"
+
+
+@pytest.mark.parametrize("with_original_event", [False, True])
+async def test_confirmed_deadline_retains_provider_timeout_and_replays_it_on_close(monkeypatch, with_original_event):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog
+    from responses_api_agents.langchain_deepagents_agent.sandbox import DeepAgentsSandboxSession
+
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="provider wait", stage="agent"
+    )
+    failure = TimeoutError("provider wait expired")
+    if with_original_event:
+        failure.__cause__ = original
+    report = {
+        "status": "incomplete",
+        "stop_reason": "wall_time",
+        "messages": [],
+        "model_calls": 0,
+        "usages": [],
+        "model_error": None,
+    }
+    session = SimpleNamespace(
+        artifacts=report,
+        workdir="/app",
+        stop_request_path="/tmp/stop.request",
+        expired=False,
+        execution_oom=None,
+        sandbox_stopped=False,
+        cleanup_confirmed=True,
+    )
+    state = DeepAgentsSandboxSession(request=_seed(sandbox_access=_access()), session=session)
+    agent = _agent()
+    monkeypatch.setattr(DeepAgentsAgent, "resolve_model_base_url", lambda *args, **kwargs: "http://model:8000/v1")
+    monkeypatch.setattr(DeepAgentsSandboxSession, "execute", AsyncMock(side_effect=failure))
+    monkeypatch.setattr(DeepAgentsSandboxSession, "close", AsyncMock())
+    body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+    with RequestFailureLog.capture() as activation_log:
+        response = await agent._run_in_sandbox(body, state)
+    saved = activation_log.reply_report(None)
+    assert response.status == "incomplete"
+    assert saved.failure_id is None
+    observed = saved.events[state.provider_wait_failure.event_id]
+    assert observed.failure_kind == "transport_timeout"
+    assert observed.foreign_error.message == "provider wait expired"
+    if with_original_event:
+        assert observed.cause_id == original.event_id
+        assert original.event_id in saved.events
+    with RequestFailureLog.capture() as close_log:
+        await agent._close_agent_session_state(state)
+    assert close_log.reply_report(None) == saved

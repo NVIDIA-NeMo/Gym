@@ -812,3 +812,29 @@ async def test_activation_retries_join_one_graph_run_and_conflicting_requests_ar
     assert [reply.output[0].content[0].text for reply in replies] == ["ran once", "ran once"]
     assert runs == ["do it"]
     assert (different.value.status_code, other_rollout.value.status_code) == (409, 409)
+
+
+@pytest.mark.parametrize("missing_index", [0, 1, 2])
+async def test_missing_usage_stays_unknown_across_in_process_model_calls(missing_index):
+    from langchain_core.runnables import RunnableLambda
+
+    agent = _make_agent()
+    replies = [_model_response("done", input_tokens=10, output_tokens=5) for _ in range(3)]
+    missing_body = orjson.loads(await replies[missing_index].read())
+    missing_body["usage"] = None
+    replies[missing_index].read = AsyncMock(return_value=orjson.dumps(missing_body))
+    agent.server_client.post = AsyncMock(side_effect=replies)
+    model = GymResponsesChatModel(agent=agent)
+    holder = {"usage": None}
+
+    async def invoke_model(_input):
+        for index in range(3):
+            await model.ainvoke([HumanMessage(content="hello")])
+            if index >= missing_index:
+                assert holder["usage"] is None
+            else:
+                assert holder["usage"].input_tokens == 10 * (index + 1)
+                assert holder["usage"].output_tokens == 5 * (index + 1)
+
+    await RunnableLambda(invoke_model).ainvoke({}, config=_run_config(holder))
+    assert agent.server_client.post.await_count == 3

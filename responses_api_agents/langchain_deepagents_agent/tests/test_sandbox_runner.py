@@ -232,3 +232,44 @@ def test_a_runner_that_fails_reports_its_error(tmp_path):
     assert output["status"] == "failed"
     assert "FileNotFoundError" in output["error"]
     assert "Traceback" in output["traceback"]
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ('{"error": {"code": "context_length_exceeded", "message": "limit"}}', True),
+        ('{"error": {"message": "context_length_exceeded"}}', False),
+        ('{"error": {"code": "invalid_request_error"}}', False),
+        ('{"error": "context_length_exceeded"}', False),
+        ("context_length_exceeded", False),
+    ],
+)
+def test_context_limit_requires_the_explicit_provider_code(body, expected):
+    from responses_api_agents.langchain_deepagents_agent.sandbox_runner import ModelRequestError
+
+    error = ModelRequestError(400, body)
+    assert error.context_limit is expected
+    assert error.status == 400
+
+
+async def test_explicit_context_rejection_is_a_gradable_context_stop(workdir):
+    model = ModelServer([(400, {"error": {"code": "context_length_exceeded", "message": "limit"}})])
+    try:
+        output = await sandbox_runner.run(_payload(model, workdir), workdir.parent / "session")
+    finally:
+        model.close()
+    assert len(model.requests) == 1
+    assert (output["status"], output["stop_reason"]) == ("incomplete", "context_limit")
+    assert output["model_context_limit"] is True
+    assert output["model_error"] is None
+
+
+async def test_deleted_scratch_is_recreated_before_the_next_command(workdir):
+    scratch = workdir.parent / "command-scratch"
+    scratch.mkdir()
+    shell = TaskShellBackend(root_dir=str(workdir), virtual_mode=False, inherit_env=True, scratch=scratch)
+    removed = await shell.aexecute(f"rm -rf {scratch}")
+    assert removed.exit_code == 0
+    result = await shell.aexecute("echo recovered")
+    assert result.exit_code == 0
+    assert result.output == "recovered\n"

@@ -39,7 +39,9 @@ class ModelServer:
     An answer is a list of output items, an ``int`` HTTP error status, or ``None``, which hangs until closed.
     """
 
-    def __init__(self, answers: list[list[dict[str, Any]] | int | None], *, usage: dict | None = USAGE) -> None:
+    def __init__(
+        self, answers: list[list[dict[str, Any]] | int | tuple[int, dict] | None], *, usage: dict | None = USAGE
+    ) -> None:
         self.answers = answers
         self.requests: list[dict[str, Any]] = []
         self.paths: list[str] = []
@@ -56,7 +58,9 @@ class ModelServer:
                     server.blocked.set()
                     server.release.wait(60)
                     answer = [text("late")]
-                if isinstance(answer, int):
+                if isinstance(answer, tuple):
+                    status, body = answer
+                elif isinstance(answer, int):
                     status, body = answer, {"error": {"message": "rejected", "type": "stub_error"}}
                 else:
                     status = 200

@@ -172,5 +172,10 @@ class GymResponsesChatModel(ResponsesChatModel):
         # It's a deliberate, narrow exception to treating `configurable` as otherwise immutable.
         model_cookies["cookies"] = resp.cookies
         gym_response = NeMoGymResponse.model_validate(await get_response_json(resp))
-        model_usage["usage"] = accumulate_response_usage(model_usage["usage"], gym_response.usage)
+        # Missing usage in any call makes the whole rollout unknown, including later successful calls.
+        if gym_response.usage is None:
+            model_usage["unknown"] = True
+        model_usage["usage"] = (
+            None if model_usage.get("unknown") else accumulate_response_usage(model_usage["usage"], gym_response.usage)
+        )
         return gym_response.model_dump(mode="json")
