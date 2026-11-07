@@ -1693,18 +1693,18 @@ class TestApp:
             assert field_name not in served_message, field_name
 
     @mark.parametrize(
-        ("capture", "engine_data", "error"),
+        ("capture", "result", "error"),
         [
-            (False, {"prompt_token_ids": [1, 2], "completion_token_ids": [3], "completion_logprobs": [-0.5]}, None),
-            (False, None, "without nvext.engine_data"),
+            (False, {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5]}, None),
+            (False, None, "without nvext.nemo_rl"),
             (
                 False,
-                {"prompt_token_ids": [1, 2], "completion_token_ids": [3]},
-                "without a list for: completion_logprobs",
+                {"prompt_token_ids": [1, 2], "generation_token_ids": [3]},
+                "without: generation_log_probs",
             ),
             (
                 False,
-                {"prompt_token_ids": [1, 2], "completion_token_ids": [3], "completion_logprobs": [-0.5, -0.1]},
+                {"prompt_token_ids": [1, 2], "generation_token_ids": [3], "generation_log_probs": [-0.5, -0.1]},
                 "mismatched generation token IDs and log probabilities",
             ),
             (True, None, None),
@@ -1712,8 +1712,8 @@ class TestApp:
                 False,
                 {
                     "prompt_token_ids": [1, 2],
-                    "completion_token_ids": [3],
-                    "completion_logprobs": [-0.5],
+                    "generation_token_ids": [3],
+                    "generation_log_probs": [-0.5],
                     # Router replay: the base64 routes envelope, as the native endpoint attaches it.
                     "routed_experts": "cm91dGVz",
                 },
@@ -1722,16 +1722,16 @@ class TestApp:
         ],
         ids=[
             "token-information",
-            "missing-engine-data",
+            "missing-result",
             "missing-logprobs",
             "logprob-count-mismatch",
             "capture",
             "routed-experts",
         ],
     )
-    async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, engine_data, error) -> None:
-        # The Dynamo frontend rejects unknown top-level fields and returns tokens only under
-        # nvext.engine_data; a capture call's admission and acknowledgement ride in nvext too.
+    async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, result, error) -> None:
+        # The Dynamo frontend accepts only OpenAI fields plus nvext. NeMo RL's request fields ride in one
+        # `nemo_rl:gym:` annotation and its call result in `nvext.nemo_rl`, both under the native names.
         server = self._setup_server(
             monkeypatch,
             dynamo_frontend=True,
@@ -1749,7 +1749,7 @@ class TestApp:
                 request_items=[{"role": "user", "content": "go"}],
                 capture_admission=CaptureAdmission(capture_key="rollout-1", model_call_id="c1", mode="text"),
             )
-            engine_data = {
+            result = {
                 "ng_commit_coords": {
                     "capture_key": "rollout-1",
                     "model_call_id": "c1",
@@ -1773,8 +1773,8 @@ class TestApp:
                 {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}},
             ],
         }
-        if engine_data is not None:
-            engine_response["nvext"] = {"engine_data": engine_data}
+        if result is not None:
+            engine_response["nvext"] = {"nemo_rl": result}
         sent = []
 
         async def fake_request(**kwargs):
@@ -1816,14 +1816,18 @@ class TestApp:
         assert "prompt_token_ids" not in outbound["messages"][1]
         assert "generation_token_ids" not in outbound["messages"][1]
         assert "generation_log_probs" not in outbound["messages"][1]
-        assert outbound["nvext"]["extra_fields"] == ["engine_data"]
         assert not {"ng_capture", "required_prefix_token_ids"} & outbound.keys()
-        # Every Gym request is marked as rollout traffic. A capture call also carries its admission;
-        # otherwise the echoed turn's tokens ride as the prefix the engine splices.
-        (call_annotation, marker) = outbound["nvext"]["annotations"]
-        assert marker == "nemo_gym:rollout"
-        if not capture:
-            assert call_annotation == "ng_prefix:[1,2]"
+        # A capture call carries its admission; otherwise the echoed turn's tokens ride as the prefix the
+        # engine splices, as NeMo RL's native server derives it from the messages.
+        assert outbound["nvext"].keys() == {"annotations"}
+        (annotation,) = outbound["nvext"]["annotations"]
+        assert annotation.startswith("nemo_rl:gym:")
+        extras = json.loads(annotation.removeprefix("nemo_rl:gym:"))
+        if capture:
+            assert extras.keys() == {"ng_capture"}
+            assert CaptureAdmission.model_validate(extras["ng_capture"]) == context.capture_admission
+        else:
+            assert extras == {"required_prefix_token_ids": [1, 2]}
         assert sent[0]["headers"]["x-default"] == "kept"
         if error:
             return
@@ -1833,10 +1837,6 @@ class TestApp:
             # The engine stages log probabilities itself; the admission is the only capture field sent.
             assert "logprobs" not in outbound
             assert outbound["stream"] is False
-            assert call_annotation.startswith("ng_capture:")
-            assert CaptureAdmission.model_validate_json(call_annotation.removeprefix("ng_capture:")) == (
-                context.capture_admission
-            )
             assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
             assert context.committed is True
             manifest = await context.lineage_store.manifest("rollout-1")
@@ -1848,7 +1848,7 @@ class TestApp:
             assert message["prompt_token_ids"] == [1, 2]
             assert message["generation_token_ids"] == [3]
             assert message["generation_log_probs"] == [-0.5]
-            assert message.get("routed_experts") == engine_data.get("routed_experts")
+            assert message.get("routed_experts") == result.get("routed_experts")
 
     @mark.parametrize(
         ("settings", "error"),

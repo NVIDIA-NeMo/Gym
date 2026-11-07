@@ -211,10 +211,11 @@ class TokenCaptureConfig(BaseModel):
     @model_validator(mode="after")
     def _validate(self) -> "TokenCaptureConfig":
         block = self.token_id_capture
+        # dynamo_worker is NeMo RL's vLLM engine behind Dynamo's frontend; the dialect measures through a chat call.
         if block.parent_resolution == "source_history" and (
-            not block.external_staging or block.external_staging_backend != "vllm_worker"
+            not block.external_staging or block.external_staging_backend not in ("vllm_worker", "dynamo_worker")
         ):
-            raise ValueError("parent_resolution=source_history requires external vLLM staging")
+            raise ValueError("parent_resolution=source_history requires external vLLM or Dynamo staging")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:

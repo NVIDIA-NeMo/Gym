@@ -89,10 +89,8 @@ from nemo_gym.models.token_capture import (
     token_capture_config,
 )
 from nemo_gym.models.token_capture.external_capture import (
-    DYNAMO_GYM_REQUEST_ANNOTATION,
-    DYNAMO_PREFIX_ANNOTATION_PREFIX,
-    annotate_dynamo_request,
-    request_dynamo_engine_data,
+    add_dynamo_gym_extras,
+    pop_dynamo_call_result,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
@@ -124,15 +122,6 @@ def _set_aside_unlisted_reasoning_effort(request: Request, body: Dict[str, Any])
         setattr(request.state, _UNLISTED_REASONING_EFFORT_STATE, effort)
         return {**body, "reasoning": {key: value for key, value in reasoning.items() if key != "effort"}}
     return body
-
-
-# NeMo RL's Dynamo engine writes these `nvext.engine_data` keys (Dynamo forwards them as-is);
-# mapped to the message fields that carry them to Gym.
-_DYNAMO_ENGINE_DATA_FIELDS = {
-    "prompt_token_ids": "prompt_token_ids",
-    "completion_token_ids": "generation_token_ids",
-    "completion_logprobs": "generation_log_probs",
-}
 
 
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
@@ -537,12 +526,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
-    # Speak the Dynamo frontend's dialect (ai-dynamo >= 1.5.1). The frontend rejects unknown request
-    # fields and returns token data only under `nvext.engine_data`, when `nvext.extra_fields` names it.
-    # On, echoed per-message token fields are stripped from requests, and every request carries the
-    # `nemo_gym:rollout` annotation in `nvext.annotations`. With return_token_id_information,
-    # engine data is requested and copied onto the message token fields. Token capture with
-    # external staging requires `token_id_capture.external_staging_backend: dynamo_worker`.
+    # Speak the Dynamo frontend's dialect (ai-dynamo >= 1.5.1), with NeMo RL's engine behind it. The frontend
+    # rejects unknown request fields and drops unknown response fields, so NeMo RL's fields ride in `nvext` under
+    # their native names: one `nemo_rl:gym:<JSON object>` entry in every request's `nvext.annotations`, and the
+    # `nvext.nemo_rl` object on the response, lifted to where the native server puts each field. Echoed
+    # per-message token fields are stripped from requests, and `/context/measure` measures through a chat call,
+    # as the frontend has no `/tokenize`. Token capture with external staging requires
+    # `token_id_capture.external_staging_backend: dynamo_worker`.
     dynamo_frontend: bool = False
     propagate_context_overflow_errors: bool = False
     refit_output_budget_to_window: bool = Field(
@@ -1065,7 +1055,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                 processed = await self._prepare_chat_request(request, chat)
             except (ValueError, NotImplementedError) as error:
                 raise HTTPException(status_code=422, detail=str(error)) from error
-            result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
+            if self.config.dynamo_frontend:
+                # The Dynamo frontend has no /tokenize, so the engine measures the chat call itself:
+                # `ng_measure` asks it for the prompt length only, returned in nvext.nemo_rl.
+                add_dynamo_gym_extras(processed, {"ng_measure": True})
+                response = await client.create_chat_completion(
+                    _headers=self._external_capture_handler.request_headers(), **processed
+                )
+                result = pop_dynamo_call_result(response) or {}
+            else:
+                result = await client.create_tokenize(**self._get_tokenize_chat_body(processed))
         finally:
             reset_token_sink(token)
         count = result.get("prompt_token_count")
@@ -1617,52 +1616,44 @@ class VLLMModel(SimpleResponsesAPIModel):
         return body_dict
 
     def _prepare_dynamo_request(self, body_dict: Dict[str, Any]) -> None:
-        """Fit a chat request to the Dynamo frontend.
+        """Fit a chat request to the Dynamo frontend, which rejects unknown top-level fields.
 
-        Strip the token fields agents echo on messages, which the frontend rejects, mark the request as
-        Gym rollout traffic, and request engine data. Without capture, the last echoed assistant turn's
-        tokens move to an annotation instead, so the engine can splice them as vLLM's
-        ``required_prefix_token_ids`` extension does. Capture calls resolve their prefix from staging.
+        Every request carries the ``nemo_rl:gym:`` annotation. Without capture, it holds the last echoed
+        turn's tokens as ``required_prefix_token_ids``, which NeMo RL's native server derives from the
+        messages itself. A capture call resolves its prefix from staging, and the capture handler has
+        already added its ``ng_capture``. The echoed token fields, which the frontend also rejects, are
+        then stripped from the messages.
         """
+        extras = {}
         if self._external_capture_handler is None:
             for message_dict in reversed(body_dict.get("messages") or []):
                 if "prompt_token_ids" in message_dict:
-                    prefix = message_dict["prompt_token_ids"] + message_dict["generation_token_ids"]
-                    annotate_dynamo_request(
-                        body_dict, DYNAMO_PREFIX_ANNOTATION_PREFIX + json.dumps(prefix, separators=(",", ":"))
+                    extras["required_prefix_token_ids"] = (
+                        message_dict["prompt_token_ids"] + message_dict["generation_token_ids"]
                     )
                     break
+        add_dynamo_gym_extras(body_dict, extras)
         for message_dict in body_dict.get("messages") or []:
             for field_name in TOKEN_FIELDS:
                 message_dict.pop(field_name, None)
-        annotate_dynamo_request(body_dict, DYNAMO_GYM_REQUEST_ANNOTATION)
-        if self.config.return_token_id_information:
-            request_dynamo_engine_data(body_dict)
 
-    def _lift_dynamo_engine_data(self, chat_completion_dict: Dict[str, Any]) -> None:
-        """Copy Dynamo's `nvext.engine_data` token arrays onto the message fields read below.
+    def _lift_dynamo_call_result(self, chat_completion_dict: Dict[str, Any]) -> None:
+        """Move the engine's ``nvext.nemo_rl`` token fields onto the message, where the native server puts them.
 
-        The token-information path then validates them, including the log probability count.
+        ``routed_experts`` comes along when router replay is on. The token-information path below then
+        validates the fields as it does the native server's, including the log probability count.
         """
-        nvext = chat_completion_dict.pop("nvext", None)
+        result = pop_dynamo_call_result(chat_completion_dict)
         if not self.config.return_token_id_information:
             return
-        engine_data = nvext.get("engine_data") if isinstance(nvext, dict) else None
-        if not isinstance(engine_data, dict):
-            raise RuntimeError(f"`{self.config.name}` got a Dynamo response without nvext.engine_data.")
-        missing = [field for field in _DYNAMO_ENGINE_DATA_FIELDS if not isinstance(engine_data.get(field), list)]
+        if result is None:
+            raise RuntimeError(f"`{self.config.name}` got a Dynamo response without nvext.nemo_rl.")
+        missing = REQUIRED_TOKEN_METADATA_FIELDS.difference(result)
         if missing:
-            # NeMo RL's engine omits completion_logprobs when vLLM returned no logprobs for the call.
-            raise RuntimeError(
-                f"`{self.config.name}` got Dynamo nvext.engine_data without a list for: {', '.join(missing)}."
-            )
-        message = chat_completion_dict["choices"][0]["message"]
-        message.update(
-            {message_field: engine_data[field] for field, message_field in _DYNAMO_ENGINE_DATA_FIELDS.items()}
+            raise RuntimeError(f"`{self.config.name}` got Dynamo nvext.nemo_rl without: {', '.join(sorted(missing))}.")
+        chat_completion_dict["choices"][0]["message"].update(
+            {field: result[field] for field in TOKEN_METADATA_FIELDS.intersection(result)}
         )
-        # Present only with router replay on, as the native endpoint attaches it; not a required key.
-        if "routed_experts" in engine_data:
-            message["routed_experts"] = engine_data["routed_experts"]
 
     def _splice_audio_from_metadata(self, body_dict: Dict[str, Any], metadata: Dict[str, Any]) -> None:
         """Move audio metadata into content blocks on the most recent user message."""
@@ -2084,7 +2075,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self._external_capture_handler is not None:
             self._external_capture_handler.prepare_response(chat_completion_dict)
         elif self.config.dynamo_frontend:
-            self._lift_dynamo_engine_data(chat_completion_dict)
+            self._lift_dynamo_call_result(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]

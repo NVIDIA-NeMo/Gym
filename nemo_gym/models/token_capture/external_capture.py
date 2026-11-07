@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
@@ -58,44 +59,47 @@ def validate_framework_context_options(request_payload: dict[str, Any]) -> None:
 # defensively alongside ``TOKEN_FIELDS`` so it never reaches the agent hop.
 _MEGATRON_TRANSPORT_FIELDS = ("compact_prompt_token_ids",)
 
-# The Dynamo frontend rejects unknown top-level request fields, so the admission
-# rides in ``nvext.annotations`` as ``"ng_capture:<admission JSON>"``.
-DYNAMO_CAPTURE_ANNOTATION_PREFIX = f"{NG_CAPTURE_FIELD}:"
-# Marks every request Gym sends a Dynamo frontend, so the engine can tell Gym rollout
-# traffic from the training framework's own requests.
-DYNAMO_GYM_REQUEST_ANNOTATION = "nemo_gym:rollout"
-# Without capture, a request's echoed prefix (the last tokenized assistant's
-# ``prompt_token_ids + generation_token_ids``) rides here as ``"ng_prefix:<JSON list>"``.
-# The engine splices it, as vLLM's ``required_prefix_token_ids`` extension does.
-DYNAMO_PREFIX_ANNOTATION_PREFIX = "ng_prefix:"
+# The Dynamo frontend accepts only OpenAI fields plus ``nvext``, and forwards ``nvext.annotations`` to the
+# engine. NeMo RL's request fields (``ng_capture``, ``required_prefix_token_ids``, ``ng_measure``) therefore ride
+# under their native names in one annotation, ``"nemo_rl:gym:<JSON object>"``. Every Gym request carries it,
+# empty when no field applies, so the engine can tell Gym's calls from NeMo RL's own.
+DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX = "nemo_rl:gym:"
+# The engine returns its call result as this ``nvext`` object, under the native vLLM server's field names.
+_DYNAMO_CALL_RESULT_FIELD = "nemo_rl"
 # Dynamo's router reads session affinity only from this header.
 DYNAMO_SESSION_ID_HEADER = "x-dynamo-session-id"
 
 
-def _extend_dynamo_nvext_list(request_payload: dict[str, Any], key: str, value: str) -> None:
-    """Add ``value`` to the ``nvext.<key>`` list, keeping existing ``nvext`` fields.
+def add_dynamo_gym_extras(request_payload: dict[str, Any], extras: dict[str, Any]) -> None:
+    """Merge ``extras`` into the request's ``nemo_rl:gym:`` annotation, adding the annotation if absent.
 
-    ``nvext`` and the list are copied so a shared config dict is never mutated.
+    ``nvext`` and its list are copied so a shared config dict is never mutated.
     """
     nvext = request_payload.get("nvext")
     if nvext is None:
         nvext = {}
     if not isinstance(nvext, dict):
         raise ValueError("nvext must be a JSON object")
-    values = nvext.get(key) or []
-    if not isinstance(values, list):
-        raise ValueError(f"nvext.{key} must be a JSON list")
-    request_payload["nvext"] = {**nvext, key: values if value in values else [*values, value]}
+    annotations = nvext.get("annotations") or []
+    if not isinstance(annotations, list):
+        raise ValueError("nvext.annotations must be a JSON list")
+    merged: dict[str, Any] = {}
+    others = []
+    for annotation in annotations:
+        if isinstance(annotation, str) and annotation.startswith(DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX):
+            merged = json.loads(annotation.removeprefix(DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX))
+        else:
+            others.append(annotation)
+    merged.update(extras)
+    extras_annotation = DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX + json.dumps(merged, separators=(",", ":"))
+    request_payload["nvext"] = {**nvext, "annotations": [*others, extras_annotation]}
 
 
-def request_dynamo_engine_data(request_payload: dict[str, Any]) -> None:
-    """Ask the Dynamo frontend to return ``nvext.engine_data``, which it sends only when ``extra_fields`` names it."""
-    _extend_dynamo_nvext_list(request_payload, "extra_fields", "engine_data")
-
-
-def annotate_dynamo_request(request_payload: dict[str, Any], annotation: str) -> None:
-    """Add an annotation, which Dynamo forwards to the engine, to ``nvext.annotations``."""
-    _extend_dynamo_nvext_list(request_payload, "annotations", annotation)
+def pop_dynamo_call_result(response_payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Remove ``nvext`` from a Dynamo response and return the engine's ``nvext.nemo_rl`` call result, if any."""
+    nvext = response_payload.pop("nvext", None)
+    result = nvext.get(_DYNAMO_CALL_RESULT_FIELD) if isinstance(nvext, dict) else None
+    return result if isinstance(result, dict) else None
 
 
 class ExternalCaptureHandler(Protocol):
@@ -505,9 +509,9 @@ class MegatronWorkerCaptureHandler(_BaseExternalCaptureHandler):
 class DynamoWorkerCaptureHandler(_BaseExternalCaptureHandler):
     """Commit lineage after a Dynamo engine worker durably stages the token delta.
 
-    The Dynamo frontend accepts only known request fields and returns engine output only under
-    ``nvext.engine_data``, so the admission travels in ``nvext.annotations`` and the
-    acknowledgement comes back as ``nvext.engine_data.ng_commit_coords``.
+    The Dynamo frontend accepts only OpenAI fields plus ``nvext``, so the admission travels as
+    ``ng_capture`` in the request's ``nemo_rl:gym:`` annotation, and the acknowledgement comes back
+    as ``nvext.nemo_rl.ng_commit_coords``.
     """
 
     _BACKEND_LABEL = "Dynamo"
@@ -520,10 +524,9 @@ class DynamoWorkerCaptureHandler(_BaseExternalCaptureHandler):
         choice_count = request_payload.get("n")
         if choice_count is not None and choice_count != 1:
             raise ValueError("Dynamo token capture requires n=1")
-        request_dynamo_engine_data(request_payload)
         # The prefix is resolved on the worker from ``staging_chain``. The worker also stages
         # the log probabilities itself, so Gym requests neither prefix ids nor logprobs here.
-        annotate_dynamo_request(request_payload, DYNAMO_CAPTURE_ANNOTATION_PREFIX + admission.model_dump_json())
+        add_dynamo_gym_extras(request_payload, {NG_CAPTURE_FIELD: admission.model_dump(mode="json")})
         return request_payload
 
     def request_headers(self) -> dict[str, str]:
@@ -534,11 +537,10 @@ class DynamoWorkerCaptureHandler(_BaseExternalCaptureHandler):
         return {DYNAMO_SESSION_ID_HEADER: context.capture_admission.capture_key}
 
     def prepare_response(self, response_payload: dict[str, Any]) -> None:
-        """Lift the acknowledgement out of ``nvext.engine_data``, then apply the shared handling."""
-        nvext = response_payload.pop("nvext", None)
-        engine_data = nvext.get("engine_data") if isinstance(nvext, dict) else None
-        if isinstance(engine_data, dict) and NG_COMMIT_COORDS_FIELD in engine_data:
-            response_payload[NG_COMMIT_COORDS_FIELD] = engine_data[NG_COMMIT_COORDS_FIELD]
+        """Lift the acknowledgement out of ``nvext.nemo_rl`` to where the native response carries it."""
+        result = pop_dynamo_call_result(response_payload)
+        if result is not None and NG_COMMIT_COORDS_FIELD in result:
+            response_payload[NG_COMMIT_COORDS_FIELD] = result[NG_COMMIT_COORDS_FIELD]
         super().prepare_response(response_payload)
 
 
