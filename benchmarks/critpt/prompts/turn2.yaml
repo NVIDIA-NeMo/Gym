@@ -1,7 +1,8 @@
 # Compiled from https://github.com/CritPt-Benchmark/CritPt/blob/main/templates/prompt_template_default.yaml
 # Mirrors NeMo-Skills nemo_skills/prompt/config/eval/critpt/code_output.yaml verbatim.
 #
-# Loaded at startup by CritPtAgent (configured via turn2_prompt_fpath in the benchmark config).
+# Rendered into each row's final user message by benchmarks/critpt/prepare.py. CritPtAgent loads it
+# (via turn2_prompt_fpath) only to adapt legacy /run inputs, so both must point at this file.
 
 user: |-
   Populate your final answer into the code template provided below.

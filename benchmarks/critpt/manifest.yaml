@@ -22,9 +22,8 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/critpt/data/critpt_benchmark.jsonl
   prepare_script: benchmarks/critpt/prepare.py
-  prompt_config: benchmarks/critpt/prompts/turn1.yaml
   num_repeats: 5
 model_server: policy_model
 canonical_split: benchmark
-standard_prompt_config: benchmarks/critpt/prompts/turn1.yaml
+prompt_source: prepared
 lifecycle: active
