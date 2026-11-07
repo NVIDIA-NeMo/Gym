@@ -221,10 +221,21 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
         path_params = getattr(request, "path_params", None)
         return path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
 
+    @staticmethod
+    def _validate_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse an aggregate budget neither supported execution mode can enforce."""
+        if body.max_output_tokens is not None:
+            raise HTTPException(
+                422,
+                "Terminus 2 cannot enforce request max_output_tokens across model calls; "
+                "omit it and configure a per-call limit on the Model Server instead",
+            )
+
     def _prepare_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, str]:
         """Apply the configured temperature and flatten the instructions and input into Terminus-2's instruction."""
+        self._validate_output_budget(body)
         body = body.model_copy(deep=True)
         if body.temperature is None:
             body.temperature = self.config.temperature
@@ -824,6 +835,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Terminus 2 /run requires resources_server; use agent sessions instead")
+        self._validate_output_budget(body.responses_create_params)
         cookies = request.cookies
         seed_response = await self.server_client.post(
             server_name=self.config.resources_server.name,

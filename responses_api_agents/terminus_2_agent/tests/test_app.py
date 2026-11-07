@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
+from fastapi import HTTPException
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
 from pydantic import ValidationError
@@ -228,6 +229,10 @@ class TestResponses:
             ],
         )
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
+            with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+                await agent.responses(request=None, body=body.model_copy(update={"max_output_tokens": 32}))
+            assert refused.value.status_code == 422
+            agent._run_terminus.assert_not_awaited()
             response = await agent.responses(request=None, body=body)
 
         assert response.model == "test-model"

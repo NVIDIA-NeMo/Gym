@@ -91,12 +91,21 @@ it sets:
 Agent sessions treat the request's fields as follows:
 
 - Applied: `instructions` and the input's system and developer messages, which join the instruction before the
-  task; `temperature`, `top_p` and reasoning effort; `max_output_tokens`, as each model call's `max_tokens`. Gym's
+  task; `temperature`, `top_p` and reasoning effort. Gym's
   Chat Completions converter converts them and the runner sends them on every model call.
 - Ignored by design: `tools`, `tool_choice` and `parallel_tool_calls`, because Terminus types keystrokes and calls no
   tools. The input is flattened to text, so images and function-call history are not used.
 - Refused with 422 before any sandbox work: fields the converter cannot represent, such as `previous_response_id`,
   `conversation`, `prompt`, `max_tool_calls`, `truncation` or `background`.
+
+Both execution modes reject request-level `max_output_tokens` with HTTP 422 before binding the activation or
+starting host work; `/run` rejects it before seeding Resources. Terminus cannot enforce a shared output-token budget
+across model calls. Previously it reused this value as
+`max_tokens` on every call. Remove `responses_create_params.max_output_tokens` from task rows (or omit
+`max_output_tokens` from direct activation requests). To retain a per-call generation cap, configure
+`policy_model.responses_api_models.vllm_model.extra_body.max_tokens`, for example `8192`, on the Chat Completions
+Model Server. The agent's `model_info.max_output_tokens` still describes the model's output limit to Terminus;
+it is not a shared generation budget. Other sampling controls and model-server limits are unchanged.
 
 `model_timeout_sec` bounds each model call and `command_timeout_sec` each terminal command.
 `record_terminal_session` applies only on the host path. `collect_rollout_details` returns token IDs and log

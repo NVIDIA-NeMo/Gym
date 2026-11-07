@@ -600,7 +600,7 @@ class TestActivation:
 
     async def test_the_request_tools_stay_out_of_the_model_calls(self, monkeypatch: pytest.MonkeyPatch) -> None:
         activation = _Activation(monkeypatch)
-        # A Terminal-Bench row: tool fields Terminus never uses, task metadata and an output limit.
+        # A Terminal-Bench row: tool fields Terminus never uses and task metadata.
         body = NeMoGymResponseCreateParamsNonStreaming(
             input="solve it",
             tools=[
@@ -609,15 +609,42 @@ class TestActivation:
             tool_choice="auto",
             parallel_tool_calls=True,
             metadata={"agent_timeout_sec": "60", "instance_id": "task-1", "docker_image": "registry/task:1"},
-            max_output_tokens=50,
         )
 
         response = await activation.respond(body)
 
         [payload] = activation.payloads
         assert not {"tools", "tool_choice", "parallel_tool_calls"} & payload["chat_params"].keys()
-        assert payload["chat_params"]["max_tokens"] == 50
+        assert "max_tokens" not in payload["chat_params"]
         assert response.status == "completed"
+
+    async def test_an_output_budget_is_refused_without_binding_the_session(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        activation = _Activation(monkeypatch, model_info={"max_output_tokens": 8192})
+        body = NeMoGymResponseCreateParamsNonStreaming(
+            input="solve it", max_output_tokens=50, temperature=0.2, top_p=0.9, reasoning={"effort": "low"}
+        )
+
+        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+            await activation.respond(body)
+
+        assert refused.value.status_code == 422
+        assert activation.state.task is None and activation.state.activation_request is None
+        assert not activation.payloads
+        activation.state.session.sandbox.exec.assert_not_awaited()
+
+        corrected = body.model_copy(update={"max_output_tokens": None})
+        response = await activation.respond(corrected)
+
+        assert response.status == "completed"
+        [payload] = activation.payloads
+        assert "max_tokens" not in payload["chat_params"]
+        assert payload["chat_params"]["temperature"] == 0.2
+        assert payload["chat_params"]["top_p"] == 0.9
+        assert payload["chat_params"]["reasoning_effort"] == "low"
+        assert payload["terminus"]["model_info"] == {"max_output_tokens": 8192}
+        assert activation.state.activation_request == corrected
 
     @pytest.mark.parametrize("field", [{"previous_response_id": "resp_1"}, {"truncation": "auto"}])
     async def test_a_request_the_converter_cannot_represent_is_refused_before_any_sandbox_work(
@@ -1097,6 +1124,17 @@ class TestRun:
 
         assert refused.value.status_code == 422
         assert "resources_server" in refused.value.detail
+
+    async def test_run_with_an_output_budget_is_refused_before_seeding_resources(self) -> None:
+        agent = self._agent(resources_server=ResourcesServerRef(type="resources_servers", name="resources"))
+        request = Request({"type": "http", "headers": [], "session": {}})
+        body = Terminus2AgentRunRequest(responses_create_params={"input": "task", "max_output_tokens": 32})
+
+        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+            await agent.run(request, body)
+
+        assert refused.value.status_code == 422
+        agent.server_client.post.assert_not_awaited()
 
 
 class TestStageAndCollect:
