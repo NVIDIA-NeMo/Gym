@@ -188,7 +188,12 @@ def _json_ready(value: Any, default: Callable[[Any], Any] | None) -> Any:
     # Containers ``orjson`` writes natively are unpacked here, so a wide integer inside one is written, not passed
     # to ``default`` with the whole container.
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {field.name: _json_ready(getattr(value, field.name), default) for field in dataclasses.fields(value)}
+        # ``orjson`` leaves out fields whose names start with an underscore.
+        return {
+            field.name: _json_ready(getattr(value, field.name), default)
+            for field in dataclasses.fields(value)
+            if not field.name.startswith("_")
+        }
     if isinstance(value, enum.Enum):
         return _json_ready(value.value, default)
     try:
