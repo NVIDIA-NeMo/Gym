@@ -134,6 +134,52 @@ class TestOutcomes:
         assert outcome.failure == TaskFailure(kind="session_lost", domain="session", reason=None)
 
 
+class TestRolloutMetrics:
+    @pytest.fixture
+    def recorded(self, monkeypatch: pytest.MonkeyPatch) -> list[tuple]:
+        calls: list[tuple] = []
+        monkeypatch.setattr(
+            in_process, "record_rollout_completed", lambda *args, **kwargs: calls.append(("completed", args, kwargs))
+        )
+        monkeypatch.setattr(
+            in_process, "record_rollout_reward", lambda *args, **kwargs: calls.append(("reward", args, kwargs))
+        )
+        return calls
+
+    async def test_each_rollout_is_counted_as_gym_eval_run_counts_it(
+        self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple]
+    ) -> None:
+        passed = {"reward": 1.0}
+        failed = {"reward": 0.0, "failure_kind": "judge_failed", "failure_reason": "no verdict"}
+        masked = {"reward": 0.0, "mask_sample": True}
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_examples", _FakeResults(passed, failed, masked))
+
+        await runner.run_task("a", num_repeats=3)
+
+        assert recorded == [
+            ("completed", ("scored",), {"dispatch_name": "agent"}),
+            ("reward", (1.0,), {"dispatch_name": "agent", "masked": False}),
+            (
+                "completed",
+                ("failed",),
+                {"dispatch_name": "agent", "failure_class": "judge", "failure_kind": "judge_failed"},
+            ),
+            ("completed", ("scored",), {"dispatch_name": "agent"}),
+            ("reward", (0.0,), {"dispatch_name": "agent", "masked": True}),
+        ]
+
+    async def test_a_reward_that_is_not_finite_is_counted_but_not_ranged(
+        self, monkeypatch: pytest.MonkeyPatch, recorded: list[tuple]
+    ) -> None:
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_examples", _FakeResults({"reward": float("nan")}))
+
+        await runner.run_task("a")
+
+        assert recorded == [("completed", ("scored",), {"dispatch_name": "agent"})]
+
+
 class TestTaskRunner:
     def test_indexes_each_task_once(self) -> None:
         runner = TaskRunner([_row("a"), _row("a"), _row("b")], registry_server=HEAD)

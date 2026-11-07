@@ -123,6 +123,10 @@ its `domain` (the layer that observed it: the part of the kind before the first 
 `session` or `provider`) and the occurrence's `reason`. Group failures by `domain` and a new kind under an existing
 domain needs no change from you.
 
+`TaskRunner.run_task` also counts each rollout in the metrics `gym eval run` records for every rollout it finishes
+(`gym.rollout.completed_total` and `gym.rollout.rewarded_total`), by the rollout's outcome. They are exported when
+telemetry is on in the calling process, as for the servers: call `nemo_gym.telemetry.setup.init_telemetry` first.
+
 `TaskResult.results` holds Gym's raw `/run` responses. Their keys are not part of the contract: depend on `rewards`
 and `outcomes`, and use `results` for debugging.
 
