@@ -52,9 +52,10 @@ from nemo_gym.models import (
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
     BaseResponsesAPIModelConfig,
     Body,
+    ChatCompletionsConverter,
     ExternalCaptureHandler,
     SimpleResponsesAPIModel,
-    VLLMConverter,
+    VLLMConverter,  # noqa: F401  # re-exported for importers of this module
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
     context_overflow_error_fields,
     is_propagated_refusal,
@@ -66,6 +67,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -914,12 +916,12 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise HTTPException(status_code=502, detail="worker did not acknowledge exact context measurement")
         return {"prompt_token_count": count}
 
-    def get_converter(self) -> "VLLMConverter":
+    def get_converter(self) -> "ChatCompletionsConverter":
         """Return the converter used for Responses API <-> Chat Completions mapping.
 
         Override in subclasses (e.g. GenRMModel) to use a specialized converter.
         """
-        return VLLMConverter(
+        return ChatCompletionsConverter(
             return_token_id_information=self.config.return_token_id_information,
             uses_reasoning_parser=self.config.uses_reasoning_parser,
             custom_tool_strategy=self.config.custom_tool_strategy,
@@ -1078,6 +1080,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         execution = getattr(request.state, "nemo_gym_model_execution", {})
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
@@ -1315,7 +1318,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                if message_dict.get("role") != "assistant":
+                    continue
+
+                # External harnesses can supply reasoning separately from content.
+                # Normalize that history too: newer vLLM ignores reasoning_content.
+                reasoning = message_dict.get("reasoning_content") or message_dict.get("reasoning")
+                if reasoning and self.config.uses_interleaved_reasoning:
+                    message_dict.pop("reasoning_content", None)
+                    message_dict.pop("reasoning", None)
+                    _set_reasoning(message_dict, reasoning, self.config.reasoning_field)
+
+                if "content" not in message_dict:
                     continue
 
                 content = message_dict["content"]
@@ -2150,7 +2164,7 @@ class VLLMModel(SimpleResponsesAPIModel):
           - ``str``: returned as-is.
           - list of text blocks (``[{"type": "text", "text": ...}, ...]``):
             concatenated with no separator. This is the shape produced by
-            VLLMConverter when the caller passes a string ``input`` to
+            ChatCompletionsConverter when the caller passes a string ``input`` to
             /v1/responses.
 
         Anything else (image / audio blocks, None content) is rejected — the
@@ -2287,7 +2301,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         vLLM /v1/completions returns ``choices[i].text``; we lift it into a
         single assistant chat message. Reasoning content (``<think>...</think>``
-        in the raw text) is left inline — VLLMConverter._extract_reasoning_from_content
+        in the raw text) is left inline — ChatCompletionsConverter._extract_reasoning_from_content
         will pull it out downstream when the result is converted back to a
         Response.
         """

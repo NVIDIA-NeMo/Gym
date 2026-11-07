@@ -16,9 +16,11 @@ import logging
 import re
 import sys
 import textwrap
+import threading
 from argparse import ArgumentParser
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from difflib import get_close_matches
@@ -94,6 +96,7 @@ def _installed_version(distribution: str) -> Optional[str]:
 ray_version = _installed_version("ray")
 
 _GLOBAL_CONFIG_DICT = None
+_SCOPED_GLOBAL_CONFIG_LOCK = threading.RLock()
 NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME = "NEMO_GYM_CONFIG_DICT"
 NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME = "NEMO_GYM_CONFIG_PATH"
 CONFIG_PATHS_KEY_NAME = "config_paths"
@@ -216,6 +219,7 @@ ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
 # so this list is the source of truth; a unit test keeps it in step with the agent apps.
 AGENT_SESSION_AGENT_TYPES = frozenset(
     {
+        "browsecomp_agent",
         "claude_code_agent",
         "codex_agent",
         "harbor_oracle_agent",
@@ -239,7 +243,14 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
 SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
 LEGACY_AGENT_SERVER_TYPE = "legacy_agent"
 # Kept when a single_agent_turn_legacy server falls back to a legacy_agent relay; the rest only applies to sessions.
-_LEGACY_RELAY_KEPT_KEYS = ("entrypoint", AGENT_SERVER_REF_KEY_NAME, "host", "port", "num_workers")
+_LEGACY_RELAY_KEPT_KEYS = (
+    "entrypoint",
+    AGENT_SERVER_REF_KEY_NAME,
+    "host",
+    "port",
+    "num_workers",
+    "uvicorn_reuse_port",
+)
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -1971,6 +1982,24 @@ def reset_global_config_dict() -> None:
     """
     global _GLOBAL_CONFIG_DICT
     _GLOBAL_CONFIG_DICT = None
+
+
+@contextmanager
+def scoped_global_config_dict(global_config_dict: DictConfig) -> Iterator[None]:
+    """Make `global_config_dict` this process's global config inside the block, and restore the previous one after.
+
+    For a library caller whose code, such as a benchmark's prepare script, reads `get_global_config_dict()`
+    and must see the config it was given, not one resolved from the host program's command line. The global is
+    process-wide, so concurrent blocks are serialized.
+    """
+    global _GLOBAL_CONFIG_DICT
+    with _SCOPED_GLOBAL_CONFIG_LOCK:
+        previous = _GLOBAL_CONFIG_DICT
+        _GLOBAL_CONFIG_DICT = global_config_dict
+        try:
+            yield
+        finally:
+            _GLOBAL_CONFIG_DICT = previous
 
 
 def get_global_config_dict(

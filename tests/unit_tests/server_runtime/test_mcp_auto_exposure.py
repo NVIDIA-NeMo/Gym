@@ -29,7 +29,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Annotated, Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -47,6 +47,8 @@ pytest.importorskip("mcp")
 from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient  # noqa: E402
 from nemo_gym.server_runtime.base_resources_server import (  # noqa: E402
     BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ResourcesSeedSessionResponse,
@@ -532,6 +534,24 @@ def test_environment_server_seed_returns_mcp_access_in_resources_tools():
         # The session hook read the task's fields, so the token is narrowed to the tool the task allows.
         assert {t["name"] for t in _list(client, token)} == {"append"}
         assert _payload(_call(client, "append", {"value": "x"}, token=token))["values"] == ["x"]
+
+
+def test_seed_handler_that_annotates_its_request_param_still_receives_it():
+    # The wrapper keeps Annotated metadata for the body's validators; the request param must still be recognised.
+    class AnnotatedRequest(Store):
+        async def seed_session(
+            self, request: Annotated[Request, "caller"], body: BaseSeedSessionRequest
+        ) -> BaseSeedSessionResponse:
+            assert request.session[SESSION_ID_KEY]
+            return BaseSeedSessionResponse()
+
+    server = _server(AnnotatedRequest)
+    app = server.setup_webserver()
+    maybe_auto_expose(server, app)
+    with TestClient(app) as client:
+        resp = client.post("/seed_session", json={})
+        assert resp.status_code == 200, resp.text
+        assert TOKEN_HEADER in resp.json()["mcp"]["headers"]
 
 
 def test_session_hook_error_fails_seed_request_not_silent_unrestricted():
