@@ -28,6 +28,7 @@ from time import monotonic
 from typing import (
     Any,
     Dict,
+    List,
     Literal,
     Optional,
 )
@@ -49,7 +50,7 @@ from nemo_gym.client.http_client import (
     raise_for_status,
     request,
 )
-from nemo_gym.core.episode_context import current_rollout_id, note_verifier_model_request
+from nemo_gym.core.episode_context import current_rollout_id, current_session_key, note_verifier_model_request
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.core.failure_records import FailureBoundary, ModelFailureDetails, SdkErrorDetails
 from nemo_gym.core.failure_transport import FailureHeader, observe_failure, observe_model_operation
@@ -245,6 +246,16 @@ class PermanentEndpointError(ClientResponseError):
 REQUEST_ID_HEADER = "X-Request-Id"
 
 
+def _merge_headers(*layers: Mapping[str, str]) -> Dict[str, str]:
+    """Merge header layers so a later layer replaces an earlier one's header of any spelling.
+
+    HTTP header names are case-insensitive, so `x-session` in a later layer replaces `X-Session` in an earlier one,
+    rather than both being sent. The result keeps the spelling and value of the last layer that names a header.
+    """
+    last_of_each_name = {name.lower(): (name, value) for layer in layers for name, value in layer.items()}
+    return dict(last_of_each_name.values())
+
+
 def _rollout_request_id(headers: Mapping[str, str]) -> Optional[str]:
     """A request id that names the rollout, for calls made inside a rollout context.
 
@@ -295,6 +306,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     default_headers: Dict[str, str] = Field(
         default_factory=dict,
         description="Extra headers to include in every request.",
+    )
+
+    rollout_id_headers: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Headers that carry the current rollout id on every request made for a rollout, e.g. for "
+            "session-affinity routing upstream. Requests outside a rollout do not get them."
+        ),
     )
 
     max_num_tries: Optional[Literal[1]] = Field(
@@ -372,6 +391,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # Only the attempt that tripped it is the cause; later calls raise without one (no attempt was made).
         self._raise_permanent_error(cause)
 
+    def _rollout_headers(self) -> Dict[str, str]:
+        session_key = current_session_key()
+        if session_key is None:
+            return {}
+        return {name: session_key for name in self.rollout_id_headers}
+
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
             self._raise_permanent_error()
@@ -381,7 +406,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         connection_retries = self.max_connection_retries
         if connection_retries is None and request_kwargs.get("_resend_after_disconnect") is False:
             connection_retries = MAX_NUM_TRIES
-        headers = self.default_headers | request_headers | {"Authorization": f"Bearer {self.api_key}"}
+        headers = _merge_headers(
+            self.default_headers,
+            self._rollout_headers(),
+            request_headers,
+            {"Authorization": f"Bearer {self.api_key}"},
+        )
         request_id = _rollout_request_id(headers)
         if request_id is not None:
             headers["X-Request-Id"] = request_id

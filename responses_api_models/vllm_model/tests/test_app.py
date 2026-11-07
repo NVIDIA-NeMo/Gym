@@ -1659,6 +1659,31 @@ class TestApp:
 
         assert len(picked) == 1
 
+    def test_endpoint_selection_keys_on_the_session_key(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+        monkeypatch.setattr("responses_api_models.vllm_model.app.current_session_key", lambda: "the-session")
+
+        picked = {server._resolve_client(self._request_for_session(f"fresh-{i}")) for i in range(32)}
+
+        assert picked == {server._clients[self._hashed_client_idx("the-session", 4)]}
+        assert list(server._session_id_to_client) == ["the-session"]
+
+    def test_the_header_and_the_endpoint_selection_name_the_same_session(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(4)]
+        upstream = NeMoGymAsyncOpenAI(
+            api_key="abc", base_url="https://example.test/v1", rollout_id_headers=["X-Session-Id"]
+        )
+
+        for capture_key in ("task-7-0", "task-7-0-a2"):
+            with rollout_context(capture_key):
+                header = upstream._rollout_headers()["X-Session-Id"]
+                server._resolve_client(self._request_for_session("a-cookie-session"))
+
+            assert header == capture_key
+            assert capture_key in server._session_id_to_client
+
     def test_rollouts_spread_across_endpoints(self, monkeypatch: MonkeyPatch) -> None:
         server = self._setup_server(monkeypatch)
         server._clients = [MagicMock(spec=NeMoGymAsyncOpenAI) for _ in range(2)]
