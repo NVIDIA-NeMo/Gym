@@ -6,6 +6,10 @@ Overrides `run()` to resolve `verifier_metadata.media_dir` references, read
 image/PDF files from disk, base64-encode them, and inject `input_image` blocks
 into `responses_create_params` before sending the request to the model.
 
+The media reaches the model only through `run()`, so the agent refuses agent sessions (a seed
+answers 422) rather than asking about images the model never sees. Run it through a
+`legacy_agent` environment server, as the shipped configs do.
+
 See `resources_servers/labbench2_vlm/README.md` for full documentation.
 
 ## Config Fields
