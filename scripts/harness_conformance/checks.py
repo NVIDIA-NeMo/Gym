@@ -110,30 +110,12 @@ def main() -> int:
             raise ValueError("Invalid selection")
     except (ValueError, TypeError, KeyError):
         harnesses = None
-    download_artifacts(harnesses or [], repo=repo, run_id=run_id, attempt=attempt, output=artifacts)
+    artifact_ids = download_artifacts(harnesses or [], repo=repo, run_id=run_id, attempt=attempt, output=artifacts)
     run_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}/attempts/{attempt}"
-    artifact_urls = {}
-    try:
-        listing = subprocess.check_output(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                f"repos/{repo}/actions/runs/{run_id}/artifacts",
-                "--jq",
-                ".artifacts[] | select(.expired == false) | [.name, .id] | @tsv",
-            ],
-            text=True,
-        )
-        by_name = dict(line.split("\t") for line in listing.splitlines())
-        for harness in harnesses or []:
-            artifact_id = by_name.get(f"harness-conformance-{harness}-{run_id}-{attempt}")
-            if artifact_id:
-                artifact_urls[harness] = (
-                    f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}"
-                )
-    except (subprocess.CalledProcessError, ValueError):
-        print("::warning::Could not link individual artifacts; use the workflow artifacts page.")
+    artifact_urls = {
+        harness: f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}"
+        for harness, artifact_id in artifact_ids.items()
+    }
     payload = p0_check(harnesses, artifacts=artifacts, sha=os.environ["GITHUB_SHA"], artifact_urls=artifact_urls)
     payload["details_url"] = run_url
     payload["external_id"] = f"harness-conformance-p0-{run_id}-{attempt}"
