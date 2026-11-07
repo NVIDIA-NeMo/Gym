@@ -210,6 +210,23 @@ def test_config_routes_every_model_through_the_rollout_and_keeps_its_providers()
     assert config["extra"] == {"x": 1}
 
 
+@pytest.mark.parametrize("capture", [True, False])
+def test_token_id_capture_routes_root_and_subagent_calls_to_capture(capture):
+    server = agent(
+        subagent_model_server={"type": "responses_api_models", "name": "lightning"}, token_id_capture=capture
+    )
+    server.server_client.global_config_dict = {"token_id_capture": {"enabled": True}}
+    server.server_client._build_server_base_url.side_effect = lambda config: f"http://{config['name']}:9000"
+    with patch(
+        "nemo_gym.agents.base_responses_api_agent.get_first_server_config_dict",
+        side_effect=lambda _, name: {"name": name},
+    ):
+        providers = server.kimi_config(MagicMock(request=seed()))["providers"]
+    capture_path = "/training-token-capture" if capture else ""
+    assert providers["policy"]["base_url"] == f"http://policy_model:9000/ng-rollout/rollout-1{capture_path}/v1"
+    assert providers["subagent"]["base_url"] == f"http://lightning:9000/ng-rollout/rollout-1{capture_path}/v1"
+
+
 @pytest.mark.parametrize(
     ("request_seed", "reason"),
     [

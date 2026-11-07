@@ -6,8 +6,12 @@ seeds the Resources and agent sessions, activates Kimi once, closes the agent, v
 Resources. Kimi runs its own tools and calls Gym Model Servers for inference. Kimi's subagent tools, `Agent` and
 `AgentSwarm`, are available unless `subagents: false`.
 
-Capability level: **Evaluation**. The adapter returns the root conversation as Responses items, usage summed over the
-root and every subagent, and an observation bundle with one invocation per subagent. Token IDs are not captured.
+The adapter returns the root conversation as Responses items, usage summed over the root and every subagent, and an
+observation bundle with one invocation per subagent.
+
+Training token-ID capture is off by default. Root and subagent model calls go to Gym Model Servers under the rollout's
+prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
+`token_id_capture: true` or run-level `token_id_capture.all_agents: true`.
 
 ## Configure and run
 
