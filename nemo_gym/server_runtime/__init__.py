@@ -53,6 +53,11 @@ if TYPE_CHECKING:
         seed_verify_step_type,
     )
     from nemo_gym.server_runtime._checkpoint.store import write_participant_state
+    from nemo_gym.server_runtime.agent_context import (
+        AGENT_CONTEXT_KEY_NAME,
+        AgentContext,
+        AgentContextArtifact,
+    )
     from nemo_gym.server_runtime.base_environment_server import (
         BaseEnvironmentServer,
         BaseEnvironmentServerConfig,
@@ -132,8 +137,11 @@ _PUBLIC_API = {
     "async_rollout_prefix_hook": "base_server",
     "rollout_prefix_hook": "base_server",
     "with_rollout_prefix": "base_server",
+    "AGENT_CONTEXT_KEY_NAME": "agent_context",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
+    "AgentContext": "agent_context",
+    "AgentContextArtifact": "agent_context",
     "AgentSessionParticipant": "_checkpoint.agent",
     "AgentSessionRecord": "_checkpoint.agent",
     "BaseEnvironmentServer": "base_environment_server",
