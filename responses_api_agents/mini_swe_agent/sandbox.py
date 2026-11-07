@@ -226,7 +226,7 @@ class MiniSWESession(AgentSessionState):
             return [], 0
         calls: list[dict[str, JsonValue]] = []
         invalid = 0
-        for line in (await self._read_optional(path) or "").splitlines():
+        for line in (await self._read_optional(path) or "").split("\n"):
             if not line.strip():
                 continue
             try:

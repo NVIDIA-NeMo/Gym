@@ -69,6 +69,8 @@ from nemo_gym.core import (
     MODEL_TRANSPORT_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -291,23 +293,54 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError("mini-SWE needs an absolute task workdir disjoint from its session directory")
 
         global_config = get_global_config_dict()
-        provider_config = resolve_provider_config(provider_ref, global_config)
         # mini-SWE calls the Model Server from inside the sandbox, where a loopback URL is the sandbox itself.
         try:
+            provider_config = resolve_provider_config(provider_ref, global_config)
             assert_model_url_reachable_from_sandbox(
                 self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
                 provider_name=next(iter(provider_config), None),
             )
-        except ValueError as error:
+            spec = None
+            if owns_sandbox:
+                settings = dict(self.config.sandbox_config)
+                metadata = settings.pop("metadata", None) or {}
+                settings["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **metadata,
+                    "agent_session_id": body.agent_session_id[:63],
+                }
+                settings.setdefault("workdir", workdir)
+                # Provider TTLs outlive this server; reserve ten minutes for setup and cleanup.
+                settings.setdefault(
+                    "ttl_s",
+                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
+                )
+                spec = SandboxSpec(**settings)
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
-        provider = create_provider(provider_config)
         try:
             if owns_sandbox:
                 sandbox = AsyncSandbox(provider)
             else:
                 sandbox = await AsyncSandbox.connect(body.sandbox_access.connection.descriptor, provider=provider)
         except BaseException:
-            await provider.aclose()
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("mini-SWE provider cleanup failed after sandbox setup failed")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason="mini-SWE provider cleanup failed",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
             raise
         state = MiniSWESession(
             request=body,
@@ -323,20 +356,7 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         )
         try:
             if owns_sandbox:
-                settings = dict(self.config.sandbox_config)
-                metadata = settings.pop("metadata", None) or {}
-                settings["metadata"] = {
-                    **resolve_provider_metadata(provider_ref, global_config),
-                    **metadata,
-                    "agent_session_id": body.agent_session_id[:63],
-                }
-                settings.setdefault("workdir", workdir)
-                # Provider TTLs outlive this server; reserve ten minutes for setup and cleanup.
-                settings.setdefault(
-                    "ttl_s",
-                    self.config.sandbox_install_timeout_seconds + self.config.sandbox_runner_timeout_seconds + 600,
-                )
-                await sandbox.start(SandboxSpec(**settings))
+                await sandbox.start(spec)
                 state.sandbox_id = sandbox.sandbox_id
                 prepared = await sandbox.exec(f"mkdir -p -- {quote(workdir)}", cwd="/", timeout_s=30)
                 if prepared.return_code != 0 or prepared.error_type is not None:
@@ -582,9 +602,9 @@ class MiniSWEAgent(SimpleResponsesAPIAgent):
         native_result = {"exit_status": exit_status, "error": error}
         failed = False
         if timed_out and not projection.responses and not state.session.expired:
-            # Each model call may take the whole budget, so a Model Server that never answered ends at the deadline:
-            # a transport failure, not the agent's result. A rollout stop keeps its timeout.
-            exit_status, error = "Timeout", "no model call returned before the run's deadline"
+            # The supervisor proves the deadline, not whether a model request started or failed in transport.
+            # Keep the retryable failed result without inventing mini-SWE's native model Timeout exception.
+            exit_status, error = "AgentDeadline", "no model call returned before the run's deadline"
             native_result = {"exit_status": exit_status, "error": error}
             termination, status, failed = exit_status, "failed", True
         elif timed_out:

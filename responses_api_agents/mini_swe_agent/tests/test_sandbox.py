@@ -360,3 +360,22 @@ async def test_malformed_runner_diagnostics_are_dropped_without_failing_the_run(
 
     assert artifacts.output == output
     assert state.runtime_info is None
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+@pytest.mark.parametrize("ensure_ascii", [False, True])
+async def test_mcp_jsonl_preserves_unicode_record_content(state, monkeypatch, separator, ensure_ascii):
+    state.mcp_servers = [{"name": "task_tools"}]
+    record = {
+        "server": "task_tools",
+        "tool": "echo",
+        "tool_call_id": "call_1",
+        "arguments": {"text": f"left{separator}right"},
+        "output": f"left{separator}right",
+    }
+    stage_mcp_calls(state, monkeypatch, [json.dumps(record, ensure_ascii=ensure_ascii) + "\r", ""])
+
+    artifacts = await state.collect()
+
+    assert artifacts.mcp_calls == [record]
+    assert artifacts.invalid_mcp_calls == 0

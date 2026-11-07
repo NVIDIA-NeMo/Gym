@@ -652,17 +652,17 @@ async def test_a_deadline_stop_is_incomplete_with_partial_work(agent) -> None:
     [None, {"info": {"exit_status": ""}, "messages": native_trajectory()["messages"][:2]}],
     ids=["before-the-first-save", "system-and-task-only"],
 )
-async def test_a_run_that_timed_out_before_any_model_call_returned_fails_as_a_transport_error(
-    agent, trajectory
-) -> None:
+async def test_a_deadline_without_a_model_reply_keeps_its_cause_unknown(agent, trajectory) -> None:
     state = state_for(agent)
     finish_run(state, trajectory=trajectory, return_code=143, timed_out=True)
 
     response = await asyncio.wait_for(agent._activate(state, body()), timeout=5)
 
-    # Each model call may take the whole budget: a Model Server that never answered is not the agent's result.
-    assert (response.status, response.metadata["mini_swe_termination"]) == ("failed", "Timeout")
-    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "model_transport_error"}
+    # This also covers a runner stalled during startup, before making any model request.
+    assert (response.status, response.metadata["mini_swe_termination"]) == ("failed", "AgentDeadline")
+    assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {"failure_kind": "unknown"}
+    assert response.metadata["stop_reason"] == "wall_time"
+    assert "no model call returned" in response.error.message
     invocation = state.observations.records[0]
     assert (invocation.status, invocation.stop_reason) == ("failed", "wall_time")
 
@@ -764,6 +764,7 @@ async def test_a_submitted_run_that_raced_close_keeps_its_own_outcome(agent) -> 
         ("PaymentRequiredError", "litellm.PaymentRequiredError: 402", "model_request_error", 402),
         ("InternalServerError", "litellm.InternalServerError: 500", "model_request_error", 500),
         ("APIConnectionError", "Connection refused", "model_transport_error", None),
+        ("Timeout", "litellm.Timeout: model request timed out", "model_transport_error", None),
         ("RepeatedFormatError", "", "agent_invalid_output", None),
         ("BadRequestError", "This model's maximum context length is 32768 tokens", "model_context_limit", None),
     ],
@@ -1002,3 +1003,74 @@ def test_rollout_stops_reach_the_supervised_session(agent) -> None:
     state = state_for(agent)
 
     assert agent._rollout_sandbox_session(state) is state.session
+
+
+@pytest.mark.parametrize("provider_config", [{"unknown_provider": {}}, {"local": 17}])
+@pytest.mark.parametrize("borrowed", [True, False])
+def test_invalid_provider_configuration_is_a_final_seed_refusal(
+    agent, sandbox, monkeypatch, provider_config, borrowed
+):
+    from nemo_gym.sandbox import create_provider
+
+    agent.config.sandbox_provider = "sandbox"
+    monkeypatch.setattr(app_module, "resolve_provider_config", lambda *args: provider_config)
+    monkeypatch.setattr(app_module, "create_provider", create_provider)
+    reason = check_agent_seed_rejected(
+        agent.setup_webserver(), seed(sandbox_access=SANDBOX_ACCESS if borrowed else None)
+    )
+    assert "provider" in reason.lower()
+    sandbox.connect.assert_not_awaited()
+    sandbox.box.start.assert_not_awaited()
+    assert not agent._session_records
+
+
+@pytest.mark.parametrize("typed_cleanup", [True, False])
+async def test_connect_failure_survives_cleanup_failure(agent, sandbox, typed_cleanup):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_report_for
+
+    original = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="connect failed",
+        operation="connect",
+        stage="seed",
+        event_id="original-connect-event",
+    )
+    cleanup = (
+        NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="session_release_failed",
+            failure_reason="cleanup failed",
+            operation="aclose",
+            stage="cleanup",
+            event_id="cleanup-event",
+        )
+        if typed_cleanup
+        else RuntimeError("cleanup failed")
+    )
+    sandbox.connect.side_effect = original
+    sandbox.provider.aclose.side_effect = cleanup
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await agent._seed_agent_session_state(seed())
+        assert caught.value is original
+        report = failure_report_for(caught.value)
+        event = report.events[report.failure_id]
+        assert (event.event_id, event.stage, event.operation) == ("original-connect-event", "seed", "connect")
+        (cleanup_event,) = log.report.events.values()
+        assert (cleanup_event.stage, cleanup_event.operation) == ("cleanup", "aclose")
+        if typed_cleanup:
+            assert cleanup_event.event_id == "cleanup-event"
+    sandbox.provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("settings", [{"metadata": 17}, {"unknown_setting": True}])
+def test_invalid_owned_sandbox_spec_is_refused_before_provider_allocation(agent, sandbox, monkeypatch, settings):
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.sandbox_config = {"workdir": "/app", **settings}
+    create = MagicMock()
+    monkeypatch.setattr(app_module, "create_provider", create)
+    assert check_agent_seed_rejected(agent.setup_webserver(), seed(sandbox_access=None))
+    create.assert_not_called()
+    sandbox.box.start.assert_not_awaited()
+    assert not agent._session_records

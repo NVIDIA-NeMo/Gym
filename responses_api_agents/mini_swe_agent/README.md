@@ -165,7 +165,7 @@ response and the reported conversation.
 | --- | --- | --- |
 | `Submitted` | `completed` | Yes |
 | `LimitsExceeded`, `TimeExceeded`, a context-window error, Gym's deadline after a model call returned, or a rollout stop | `incomplete`; `mini_swe_termination` names it | Yes |
-| Gym's deadline before any model call returned | `failed`, `Timeout`, with `ng_agent_outcome` `model_transport_error` | By the outcome policy, which retries it by default |
+| Gym's deadline before any model call returned | `failed`, `AgentDeadline`, with `ng_agent_outcome` `unknown`; no model transport cause is inferred | By the outcome policy, which retries it by default |
 | No exit status: the run was killed mid-step, by its own command or an OOM kill. The runner saves before each step's commands run, so the step's model call is kept. | `incomplete`, `killed` | Yes |
 | No exit status: close stopped the run | `incomplete`, `cancelled` | No: a closed episode is not verified |
 | A model call that failed (LiteLLM's error, such as `RateLimitError`) or `RepeatedFormatError` | `failed` with `ng_agent_outcome` | By the Environment Server's outcome policy |
