@@ -50,6 +50,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
     accumulate_response_usage,
+    current_model_sampling_segment,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, observe_verifier
 from nemo_gym.trajectory import (
@@ -548,7 +549,9 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
         shares the cached client's transport, so calls remain correlated without
         accumulating a connection pool per rollout. ``rollout_id_from_run``
         returns ``None`` when capture is disabled, preserving the shared
-        unprefixed client path.
+        unprefixed client path, unless the rollout carries a training
+        framework's sampling values: its copy's URL carries them, and the
+        shared URL, built for every rollout, carries none.
 
         The per-run client BORROWS that transport rather than owning it, so it
         must never be closed: ``Client.close()`` closes the underlying httpx
@@ -576,7 +579,7 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
         shared_client = self.client_cache[cache_key]
         rollout_id = self._rollout_id_for(body, request)
-        if rollout_id is None:
+        if rollout_id is None and current_model_sampling_segment() is None:
             return shared_client
 
         model_server_url = self.resolve_model_base_url(self.config.model_server.name, rollout_id)

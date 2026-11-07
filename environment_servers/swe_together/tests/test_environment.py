@@ -15,7 +15,13 @@ from environment_servers.swe_together.app import Episode, SWETConfig, SWETEnviro
 from environment_servers.swe_together.schemas import CandidateTurn, SWETRequest, UserTurn, episode_response
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.task import TaskData
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseUsage, current_verifier_invocation_id
+from nemo_gym.core import (
+    ModelCallSampling,
+    NeMoGymResponse,
+    NeMoGymResponseUsage,
+    current_verifier_invocation_id,
+    encode_model_sampling,
+)
 from nemo_gym.rollouts.rollout_collection import _episode_record
 from nemo_gym.sandbox import PLACEMENT_GROUP_KEY
 from nemo_gym.trajectory import TrajectoryRecord
@@ -83,6 +89,37 @@ def server(tmp_path, **updates):
         **updates,
     )
     return SWETEnvironmentServer.model_construct(config=config)
+
+
+@pytest.mark.parametrize("sampling", [None, ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)])
+def test_the_candidates_activation_carries_the_episodes_sampling_values(tmp_path, sampling):
+    environment = SWETEnvironmentServer.model_construct(
+        config=server(tmp_path).config,
+        server_client=SimpleNamespace(global_config_dict={"policy": {"responses_api_agents": {"opencode_agent": {}}}}),
+    )
+    values = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampling is not None else ""
+
+    path = environment._activation_path(request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/one{values}/v1/responses"
+
+
+@pytest.mark.parametrize("sampling", [None, ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)])
+def test_the_candidates_capture_tag_precedes_its_sampling_values(tmp_path, sampling):
+    environment = SWETEnvironmentServer.model_construct(
+        config=server(tmp_path).config,
+        server_client=SimpleNamespace(
+            global_config_dict={
+                "token_id_capture": {"enabled": True},
+                "policy": {"responses_api_agents": {"opencode_agent": {"token_id_capture": True}}},
+            }
+        ),
+    )
+    values = f"/ng-sampling/{encode_model_sampling(sampling)}" if sampling is not None else ""
+
+    path = environment._activation_path(request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/one/training-token-capture{values}/v1/responses"
 
 
 def state(tmp_path, decisions):
@@ -885,3 +922,81 @@ async def test_wrapped_simulator_failure_keeps_upstream_status_in_failure(tmp_pa
     assert saved == result.failure.dependency_error
     assert saved["status_code"] == 408 and "Timeout passed=360.0" in saved["body"]
     assert saved["cause"].startswith("ClientResponseError: 408")
+
+
+SAMPLING = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+
+
+@pytest.mark.asyncio
+async def test_an_episode_with_sampling_values_reaches_the_protocol(tmp_path, monkeypatch):
+    prepare = AsyncMock(side_effect=RuntimeError("stop after admission"))
+    monkeypatch.setattr(SWETEnvironmentServer, "_prepare", prepare)
+
+    await server(tmp_path).run_request(request().model_copy(update={"model_sampling": SAMPLING}))
+
+    # Admitted rather than refused: the episode reached the protocol with its values.
+    assert prepare.await_count == 1
+    assert prepare.await_args.args[0].request.model_sampling == SAMPLING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling", [None, SAMPLING])
+async def test_the_judge_and_interaction_scorer_keep_their_own_sampling(tmp_path, monkeypatch, sampling):
+    value, _ = state(tmp_path, [])
+    value.request = value.request.model_copy(update={"model_sampling": sampling})
+    value.snapshots = SimpleNamespace(capture=AsyncMock(), final_patch="x" * 100, baseline=[])
+    value.task_metadata = {"judge_timeout": 100}
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace()
+    segments = {}
+
+    async def judge(**kwargs):
+        segments["judge"] = kwargs["model_sampling"]
+        return {"judge_score": 1.0}
+
+    def scorer(*_args, **kwargs):
+        segments["interaction"] = kwargs["model_sampling"]
+        return SimpleNamespace(calls=[])
+
+    monkeypatch.setattr(SWETEnvironmentServer, "_new_sandbox", AsyncMock())
+    monkeypatch.setattr(app, "replicate_submission", AsyncMock(return_value={}))
+    monkeypatch.setattr(app, "run_judge", judge)
+    monkeypatch.setattr(app, "interaction_metrics", AsyncMock(return_value={}))
+    monkeypatch.setattr(app, "AuxiliaryModel", scorer)
+    initial = app.NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "task"}])
+
+    result = await environment._verify(value, initial, [activation()])
+
+    assert result["judge_score"] == 1.0
+    expected = None if sampling is None else "null"
+    assert segments == {"judge": expected, "interaction": expected}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("sampling", [None, SAMPLING])
+async def test_the_user_simulator_keeps_its_own_sampling(tmp_path, monkeypatch, sampling):
+    environment = server(tmp_path)
+    environment.server_client = SimpleNamespace(global_config_dict={})
+    environment._runtime = SimpleNamespace(prepare=AsyncMock(), manifest={"artifacts": {}})
+    req = request().model_copy(update={"model_sampling": sampling})
+    episode = Episode(req, req.task.task_input.task_data, tmp_path, tmp_path / "artifacts")
+    episode.task_metadata = {"record": {"history_policy": "none"}, "agent_kwargs": {}}
+    episode.dependency_access = SimpleNamespace(register=AsyncMock())
+    (tmp_path / "instruction.md").write_text("Fix the bug.")
+    succeeded = SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+    sandbox = SimpleNamespace(exec=AsyncMock(return_value=succeeded))
+    monkeypatch.setattr(SWETEnvironmentServer, "_new_sandbox", AsyncMock(return_value=sandbox))
+    monkeypatch.setattr(app, "RepositorySnapshots", lambda *_args, **_kwargs: SimpleNamespace(capture=AsyncMock()))
+    monkeypatch.setattr(app, "discover_repo_config_files", AsyncMock(return_value=""))
+    monkeypatch.setattr(app, "session_analysis", lambda _task_dir: ("", []))
+    simulators = []
+
+    def simulator_model(*_args, **kwargs):
+        simulators.append(kwargs["model_sampling"])
+        return SimpleNamespace(calls=[])
+
+    monkeypatch.setattr(app, "AuxiliaryModel", simulator_model)
+
+    await environment._prepare(episode)
+
+    assert simulators == [None if sampling is None else "null"]

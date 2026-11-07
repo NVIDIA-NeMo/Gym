@@ -9,6 +9,7 @@ from time import monotonic, time
 from aiohttp import ClientResponseError
 
 from nemo_gym.client import ServerClient, get_response_json, raise_for_status
+from nemo_gym.core import model_sampling_context
 
 
 ERROR_BODY_CHARS = 8000
@@ -46,11 +47,22 @@ class ModelMessage:
 
 
 class AuxiliaryModel:
-    def __init__(self, client: ServerClient, name: str, *, cookies: dict[str, str], temperature: float):
+    """A model the environment calls itself. ``model_sampling`` is its calls' ``/ng-sampling/`` value, if any."""
+
+    def __init__(
+        self,
+        client: ServerClient,
+        name: str,
+        *,
+        cookies: dict[str, str],
+        temperature: float,
+        model_sampling: str | None = None,
+    ):
         self.client = client
         self.name = name
         self.cookies = cookies
         self.temperature = temperature
+        self.model_sampling = model_sampling
         self.calls = []
 
     async def call(
@@ -73,7 +85,9 @@ class AuxiliaryModel:
         self.calls.append(record)
         started = monotonic()
         try:
-            response = await self.client.post(self.name, "/v1/chat/completions", json=body, cookies=self.cookies)
+            # The server client puts the segment after the rollout prefix it may add.
+            with model_sampling_context(self.model_sampling):
+                response = await self.client.post(self.name, "/v1/chat/completions", json=body, cookies=self.cookies)
             await raise_for_status(response)
             data = await get_response_json(response)
             message = data["choices"][0]["message"]
