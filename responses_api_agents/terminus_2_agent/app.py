@@ -64,6 +64,9 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    NgFailureEvent,
+    observe_failure,
+    sdk_error_details,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -420,17 +423,16 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(f"Terminus 2 needs an absolute sandbox workdir, got {workdir!r}")
 
         global_config = get_global_config_dict()
-        provider_config = resolve_provider_config(provider_ref, global_config)
-        # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
-        # without use_absolute_ip) would make every model call fail.
-        assert_model_url_reachable_from_sandbox(
-            self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
-            provider_name=next(iter(provider_config), None),
-        )
-        provider = create_provider(provider_config)
         try:
+            provider_config = resolve_provider_config(provider_ref, global_config)
+            # The runner inside the sandbox calls the Model Server itself, so a loopback URL (the default
+            # without use_absolute_ip) would make every model call fail.
+            assert_model_url_reachable_from_sandbox(
+                self.resolve_model_base_url(self.config.model_server.name, body.episode_id.capture_key),
+                provider_name=next(iter(provider_config), None),
+            )
+            spec = None
             if owns_sandbox:
-                sandbox = AsyncSandbox(provider)
                 sandbox_config = self.config.sandbox_config.copy()
                 sandbox_config["metadata"] = {
                     **resolve_provider_metadata(provider_ref, global_config),
@@ -444,11 +446,33 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 sandbox_config.setdefault(
                     "ttl_s", 2 * self.config.sandbox_install_timeout_seconds + self.config.timeout + 600
                 )
-                await sandbox.start(SandboxSpec(**sandbox_config))
+                spec = SandboxSpec(**sandbox_config)
+            provider = create_provider(provider_config)
+        except (TypeError, ValueError) as error:
+            raise AgentSeedRejectedError(str(error)) from error
+        try:
+            if owns_sandbox:
+                sandbox = AsyncSandbox(provider)
+                await sandbox.start(spec)
             else:
                 sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
         except BaseException:
-            await provider.aclose()
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("Terminus 2 provider cleanup failed after sandbox setup failed")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason="Terminus 2 provider cleanup failed",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
             raise
 
         state = Terminus2SandboxSession(
@@ -488,6 +512,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, Terminus2SandboxSession):
             raise TypeError("Expected a Terminus 2 agent session state")
+        if state.provider_wait_failure is not None:
+            observe_failure(state.provider_wait_failure)
         await state.close(self.config.session_close_timeout_seconds)
         observations = state.observations
         if observations is None and isinstance(state.session.artifacts, dict):
@@ -618,6 +644,9 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 # Terminus records no start or end time for a command batch.
                 ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id),
             ]
+            gaps.append(ObservationGap(code="reasoning_token_usage_unavailable", invocation_id=invocation_id))
+            if not output.get("cached_usage_known", False):
+                gaps.append(ObservationGap(code="cached_token_usage_unavailable", invocation_id=invocation_id))
             if output.get("calls_without_usage"):
                 gaps.append(
                     ObservationGap(
@@ -671,13 +700,22 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
                 output = await state.execute(
                     payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
-            except TimeoutError:
-                # The supervisor normally ends Terminus at the deadline and the runner saves its turns. If even the
-                # supervisor overran, a saved result is still the run's timeout, but only once the budget has
-                # passed: providers raise TimeoutError for transport failures too.
+            except TimeoutError as error:
+                # Only the supervisor receipt establishes a harness deadline. A provider timeout alone does not.
                 output = state.session.artifacts
-                if not isinstance(output, dict) or monotonic() - started < timeout:
+                cleanup = state.session.cleanup
+                if not isinstance(output, dict) or cleanup is None or not cleanup["timed_out"]:
                     raise
+                state.provider_wait_failure = NgFailureEvent(
+                    boundary="sandbox",
+                    failure_kind="transport_timeout",
+                    failure_reason="Sandbox provider wait expired after Terminus 2's confirmed deadline",
+                    operation="exec_wait",
+                    stage="agent",
+                    foreign_error=sdk_error_details(error, message=str(error)),
+                )
+                state.provider_wait_failure.__cause__ = error
+                observe_failure(state.provider_wait_failure)
                 output = {**output, "stop_reason": "wall_time"}
         duration_ms = (monotonic() - started) * 1000
 
@@ -695,6 +733,11 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             # Pending, failed, or partially accounted attempts make aggregate usage unknown.
             usage_known=not output.get("calls_without_usage"),
         )
+        if response.usage is not None:
+            # Harbor does not retain reasoning counts. Missing cache details must not become measured zeros.
+            response.usage.output_tokens_details.reasoning_tokens = None
+            if not output.get("cached_usage_known", False):
+                response.usage.input_tokens_details.cached_tokens = None
         state.observations = self._observations(
             state,
             output,

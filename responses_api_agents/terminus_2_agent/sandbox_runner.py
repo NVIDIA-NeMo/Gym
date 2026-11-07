@@ -134,6 +134,7 @@ async def _run(payload: dict[str, Any], output_path: Path) -> dict[str, Any]:
             "terminal_response_id": llm.last_response_id,
             "response_ids": list(llm.response_ids),
             "calls_without_usage": llm.calls_without_usage,
+            "cached_usage_known": llm.cached_usage_known,
             "compactions": agent.compactions,
             "runtime": _runtime(),
         }

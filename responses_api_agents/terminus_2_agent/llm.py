@@ -117,6 +117,7 @@ class NemoGymLLM(BaseLLM):
         # Every answered call, in order; pending or unaccounted attempts keep aggregate usage unknown.
         self.response_ids: list[str] = []
         self.calls_without_usage = 0
+        self.cached_usage_known = True
         self._extra_chat_params = (
             dict(chat_params)
             if chat_params is not None
@@ -426,9 +427,11 @@ class NemoGymLLM(BaseLLM):
         prompt_tokens = usage["prompt_tokens"]
         completion_tokens = usage["completion_tokens"]
         prompt_tokens_details = usage.get("prompt_tokens_details") or {}
-        cache_tokens = (
-            prompt_tokens_details.get("cached_tokens", 0) if isinstance(prompt_tokens_details, dict) else 0
-        ) or 0
+        cache_tokens = prompt_tokens_details.get("cached_tokens") if isinstance(prompt_tokens_details, dict) else None
+        if type(cache_tokens) is not int or cache_tokens < 0:
+            self.cached_usage_known = False
+            # Harbor's UsageInfo requires a number; keep the missing detail separately for the Gym response.
+            cache_tokens = 0
 
         return UsageInfo(
             prompt_tokens=int(prompt_tokens),

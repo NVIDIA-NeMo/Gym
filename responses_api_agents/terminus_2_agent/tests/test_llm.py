@@ -367,3 +367,31 @@ async def test_a_failed_attempt_remains_unknown_after_a_successful_retry():
         result = await llm.call.retry_with(wait=wait_none())(llm, prompt="question")
     assert result.usage.prompt_tokens == 10
     assert llm.calls_without_usage == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_cache_detail_stays_unknown_after_a_later_reported_count():
+    llm = _make_llm()
+    for details in ({}, {"prompt_tokens_details": {"cached_tokens": 4}}):
+        response, _ = await _call(
+            llm,
+            _mock_response(usage={"prompt_tokens": 10, "completion_tokens": 2, **details}),
+            prompt="hello",
+        )
+        assert response.usage.prompt_tokens == 10
+        assert response.usage.completion_tokens == 2
+        assert llm.cached_usage_known is False
+
+
+@pytest.mark.asyncio
+async def test_reported_zero_cache_detail_is_known():
+    llm = _make_llm()
+    response, _ = await _call(
+        llm,
+        _mock_response(
+            usage={"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 0}}
+        ),
+        prompt="hello",
+    )
+    assert response.usage.cache_tokens == 0
+    assert llm.cached_usage_known is True

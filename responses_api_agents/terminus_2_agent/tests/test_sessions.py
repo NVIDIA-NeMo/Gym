@@ -692,13 +692,19 @@ class TestActivation:
         assert response.usage is None
         assert "model_usage_unavailable" in {gap.code for gap in closed.agent_observations.gaps}
 
-    async def test_a_late_result_after_a_provider_timeout_is_kept_only_past_the_budget(
+    async def test_a_provider_timeout_keeps_partial_work_after_a_confirmed_deadline(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         activation = _Activation(monkeypatch)
 
         async def overran(payload: dict, *, timeout: float, close_timeout: float) -> dict:
             activation.state.session.artifacts = _output(stop_reason="completed")
+            activation.state.session.cleanup = {
+                "timed_out": True,
+                "return_code": 143,
+                "cleanup_confirmed": True,
+                "error": None,
+            }
             raise TimeoutError("supervisor exceeded its deadline")
 
         activation.state.execute = overran
@@ -1168,3 +1174,133 @@ class TestRuntime:
 
         with pytest.raises(RuntimeError, match="Cannot build a sandbox install URL"):
             terminus_sandbox._sandbox_harbor_requirement()
+
+
+@pytest.mark.parametrize("provider_config", [{"unknown_provider": {}}, {"local": 17}])
+@pytest.mark.parametrize("borrowed", [True, False])
+def test_invalid_provider_configuration_is_a_final_seed_refusal(providers, monkeypatch, provider_config, borrowed):
+    from nemo_gym.sandbox import create_provider
+
+    agent = _agent(sandbox_provider="runtime", sandbox_config={"workdir": "/app"})
+    providers.resolve.return_value = provider_config
+    monkeypatch.setattr(f"{APP}.create_provider", create_provider)
+    reason = check_agent_seed_rejected(agent.setup_webserver(), _seed(borrowed=borrowed))
+    assert "provider" in reason.lower()
+    providers.connect.assert_not_awaited()
+    providers.install.assert_not_awaited()
+    assert not agent._session_records
+
+
+@pytest.mark.parametrize("typed_cleanup", [True, False])
+async def test_connect_failure_survives_cleanup_failure(providers, typed_cleanup):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_report_for
+
+    original = NgFailureEvent(
+        boundary="sandbox",
+        failure_kind="provider_unavailable",
+        failure_reason="connect failed",
+        operation="connect",
+        stage="seed",
+        event_id="original-connect-event",
+    )
+    cleanup = (
+        NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="session_release_failed",
+            failure_reason="cleanup failed",
+            operation="aclose",
+            stage="cleanup",
+            event_id="cleanup-event",
+        )
+        if typed_cleanup
+        else RuntimeError("cleanup failed")
+    )
+    providers.connect.side_effect = original
+    providers.provider.aclose.side_effect = cleanup
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await _agent()._seed_agent_session_state(_seed())
+        assert caught.value is original
+        report = failure_report_for(caught.value)
+        event = report.events[report.failure_id]
+        assert (event.event_id, event.stage, event.operation) == ("original-connect-event", "seed", "connect")
+        (cleanup_event,) = log.report.events.values()
+        assert (cleanup_event.stage, cleanup_event.operation) == ("cleanup", "aclose")
+        if typed_cleanup:
+            assert cleanup_event.event_id == "cleanup-event"
+    providers.provider.aclose.assert_awaited_once()
+
+
+@pytest.mark.parametrize("cached_known", [True, False])
+async def test_session_usage_keeps_unreported_details_unknown(monkeypatch, cached_known):
+    output = _output(cached_usage_known=cached_known)
+    output["trajectory"]["final_metrics"]["total_cached_tokens"] = 3
+    activation = _Activation(monkeypatch, output)
+
+    response = await activation.respond()
+    closed = await activation.agent._close_agent_session_state(activation.state)
+
+    assert response.usage is not None
+    assert response.usage.input_tokens == output["trajectory"]["final_metrics"]["total_prompt_tokens"]
+    assert response.usage.output_tokens == output["trajectory"]["final_metrics"]["total_completion_tokens"]
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+    expected_cached = output["trajectory"]["final_metrics"]["total_cached_tokens"] if cached_known else None
+    assert response.usage.input_tokens_details.cached_tokens == expected_cached
+    gaps = {gap.code for gap in closed.agent_observations.gaps}
+    assert "reasoning_token_usage_unavailable" in gaps
+    assert ("cached_token_usage_unavailable" in gaps) is (not cached_known)
+
+
+@pytest.mark.parametrize("settings", [{"metadata": 17}, {"unknown_setting": True}])
+def test_invalid_owned_sandbox_spec_is_refused_before_provider_allocation(providers, monkeypatch, settings):
+    agent = _agent(sandbox_provider="runtime", sandbox_config={"workdir": "/app", **settings})
+    create = MagicMock()
+    monkeypatch.setattr(f"{APP}.create_provider", create)
+    assert check_agent_seed_rejected(agent.setup_webserver(), _seed(borrowed=False))
+    create.assert_not_called()
+    providers.connect.assert_not_awaited()
+    assert not agent._session_records
+
+
+@pytest.mark.parametrize("confirmed_deadline", [True, False])
+async def test_provider_timeout_evidence_survives_only_confirmed_deadline_suppression(monkeypatch, confirmed_deadline):
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog
+
+    activation = _Activation(monkeypatch)
+    original = NgFailureEvent(
+        boundary="sandbox", failure_kind="transport_timeout", failure_reason="provider wait expired", stage="agent"
+    )
+    failure = TimeoutError("provider timeout details")
+    failure.__cause__ = original
+
+    async def expired(payload, *, timeout, close_timeout):
+        activation.state.session.artifacts = _output()
+        activation.state.session.cleanup = {
+            "timed_out": confirmed_deadline,
+            "return_code": 143,
+            "cleanup_confirmed": True,
+            "error": None,
+        }
+        raise failure
+
+    activation.state.execute = expired
+    clock = iter([0.0, 61.0, 61.0])
+    monkeypatch.setattr(f"{APP}.monotonic", lambda: next(clock))
+    with RequestFailureLog.capture() as log:
+        if not confirmed_deadline:
+            with pytest.raises(TimeoutError) as caught:
+                await activation.respond()
+            assert caught.value is failure
+            return
+        response = await activation.respond()
+        report = log.reply_report(None)
+    assert response.status == "incomplete"
+    assert report.failure_id is None
+    wait = report.events[activation.state.provider_wait_failure.event_id]
+    assert wait.foreign_error.message == "provider timeout details"
+    assert wait.cause_id == original.event_id
+    assert report.events[original.event_id].stage == "agent"
+    activation.state.close = AsyncMock()
+    with RequestFailureLog.capture() as close_log:
+        await activation.agent._close_agent_session_state(activation.state)
+    assert close_log.reply_report(None) == report

@@ -20,7 +20,7 @@ from nemo_gym.agents import (
     SandboxPythonRuntime,
     SandboxSession,
 )
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
 
@@ -106,6 +106,7 @@ class Terminus2SandboxSession(AgentSessionState):
     # The activation's invocation; the runner sends it as x-session-id, which model-call capture joins on.
     invocation_id: str | None = None
     observations: AgentObservationBundle | None = None
+    provider_wait_failure: NgFailureEvent | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     installation_task: asyncio.Task[None] | None = None
