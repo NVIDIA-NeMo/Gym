@@ -49,6 +49,7 @@ from nemo_gym.client.http_client import (
     _format_upstream_error_log,
     _set_tcp_keepalive,
 )
+from nemo_gym.client.http_retries import HttpRetryCountMiddleware
 from nemo_gym.client.server_client import (
     SESSION_ID_KEY,
     ServerClient,
@@ -640,6 +641,9 @@ repr(e): {repr(e)}"""
         if is_main_fastapi_proc:
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
+        # Outside the exception middleware, so a handled 500 still reports its retries, and inside session
+        # routing, so the worker that serves a forwarded request reports them and the forwarder passes them on.
+        app.add_middleware(HttpRetryCountMiddleware)
         backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
         # A worker of a multi-worker server serves a private socket in this directory and records session owners in it.
         # The main process of a multi-worker server never serves the app.
