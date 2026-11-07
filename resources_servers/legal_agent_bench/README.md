@@ -156,6 +156,16 @@ gym env start \
 This setting is forwarded to each task verifier as
 `LAB_JUDGE_PARALLELISM`.
 
+For the pinned production-review task, the verifier resolves document IDs such
+as `DOC_008` to the filenames explicitly identified elsewhere in that task's
+rubric. This lets judges find the same document when an agent uses its own row
+labels. The correction applies only to that task at the pinned source revision;
+unmapped IDs and document-coverage ranges are unchanged. Original criteria and
+agent outputs are preserved, and both judges receive the same resolved criteria.
+Results record `grading_corrections` and `document_id_aliases` so corrected scores
+can be distinguished from scores produced by the unmodified upstream prompt.
+The aliases stay in verifier code and are not added to agent instructions.
+
 The task container requires network access because its verifier calls the
 configured judge endpoint. The agent and verifier share that container, so the
 agent also has network access during a rollout. This differs from the upstream LAB
@@ -199,5 +209,6 @@ should list exactly `docx`, `pptx`, and `xlsx`.
 ## Licensing and source modifications
 
 Harvey LAB is MIT-licensed. Its license and the details of the minimal modified
-runtime are in `vendor/harvey_labs/`. Task documents and public skills are
+runtime are in `vendor/harvey_labs/`; the runtime code lives in `harness/`
+and `lab_harbor/`. Task documents and public skills are
 downloaded from the pinned public repository and are never tracked here.

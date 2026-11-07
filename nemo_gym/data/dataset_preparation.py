@@ -47,6 +47,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
+    get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
 )
@@ -608,6 +609,19 @@ class TrainDataProcessor(BaseModel):
     ) -> List[ServerInstanceConfig]:
         parser = GlobalConfigDictParser()
         server_instance_configs = parser.filter_for_server_instance_configs(global_config_dict)
+        # Runtime server models defer OmegaConf expressions. Dataset paths are
+        # consumed here, so resolve selectors such as prepare_script_args.input.
+        for instance in server_instance_configs:
+            if instance.name not in global_config_dict:
+                continue
+            datasets = get_first_server_config_dict(global_config_dict, instance.name).get("datasets")
+            if datasets is not None:
+                instance.get_inner_run_server_config().datasets = [
+                    BenchmarkDatasetConfig.model_validate(dataset)
+                    if dataset.get("type") == "benchmark"
+                    else DatasetConfig.model_validate(dataset)
+                    for dataset in datasets
+                ]
         self._all_server_instance_configs = list(server_instance_configs)
 
         # Datasets may be declared by resources servers (the normal, decoupled home: the RS owns

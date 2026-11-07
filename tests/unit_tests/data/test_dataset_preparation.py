@@ -97,6 +97,49 @@ def _make_agent_instance_config(name: str, dataset_specs: list) -> "ResponsesAPI
 
 
 class TestLoadAndValidateServerInstanceConfigs:
+    def test_resolves_dataset_paths_without_resolving_all_server_fields(self) -> None:
+        global_config_dict = DictConfig(
+            {
+                "selected_input": "selected.jsonl",
+                "agent": {
+                    "responses_api_agents": {
+                        "simple_agent": {
+                            "host": "127.0.0.1",
+                            "port": 12345,
+                            "entrypoint": "app.py",
+                            "runtime_only_setting": "${runtime_only_value}",
+                            "datasets": [
+                                {
+                                    "name": "benchmark",
+                                    "type": "benchmark",
+                                    "jsonl_fpath": "${selected_input}",
+                                    "prompt_config": None,
+                                    "prepare_script": "benchmarks/example/prepare.py",
+                                    "num_repeats": 1,
+                                }
+                            ],
+                            "resources_server": {
+                                "type": "resources_servers",
+                                "name": "resources",
+                            },
+                            "model_server": {
+                                "type": "responses_api_models",
+                                "name": "policy_model",
+                            },
+                        }
+                    }
+                },
+            }
+        )
+
+        result = TrainDataProcessor().load_and_validate_server_instance_configs(
+            config=TrainDataProcessorConfig(output_dirpath="", mode="train_preparation"),
+            global_config_dict=global_config_dict,
+        )
+
+        assert result[0].datasets[0].jsonl_fpath == Path("selected.jsonl")
+        assert result[0].get_inner_run_server_config().model_extra["runtime_only_setting"] == "${runtime_only_value}"
+
     def test_load_and_validate_server_instance_configs_sanity(self, monkeypatch: MonkeyPatch) -> None:
         # Fix the port returned
         find_open_port_mock = MagicMock()

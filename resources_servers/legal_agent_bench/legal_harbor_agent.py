@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# LAB protocol source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# 9e9fa7fe126103de1fceb2227b7c70bf59b67f73/lab_core/harness/agent_loop.py
 """Harbor agent adapter for Legal Agent Bench inside NeMo Gym."""
 
 from __future__ import annotations
@@ -10,11 +16,18 @@ import json
 import logging
 import re
 import shlex
-import sys
+import tempfile
 import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
+from nemo_gym.orchestration.jobs import installed_gym_commit
+from resources_servers.legal_agent_bench.harness.adapters.base import ModelResponse
+from resources_servers.legal_agent_bench.harness.adapters.openai_compatible import OpenAICompatibleAdapter
+from resources_servers.legal_agent_bench.lab_harbor.completion import CompletionState
+from resources_servers.legal_agent_bench.lab_harbor.tools import CONTAINER_TOOL_RUNNER_PATH, get_all_tool_definitions
 from resources_servers.legal_agent_bench.prepare import (
     DEFAULT_SKILLS_DIR,
     discover_harness_skills,
@@ -24,17 +37,10 @@ from resources_servers.legal_agent_bench.prepare import (
 
 
 _PACKAGE_DIR = Path(__file__).resolve().parent
-_VENDOR_ROOT = _PACKAGE_DIR / "vendor" / "harvey_labs"
-if str(_VENDOR_ROOT) not in sys.path:
-    sys.path.insert(0, str(_VENDOR_ROOT))
-
-from harness.adapters.base import ModelResponse  # noqa: E402
-from harness.adapters.openai_compatible import OpenAICompatibleAdapter  # noqa: E402
-from lab_harbor.tools import CONTAINER_TOOL_RUNNER_PATH, get_all_tool_definitions  # noqa: E402
-
 
 try:  # pragma: no cover - Harbor is installed in the Harbor agent server venv.
     from harbor.agents.base import BaseAgent
+    from harbor.agents.capabilities import AgentCapabilities
     from harbor.environments.base import BaseEnvironment
     from harbor.models.agent.context import AgentContext
 except ImportError:  # pragma: no cover
@@ -45,16 +51,19 @@ except ImportError:  # pragma: no cover
             self.model_name = model_name
             self.logger = logger or logging.getLogger(__name__)
 
+    from types import SimpleNamespace
+
+    AgentCapabilities = SimpleNamespace
     BaseEnvironment = Any  # type: ignore
     AgentContext = Any  # type: ignore
 
 
 LAB_TASK_ID_MARKER = "lab_task_id:"
-AGENT_VERSION = "0.1.0"
+AGENT_VERSION = "0.2.0"
 INITIAL_USER_PROMPT = "Please begin working on the task described in the system prompt."
 REQUIRED_TASK_KEYS = {"title", "instructions", "criteria"}
 REQUIRED_CRITERION_KEYS = {"id", "title", "match_criteria"}
-SYSTEM_PROMPT_PATH = _VENDOR_ROOT / "harness" / "system-prompt.md"
+SYSTEM_PROMPT_PATH = _PACKAGE_DIR / "harness" / "system-prompt.md"
 SYSTEM_PROMPT_PREAMBLE = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
 
 
@@ -79,6 +88,7 @@ class HarborToolExecutor:
         self.bash_command_count = 0
         self.glob_count = 0
         self.grep_count = 0
+        self.completion = CompletionState()
 
     async def preflight(self) -> None:
         result, _metrics = await self._run_container_tool("preflight", {})
@@ -92,6 +102,15 @@ class HarborToolExecutor:
             except json.JSONDecodeError:
                 return f"Error: invalid JSON arguments: {arguments}"
 
+        if not isinstance(arguments, dict):
+            return "Error: tool arguments must be a JSON object"
+        if tool_name == "finish":
+            result, metrics = await self._run_container_tool("finish", arguments)
+            if "missing_deliverables" not in metrics:
+                return f"Error: completion check failed: {result}"
+            return self.completion.finish(
+                summary=str(arguments.get("summary", "")), missing=metrics.get("missing_deliverables", [])
+            )
         if tool_name == "bash":
             return await self._bash(arguments.get("command", ""))
         if tool_name in {"read", "write", "write_docx", "edit", "glob", "grep"}:
@@ -106,18 +125,26 @@ class HarborToolExecutor:
         self.bash_command_count += 1
         result = await self.environment.exec(
             command,
-            cwd="/workspace/output",
+            cwd="/workspace",
             env=self._tool_env(),
             timeout_sec=self.shell_timeout,
         )
         return self._format_exec_result(result)
 
     async def _run_container_tool(self, tool_name: str, arguments: dict) -> tuple[str, dict]:
-        payload = shlex.quote(json.dumps(arguments))
-        command = f"python {shlex.quote(CONTAINER_TOOL_RUNNER_PATH)} {shlex.quote(tool_name)} {payload}"
+        # File transfer avoids command/argv limits for generated legal documents.
+        remote_path = f"/tmp/lab-tool-{uuid4().hex}.json"
+        with tempfile.TemporaryDirectory(prefix="lab-harbor-tool-") as temporary:
+            payload = Path(temporary) / "arguments.json"
+            payload.write_text(json.dumps(arguments), encoding="utf-8")
+            await self.environment.upload_file(payload, remote_path)
+        command = (
+            f"python {shlex.quote(CONTAINER_TOOL_RUNNER_PATH)} {shlex.quote(tool_name)}"
+            f" < {shlex.quote(remote_path)}; result=$?; rm -f {shlex.quote(remote_path)}; exit $result"
+        )
         result = await self.environment.exec(
             command,
-            cwd="/workspace/output",
+            cwd="/workspace",
             env=self._tool_env(),
             timeout_sec=self.shell_timeout,
         )
@@ -135,7 +162,8 @@ class HarborToolExecutor:
         return {
             "VDR_DIR": "/workspace/vdr",
             "OUTPUT_DIR": "/workspace/output",
-            "WORKSPACE_DIR": "/workspace/workspace",
+            "WORKSPACE_DIR": "/workspace",
+            "DOCUMENTS_DIR": "/workspace/vdr",
             "SKILLS_DIR": "/workspace/skills",
             "HOME": "/workspace/workspace",
         }
@@ -201,6 +229,8 @@ class HarborToolExecutor:
 class LegalAgentBenchHarborAgent(BaseAgent):
     """NeMo Gym-specific Harbor agent for Legal Agent Bench."""
 
+    capabilities = AgentCapabilities(atif=True)
+
     def __init__(
         self,
         logs_dir: Path,
@@ -228,7 +258,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             kwargs["agent_model_base_url"] = api_base
         if responses_create_params.get("max_output_tokens") and not kwargs.get("agent_model_max_tokens"):
             kwargs["agent_model_max_tokens"] = responses_create_params["max_output_tokens"]
-        if kwargs.get("agent_model_top_p") is None:
+        if "agent_model_top_p" not in kwargs:
             kwargs["agent_model_top_p"] = responses_create_params.get("top_p", 0.95)
 
         self.adapter_kwargs = kwargs
@@ -299,6 +329,9 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             "finished_cleanly": result["finished_cleanly"],
             "context_overflow": result["context_overflow"],
             "model_error": result.get("model_error"),
+            "finish_reason": result["finish_reason"],
+            "finish_summary": result["finish_summary"],
+            "finish_called": result["finish_called"],
             **result["tool_metrics"],
         }
         (artifact_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
@@ -312,6 +345,8 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         )
         _write_agent_error_flags(Path(self.logs_dir), metrics)
         _populate_context(context, result, metrics, task_id, self.agent_id, artifact_dir)
+        if result.get("model_error") is not None:
+            raise RuntimeError(f"LAB model request failed: {result['model_error']}")
 
     async def _hydrate_environment(self, environment: BaseEnvironment, docs_dir: Path) -> None:
         validate_harness_skills(self.skills_dir)
@@ -340,7 +375,7 @@ class LegalAgentBenchHarborAgent(BaseAgent):
             base_url=base_url,
             api_key=kwargs.pop("agent_model_api_key", None),
             temperature=self.temperature,
-            max_tokens=int(kwargs.pop("agent_model_max_tokens", 32768)),
+            max_tokens=int(kwargs.pop("agent_model_max_tokens", 65536)),
             reasoning_effort=self.reasoning_effort,
             timeout_seconds=kwargs.pop("agent_model_timeout_seconds", None),
             omit_temperature=kwargs.pop("agent_model_omit_temperature", None),
@@ -349,7 +384,13 @@ class LegalAgentBenchHarborAgent(BaseAgent):
         )
 
     def _result_config(self, task_id: str, task_dir: Path, tools: list[dict], skill_names: list[str]) -> dict:
+        try:
+            harbor_version = version("harbor")
+        except PackageNotFoundError:
+            harbor_version = None
         return {
+            "harness_pin": {"harbor": harbor_version, "lab_agent": AGENT_VERSION},
+            "gym_commit": installed_gym_commit(),
             "agent_id": self.agent_id,
             "agent_config_id": self.agent_config_id,
             "model": self.model,
@@ -391,7 +432,6 @@ async def _run_agent_async(
     finished_cleanly = False
     context_overflow = False
     model_error = None
-    empty_response_count = 0
     start_time = time.time()
 
     transcript_path.parent.mkdir(parents=True, exist_ok=True)
@@ -407,7 +447,7 @@ async def _run_agent_async(
                 if _is_context_overflow_error(err_msg):
                     context_overflow = True
                     break
-                model_error = err_msg
+                model_error = err_msg or type(exc).__name__
                 break
 
             messages.append(response.message)
@@ -416,20 +456,8 @@ async def _run_agent_async(
             _log_turn(transcript_file, turn_count, "assistant", response)
 
             if not response.tool_calls:
-                if not (response.text or "").strip():
-                    empty_response_count += 1
-                    if empty_response_count <= 2 and turn_count < max_turns:
-                        messages.append(
-                            adapter.make_user_message(
-                                "Your last response was empty and did not call any tools. Continue the task. "
-                                "Use the available tools to inspect the documents and write the required deliverables."
-                            )
-                        )
-                        continue
-                    break
                 finished_cleanly = True
                 break
-            empty_response_count = 0
 
             tool_results = []
             for tool_call in response.tool_calls:
@@ -442,6 +470,9 @@ async def _run_agent_async(
             )
             _log_tool_result_messages(transcript_file, turn_count, result_messages)
             messages.extend(result_messages)
+            if tool_executor.completion.finished:
+                finished_cleanly = True
+                break
 
     elapsed = time.time() - start_time
     return {
@@ -453,6 +484,19 @@ async def _run_agent_async(
         "finished_cleanly": (not context_overflow and finished_cleanly),
         "context_overflow": context_overflow,
         "model_error": model_error,
+        "finish_reason": (
+            "context_overflow"
+            if context_overflow
+            else "model_error"
+            if model_error
+            else "finish_tool"
+            if tool_executor.completion.finished
+            else "no_tool_calls"
+            if finished_cleanly
+            else "max_turns_exceeded"
+        ),
+        "finish_summary": tool_executor.completion.summary,
+        "finish_called": tool_executor.completion.finished,
         "tool_metrics": tool_executor.get_metrics(),
     }
 
@@ -602,6 +646,7 @@ def _log_tool(f, turn: int, tool_call_id: str, name: str, arguments: str, result
         "tool_name": name,
         "arguments": arguments if isinstance(arguments, str) else str(arguments),
         "result_preview": result[:1000],
+        "result": result,
     }
     f.write(json.dumps(entry) + "\n")
     f.flush()
@@ -654,7 +699,10 @@ def _write_trajectory(
                     "arguments": _parse_tool_arguments(tc.get("arguments")),
                 }
             )
-        observations = [{"content": t.get("result_preview", "")} for t in tool_entries_by_turn.get(turn, [])]
+        observations = [
+            {"source_call_id": t.get("tool_call_id"), "content": t.get("result", t.get("result_preview", ""))}
+            for t in tool_entries_by_turn.get(turn, [])
+        ]
         step: dict[str, Any] = {
             "step_id": len(steps) + 1,
             "source": "agent",
@@ -717,6 +765,8 @@ def _populate_context(
         "lab_run_id": metrics["run_id"],
         "artifact_dir": str(artifact_dir),
         "finished_cleanly": metrics["finished_cleanly"],
+        "finish_reason": metrics.get("finish_reason"),
+        "context_overflow": metrics.get("context_overflow", False),
         "model_error": metrics.get("model_error"),
         "turn_count": metrics["turn_count"],
         "tool_metrics": {
