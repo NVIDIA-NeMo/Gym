@@ -117,6 +117,13 @@ measures the 27 public questions rather than their private 450-question split, w
 our own judge rather than their three-model jury. `rubric_fraction` is ungated and
 unweighted, so it has no counterpart there at all.
 
+Run limits follow Vals: the only bound is the agent's one-hour `max_time_seconds`,
+checked between turns. The benchmark overlay unsets the training defaults for the
+retrieval output budget (`retrieval_max_output_tokens`), the per-tool timeout
+(`tool_call_timeout`) and the soft rollout budget (`max_rollout_time_seconds`), so
+`retrieve_information` can use the model's full generation budget and a single
+rollout can take close to an hour on a slow endpoint.
+
 ## Licensing & grading
 
 Environment code (this recipe + `resources_servers/finance_agent_v2/`) is
