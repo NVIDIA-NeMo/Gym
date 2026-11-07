@@ -17,11 +17,35 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Before opening a PR, run the local checks that mirror CI: tests (skip or N/A for docs-only), `pre-commit run --all-files`, and DCO sign-off (`git commit -s`). Cryptographic `-S` signing is optional and not required.
 - AI-generated tests must assert real behavior; avoid vacuous pass-through tests.
 - Prefer the vetted skills under `.agents/skills/` (see [Agent Skills](https://docs.nvidia.com/nemo/gym/latest/contribute/agent-skills)).
-- For session lifecycle and routing terms (lock, fence, close retry window, saved reply, release, owner, episode session),
-  use the names in the Sessions section of `fern/versions/latest/pages/about/concepts/key-terminology.mdx` and do not add
-  synonyms.
+- Follow [Terminology](#terminology) in code, docs, and PR text.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
+
+## Terminology
+
+One concept gets one name, everywhere: identifiers, config keys, CLI flags, wire fields, docstrings, comments, log and
+error messages, test names, docs, commit messages, and PR text.
+
+- `fern/versions/latest/pages/about/concepts/key-terminology.mdx` is the source of truth. Use its terms in every
+  section, not only Sessions, and never use a term its **Not** column rejects. Its "Other features" list names the few
+  features that keep a word in their own sense.
+- When a change introduces a concept, add it to the glossary in the same PR: the term, a one-sentence definition, and
+  any synonyms to reject. Before naming it, grep `nemo_gym/` and the docs for an existing term for the same concept,
+  and reuse it.
+- Do not reuse an existing name for different behavior. Two operations share a name only when they behave the same;
+  for example, token capture's retire, delete, and fence mean the same thing in every store that offers them.
+- Renaming a public name is an API change: keep the old name working with a deprecation warning
+  (`nemo_gym/_moved_paths.py` for modules and names), and update the glossary.
+- Spell out Gym components: resources server, agent server, model server, environment server. Never "resource server",
+  "env server", or invented abbreviations such as "RS". Established names (HTTP, JSON, MCP, GPU) and abbreviations the
+  glossary lists are fine. Code identifiers and command names stay verbatim.
+- Name what a thing is, not its age or origin. Do not use "native", "new", "old", or "v2" as part of a concept's name,
+  and use "legacy" only for the `legacy_agent` path and an agent's own `/run` episode. For example, say "episode
+  request" or "flat row", not "native request" or "legacy row".
+- Gym serves evaluation and training alike, so its terms must read correctly for both. Do not adopt a training
+  framework's vocabulary for a Gym concept; integration docs map the framework's terms onto Gym's.
+- Metric and attribute names follow `fern/versions/latest/pages/observability/metrics.mdx`: durations in milliseconds
+  end in `_ms`, counters end in `_total`, and Gym attributes live under `nemo.gym.`.
 
 ## Code provenance
 
@@ -66,6 +90,7 @@ Environments decompose into four concepts:
 | Agent Harness | FastAPI Agent Server (`responses_api_agents/`) |
 | Verifier + State | FastAPI Resources Server (`resources_servers/`) |
 | Model | FastAPI Model Server (`responses_api_models/`) or your own |
+| Episode orchestration | FastAPI Environment Server (`environment_servers/`) |
 
 Base class hierarchy:
 ```
@@ -73,8 +98,18 @@ BaseServer (Pydantic model with config + server_client)
 └── SimpleServer (FastAPI app setup, middleware stack)
     ├── SimpleResourcesServer  →  implement verify()
     ├── SimpleResponsesAPIModel  →  implement chat_completions(), responses()
-    └── SimpleResponsesAPIAgent  →  implement responses(), run()
+    ├── SimpleResponsesAPIAgent  →  implement responses(); run() is deprecated
+    └── BaseEnvironmentServer  →  implement run()
 ```
+
+Who owns what (details in `fern/versions/latest/pages/about/architecture.mdx`):
+
+- The environment server owns the episode: which servers it binds and the order of their calls. A new interaction
+  pattern gets its own environment server; do not put episode ordering into an agent server. An agent's own `run()`
+  is deprecated: new agents implement agent sessions, and custom episode logic goes in an environment server.
+- The resources server owns environment tools, per-task state, and verification. The agent server owns the loop of
+  model and tool calls. The model server owns inference.
+- Whoever creates a session, sandbox, or other per-task resource releases it, on every path.
 
 `BaseServer` and `SimpleServer` live in `nemo_gym/server_runtime/base_server.py`, `SimpleResourcesServer` in
 `nemo_gym/server_runtime/base_resources_server.py`, `SimpleResponsesAPIModel` in
@@ -101,11 +136,16 @@ The typical workflow is to create your own environments tailored to your evaluat
 4. **Model** — use any LLM endpoint via the Model Server (supports inference providers like OpenAI, and vLLM for local/open models), or manage inference in your own agent harness
 5. **YAML config** — wires the resources server, agent, and model server together
 
+To contribute an environment or benchmark, search for an existing one first (`gym search`), scaffold with
+`gym env init`, then run `gym env validate` and `gym env test`. See
+`fern/versions/latest/pages/contribute/environments/` and the `add-benchmark` skill. For an agent harness, see
+`fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx` and the `add-harness` skill.
+
 For guidance on how to build environments, see `fern/versions/latest/pages/environment-tutorials/`. For evaluation, see `fern/versions/latest/pages/get-started/quickstart.mdx`. For training framework integrations, see `fern/versions/latest/pages/training-tutorials/`.
 
 ## Environment Design Recommendations
 
-- **Use NeMo Gym's Model Server for inference** — standardizes different model providers behind a common format and manages token IDs needed for training.
+- **Use NeMo Gym's Model Server for inference** — standardizes different model providers behind a common format and manages token IDs needed for training. Route every policy model call through it: capture and training see only those calls.
 - **Hydra YAML for configuration** — pass configuration through Gym's Hydra config system so it's composable and reproducible across runs.
 - **Graceful error handling** — environments must handle tool failures and bad model outputs with meaningful error responses, not crash the server.
 - **Async endpoints** — the `/run` endpoint must be async. Use `asyncio.Semaphore` for concurrency control if shelling out to external processes.
@@ -113,7 +153,7 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 ## Communication & Async Patterns
 
-Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
+Servers communicate via `ServerClient`, which wraps aiohttp with retries and connection pooling via a singleton aiohttp client.
 
 - **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.client.http_client.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
@@ -198,6 +238,10 @@ pre-commit run --all-files
 # Check server health
 gym env status
 
+# Collect rollouts and score them (gym <group> --help lists every command)
+gym eval run --config ...
+gym eval profile ...
+
 # Dev test (runs the core unit tests with coverage: pytest --cov)
 gym dev test
 
@@ -266,9 +310,6 @@ gym env resolve --config ...
   when that area is already type-checkable; do not claim repo-wide `mypy --strict` compliance.
 - Public APIs and objects included in generated reference docs need useful docstrings. Comments should explain intent,
   invariants, or tradeoffs rather than narrating the code.
-- Name things by what they are. Avoid qualifiers that carry no information, such as "native", "legacy", "new", or
-  "old"; name the specific mechanism, owner, or format instead (for example, "agent session" rather than "native
-  session"). This applies to identifiers, comments, docs, error messages, and test names.
 - Use keyword-only arguments for new public parameters that are easy to swap or misread, especially repeated same-type
   values and boolean controls.
 - Use module loggers for library and server diagnostics. Direct console output is acceptable in CLI/user-facing paths;
@@ -282,7 +323,7 @@ gym env resolve --config ...
 
 Notable custom hooks that auto-modify files:
 - `add-verified-flag`: Adds `verified: false` to new resources server YAML configs (`verified: true` means the benchmark has been baselined and reviewed; new servers start as `false`)
-- `update-readme-table`: Updates the resources server table in root README.md
+- `update-readme-table`: Updates the environment list in root README.md
 - `ruff-format`: Auto-formats code
 
 First run may fail as hooks modify files. Stage the changes and commit again.
