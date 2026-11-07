@@ -137,6 +137,17 @@ default route's interface is not the one the sandboxes reach (a VPN, several net
 needs other servers reachable sets `absolute_ip_server_types` or `default_host` (see
 [Multi-Node Configuration](/main/reference/configuration#multi-node-configuration)).
 
+## The model rejects every request
+
+**Symptom.** Every episode fails at the agent stage with `failure_kind` `model_request_rejected` and an `HTTP 400`
+reason from the model endpoint, such as `max_tokens is too large`.
+
+**Cause.** The endpoint refused the request as invalid before the model answered, so the run's settings are at
+fault and the episode is not graded. A common case is a harness output limit above the model's cap: OpenCode asks
+for up to 131,072 output tokens, and gpt-4.1 allows 32,768.
+
+**Fix.** Lower the limit with `--max-output-tokens <n>`, within the model's cap.
+
 ## A harness cannot install its runtime in the sandbox
 
 **Symptom.** Every episode fails at the agent stage with `Hermes sandbox installation failed`, the installer's
