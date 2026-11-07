@@ -76,6 +76,7 @@ from nemo_gym.models import (
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
+    start_model_execution,
 )
 from nemo_gym.models.token_capture import (
     CaptureContext,
@@ -9068,3 +9069,19 @@ async def test_a_400_for_an_unsupported_parameter_value_records_invalid_request_
     execution = request.state.nemo_gym_model_execution
     assert execution["upstream_status_code"] == 400
     assert execution.get("error_category") == category
+
+
+@mark.parametrize("finish_reason", ["stop", "tool_calls", "length"])
+async def test_responses_notes_the_chat_finish_reason_for_model_call_capture(
+    monkeypatch: MonkeyPatch, finish_reason: str
+) -> None:
+    model = _refit_model(monkeypatch, False)
+    completion = PARAMETERIZE_DATA[0][2].model_copy(deep=True)
+    completion.choices[0].finish_reason = finish_reason
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=completion))
+    request = _refit_request()
+    start_model_execution(request, upstream_attempted=True)
+
+    await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+    assert request.state.nemo_gym_model_execution["finish_reason"] == finish_reason

@@ -67,12 +67,21 @@ their failure policy: a turn or step limit (mini-SWE-agent incomplete, the Deep 
 `error_max_turns`) now returns an incomplete response that `/run` verifies and scores, where Fabric 0.2.0 raised. The
 upgrade also reaches AnySWE, AnyTerminal and the `harness_agent` presets that embed this agent.
 
+Claude failures with a structured upstream `api_error_status` retain that status in the session's
+`ng_agent_outcome`; the Environment Server applies its grading/retry policy. Host execution also returns
+permanent model-request outcomes, but keeps ungradable failures such as 429/503 on its exception path
+because host wrappers verify directly. Unclassified setup/worker failures still raise.
+
+Token usage follows Fabric's `nemo_fabric.detailed_token_usage.v1` inclusion flags. Claude's cache reads
+and cache writes are added to its exclusive input count exactly once; inclusive provider counts stay
+unchanged. Missing required dimensions leave usage unknown instead of reporting a subtotal as complete.
+
 Fabric and directly wrapped harnesses can differ in SDK/CLI versions, system prompt
 composition, permissions, tools and telemetry. Keep those choices in an A/B run's
 receipt; sharing an adapter name does not establish behavior or performance parity.
 
 `configs/` has a preset per Python adapter: Claude, Codex, Deep Agents, Hermes, mini-SWE-agent, OpenClaw, and
-OpenHands. OpenClaw also needs its CLI on `PATH`: `npm install --global openclaw@2026.9.34` (Node.js 24.16 or later).
+OpenHands. OpenClaw also needs its CLI on `PATH`: `npm install --global openclaw@2026.9.34` (Node.js 24.22.1 or later).
 
 ## Relay
 

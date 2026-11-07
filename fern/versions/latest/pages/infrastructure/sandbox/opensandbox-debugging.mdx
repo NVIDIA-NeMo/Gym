@@ -85,19 +85,23 @@ The next command request cannot reach it, and an attached PTY can lose its conne
 also occur for other reasons, such as node loss or sandbox expiry.
 
 On command execution failure or PTY loss, Gym checks the sandbox's lifecycle status within the remaining
-diagnostic budget. A terminal lifecycle `OOMKilled` reason does not identify the affected container;
-it establishes unavailability, and is retained for diagnosis. The opt-in evidence options below confirm OOM
-only for the current user container, producing a `provider_oom_killed` failure event.
-The diagnostic reason identifies the evidence source. Without that evidence, a disconnect or exit code 137
-does not establish OOM. See [Failure reporting and recovery](./opensandbox#failure-reporting-and-recovery)
-for OpenSandbox timeouts and retry settings, and [Error Handling](./index#error-handling) for the shared contract.
+diagnostic budget. A terminal lifecycle `OOMKilled` reason alone does not identify the affected container.
+Gym confirms OOM when the control-plane response identifies the current sandbox and contains the recognized
+single-pod report of its `sandbox` container terminating with `OOMKilled`. The report must describe the
+current container state; sidecars, init containers, historical states and ambiguous reports do not qualify.
 
-Both OOM evidence options below default to `false`; a lifecycle reason alone never produces `provider_oom_killed`.
-If neither option confirms OOM within the diagnostic budget, Gym retains the observed request or
-command-outcome failure. A confirmed stopped or failed sandbox without
-OOM evidence is `provider_unavailable`, retaining the original request failure as its cause.
-An unconfirmed OOM does not qualify for an OOM-specific `count_as_zero` rule: retries and terminal handling
-follow the owning caller's outcome policy and budgets, so repeated failures can remain ungraded instead of scoring zero.
+A confirmed OOM becomes a `provider_oom_killed` event. Its diagnostic reason retains the evidence source
+and any reported container exit code. `details.exit_code` stays unset because the command's own exit was not observed.
+The controller can retain this report after the pod disappears, so a later pod lookup returning 404 does not
+erase the recorded cause. Command-status HTTP 410 bodies alone never establish OOM: even through the server
+proxy, a response body can originate in the sandbox's exec daemon.
+
+If the lifecycle report is unrecognized, the optional inspect fallback below may provide evidence.
+Without either source, Gym retains the observed request or command-outcome failure. A confirmed stopped or
+failed sandbox without OOM evidence is `provider_unavailable`, retaining the original request failure as its cause.
+The caller's outcome policy chooses retries, scoring and health attribution from that evidence and the execution stage.
+See [Failure reporting and recovery](./opensandbox#failure-reporting-and-recovery) for timeout and retry settings,
+and [Error Handling](./index#error-handling) for the shared contract.
 
 ### Inspect fallback
 
@@ -110,18 +114,13 @@ Unknown layouts, duplicate states, failed requests and bodies over 64 KiB provid
 Lifecycle reads and optional inspect requests share the remaining diagnostic/recovery budget. A failed diagnostic
 lookup cannot replace the original failure. Confirm support with the deployment operator before enabling this route.
 
-### Ended-report compatibility
+### Lifecycle report compatibility
 
-`diagnostics.ended_report_oom` defaults to `false`. Enable it only after the deployment operator confirms
-that HTTP 410 `SANDBOX::ENDED` messages are authoritative gateway reports, rather than forwarded
-sandbox-controlled text. The report emitter and format are not a verified supported upstream API.
-`connection.use_server_proxy: true` is also required; that route alone does not establish the report's authority.
-
-For background command-status failures, Gym accepts only the exact report layout identifying the current
-sandbox, one observed failed pod and its `sandbox` container exiting with `OOMKilled`. Other layouts,
-sidecar reports, mismatched sandbox IDs and contradictory text provide no OOM evidence. See
-[connection settings](./opensandbox#user-and-runtime-notes) for the SDK transport configuration
-that discards these response bodies. Keeping a 410 response is separate from confirming its OOM attribution.
+Gym recognizes the control-plane status shape `state="Failed"`, `reason="FAILED"` with a matching sandbox ID
+and the complete `1/1 observed pods failed` report naming its `<sandbox-id>-0` pod and `sandbox` container.
+This compatibility parser is deliberately narrow: pooled pods, multiple pods, mismatched IDs, extra termination
+text and unknown report layouts provide no OOM evidence. A generic `FAILED` or `OOMKilled` reason is insufficient.
+Recognition uses the existing bounded lifecycle lookup; no additional option or request is required.
 
 ### Counting OOMs across a run
 

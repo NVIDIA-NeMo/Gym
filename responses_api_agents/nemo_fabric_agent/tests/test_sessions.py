@@ -175,7 +175,6 @@ async def test_stage_uses_private_python_and_preserves_task_environment(monkeypa
     monkeypatch.setattr("responses_api_agents.nemo_fabric_agent.sandbox.upload_text", upload)
     payload = {"input": "hello", "workdir": "/app"}
     command = await state.stage_activation(payload)
-    assert command.stdlib_runner is False
     assert command.argv == ["bash", "/tmp/session/harness_runner.sh", "/tmp/session/params.sh"]
     assert json.loads(uploads["/tmp/session/input.json"]) == payload
     params = uploads["/tmp/session/params.sh"]
@@ -276,3 +275,34 @@ async def test_unbound_compatibility_run_refuses_before_seeding_resources():
         await instance.run(request(), app.NeMoFabricAgentRunRequest(responses_create_params={"input": "hello"}))
     assert error.value.status_code == 422
     instance.server_client.post.assert_not_called()
+
+
+async def test_session_preserves_permanent_model_error_instead_of_raising_http_500(monkeypatch):
+    from nemo_gym.agents import agent_outcome_policy
+
+    instance = agent(adapter_id="nvidia.fabric.claude")
+    result = {
+        "status": "failed",
+        "output": {"response": None},
+        "error": {
+            "code": "claude_result_failed",
+            "retryable": False,
+            "stage": "invoke",
+            "metadata": {"subtype": "error_during_execution", "api_error_status": 400},
+        },
+    }
+    state = FabricSandboxSession(
+        request=seed(),
+        session=SimpleNamespace(
+            workdir="/app",
+            session_dir="/tmp/fabric",
+            execute=AsyncMock(return_value=result),
+            cleanup={"timed_out": False, "return_code": 0},
+            closing=False,
+        ),
+        observations=AgentObservationBundle(source="nemo_fabric"),
+    )
+    monkeypatch.setattr(type(instance), "resolve_model_base_url", lambda *args: "http://model/v1")
+    response = await instance._sandbox_response(state, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    assert response.status == "failed"
+    assert agent_outcome_policy(response).value == "verify"

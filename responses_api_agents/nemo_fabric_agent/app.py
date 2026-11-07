@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 from asyncio import Semaphore
+from collections.abc import Mapping
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
@@ -20,6 +21,7 @@ from uuid import uuid4
 
 from fastapi import Body, HTTPException, Request
 from nemo_fabric import Fabric, FabricConfig, RunRequest
+from openai.types.responses.response_error import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PositiveInt
 
 from nemo_gym.agents import (
@@ -27,19 +29,23 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
+    OutcomeAction,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    agent_outcome_policy,
     assert_model_url_reachable_from_sandbox,
     resolve_agent_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionCallOutput,
@@ -476,16 +482,60 @@ def _normalized_usage(result: dict[str, Any], output: dict[str, Any]) -> dict[st
     return _deep_merge(details, usage)
 
 
-def _has_token_usage(usage: dict[str, Any]) -> bool:
-    """API-call counts alone are not evidence that zero tokens were consumed."""
+def _response_usage(result: dict[str, Any], output: dict[str, Any], *, adapter_id: str) -> NeMoGymResponseUsage | None:
+    """Convert Fabric's declared token dimensions to inclusive Gym counts without estimating missing usage."""
+    usage = _normalized_usage(result, output)
+    detailed = _mapping(usage.get("nemo_fabric.detailed_token_usage.v1"))
 
-    def known(keys: tuple[str, ...]) -> bool:
-        return any(
-            isinstance(usage.get(key), int) and not isinstance(usage[key], bool) and usage[key] >= 0 for key in keys
+    def count(source: dict[str, Any], *names: str) -> int | None:
+        for name in names:
+            if name in source:
+                value = source[name]
+                return value if type(value) is int and value >= 0 else None
+        return None
+
+    input_fields = {"input_tokens", "cached_input_tokens", "cache_write_input_tokens", "input_tokens_include_cache"}
+    output_fields = {"output_tokens", "reasoning_tokens", "output_tokens_include_reasoning"}
+    detailed_input = bool(input_fields & detailed.keys())
+    detailed_output = bool(output_fields & detailed.keys())
+    inputs = detailed if detailed_input else usage
+    outputs = detailed if detailed_output else usage
+    input_tokens = count(inputs, "input_tokens", "prompt_tokens", "inputTokens")
+    cached_tokens = count(inputs, "cached_input_tokens", "cache_read_input_tokens", "cachedInputTokens")
+    cache_write_tokens = count(
+        inputs, "cache_write_input_tokens", "cache_creation_input_tokens", "cacheWriteInputTokens"
+    )
+    output_tokens = count(outputs, "output_tokens", "completion_tokens", "outputTokens")
+    reasoning_tokens = count(outputs, "reasoning_tokens", "reasoning_output_tokens", "reasoningOutputTokens")
+
+    def inclusive(base: int | None, parts: tuple[int | None, ...], included: object) -> int | None:
+        if base is None:
+            return None
+        if included is True:
+            return base
+        if included is False and all(part is not None for part in parts):
+            return base + sum(part for part in parts if part is not None)
+        return None
+
+    if detailed_input:
+        input_tokens = inclusive(
+            input_tokens, (cached_tokens, cache_write_tokens), inputs.get("input_tokens_include_cache")
         )
-
-    return known(("input_tokens", "prompt_tokens", "inputTokens")) and known(
-        ("output_tokens", "completion_tokens", "outputTokens")
+    elif adapter_id == "nvidia.fabric.claude":
+        # Claude's raw input counter excludes both cache dimensions, even when detailed usage is partial/absent.
+        input_tokens = inclusive(input_tokens, (cached_tokens, cache_write_tokens), False)
+    if detailed_output:
+        output_tokens = inclusive(output_tokens, (reasoning_tokens,), outputs.get("output_tokens_include_reasoning"))
+    if input_tokens is None or output_tokens is None:
+        return None
+    return NeMoGymResponseUsage(
+        input_tokens=input_tokens,
+        input_tokens_details=NeMoGymResponseInputTokensDetails(
+            cached_tokens=cached_tokens, cache_write_tokens=cache_write_tokens
+        ),
+        output_tokens=output_tokens,
+        output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
+        total_tokens=input_tokens + output_tokens,
     )
 
 
@@ -799,7 +849,27 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             # The trajectory files live in relay_dir, so read them before it is removed.
             trajectories = _atif_trajectories(_mapping(result_mapping.get("output"))) if relay_dir else []
 
-        return self._response_from_result(body, result_mapping, trajectories)
+        response, converted = self._response_from_result(body, result_mapping, trajectories)
+        # Host wrappers verify directly instead of consulting the Environment Server's outcome policy.
+        # Preserve their exception path for failures that must not be graded (for example upstream 429/503).
+        if response.status == "failed" and agent_outcome_policy(response) != OutcomeAction.VERIFY:
+            raise RuntimeError(f"NeMo Fabric invocation failed: {result_mapping.get('error')}")
+        return response, converted
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Preserve Claude's structured upstream status; other adapter failures keep their existing failure path."""
+        error = _mapping(native_result.get("error"))
+        metadata = _mapping(error.get("metadata"))
+        status = metadata.get("api_error_status")
+        if (
+            self.config.adapter_id == "nvidia.fabric.claude"
+            and error.get("code") == "claude_result_failed"
+            and metadata.get("subtype") == "error_during_execution"
+            and type(status) is int
+            and 400 <= status <= 599
+        ):
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     def _response_from_result(
         self,
@@ -815,22 +885,17 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             error_mapping.get("code"),
             _mapping(error_mapping.get("metadata")).get("subtype"),
         ) in _MODEL_STOPS
-        if result_mapping.get("status") != "succeeded" and not model_stop and not incomplete:
+        model_failure = (
+            result_mapping.get("status") != "succeeded"
+            and self.classify_outcome(result_mapping).failure_kind == MODEL_REQUEST_ERROR
+        )
+        if result_mapping.get("status") != "succeeded" and not model_stop and not incomplete and not model_failure:
             error = error_mapping.get("message") or "unknown Fabric failure"
             details = {k: v for k, v in error_mapping.items() if k != "message" and v not in (None, {}, [])}
             if details:
                 error = f"{error} ({json.dumps(details, default=str, sort_keys=True)})"
             raise RuntimeError(f"NeMo Fabric invocation failed: {error}")
         output = _mapping(result_mapping.get("output"))
-        usage = _normalized_usage(result_mapping, output)
-        input_tokens = _usage_value(usage, "input_tokens", "prompt_tokens", "inputTokens")
-        output_tokens = _usage_value(usage, "output_tokens", "completion_tokens", "outputTokens")
-        cached_tokens = _usage_value(usage, "cached_input_tokens", "cache_read_input_tokens", "cachedInputTokens")
-        cache_write_tokens = _usage_value(
-            usage, "cache_write_input_tokens", "cache_creation_input_tokens", "cacheWriteInputTokens"
-        )
-        reasoning_tokens = _usage_value(usage, "reasoning_tokens", "reasoning_output_tokens", "reasoningOutputTokens")
-        total_tokens = _usage_value(usage, "total_tokens", "totalTokens") or input_tokens + output_tokens
         response_text = output.get("response", output.get("output"))
         if not isinstance(response_text, str):
             response_text = (
@@ -849,11 +914,20 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
                 if isinstance(item, NeMoGymResponseFunctionCallOutput):
                     item.output = native_outputs.get(item.call_id, item.output)
         # Some adapters' trajectories drop tool outputs or collapse the run into one step, and Relay's ATIF steps carry
-        # no reasoning. Keep the fuller record.
+        # no reasoning. Keep the fuller record. ATIF must also keep every native tool result under its call ID, since
+        # an unrelated Relay-only result would otherwise make up for a dropped one in the counts.
+        atif_outputs = {item.call_id: item.output for item in atif_items if item.type == "function_call_output"}
+        native_results_kept = all(
+            item.call_id in atif_outputs and (atif_outputs[item.call_id] or not item.output)
+            for item in native_items
+            if item.type == "function_call_output"
+        )
         atif_counts, native_counts = _record_counts(atif_items), _record_counts(native_items)
         output_items = (
             atif_items
-            if atif_items and all(atif >= native for atif, native in zip(atif_counts, native_counts))
+            if atif_items
+            and native_results_kept
+            and all(atif >= native for atif, native in zip(atif_counts, native_counts))
             else native_items
         )
         response = NeMoGymResponse(
@@ -861,25 +935,21 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             created_at=int(time()),
             model=str(output.get("model") or self.config.model),
             object="response",
-            status="incomplete" if model_stop or incomplete else "completed",
+            status="incomplete" if model_stop or incomplete else "failed" if model_failure else "completed",
+            error=ResponseError(
+                code="server_error", message=str(error_mapping.get("message") or "Fabric model request failed")
+            )
+            if model_failure and not incomplete and not model_stop
+            else None,
             output=output_items,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
-            usage=NeMoGymResponseUsage(
-                input_tokens=input_tokens,
-                input_tokens_details=NeMoGymResponseInputTokensDetails(
-                    cache_write_tokens=cache_write_tokens,
-                    cached_tokens=cached_tokens,
-                ),
-                output_tokens=output_tokens,
-                output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
-                total_tokens=total_tokens,
-            ),
+            usage=_response_usage(result_mapping, output, adapter_id=self.config.adapter_id),
         )
         if trajectories:
             result_mapping["relay_atif"] = trajectories
-        return response, json.loads(json.dumps(result_mapping, default=str))
+        return self.report_outcome(response, result_mapping), json.loads(json.dumps(result_mapping, default=str))
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> FabricSandboxSession:
         """Attach to the resources sandbox, or own one for tasks without a sandbox."""
@@ -1115,8 +1185,6 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         if timed_out and state.session.cleanup_confirmed and not state.session.closing:
             if result is not None:
                 response, _ = self._response_from_result(body, result, result.get("relay_atif") or [], incomplete=True)
-                if not _has_token_usage(_normalized_usage(result, _mapping(result.get("output")))):
-                    response.usage = None
             else:
                 state.observations.gaps.append(ObservationGap(code="partial_fabric_result_unavailable"))
                 response = NeMoGymResponse(
@@ -1141,8 +1209,7 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         response, _ = self._response_from_result(
             body, result, result.get("relay_atif") or [], incomplete=adapter_timeout
         )
-        if not _has_token_usage(_normalized_usage(result, _mapping(result.get("output")))):
-            response.usage = None
+        if response.usage is None:
             state.observations.gaps.append(ObservationGap(code="usage_unavailable"))
         if self.config.adapter_id == "nvidia.fabric.mini-swe-agent" and not result.get("relay_atif"):
             state.observations.gaps.append(

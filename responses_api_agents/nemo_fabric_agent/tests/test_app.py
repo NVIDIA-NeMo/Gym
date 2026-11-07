@@ -13,6 +13,7 @@ import pytest
 from nemo_fabric import Fabric
 from omegaconf import OmegaConf
 
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, agent_outcome_policy
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -652,6 +653,62 @@ def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(native_output: st
     assert fabric_result["relay_atif"] == [trajectory]
 
 
+@pytest.mark.parametrize(
+    ("native_output", "atif_results", "expected"),
+    [
+        # A Relay-only result for c2 cannot stand in for the native c1 result that ATIF lacks.
+        ("kept", {"c2": "relay-only"}, {"c1": "kept"}),
+        # Nor can it hide a native c1 result that ATIF reduced to empty.
+        ("kept", {"c1": "", "c2": "relay-only"}, {"c1": "kept"}),
+        ("", {"c2": "relay-only"}, {"c1": ""}),
+        # ATIF that keeps every native result stays eligible, with its extra results.
+        ("kept", {"c1": "kept", "c2": "relay-only"}, {"c1": "kept", "c2": "relay-only"}),
+        ("", {"c1": "", "c2": ""}, {"c1": "", "c2": ""}),
+    ],
+)
+def test_relay_selection_compares_tool_results_by_call_id(
+    native_output: str, atif_results: dict[str, str], expected: dict[str, str], tmp_path: Path
+) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.mini-swe-agent")
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"tool_call_id": key, "function_name": "bash", "arguments": {}} for key in ("c1", "c2")
+                ],
+                "observation": {
+                    "results": [{"source_call_id": key, "content": text} for key, text in atif_results.items()]
+                },
+            }
+        ]
+    }
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        (relay_dir / "t.json").write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output["relay_artifacts"] = [{"kind": "atif", "path": str(relay_dir / "t.json")}]
+        result.output["messages"] = [
+            {"role": "assistant", "content": "", "tool_calls": [{"id": "c1", "name": "bash", "args": {}}]},
+            {"role": "tool", "content": native_output},
+            {"role": "assistant", "content": "fabric answer"},
+        ]
+        return result
+
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(side_effect=run)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        response, _ = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
+
+    assert {item.call_id: item.output for item in response.output if item.type == "function_call_output"} == expected
+
+
 @pytest.mark.parametrize("native_output", ["README.txt", ""])
 @pytest.mark.parametrize("relay_only_call", [False, True])
 def test_relay_preserves_native_text_by_call_id(native_output: str, relay_only_call: bool, tmp_path: Path) -> None:
@@ -1109,3 +1166,164 @@ async def test_separate_host_adapter_uses_worker_result_without_global_python_mu
     assert run.call_args.kwargs["workspace"] == str(tmp_path)
     fabric.assert_not_called()
     assert os.environ["ADAPTER_PYTHON"] == "/other-agent/python"
+
+
+@pytest.mark.parametrize(
+    ("status", "action"),
+    [(400, "verify"), (413, "verify"), (422, "verify"), (429, "retry"), (503, "retry"), (401, "fail")],
+)
+def test_structured_claude_model_failure_preserves_environment_policy(status, action):
+    result = {
+        "status": "failed",
+        "output": {"response": None},
+        "error": {
+            "stage": "invoke",
+            "code": "claude_result_failed",
+            "message": "Claude returned an error result",
+            "retryable": False,
+            "metadata": {"subtype": "error_during_execution", "api_error_status": status},
+        },
+    }
+    response, saved = _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), result, []
+    )
+    assert response.status == "failed"
+    outcome = AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY])
+    assert outcome.failure_kind == "model_request_error" and outcome.status_code == status
+    assert agent_outcome_policy(response).value == action
+    assert saved["error"] == result["error"]
+    assert response.usage is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": "worker_failed", "message": "HTTP 400"},
+        {"code": "claude_result_failed", "metadata": {"subtype": "error_during_execution", "api_error_status": "400"}},
+        {"code": "claude_result_failed", "metadata": {"subtype": "error_during_execution", "api_error_status": True}},
+    ],
+)
+def test_unclassified_worker_errors_do_not_become_model_failures(error):
+    with pytest.raises(RuntimeError, match="Fabric invocation failed"):
+        _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+            NeMoGymResponseCreateParamsNonStreaming(input="task"), {"status": "failed", "error": error}, []
+        )
+
+
+@pytest.mark.parametrize("container", ["metadata", "extensions"])
+@pytest.mark.parametrize("includes_cache", [False, True])
+def test_detailed_claude_usage_reports_inclusive_input_and_total(container, includes_cache):
+    details = {
+        "input_tokens": 60 if includes_cache else 10,
+        "cached_input_tokens": 30,
+        "cache_write_input_tokens": 20,
+        "input_tokens_include_cache": includes_cache,
+        "output_tokens": 5,
+        "output_tokens_include_reasoning": True,
+    }
+    result = {
+        "status": "succeeded",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            container: {"nemo_fabric.detailed_token_usage.v1": details},
+        },
+        "output": {
+            "response": "answer",
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 20,
+                "output_tokens": 5,
+            },
+        },
+    }
+    response, _ = _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), result, []
+    )
+    assert response.usage.input_tokens == 60
+    assert response.usage.total_tokens == 65
+    assert response.usage.input_tokens_details.cached_tokens == 30
+    assert response.usage.input_tokens_details.cache_write_tokens == 20
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+
+
+@pytest.mark.parametrize(
+    "missing", ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "input_tokens_include_cache"]
+)
+def test_partial_detailed_usage_never_falls_back_to_an_exclusive_subtotal(missing):
+    details = {
+        "input_tokens": 10,
+        "cached_input_tokens": 30,
+        "cache_write_input_tokens": 20,
+        "input_tokens_include_cache": False,
+        "output_tokens": 5,
+        "output_tokens_include_reasoning": True,
+    }
+    del details[missing]
+    result = {
+        "status": "succeeded",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "metadata": {"nemo_fabric.detailed_token_usage.v1": details},
+        },
+        "output": {"response": "answer"},
+    }
+    response, _ = _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), result, []
+    )
+    assert response.usage is None
+
+
+@pytest.mark.parametrize(("included", "expected"), [(False, 12), (True, 5), (None, None)])
+def test_detailed_reasoning_is_added_only_when_declared_exclusive(included, expected):
+    result = {
+        "status": "succeeded",
+        "output": {"response": "answer"},
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "metadata": {
+                "nemo_fabric.detailed_token_usage.v1": {
+                    "output_tokens": 5,
+                    "reasoning_tokens": 7,
+                    "output_tokens_include_reasoning": included,
+                }
+            },
+        },
+    }
+    response, _ = _agent()._response_from_result(NeMoGymResponseCreateParamsNonStreaming(input="task"), result, [])
+    if expected is None:
+        assert response.usage is None
+    else:
+        assert response.usage.output_tokens == expected
+        assert response.usage.total_tokens == 10 + expected
+
+
+@pytest.mark.parametrize("status", [400, 429, 503])
+async def test_host_execution_keeps_ungradable_model_failures_on_the_exception_path(status, tmp_path):
+    from types import SimpleNamespace
+
+    instance = _agent(cwd=str(tmp_path), adapter_id="nvidia.fabric.claude")
+    result = _FakeResult()
+    result.status = "failed"
+    result.error = SimpleNamespace(
+        code="claude_result_failed",
+        message="model request rejected",
+        metadata={"subtype": "error_during_execution", "api_error_status": status},
+    )
+    fabric = MagicMock()
+    fabric.run = AsyncMock(return_value=result)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://model/v1"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+        if status == 400:
+            response, _ = await instance._create_response(body)
+            assert response.status == "failed" and response.error.message == "model request rejected"
+        else:
+            with pytest.raises(RuntimeError, match="Fabric invocation failed"):
+                await instance._create_response(body)
