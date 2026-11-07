@@ -121,7 +121,6 @@ EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "TaskFailure": [
         "kind",
         "source",
-        "delivery",
         "stage",
         "terminal",
         "reason",

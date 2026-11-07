@@ -99,6 +99,14 @@ class _FakeResults:
 
 
 class TestOutcomes:
+    async def test_a_task_run_once_has_its_one_outcome_as_a_property(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        runner = TaskRunner([_row("a")], registry_server=HEAD)
+        monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults({"reward": 1.0}, {"reward": 0.0}))
+
+        assert (await runner.run_task("a")).outcome == RolloutOutcome(reward=1.0)
+        with pytest.raises(ValueError):
+            (await runner.run_task("a", num_repeats=2)).outcome
+
     async def test_each_rollout_has_a_typed_outcome_beside_the_raw_result(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -127,7 +135,6 @@ class TestOutcomes:
                 failure=TaskFailure(
                     kind="judge_failed",
                     source="environment",
-                    delivery="delivered",
                     reason="no verdict",
                 ),
             ),
@@ -143,9 +150,7 @@ class TestOutcomes:
         outcome = (await runner.run_task("a")).outcomes[0]
 
         assert outcome.failure.domain == "session"
-        assert outcome.failure == TaskFailure(
-            kind="session_lost", source="environment", delivery="delivered", reason=None
-        )
+        assert outcome.failure == TaskFailure(kind="session_lost", source="environment", reason=None)
 
 
 def _record(
@@ -169,6 +174,24 @@ def _record(
     )
 
 
+class TestTaskFailure:
+    @pytest.mark.parametrize(
+        "kind, domain",
+        [
+            ("judge_failed", "judge"),
+            ("agent_timeout", "agent"),
+            ("provider_unavailable", "provider"),
+            ("model_context_limit", "model"),
+            ("myenv:bad_input", "myenv"),
+            ("cancelled", "cancelled"),
+        ],
+    )
+    def test_the_domain_is_the_part_of_the_kind_before_the_first_underscore_or_colon(
+        self, kind: str, domain: str
+    ) -> None:
+        assert TaskFailure(kind=kind, source="environment").domain == domain
+
+
 class TestFailedRuns:
     async def test_a_failed_run_comes_back_as_an_outcome_beside_the_rollouts_that_finished(
         self, monkeypatch: pytest.MonkeyPatch
@@ -186,7 +209,6 @@ class TestFailedRuns:
             failure=TaskFailure(
                 kind="model_request_error",
                 source="collector",
-                delivery="delivered",
                 stage="agent",
                 terminal=True,
                 reason="boom",
@@ -214,7 +236,7 @@ class TestFailedRuns:
         failure = (await runner.run_task("a")).outcomes[0].failure
 
         assert failure is not None
-        assert (failure.kind, failure.source, failure.delivery) == (kind, source, delivery)
+        assert (failure.kind, failure.source) == (kind, source)
         assert failure.http_status is None
         assert failure.exception_type is None
 

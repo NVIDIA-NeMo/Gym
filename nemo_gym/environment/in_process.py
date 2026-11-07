@@ -35,6 +35,7 @@ holds Gym's raw `/run` responses (the failure record for a failed `/run`), whose
 """
 
 import json
+import re
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -59,7 +60,6 @@ from nemo_gym.core.failure_kinds import (
     AGENT_RUN_ERROR,
     ENVIRONMENT_SERVER_FAILED,
     FailureStage,
-    failure_domain,
 )
 from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
@@ -107,19 +107,16 @@ class TaskFailure:
     """What Gym observed when a rollout failed. It reports; what to do about it is the caller's decision.
 
     `kind` is Gym's failure kind: the cause when the reporter named one, else `environment_server_failed` (the
-    environment reported a failure without a kind), `agent_run_error` (the `/run` call failed and the request was
-    delivered) or `agent_request_failed` (it failed and may not have been). `domain` is the layer that observed it: the
-    part of the kind before its first `_` or `:`, such as `agent`, `judge`, `session` or `provider`.
+    environment reported a failure without a kind), `agent_run_error` (the `/run` call failed and the request reached
+    the agent) or `agent_request_failed` (it failed and may not have). `domain` is derived from it.
 
-    `source` says who reported the failure, `delivery` is Gym's evidence about whether the request reached the agent
-    (`not_sent`, `possibly_delivered`, `delivered`), `stage` is where in the episode it happened when the reporter
-    knows, and `terminal` is the reporter's statement that the episode must not be attempted again. `reason`,
-    `http_status` and `exception_type` are diagnostics.
+    `source` says who reported the failure, `stage` is where in the episode it happened when the reporter knows, and
+    `terminal` is the reporter's statement that the episode must not be attempted again. `reason`, `http_status` and
+    `exception_type` are diagnostics.
     """
 
     kind: str
     source: Literal["environment", "collector"]
-    delivery: Literal["not_sent", "possibly_delivered", "delivered"]
     stage: Optional[FailureStage] = None
     terminal: bool = False
     reason: Optional[str] = None
@@ -128,7 +125,13 @@ class TaskFailure:
 
     @property
     def domain(self) -> str:
-        return failure_domain(self.kind)
+        """The layer that observed the failure: the part of `kind` before its first `_` or `:`.
+
+        Names are `<domain>_<condition>` and an environment's own are `<server>:<kind>`, so `agent_run_error` is in
+        `agent`, `judge_failed` in `judge` and `myenv:bad_input` in `myenv`. A name with neither, such as `cancelled`,
+        is its own domain. A new kind under an existing domain needs no change from a caller that groups by domain.
+        """
+        return re.split(r"[_:]", self.kind, maxsplit=1)[0]
 
 
 @dataclass(frozen=True)
@@ -159,6 +162,12 @@ class TaskResult:
     rewards: list[Optional[float]]
     results: list[dict[str, Any]]
     outcomes: list[RolloutOutcome] = field(default_factory=list)
+
+    @property
+    def outcome(self) -> RolloutOutcome:
+        """The outcome of the only rollout, for a task run once. Raises ValueError when there is not exactly one."""
+        (only,) = self.outcomes
+        return only
 
 
 @experimental
@@ -351,7 +360,6 @@ def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome
         failure = TaskFailure(
             kind=str(kind),
             source="environment",
-            delivery="delivered",
             reason=None if reason is None else str(reason),
         )
     prompt = (result.get("responses_create_params") or {}).get("input")
@@ -370,7 +378,6 @@ def _failure_of_record(record: RolloutFailureRecord) -> TaskFailure:
     return TaskFailure(
         kind=kind,
         source=record.source,
-        delivery=record.delivery,
         stage=record.failure.stage,
         terminal=record.failure.terminal,
         reason=record.failure.failure_reason,
