@@ -202,7 +202,7 @@ uses all of them). Local calls ignore them.
 - `model_base_url`, `model_api_key`: an OpenAI-compatible chat-completions base URL (with `/v1`) that
   OpenCode calls directly from the sandbox as `model`, instead of a Gym `model_server` (set exactly one),
   and its key (default `EMPTY`). Gym does not capture these calls, so the model-call correlation plugin
-  is not loaded.
+  is not loaded. In a sandbox OpenCode creates, `network_access: model_only` opens this endpoint's host.
 - `reasoning_effort`: sent as chat `reasoning_effort` on every request (the model's `reasoningEffort`
   option), e.g. `max`.
 - `interleaved_reasoning_field`: the assistant-message field that replays each turn's reasoning

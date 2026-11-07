@@ -8,7 +8,8 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi import HTTPException, Request
@@ -23,6 +24,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_runner import stage
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
     capture_observations,
     close_body,
+    owned_seed_with_several_grants,
     read_params,
     seed,
     setup,
@@ -102,6 +104,30 @@ def test_seed_requires_exactly_one_model_route(setup, routes):
     assert response.status_code == 422
     assert "model_server or model_base_url" in response.text
     sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.parametrize(("network_access", "allowed"), [("inherit", None), ("model_only", ["gateway.example"])])
+def test_direct_endpoint_owned_sandbox_egress_allows_the_endpoint(setup, network_access, allowed):
+    agent, sandbox = setup
+    configure_direct(agent, network_access=network_access)
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/workspace"}
+    sandbox.expected_workdir = "/workspace"
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.opencode_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=owned_seed_with_several_grants(required=False))
+        assert created.status_code == 200, created.text
+    # With no Gym model server, the sandbox calls the direct endpoint, so that is the host model_only opens.
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
 
 
 def test_direct_endpoint_accepts_its_own_model_name_in_requests(setup):

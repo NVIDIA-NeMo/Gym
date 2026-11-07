@@ -265,7 +265,7 @@ detail, not a separate endpoint or a setup step users must run.
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 - `model_base_url`, `model_api_key`: an OpenAI-compatible base URL (with `/v1`) that Pi calls directly
   from the sandbox, instead of a Gym `model_server` (set exactly one), and its key (default `EMPTY`).
-  Gym does not capture these calls.
+  Gym does not capture these calls. In a sandbox Pi creates, `network_access: model_only` opens this endpoint's host.
 - `thinking_level_map`: the generated model's Pi `thinkingLevelMap`, e.g. `{max: max}` so that
   `thinking: max` sends `reasoning_effort: "max"` (with `provider_compat.supportsReasoningEffort: true`)
 - `provider_compat`: Pi compat flags merged over the generated provider's

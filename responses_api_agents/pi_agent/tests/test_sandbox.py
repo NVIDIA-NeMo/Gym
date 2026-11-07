@@ -2961,6 +2961,27 @@ def test_seed_requires_exactly_one_model_route(setup, routes):
     sandbox.exec.assert_not_awaited()
 
 
+@pytest.mark.parametrize(("network_access", "allowed"), [("inherit", None), ("model_only", ["gateway.example"])])
+async def test_direct_endpoint_owned_sandbox_egress_allows_the_endpoint(setup, network_access, allowed):
+    agent, sandbox = setup
+    configure_direct(agent, network_access=network_access)
+    agent.config.sandbox_provider = "agent-provider"
+    agent.config.sandbox_config = {"image": "test-image"}
+    sandbox.start = AsyncMock()
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.AsyncSandbox", return_value=sandbox),
+        patch(f"{module}.create_provider", return_value=SimpleNamespace(name="opensandbox", aclose=AsyncMock())),
+    ):
+        await agent.seed_agent_session(Request({"type": "http", "session": {}}), owned_seed_with_search_grant())
+    # With no Gym model server, the sandbox calls the direct endpoint, so that is the host model_only opens.
+    policy = sandbox.start.await_args.args[0].provider_options.get("network_policy")
+    if allowed is None:
+        assert policy is None
+    else:
+        assert policy == {"defaultAction": "deny", "egress": [{"action": "allow", "target": host} for host in allowed]}
+
+
 def test_task_sandbox_rooted_at_filesystem_root_runs(setup):
     # Task images without a WORKDIR start in "/": Pi's runtime and session files stay under /tmp.
     agent, sandbox = setup

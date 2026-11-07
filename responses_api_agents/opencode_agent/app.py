@@ -1054,7 +1054,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     spec,
                     network_access=self.config.network_access,
                     provider=provider,
-                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                    # A direct endpoint is the host the sandbox calls in place of the Gym model server.
+                    model_base_url=(
+                        self.config.model_base_url
+                        if self.config.model_server is None
+                        else self.resolve_model_base_url(self.config.model_server.name, trace_context=False)
+                    ),
                     tool_urls=[
                         str(access.connection.url)
                         for access in self.effective_tool_accesses(body)
