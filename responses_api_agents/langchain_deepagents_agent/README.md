@@ -106,6 +106,10 @@ session, and then calls `/verify`. The agent's side of that contract:
   for a benchmark that lends its task sandbox.
 - **Activation** runs the graph once per session. An identical retry joins that run, and a different request or
   a request for another rollout answers 409. A client that disconnects does not cancel the run.
+- **Output budget.** Both profiles reject a non-null request `max_output_tokens` with HTTP 422 before starting or
+  binding an activation: the graph cannot enforce a total across its model calls. Remove that request field and
+  configure the Model Server's per-call output limit instead; a corrected request can use the same session.
+  The legacy search `/run` route rejects this field before seeding resources as well.
 - **Close** cancels a graph that is still running. Close returns no resources cookie jar, so `/verify` receives
   the seed's cookies unchanged. It returns an observation bundle with the gaps `agent_transcript_unavailable` and
   `model_call_ownership_unavailable` (see [Open gaps](#open-gapslimitations)).
@@ -146,9 +150,10 @@ not list this agent yet, so start its servers with `--allow-unsupported-pairing`
   call that still fails ends the run: the response is `failed` and reports the cause in `ng_agent_outcome`
   (`model_request_error` with the HTTP status, or `model_transport_error`), so the Environment Server's outcome
   policy decides whether to verify or retry the episode.
-- **Request fields.** `input`, `instructions` (as a system message), and `temperature`, `top_p`,
-  `max_output_tokens` and `reasoning` apply to every model call; `max_output_tokens` limits each call, not the
-  episode. A request that declares `tools` is refused with HTTP 422, because the graph runs only its own tools.
+- **Request fields.** `input`, `instructions` (as a system message), and `temperature`, `top_p` and `reasoning`
+  apply to every model call. Request `max_output_tokens` is refused with HTTP 422 because no response-wide
+  budget is enforced; configure a per-call limit on the Model Server instead. A request that declares `tools`
+  is refused with HTTP 422, because the graph runs only its own tools.
   Other fields, such as `tool_choice` and `parallel_tool_calls`, are ignored.
 - **Tools** work on the sandbox's filesystem. Commands run in `workdir` with the sandbox's environment plus the
   owner's `sandbox_access.env`; `HOME` is the task's. A command's default time limit is `shell_timeout_seconds`

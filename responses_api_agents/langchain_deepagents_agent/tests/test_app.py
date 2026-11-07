@@ -150,8 +150,7 @@ async def test_responses_propagates_inbound_cookies_to_outgoing_response():
     request.path_params = {}
     response = Response()
 
-    body = MagicMock()
-    body.input = "hello"
+    body = NeMoGymResponseCreateParamsNonStreaming(input="hello")
 
     await agent.responses(request, response, body)
     assert response.raw_headers  # a Set-Cookie header was added
@@ -178,7 +177,7 @@ async def test_responses_seeds_model_cookies_empty_not_from_resources_server_coo
     request.path_params = {}
     request.url.path = "/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert run_config["configurable"]["model_cookies"] == {"cookies": None}
@@ -199,7 +198,7 @@ async def test_responses_forwards_capture_mode_path_into_model_url_path():
     request.path_params = {"rollout_id": "abc123"}
     request.url.path = "/ng-rollout/abc123/training-token-capture/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert "training-token-capture" in run_config["configurable"]["model_url_path"]
@@ -359,8 +358,7 @@ async def test_responses_result_is_what_verify_receives_for_a_tool_using_rollout
     request = MagicMock()
     request.cookies = {}
     request.path_params = {}
-    body = MagicMock()
-    body.input = "list files"
+    body = NeMoGymResponseCreateParamsNonStreaming(input="list files")
 
     result = await agent.responses(request, Response(), body)
 
@@ -444,7 +442,7 @@ async def test_responses_propagates_rollout_id_as_langgraph_thread_id():
     request.path_params = {"rollout_id": "abc123"}
     request.url.path = "/ng-rollout/abc123/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert run_config["configurable"]["thread_id"] == "abc123"
@@ -466,7 +464,7 @@ async def test_responses_thread_id_falls_back_to_unscoped_without_a_rollout_id()
     request.path_params = {}
     request.url.path = "/v1/responses"
 
-    await agent.responses(request, Response(), MagicMock(input="hello"))
+    await agent.responses(request, Response(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
 
     run_config = agent.agent.ainvoke.call_args.kwargs["config"]
     assert run_config["configurable"]["thread_id"] == "unscoped"
@@ -760,6 +758,47 @@ async def _seed_with_graph(agent: ReasoningSearchDeepAgent, graph: MagicMock):
     request = _request()
     await agent.seed_agent_session(request, _seed_body())
     return request
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seeded", [False, True])
+async def test_response_output_budget_is_refused_before_graph_binding_or_model_calls(seeded):
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(return_value=_model_response("done"))
+    request = _request()
+    state = None
+    if seeded:
+        await agent.seed_agent_session(request, _seed_body())
+        state = agent._require_agent_session("agent-session")
+    body = NeMoGymResponseCreateParamsNonStreaming(input="go", max_output_tokens=32)
+
+    with pytest.raises(HTTPException, match="response-wide max_output_tokens") as refused:
+        await agent.responses(request, Response(), body)
+    assert refused.value.status_code == 422
+    agent.server_client.post.assert_not_awaited()
+    if state is not None:
+        assert state.activation is None and state.activation_request is None
+
+    result = await agent.responses(request, Response(), body.model_copy(update={"max_output_tokens": None}))
+    assert result.output[-1].content[0].text == "done"
+    agent.server_client.post.assert_awaited_once()
+    if seeded:
+        await agent.close_agent_session(request, _close_body())
+
+
+@pytest.mark.asyncio
+async def test_legacy_run_rejects_output_budget_before_seeding_resources():
+    from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
+
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=AssertionError("invalid budget must not seed resources"))
+    body = SimpleAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="go", max_output_tokens=32)
+    )
+    with pytest.raises(HTTPException, match="response-wide max_output_tokens") as refused:
+        await agent.run(_request(), body)
+    assert refused.value.status_code == 422
+    agent.server_client.post.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -190,6 +190,16 @@ def _usage(output: Mapping[str, Any]) -> Optional[NeMoGymResponseUsage]:
     return total
 
 
+def _reject_response_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+    """Reject an aggregate budget before starting resources or binding graph work."""
+    if body.max_output_tokens is not None:
+        raise HTTPException(
+            422,
+            "DeepAgents cannot enforce a response-wide max_output_tokens budget; "
+            "configure per-call output limits on the Model Server instead",
+        )
+
+
 def _model_error_type(output: Mapping[str, Any]) -> Optional[str]:
     if not output.get("model_error"):
         return None
@@ -422,7 +432,6 @@ class DeepAgentsAgent(SimpleAgent):
         sampling = {
             "temperature": body.temperature,
             "top_p": body.top_p,
-            "max_output_tokens": body.max_output_tokens,
             "reasoning": body.reasoning,
         }
         access = state.request.sandbox_access
@@ -479,6 +488,7 @@ class DeepAgentsAgent(SimpleAgent):
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
+        _reject_response_budget(body)
         # Same extraction SimpleAgent.responses() does, including the "unscoped" fallback.
         path_params = getattr(request, "path_params", None)
         rollout_id = path_params.get("rollout_id") if isinstance(path_params, Mapping) else None
@@ -573,6 +583,7 @@ class DeepAgentsAgent(SimpleAgent):
         """Keep legacy /run for the search profile; sandbox episodes require an Environment Server."""
         if self.config.tool_profile == "builtin":
             raise HTTPException(409, "Sandboxed DeepAgents runs only in agent sessions; use an environment server")
+        _reject_response_budget(body.responses_create_params)
         return await super().run(request, body)
 
 

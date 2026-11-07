@@ -14,7 +14,7 @@ from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import Response
+from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -244,7 +244,13 @@ async def test_an_episode_runs_the_graph_in_the_lent_sandbox_and_close_leaves_it
     agent, request = _agent(), _request()
     try:
         await agent.seed_agent_session(request, _seed(sandbox_access=access))
-        body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", temperature=0.5)
+        body = NeMoGymResponseCreateParamsNonStreaming(input="Do the task.", temperature=0.5, top_p=0.8)
+        state = agent._require_agent_session("agent-session")
+        with pytest.raises(HTTPException, match="response-wide max_output_tokens") as refused:
+            await agent.responses(request, Response(), body.model_copy(update={"max_output_tokens": 32}))
+        assert refused.value.status_code == 422
+        assert state.activation is None and state.activation_request is None
+        assert model.requests == []
         response = await asyncio.wait_for(agent.responses(request, Response(), body), 120)
         close = await asyncio.wait_for(agent.close_agent_session(request, _close_body()), 60)
     finally:
@@ -256,6 +262,8 @@ async def test_an_episode_runs_the_graph_in_the_lent_sandbox_and_close_leaves_it
     assert response.output[2].content[0].text == "done"
     assert response.usage.total_tokens == 30
     assert {request["temperature"] for request in model.requests} == {0.5}
+    assert {request["top_p"] for request in model.requests} == {0.8}
+    assert all("max_output_tokens" not in request for request in model.requests)
     assert (workdir / "copied.txt").read_text() == "from the task image\n"
     # The harness's runtime and session files stay outside the task's working directory.
     assert sorted(path.name for path in workdir.iterdir()) == ["copied.txt", "input.txt"]
