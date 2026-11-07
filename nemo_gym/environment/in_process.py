@@ -35,6 +35,7 @@ debugging.
 """
 
 import json
+import math
 import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -60,7 +61,8 @@ from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
 from nemo_gym.eval.eval_plan import EvalPlan
 from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
-from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper, _metric_failure_kind
+from nemo_gym.telemetry.gym_metrics import record_rollout_completed, record_rollout_reward
 
 
 @dataclass(frozen=True)
@@ -301,12 +303,30 @@ class TaskRunner:
         finally:
             await completions.aclose()
         results = [result for _, result in completed]
+        outcomes = [_outcome(result) for result in results]
+        for (row, _), outcome in zip(completed, outcomes, strict=True):
+            _record_outcome(outcome, self._helper._dispatch_name(row))
         return TaskResult(
             task_id=task_id,
             rewards=[result["reward"] for result in results],
             results=results,
-            outcomes=[_outcome(result) for result in results],
+            outcomes=outcomes,
         )
+
+
+def _record_outcome(outcome: RolloutOutcome, dispatch_name: str) -> None:
+    """Count the rollout in the metrics `gym eval run` records for each rollout it finishes."""
+    if outcome.failure is not None:
+        record_rollout_completed(
+            "failed",
+            dispatch_name=dispatch_name,
+            failure_class=outcome.failure.domain,
+            failure_kind=_metric_failure_kind(outcome.failure.kind),
+        )
+        return
+    record_rollout_completed("scored", dispatch_name=dispatch_name)
+    if math.isfinite(outcome.reward):
+        record_rollout_reward(outcome.reward, dispatch_name=dispatch_name, masked=outcome.masked)
 
 
 def _outcome(result: Mapping[str, Any]) -> RolloutOutcome:
