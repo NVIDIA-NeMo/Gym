@@ -200,16 +200,19 @@ class RolloutRecord:
         return row
 
 
-def read_record_rows(records: Iterable[RolloutRecord]) -> list[dict]:
-    """Read records in order through one open handle per file, for random access without an open per record."""
+def iter_record_rows(records: Iterable[RolloutRecord]) -> Iterator[dict]:
+    """Yield records' rows in order, one at a time, through one open handle per file."""
     with ExitStack() as files:
         handles = {}
-        rows = []
         for record in records:
             if record.path not in handles:
                 handles[record.path] = files.enter_context(record.path.open("rb"))
-            rows.append(record._read(handles[record.path]))
-        return rows
+            yield record._read(handles[record.path])
+
+
+def read_record_rows(records: Iterable[RolloutRecord]) -> list[dict]:
+    """Read records in order through one open handle per file, for random access without an open per record."""
+    return list(iter_record_rows(records))
 
 
 @dataclass(frozen=True, slots=True)
@@ -849,6 +852,10 @@ class RolloutRecords:
         # Existing consumers explicitly request materialized results. Keep reads
         # out of reconciliation/coverage and reuse handles for random access.
         return read_record_rows(self.selected_records(disposition).values())
+
+    def iter_selected(self, disposition: str) -> Iterator[dict]:
+        """Yield ``selected``'s payloads one at a time, in the same order, so a reader holds one row at a time."""
+        return iter_record_rows(self.selected_records(disposition).values())
 
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))
