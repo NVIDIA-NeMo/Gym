@@ -6,14 +6,12 @@ verifies the task, and closes Resources. Qwen Code runs its own tools and calls 
 Its native subagents (the `agent` tool, nested delegation, background agents and the experimental Agent Team) are
 configurable.
 
-The adapter returns the root session as Responses items, Qwen Code's run usage (subagents included), and an
-observation bundle with explicit gaps.
+Capability level: **Evaluation**. The adapter returns the root session as Responses items, Qwen Code's run usage
+(subagents included), and an observation bundle with explicit gaps.
 
-Training token-ID capture is off by default. Root and subagent model calls go to Gym Model Servers under the rollout's
-prefix, so capture needs only run-level `token_id_capture.enabled: true` and either the agent's
-`token_id_capture: true` or run-level `token_id_capture.all_agents: true`. No training capture run has validated this
-yet, and capture is refused at seed while `subagent_model_server` is set, since its calls would land in the policy
-rollout.
+Model calls already use the rollout's capture route, but no training capture run has validated this harness yet.
+Capture is refused at seed while `subagent_model_server` is set, since its calls would land in the policy rollout.
+The harness conformance probes are not run at the Evaluation level.
 
 ## Configure and run
 
@@ -38,6 +36,8 @@ single_agent_turn_legacy:
 
 Supply a `policy_model` Gym Model Server, `policy_model_name`, and the `sandbox` provider configuration in
 `model-provider.yaml`. The task sandbox must be able to reach the Model Server.
+The SWE-bench Pro pairing is undeclared (this agent is not in that Resources server's `allowed_agents`), so
+`gym env start` needs `--allow-unsupported-pairing`.
 
 ```bash
 python benchmarks/swebench/pro/prepare.py
