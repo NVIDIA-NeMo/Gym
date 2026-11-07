@@ -60,6 +60,9 @@ from openai.types.chat.completion_create_params import (
     ResponseFormat,
     WebSearchOptions,
 )
+from openai.types.chat.completion_create_params import (
+    PromptCacheOptions as ChatPromptCacheOptions,
+)
 from openai.types.responses import (
     ApplyPatchToolParam,
     ComputerToolParam,
@@ -119,10 +122,13 @@ from openai.types.responses.response_create_params import (
     ResponsesModel,
     ResponseTextConfigParam,
     StreamOptions,
+    ToolChoiceSpecificProgrammaticToolCallingParam,
 )
+from openai.types.responses.response_create_params import PromptCacheOptions as ResponsesPromptCacheOptions
 from openai.types.responses.response_function_call_output_item_list_param import (
     ResponseFunctionCallOutputItemListParam,
 )
+from openai.types.responses.response_function_tool_call import Caller as FunctionToolCallCaller
 from openai.types.responses.response_function_web_search import ActionFind, ActionOpenPage, ActionSearch
 from openai.types.responses.response_input_content_param import ResponseInputContentParam
 from openai.types.responses.response_input_item import (
@@ -135,6 +141,7 @@ from openai.types.responses.response_input_item import (
     McpApprovalResponse,
     ResponseCustomToolCallOutput,
 )
+from openai.types.responses.response_input_param import FunctionCallOutputCaller
 from openai.types.responses.response_output_item import (
     AdditionalTools as OutputAdditionalTools,
 )
@@ -144,6 +151,8 @@ from openai.types.responses.response_output_item import (
     McpApprovalRequest,
     McpCall,
     McpListTools,
+    Program,
+    ProgramOutput,
 )
 from openai.types.responses.response_output_item import (
     LocalShellCallOutput as OutputLocalShellCallOutput,
@@ -167,6 +176,7 @@ from openai.types.responses.tool_param import (
     ImageGeneration,
     LocalShell,
     Mcp,
+    ProgrammaticToolCalling,
 )
 from openai.types.shared.chat_model import ChatModel
 from openai.types.shared_params import ComparisonFilter, CompoundFilter, FunctionDefinition
@@ -391,6 +401,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
     """
 
     call_id: str
+    caller: Optional[FunctionCallOutputCaller] = None
     output: Union[str, ResponseFunctionCallOutputItemListParam]
     type: Literal["function_call_output"] = "function_call_output"
     id: Optional[str] = None
@@ -398,6 +409,7 @@ class NeMoGymFunctionCallOutput(BaseModel):
 
 
 class NeMoGymResponseFunctionToolCall(BaseModel):
+    caller: Optional[FunctionToolCallCaller] = None
     arguments: str
     call_id: str
     name: str
@@ -507,6 +519,14 @@ class NeMoGymImageGenerationCall(ImageGenerationCall):
 
 class NeMoGymResponseCodeInterpreterToolCall(ResponseCodeInterpreterToolCall):
     """A hosted code-interpreter call (OpenAI Responses ``code_interpreter_call`` output item)."""
+
+
+class NeMoGymResponseProgram(Program):
+    """A native server-executed program with its opaque fingerprint preserved."""
+
+
+class NeMoGymResponseProgramOutput(ProgramOutput):
+    """The native result of a server-executed program."""
 
 
 class NeMoGymLocalShellCall(LocalShellCall):
@@ -847,6 +867,8 @@ NeMoGymResponseInputItem = Annotated[
         Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
         Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
         Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymResponseProgram, Tag("program")],
+        Annotated[NeMoGymResponseProgramOutput, Tag("program_output")],
         Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
         Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
         Annotated[NeMoGymComputerCallOutput, Tag("computer_call_output")],
@@ -970,6 +992,7 @@ NeMoGymToolParam: TypeAlias = Union[
     WebSearchToolParam,
     Mcp,
     NeMoGymCodeInterpreterToolParam,
+    ProgrammaticToolCalling,
     ImageGeneration,
     LocalShell,
     NeMoGymFunctionShellToolParam,
@@ -993,6 +1016,7 @@ NeMoGymToolChoice: TypeAlias = Union[
     ToolChoiceFunctionParam,
     ToolChoiceMcpParam,
     ToolChoiceCustomParam,
+    ToolChoiceSpecificProgrammaticToolCallingParam,
     ToolChoiceApplyPatchParam,
     ToolChoiceShellParam,
 ]
@@ -1045,6 +1069,7 @@ class NeMoGymResponseCreateParamsNonStreaming(BaseModel):
     moderation: Optional[Moderation] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
+    prompt_cache_options: Optional[ResponsesPromptCacheOptions] = None
     safety_identifier: Optional[str] = None
     stream_options: Optional[StreamOptions] = None
     temperature: Optional[float] = None
@@ -1089,6 +1114,8 @@ NeMoGymResponseOutputItem = Annotated[
         Annotated[NeMoGymResponseComputerToolCall, Tag("computer_call")],
         Annotated[NeMoGymImageGenerationCall, Tag("image_generation_call")],
         Annotated[NeMoGymResponseCodeInterpreterToolCall, Tag("code_interpreter_call")],
+        Annotated[NeMoGymResponseProgram, Tag("program")],
+        Annotated[NeMoGymResponseProgramOutput, Tag("program_output")],
         Annotated[NeMoGymLocalShellCall, Tag("local_shell_call")],
         Annotated[NeMoGymResponseCustomToolCall, Tag("custom_tool_call")],
         Annotated[NeMoGymResponseComputerCallOutput, Tag("computer_call_output")],
@@ -1124,6 +1151,7 @@ _register_item_tags(NeMoGymResponseOutputItem, _RESPONSE_OUTPUT_ITEM_TAG_BY_CLAS
 
 class NeMoGymResponseInputTokensDetails(ResponseInputTokensDetails):
     cached_tokens: Optional[int]
+    cache_write_tokens: Optional[int] = None
 
 
 class NeMoGymResponseOutputTokensDetails(ResponseOutputTokensDetails):
@@ -1135,28 +1163,19 @@ class NeMoGymResponseUsage(ResponseUsage):
     output_tokens_details: NeMoGymResponseOutputTokensDetails
 
     @classmethod
-    def sum_from_list(cls, usages: "NeMoGymResponseUsage") -> "NeMoGymResponseUsage":
-        final_usage = NeMoGymResponseUsage(
+    def sum_from_list(cls, usages: List["NeMoGymResponseUsage"]) -> "NeMoGymResponseUsage":
+        total = None
+        for usage in usages:
+            total = accumulate_response_usage(total, usage)
+        if total is not None:
+            return total
+        return cls(
             input_tokens=0,
             input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=0),
             output_tokens=0,
             output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
             total_tokens=0,
         )
-        for usage in usages:
-            final_usage.input_tokens += usage.input_tokens
-            final_usage.input_tokens_details.cached_tokens = _add_optional_token_counts(
-                final_usage.input_tokens_details.cached_tokens,
-                usage.input_tokens_details.cached_tokens,
-            )
-            final_usage.output_tokens += usage.output_tokens
-            final_usage.output_tokens_details.reasoning_tokens = _add_optional_token_counts(
-                final_usage.output_tokens_details.reasoning_tokens,
-                usage.output_tokens_details.reasoning_tokens,
-            )
-            final_usage.total_tokens += usage.total_tokens
-
-        return final_usage
 
 
 def _add_optional_token_counts(left: Optional[int], right: Optional[int]) -> Optional[int]:
@@ -1180,6 +1199,10 @@ def accumulate_response_usage(
     result.output_tokens += additional.output_tokens
     result.total_tokens += additional.total_tokens
     if result.input_tokens_details is not None and additional.input_tokens_details is not None:
+        result.input_tokens_details.cache_write_tokens = _add_optional_token_counts(
+            result.input_tokens_details.cache_write_tokens,
+            additional.input_tokens_details.cache_write_tokens,
+        )
         result.input_tokens_details.cached_tokens = _add_optional_token_counts(
             result.input_tokens_details.cached_tokens,
             additional.input_tokens_details.cached_tokens,
@@ -1512,6 +1535,7 @@ class NeMoGymChatCompletionCreateParamsNonStreaming(BaseModel):
     presence_penalty: Optional[float] = None
     prompt_cache_key: Optional[str] = None
     prompt_cache_retention: Optional[Literal["in_memory", "24h"]] = None
+    prompt_cache_options: Optional[ChatPromptCacheOptions] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     response_format: Optional[ResponseFormat] = None
     seed: Optional[int] = None

@@ -141,7 +141,10 @@ def chat_completion_usage_to_response_usage(usage: Optional[CompletionUsage]) ->
     )
     return NeMoGymResponseUsage(
         input_tokens=usage.prompt_tokens,
-        input_tokens_details=NeMoGymResponseInputTokensDetails(cached_tokens=cached_tokens),
+        input_tokens_details=NeMoGymResponseInputTokensDetails(
+            cached_tokens=cached_tokens,
+            cache_write_tokens=_usage_detail(usage, "prompt_tokens_details", "cache_write_tokens"),
+        ),
         output_tokens=usage.completion_tokens,
         output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=reasoning_tokens),
         # Provider totals can use accounting that differs from prompt + completion.
@@ -518,6 +521,10 @@ class ChatCompletionsConverter(BaseModel):
             responses_create_params["tools"] = []
             for tool_dict in tools:
                 tool_type = tool_dict.get("type")
+                if tool_dict.get("allowed_callers") is not None:
+                    raise NotImplementedError(
+                        "Responses tool caller eligibility has no Chat Completions representation."
+                    )
                 if tool_type not in {"function", "custom"}:
                     raise NotImplementedError(
                         f"Responses tool type {tool_type!r} has no implemented Chat Completions conversion."
@@ -569,6 +576,8 @@ class ChatCompletionsConverter(BaseModel):
         *,
         drop_unrepresentable_request_fields: bool = False,
     ) -> None:
+        if m.get("caller") is not None:
+            raise NotImplementedError("Responses function caller metadata has no Chat Completions representation.")
         state.flush_assistant()
 
         assert "call_id" in m
@@ -813,6 +822,8 @@ class ChatCompletionsConverter(BaseModel):
         m: dict,
         state: ChatCompletionsConverterState,
     ) -> None:
+        if m.get("caller") is not None:
+            raise NotImplementedError("Responses function caller metadata has no Chat Completions representation.")
         state.assistant_item_buffered = True
         assert "call_id" in m
         if m.get("namespace") is not None:
@@ -843,6 +854,8 @@ class ChatCompletionsConverter(BaseModel):
         ``{"input": "<raw text>"}``, a different object from the one the model
         generated.
         """
+        if m.get("caller") is not None:
+            raise NotImplementedError("Responses custom tool caller metadata has no Chat Completions representation.")
         state.assistant_item_buffered = True
         assert "call_id" in m
         if m.get("namespace") is not None:
@@ -1053,6 +1066,7 @@ class ChatCompletionsConverter(BaseModel):
             parallel_tool_calls=chat_completion_create_params.parallel_tool_calls,
             prompt_cache_key=chat_completion_create_params.prompt_cache_key,
             prompt_cache_retention=chat_completion_create_params.prompt_cache_retention,
+            prompt_cache_options=chat_completion_create_params.prompt_cache_options,
             reasoning=Reasoning(effort=chat_completion_create_params.reasoning_effort)
             if chat_completion_create_params.reasoning_effort is not None
             else None,
@@ -1355,6 +1369,7 @@ class ChatCompletionsConverter(BaseModel):
 _RESPONSE_OUTPUT_BOUNDARY_TYPES = frozenset(
     {
         "code_interpreter_call",
+        "program",
         "computer_call",
         "custom_tool_call",
         "file_search_call",
@@ -1386,6 +1401,7 @@ _RESPONSE_NON_BOUNDARY_TYPES: frozenset[str] = frozenset(
         "computer_call_output",
         "custom_tool_call_output",
         "function_call_output",
+        "program_output",
         "local_shell_call_output",
         "mcp_approval_response",
         "shell_call_output",

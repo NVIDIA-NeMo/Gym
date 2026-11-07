@@ -22,6 +22,7 @@ two directions against drift.
 
 import json
 
+import pytest
 from anthropic.types import Message
 
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
@@ -624,3 +625,39 @@ class TestSharedHelperBranches:
         anthropic_body: dict = {}
         conv._copy_tool_choice({"tool_choice": "required"}, anthropic_body)
         assert anthropic_body["tool_choice"] == {"type": "any"}
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh", "max"])
+def test_anthropic_explicit_effort_is_preserved(effort: str) -> None:
+    body = {"model": "synthetic", "messages": [], "max_tokens": 100, "output_config": {"effort": effort}}
+    converted = _converter().anthropic_request_to_responses(body)
+    assert converted.reasoning == {"effort": effort}
+    assert converted.model_dump(exclude_unset=True)["reasoning"] == {"effort": effort}
+
+
+@pytest.mark.parametrize(
+    "output_config", [None, True, 1, [], "max", {"effort": None}, {"effort": 1}, {"effort": "ultra"}]
+)
+def test_anthropic_invalid_effort_fails_without_payload(output_config: object) -> None:
+    body = {"model": "synthetic", "messages": [], "max_tokens": 100, "output_config": output_config}
+    with pytest.raises(ValueError, match="^Invalid Anthropic output_config"):
+        _converter().anthropic_request_to_responses(body)
+
+
+@pytest.mark.parametrize("extra", [{}, {"output_config": {}}])
+def test_anthropic_omitted_effort_stays_omitted(extra: dict) -> None:
+    body = {"model": "synthetic", "messages": [], "max_tokens": 100, **extra}
+    converted = _converter().anthropic_request_to_responses(body)
+    assert "reasoning" not in converted.model_dump(exclude_unset=True)
+
+
+@pytest.mark.parametrize("count", [None, 0, 7])
+def test_anthropic_cache_creation_usage_preserves_reported_counts(count: int | None) -> None:
+    usage = {"input_tokens": 11, "output_tokens": 3}
+    if count is not None:
+        usage["cache_creation_input_tokens"] = count
+
+    result = _converter()._usage_to_responses_usage(usage)
+
+    assert result.input_tokens_details.cache_write_tokens == count
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (11, 3, 14)

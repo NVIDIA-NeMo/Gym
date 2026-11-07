@@ -2104,6 +2104,7 @@ def test_response_field_set_is_pinned() -> None:
         "prompt",
         "prompt_cache_key",
         "prompt_cache_retention",
+        "prompt_cache_options",
         "reasoning",
         "safety_identifier",
         "service_tier",
@@ -2331,6 +2332,33 @@ def test_chat_request_drops_litellm_provider_specific_fields_from_history() -> N
 
     assert "provider_specific_fields" not in params.messages[1]
     assert params.messages[1]["tool_calls"][0]["function"]["name"] == "bash"
+
+
+@pytest.mark.parametrize("counts", [[], [None], [0], [3], [3, 4], [None, 4], [3, None], [3, None, 4]])
+def test_cache_write_usage_preserves_known_and_unknown(counts: list[int | None]) -> None:
+    usages = []
+    for count in counts:
+        usage = _usage(cached_tokens=0, reasoning_tokens=0)
+        usage.input_tokens_details.cache_write_tokens = count
+        usages.append(usage)
+    before = [usage.model_dump() for usage in usages]
+    expected = sum(counts) if counts and all(count is not None for count in counts) else None
+    summed = NeMoGymResponseUsage.sum_from_list(usages)
+    assert summed.input_tokens_details.cache_write_tokens == expected
+    assert summed.input_tokens == sum(usage.input_tokens for usage in usages)
+    assert summed.output_tokens == sum(usage.output_tokens for usage in usages)
+    assert [usage.model_dump() for usage in usages] == before
+    accumulated = None
+    for usage in usages:
+        accumulated = accumulate_response_usage(accumulated, usage)
+    if accumulated is not None:
+        assert accumulated.input_tokens_details.cache_write_tokens == expected
+
+
+def test_cache_write_usage_omission_is_unknown() -> None:
+    details = NeMoGymResponseInputTokensDetails(cached_tokens=None)
+    assert details.cache_write_tokens is None
+    assert "cache_write_tokens" not in details.model_dump(exclude_unset=True)
 
 
 class TestUntypedInputItems:
