@@ -72,11 +72,42 @@ class TestParseJudgeGrade:
     def test_letter_on_last_line(self) -> None:
         assert parse_judge_grade("Some reasoning\nA") == "A"
 
-    def test_letter_in_text(self) -> None:
+    def test_labelled_letter_in_text(self) -> None:
         assert parse_judge_grade("The grade is A based on analysis") == "A"
 
     def test_fallback_to_b(self) -> None:
         assert parse_judge_grade("no clear grade here") == "B"
+
+    @pytest.mark.parametrize(
+        "text, expected",
+        [
+            ("NOT_ATTEMPTED", "D"),
+            ("CORRECT", "A"),
+            ("INCORRECT", "B"),
+            ("PARTIAL_ANSWER", "C"),
+            ("PARTIAL", "C"),
+            ("The grade is NOT_ATTEMPTED because the model refuses.", "D"),
+            ("C: PARTIAL_ANSWER", "C"),
+            ("Grade: **B**", "B"),
+            ("reasoning\n**A**", "A"),
+            ("reasoning\nD.", "D"),
+        ],
+    )
+    def test_unambiguous_grade_tokens(self, text: str, expected: str) -> None:
+        assert parse_judge_grade(text) == expected
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "A reasonable attempt, but it is not clear",
+            "It is CORRECT in part but also INCORRECT in part",
+            "PARTIALLY_CORRECT",
+            "Not attempted at all",
+            "",
+        ],
+    )
+    def test_ambiguous_text_defaults_to_incorrect(self, text: str) -> None:
+        assert parse_judge_grade(text) == "B"
 
     def test_whitespace_handling(self) -> None:
         assert parse_judge_grade("  D  ") == "D"
@@ -506,8 +537,12 @@ class TestExtractTextNoStrip:
         ("A", "A", True),
         ("B", "B", True),
         ("explanation\nD", "D", True),
-        ("The grade is A based on analysis", "A", False),
+        ("The grade is A based on analysis", "A", True),
+        ("NOT_ATTEMPTED", "D", True),
+        ("CORRECT", "A", True),
+        ("PARTIALLY_CORRECT", "B", False),
         ("no clear grade", "B", False),
+        ("It is CORRECT in part but also INCORRECT in part", "B", False),
     ],
 )
 def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):

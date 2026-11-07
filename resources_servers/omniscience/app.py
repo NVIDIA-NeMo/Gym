@@ -110,26 +110,48 @@ def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool =
     return ""
 
 
-def parse_judge_grade(judge_text: str) -> str:
-    """Parse the single-letter grade (A/B/C/D) from the judge's response.
+# Grade names from the judge prompt, mapped to their letters. Matched case-sensitively
+# and only as whole tokens, so "INCORRECT" never matches "CORRECT" and ordinary prose
+# ("the answer is correct") is ignored.
+_GRADE_KEYWORDS = {
+    "CORRECT": "A",
+    "INCORRECT": "B",
+    "PARTIAL_ANSWER": "C",
+    "PARTIAL": "C",
+    "NOT_ATTEMPTED": "D",
+}
+_GRADE_KEYWORD_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(INCORRECT|CORRECT|PARTIAL_ANSWER|PARTIAL|NOT_ATTEMPTED)(?![A-Za-z0-9_])"
+)
+_LABELLED_LETTER_RE = re.compile(r"(?i:\b(?:grade|verdict))\s*(?:is|:|=)?\s*[\"'*(\[]*([ABCD])\b")
+_LETTER_WRAPPER_CHARS = " \t*_`\"'()[].:"
 
-    Returns "A", "B", "C", or "D". Falls back to "B" (INCORRECT) when the
-    output cannot be reliably parsed.
+
+def parse_judge_grade(judge_text: str) -> str:
+    """Parse the grade letter (A/B/C/D) from the judge's response.
+
+    A grade is accepted only when it is unambiguous: the bare letter, the last
+    line (ignoring markdown or punctuation wrappers), or a single distinct grade
+    named in the text, either as a labelled letter ("Grade: A") or as a grade
+    keyword ("NOT_ATTEMPTED"). ``record_parsed_judge_verdict`` is called only for
+    such a grade. Otherwise the result is "B" (INCORRECT) without a recorded
+    verdict, so the grading stays unknown and can be graded again.
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C", "D"):
         record_parsed_judge_verdict()
         return cleaned
 
-    last_line = cleaned.rsplit("\n", 1)[-1].strip()
-    for letter in ("A", "B", "C", "D"):
-        if last_line == letter:
-            record_parsed_judge_verdict()
-            return letter
+    last_line = cleaned.rsplit("\n", 1)[-1].strip(_LETTER_WRAPPER_CHARS)
+    if last_line in ("A", "B", "C", "D"):
+        record_parsed_judge_verdict()
+        return last_line
 
-    for letter in ("A", "B", "C", "D"):
-        if letter in cleaned:
-            return letter
+    candidates = {m.group(1) for m in _LABELLED_LETTER_RE.finditer(cleaned)}
+    candidates |= {_GRADE_KEYWORDS[m.group(1)] for m in _GRADE_KEYWORD_RE.finditer(cleaned)}
+    if len(candidates) == 1:
+        record_parsed_judge_verdict()
+        return candidates.pop()
 
     return "B"
 
