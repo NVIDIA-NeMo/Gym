@@ -89,6 +89,12 @@ which are removed as the code moves and must not grow. `nemo_gym/verifiers/` sit
 Harbor verifier sandboxes and uses only the standard library. Each package's `__init__.py` docstring says what it holds. Old flat paths such as `nemo_gym.server_utils` still import, with a deprecation warning, until 0.10.0
 (`nemo_gym/_moved_paths.py`). For a summary of each package, see `fern/versions/latest/pages/api-reference/index.mdx`.
 
+`nemo_gym.orchestration` is a Gym-aware orchestrator (submit, Slurm/Kubernetes executors, job tracking). It provides no
+core functionality. No module in `nemo_gym/`, and no server, benchmark or script built on it, may import it, except `nemo_gym/cli/main.py`, which wires the
+orchestration entrypoint into the CLI. If another package needs something that lives there, move that code into the
+package that owns it. Deleting `orchestration/` should leave only the CLI wiring to change.
+`tests/unit_tests/test_orchestration_boundary.py` enforces this.
+
 For full architecture and concepts (environments, training approaches, verification), see `fern/versions/latest/pages/about/`.
 
 ## Creating Environments
