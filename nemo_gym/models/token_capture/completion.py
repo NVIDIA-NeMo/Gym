@@ -6,11 +6,33 @@
 from typing import Any
 
 from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.models.anthropic_converter import AnthropicConverter
 from nemo_gym.models.chat_completions_converter import ChatCompletionsConverter
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
 from nemo_gym.models.token_capture.records import response_to_output_items, strip_token_fields
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.models.token_capture.staging.records import CompletionStatus, OutputValidationItem
+
+
+def completion_replay_items(response: dict[str, Any]) -> list[dict]:
+    """Return the served completion as the request items its echo converts to at ingress.
+
+    Messages ingress uses the shared Anthropic converter, so the served assistant
+    turn goes through the same converter. Other dialects use token-free Responses
+    output items. Replay digests match the next request's prefix when the client
+    echoes the served turn unchanged, apart from fields ignored by the converter.
+    """
+    if response.get("type") == "message" and response.get("role") == "assistant":
+        params = AnthropicConverter().anthropic_request_to_responses(
+            {
+                "model": response.get("model", ""),
+                "max_tokens": 1,
+                "messages": [{"role": "assistant", "content": response.get("content") or []}],
+            }
+        )
+        assert isinstance(params.input, list)
+        return [item.model_dump(mode="json") for item in params.input]
+    return strip_token_fields(response_to_output_items(response))[0]
 
 
 def completion_items(response: dict[str, Any]) -> list[dict]:
