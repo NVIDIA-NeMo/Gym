@@ -66,6 +66,7 @@ bash -lc '
     + """
     """
     + ENSURE_RAY_INSTALLED
+    + "{ray_head}"
     # Ray applies the wait above only to the head waiting for workers: a worker gives up on a late
     # head after ~40s (GcsClient connect timeout), so workers first wait for the head's GCS port.
     # Node 0 is the head here as in the fallback below: the prelude takes RAY_HEAD_NODE_IP from it.
@@ -147,7 +148,9 @@ def escape_for_single_quoted_block(body: str) -> str:
     return body.replace("'", "'\"'\"'")
 
 
-def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_flags: str) -> str:
+def render_vllm_ray_symmetric_run(
+    inner_cmd: str, total_nodes: int, resource_flags: str, ray_head_var: str | None = None
+) -> str:
     """Render the Ray head/worker bootstrap that wraps a single vLLM instance's TP/PP command so
     it spans multiple Slurm nodes.
 
@@ -155,10 +158,15 @@ def render_vllm_ray_symmetric_run(inner_cmd: str, total_nodes: int, resource_fla
     every task and runs the entrypoint only on the elected head node. Containers with an older Ray
     pin fall back to manually starting head/worker Ray processes, keyed on Slurm's per-node task
     rank ($SLURM_NODEID).
+
+    `ray_head_var` names an exported variable holding this service's own Ray head as host:port. It is
+    set when the service's first node is not the allocation's first node, so its head and workers join
+    their own cluster and not the one `RAY_HEAD_NODE_IP` names for the whole job.
     """
     # Only the interpolated values are escaped; the template's own structure is
     # what the quoting is meant to preserve.
     return _VLLM_RAY_SYMMETRIC_RUN.format(
+        ray_head=f'\n    export RAY_HEAD_NODE_IP="${ray_head_var}"' if ray_head_var else "",
         total_nodes=total_nodes,
         resource_flags=escape_for_single_quoted_block(resource_flags),
         inner_cmd=escape_for_single_quoted_block(inner_cmd),
