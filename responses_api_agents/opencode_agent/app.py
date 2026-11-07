@@ -327,9 +327,11 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``compaction.auto`` (a boolean). Automatic compaction summarizes the session and continues from the
       summary, in model calls that do not extend the scored call's prefix. With it off, a run that fills the
       context ends with OpenCode's context-overflow error, which the adapter reports as a context limit.
-    - ``agent.build.steps`` (a positive integer): the most model calls OpenCode makes for one prompt. The session
-      runs OpenCode's ``build`` agent; on the last allowed call OpenCode adds a message that asks for a final
-      answer. Other agent fields would replace the adapter's prompt, model or sampling.
+    - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
+      runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+      asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
+      Other agent fields would replace the adapter's prompt, model or sampling. The seed refuses it with token
+      capture on.
     """
     unsupported = sorted(opencode_config.keys() - {"permission", "tools", "compaction", "agent"})
     if unsupported:
@@ -972,6 +974,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
         config_error = _session_opencode_config_error(self.config.opencode_config)
+        if (
+            config_error is None
+            and self._token_id_capture_enabled()
+            and "steps" in self.config.opencode_config.get("agent", {}).get("build", {})
+        ):
+            # OpenCode sends its last-step prompt as an assistant message, so capture cannot join that call to the
+            # earlier calls of the rollout.
+            config_error = "agent.build.steps cannot be used with token capture"
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
