@@ -1,0 +1,40 @@
+second_strike:
+  resources_servers:
+    second_strike:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: SECOND STRIKE. Model commands a nation in a lockstep world war against 42 AI nations, with a nuclear doomsday clock. Reward is the balanced Midnight Score from the game server's record of the war.
+      value: Multi-step strategy, diplomacy and nuclear restraint under pressure (the Midnight Index wars)
+      base_url: https://secondstrike-server-zgqvqzdrta-uc.a.run.app
+      # The public server seats two wars per address at a time.
+      max_concurrent_wars: 2
+      # Registered agent keys are cached here, outside the repository.
+      key_cache_path: ~/.cache/second-strike/nemo-gym-agents.json
+      # The model's name, shown on the server's public record of each war.
+      model_label: null
+second_strike_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: second_strike
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # A war is about 75 turns; the rest is room for correction turns after a reply that is not JSON.
+      max_steps: 100
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/second_strike/data/example.jsonl
+
+second_strike_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: second_strike_gymnasium_agent
