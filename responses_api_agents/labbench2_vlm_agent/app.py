@@ -22,20 +22,29 @@ either injects ``input_image`` blocks (default) or extracted PDF text as
 is ``protocolqa2`` (so mixed JSONLs can use one run: text for protocols, images
 for figqa2/tableqa2). Non-protocol rows always use the image path when
 ``media_mode=text`` is set.
+
+An agent session gets the same media from the task's ``agent_context`` (``artifacts.media`` and ``values.tag``)
+and embeds it in the episode it creates; the agent loop stays Simple Agent's.
 """
 
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
 from fastapi import Request
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agents import AgentSeedSessionRequest, resolve_agent_context_artifact
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import AgentContextArtifact
+from nemo_gym.trajectory import ObservationGap, TrajectoryRecord
 from resources_servers.labbench2_vlm.prepare_data import embed_media_into_row
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
     SimpleAgentRunRequest,
+    SimpleAgentSessionState,
     SimpleAgentVerifyResponse,
 )
 
@@ -68,13 +77,8 @@ def _effective_media_mode(agent_media_mode: str, verifier_metadata: dict | None)
     return "image"
 
 
-def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
-    """Remove input_image blocks from the serialized rollout result.
-
-    Operates on a dict dump to avoid Pydantic model mutation/serialization issues,
-    then re-validates into the response model.
-    """
-
+def _scrub_image_blocks(value: Any) -> tuple[Any, bool]:
+    """``value`` without its input_image blocks, and whether it had any."""
     removed_image = False
 
     def scrub(value: Any) -> Any:
@@ -91,7 +95,16 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
             return {key: scrub(item) for key, item in value.items()}
         return value
 
-    data = scrub(result.model_dump(mode="json"))
+    return scrub(value), removed_image
+
+
+def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyResponse:
+    """Remove input_image blocks from the serialized rollout result.
+
+    Operates on a dict dump to avoid Pydantic model mutation/serialization issues,
+    then re-validates into the response model.
+    """
+    data, removed_image = _scrub_image_blocks(result.model_dump(mode="json"))
     if removed_image:
         for key in ("ng_trajectory", "ng_agent_observations"):
             observations = data.get(key)
@@ -100,8 +113,75 @@ def _strip_image_blocks(result: SimpleAgentVerifyResponse) -> SimpleAgentVerifyR
     return SimpleAgentVerifyResponse.model_validate(data)
 
 
+def _strip_trajectory_images(trajectory: TrajectoryRecord) -> TrajectoryRecord:
+    """The trajectory without the base64 images its conversations carry, with a gap that says so."""
+    data, removed_image = _scrub_image_blocks(trajectory.model_dump(mode="json"))
+    stripped = TrajectoryRecord.model_validate(data)
+    if removed_image:
+        stripped.gaps.append(ObservationGap(code="multimodal_history_redacted"))
+    return stripped
+
+
+class LabbenchVLMAgentContext(BaseModel):
+    """The ``agent_context`` a labbench2 task carries: its media directory and its subtask tag.
+
+    The tag is required: it picks text or image media for protocolqa2 under ``media_mode=text``, so a row without it
+    would reach the model with a different prompt than on /run.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    media: AgentContextArtifact
+    tag: str
+
+
+@dataclass
+class LabbenchVLMSessionState(SimpleAgentSessionState):
+    # The task's media directory, resolved under media_base_dir when the session is seeded.
+    media_dir: Path | None = None
+    tag: str = ""
+
+
 class LabbenchVLMAgent(SimpleAgent):
     config: LabbenchVLMAgentConfig
+    agent_context_model = LabbenchVLMAgentContext
+
+    def _media_base_dir(self) -> Path:
+        base = Path(self.config.media_base_dir)
+        return base if base.is_absolute() else PARENT_DIR / base
+
+    def _new_session_state(self, body: AgentSeedSessionRequest) -> LabbenchVLMSessionState:
+        # A restore rebuilds sessions through here too, so a restored session keeps its media.
+        state = super()._new_session_state(body)
+        context = self.parse_agent_context(body)
+        media_dir = resolve_agent_context_artifact(context.media, self._media_base_dir(), kind="directory")
+        return LabbenchVLMSessionState(
+            **{field.name: getattr(state, field.name) for field in fields(state)}, media_dir=media_dir, tag=context.tag
+        )
+
+    async def _create_session_episode(
+        self, state: SimpleAgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming, **kwargs: Any
+    ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
+        if isinstance(state, LabbenchVLMSessionState) and state.media_dir is not None:
+            # The same media for the same request, so a retried activation sends the model the same input.
+            row = {
+                "responses_create_params": body.model_dump(mode="json", exclude_unset=True),
+                "verifier_metadata": {"media_dir": state.media_dir.name},
+            }
+            enriched = embed_media_into_row(
+                row,
+                state.media_dir.parent,
+                dpi=self.config.dpi,
+                media_mode=_effective_media_mode(self.config.media_mode, {"tag": state.tag}),
+            )
+            body = NeMoGymResponseCreateParamsNonStreaming.model_validate(enriched["responses_create_params"])
+        model_response, trajectory, model_cookies, resources_cookies = await super()._create_session_episode(
+            state, body, **kwargs
+        )
+        # A session's trajectory reaches its observations and the rollout record; keep the base64 images out of both.
+        if trajectory is not None and self.config.strip_images_from_output:
+            trajectory = _strip_trajectory_images(trajectory)
+        return model_response, trajectory, model_cookies, resources_cookies
 
     async def run(self, request: Request, body: SimpleAgentRunRequest) -> SimpleAgentVerifyResponse:
         resolved_base = Path(self.config.media_base_dir)

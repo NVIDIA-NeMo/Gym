@@ -27,6 +27,7 @@ from nemo_gym.data.task_data import (
     normalize_task_fields,
     validate_jsonl_rows,
 )
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
 
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -42,6 +43,13 @@ class TestNormalizeTaskFields:
         fields, conflicts = normalize_task_fields(row)
         assert fields == {"question": "q"}
         assert conflicts == []
+
+    def test_agent_context_is_not_task_data(self):
+        """A row's agent_context goes to the agent, so a server's TaskData schema never reports it as unknown."""
+        fields, _ = normalize_task_fields(
+            {"verifier_metadata": {"label": "safe"}, "agent_context": {"artifacts": {"media": {"path": "figs/1"}}}}
+        )
+        assert fields == {"label": "safe"}
 
     def test_splices_verifier_metadata_contents(self):
         fields, conflicts = normalize_task_fields(
@@ -160,6 +168,18 @@ class TestTaskDataValidator:
         assert v.report.error_rows == 1
         assert "expected_answer" in v.report.errors[0]
         assert "0/" not in v.report.summary().splitlines()[0]
+
+    def test_agent_context_inside_task_data_is_not_a_task_field(self):
+        """The task input lifts agent_context out of the task_data container, so dataset validation skips it there."""
+        row = {
+            "responses_create_params": {"input": "q"},
+            "task_data": {"question": "q", "expected_answer": "a", "agent_context": {"values": {"tag": "figqa2"}}},
+        }
+        v = self._validator()
+        v.validate_row(0, row)
+
+        assert v.report.clean, v.report.summary()
+        assert SingleAgentTurnTaskInput.model_validate(row).task_data == {"question": "q", "expected_answer": "a"}
 
     def test_verifier_metadata_rows_validate_against_flat_schema(self):
         v = self._validator()
