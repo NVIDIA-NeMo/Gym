@@ -244,16 +244,20 @@ These are known and deliberate; each is a follow-up rather than a bug.
   Profile that variance — repeated grading of one fixed app — before treating this as a
   training signal. `REVERIFY_MODE` is `UNSUPPORTED` for the same reason: scores cannot be
   recomputed from stored rollouts, since grading depends on live app and database state.
+- **Grading has not been re-run on `v2.0.7`.** The grader's base image and runner scripts now
+  come from that tag's `_harness/`; the results under Validation were graded on a checkout
+  from before ViBench 2.0.
 - **`mvp` artifacts only.** Feature tasks need sandbox staging of a starting codebase; see above.
 - **Cost per rollout is high**: one coding agent, plus a seeding agent and an evaluation
   agent per test plan.
 
 ## Anti-cheat
 
-The build sandbox receives the PRD and `<app>/assets/` only. Test plans and `test_assets/`
-are never staged into it — they are read at grade time by the resources server. Dataset paths
-are resolved against `vibench_repo_root` and rejected if they escape it. The harvested tarball
-is untrusted: unpacking refuses members and links that escape the app directory.
+The build sandbox receives the PRD and `v1/prds/<app>/assets/` (`prds/<app>/assets/` before
+ViBench 2.0) only. Test plans and `test_assets/` are never staged into it — they are read at
+grade time by the resources server. Dataset paths are resolved against `vibench_repo_root` and
+rejected if they escape it. The harvested tarball is untrusted: unpacking refuses members and
+links that escape the app directory.
 
 ## Licensing
 

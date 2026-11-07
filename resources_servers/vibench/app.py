@@ -347,10 +347,10 @@ class VibenchResourcesServer(SimpleResourcesServer):
 
     @property
     def _vibench_python(self) -> str:
-        """ViBench's own interpreter when the checkout has one.
+        """ViBench's own interpreter when the checkout has one, else the Gym component's.
 
-        Its scripts import ViBench's dependencies, which are not in the Gym component venv;
-        prepare.py already resolves the same checkout this way.
+        ViBench 1.0's venv is in v1/ since vibench-public 2.0 and at the root before it;
+        prepare.py resolves the same checkout this way.
         """
         for candidate in (
             self._repo_root / "v1" / ".venv" / "bin" / "python",
