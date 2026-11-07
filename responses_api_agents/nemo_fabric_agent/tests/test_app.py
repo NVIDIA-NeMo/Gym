@@ -13,6 +13,7 @@ import pytest
 from nemo_fabric import Fabric
 from omegaconf import OmegaConf
 
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, agent_outcome_policy
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
@@ -88,6 +89,13 @@ class _FakeResult:
             "status": self.status,
             "output": dict(self.output),
             "request_id": "request-1",
+            "error": {
+                "code": self.error.code,
+                "message": self.error.message,
+                "metadata": self.error.metadata,
+            }
+            if self.error is not None
+            else None,
         }
 
 
@@ -256,6 +264,7 @@ def test_fabric_config_injects_model_workspace_mcp_and_skills(tmp_path: Path) ->
         "nemo_fabric_deepagents",
         "nemo_fabric_hermes",
         "nemo_fabric_mini_swe_agent",
+        "nemo_fabric_openclaw",
         "nemo_fabric_openhands",
     ],
 )
@@ -284,6 +293,11 @@ def test_harness_presets_pass_fabric_planning(preset_name: str, tmp_path: Path) 
     )
 
     assert Fabric().plan(config, base_dir=tmp_path).adapter.adapter_id == merged["adapter_id"]
+    if preset_name == "nemo_fabric_mini_swe_agent":
+        # 0.6.1 ignores MSWEA_COST_TRACKING; an unpriced Gym alias otherwise fails after its first model call.
+        mapping = config.to_mapping()
+        assert mapping["models"]["default"]["settings"]["cost_tracking"] == "disabled"
+        assert mapping["runtime"]["max_turns"] > 0
 
 
 def test_rollout_mcp_metadata_is_optional_and_headers_are_optional(caplog) -> None:
@@ -527,33 +541,25 @@ def test_relay_is_skipped_for_adapters_without_relay_support(tmp_path: Path) -> 
     assert "relay_atif" not in fabric_result
 
 
-@pytest.mark.parametrize("compatible", [False, True])
-def test_relay_follows_the_hermes_compatibility_check(compatible: bool, tmp_path: Path) -> None:
+def test_relay_is_skipped_when_hermes_agent_cannot_run_it(tmp_path: Path) -> None:
     agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.hermes")
     fabric = MagicMock()
     fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
     fabric.run = AsyncMock(return_value=_FakeResult())
-    check = MagicMock(
-        returncode=0 if compatible else 1, stderr="" if compatible else "Hermes Agent without Relay support"
-    )
     with (
         patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
         patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
-        patch("responses_api_agents.nemo_fabric_agent.app.subprocess.run", return_value=check) as run_check,
+        patch(
+            "responses_api_agents.nemo_fabric_agent.app.subprocess.run",
+            return_value=MagicMock(returncode=1, stderr="Hermes Agent without Relay support"),
+        ),
     ):
         _, fabric_result = asyncio.run(
             agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
         )
 
-    run_check.assert_called_once()
-    config = fabric.run.call_args.args[0].to_mapping()
-    if compatible:
-        assert "relay" in config["telemetry"]["providers"]
-        assert config["relay"]["observability"]["atif"]["enabled"] is True
-        assert fabric_result["relay_atif"] == []
-    else:
-        assert "relay" not in config
-        assert "relay_atif" not in fabric_result
+    assert "relay" not in fabric.run.call_args.args[0].to_mapping()
+    assert "relay_atif" not in fabric_result
 
 
 def test_atif_inlines_subagent_trajectories_and_skips_wrapper_steps() -> None:
@@ -846,7 +852,7 @@ def test_atif_skips_copied_context_steps() -> None:
 
 
 def test_atif_keeps_relay_structured_tool_results() -> None:
-    fixture = Path(__file__).parents[3] / "tests/unit_tests/trajectory/fixtures/relay_atif_v1_7_tool_trajectory.json"
+    fixture = Path(__file__).parent / "fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")
 
     calls = [item for item in items if item.type == "function_call"]
@@ -1111,3 +1117,213 @@ def test_atif_trajectories_skips_partial_or_undecodable_artifacts(tmp_path: Path
     whole.write_text(json.dumps({"steps": []}))
     artifacts = [{"kind": "atif", "path": str(p)} for p in (cut_utf8, truncated, whole)]
     assert _atif_trajectories({"relay_artifacts": artifacts}) == [{"steps": []}]
+
+
+async def test_host_adapter_setup_is_lazy_shared_and_retries_after_failure(monkeypatch):
+    import threading
+
+    agent = _agent(adapter_project="hermes_env")
+    entered, release = threading.Event(), threading.Event()
+    calls = []
+
+    def install():
+        calls.append(True)
+        entered.set()
+        assert release.wait(10)
+        return "/private/hermes/bin/python"
+
+    monkeypatch.setattr(NeMoFabricAgent, "_install_host_adapter", lambda _: install())
+    assert not calls  # construction must not install an unused host runtime for sandbox sessions
+    first = asyncio.create_task(agent._ensure_host_adapter())
+    assert await asyncio.to_thread(entered.wait, 10)
+    second = asyncio.create_task(agent._ensure_host_adapter())
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, second)
+    assert len(calls) == 1 and agent._adapter_python == "/private/hermes/bin/python"
+
+    agent = _agent(adapter_project="hermes_env")
+    with patch.object(NeMoFabricAgent, "_install_host_adapter", side_effect=RuntimeError("install failed")):
+        with pytest.raises(RuntimeError, match="install failed"):
+            await agent._ensure_host_adapter()
+    assert agent._adapter_python is None
+    await agent._ensure_host_adapter()
+    assert agent._adapter_python == "/private/hermes/bin/python"
+
+
+async def test_separate_host_adapter_uses_worker_result_without_global_python_mutation(tmp_path, monkeypatch):
+    agent = _agent(cwd=str(tmp_path), adapter_project="hermes_env")
+    agent._adapter_python = "/hermes/python"
+    monkeypatch.setenv("ADAPTER_PYTHON", "/other-agent/python")
+    result = _FakeResult().to_mapping()
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://model/v1"),
+        patch.object(NeMoFabricAgent, "_run_host_adapter", new=AsyncMock(return_value=result)) as run,
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric") as fabric,
+    ):
+        response, _ = await agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+    assert response.output[0].content[0].text == "fabric answer"
+    assert run.call_args.kwargs["workspace"] == str(tmp_path)
+    fabric.assert_not_called()
+    assert os.environ["ADAPTER_PYTHON"] == "/other-agent/python"
+
+
+@pytest.mark.parametrize(
+    ("status", "action"),
+    [(400, "verify"), (413, "verify"), (422, "verify"), (429, "retry"), (503, "retry"), (401, "fail")],
+)
+def test_structured_claude_model_failure_preserves_environment_policy(status, action):
+    result = {
+        "status": "failed",
+        "output": {"response": None},
+        "error": {
+            "stage": "invoke",
+            "code": "claude_result_failed",
+            "message": "Claude returned an error result",
+            "retryable": False,
+            "metadata": {"subtype": "error_during_execution", "api_error_status": status},
+        },
+    }
+    response, saved = _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), result, []
+    )
+    assert response.status == "failed"
+    outcome = AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY])
+    assert outcome.failure_kind == "model_request_error" and outcome.status_code == status
+    assert agent_outcome_policy(response).value == action
+    assert saved["error"] == result["error"]
+    assert response.usage is None
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        {"code": "worker_failed", "message": "HTTP 400"},
+        {"code": "claude_result_failed", "metadata": {"subtype": "error_during_execution", "api_error_status": "400"}},
+        {"code": "claude_result_failed", "metadata": {"subtype": "error_during_execution", "api_error_status": True}},
+    ],
+)
+def test_unclassified_worker_errors_do_not_become_model_failures(error):
+    with pytest.raises(RuntimeError, match="Fabric invocation failed"):
+        _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+            NeMoGymResponseCreateParamsNonStreaming(input="task"), {"status": "failed", "error": error}, []
+        )
+
+
+@pytest.mark.parametrize("container", ["metadata", "extensions"])
+@pytest.mark.parametrize("includes_cache", [False, True])
+def test_detailed_claude_usage_reports_inclusive_input_and_total(container, includes_cache):
+    details = {
+        "input_tokens": 60 if includes_cache else 10,
+        "cached_input_tokens": 30,
+        "cache_write_input_tokens": 20,
+        "input_tokens_include_cache": includes_cache,
+        "output_tokens": 5,
+        "output_tokens_include_reasoning": True,
+    }
+    result = {
+        "status": "succeeded",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            container: {"nemo_fabric.detailed_token_usage.v1": details},
+        },
+        "output": {
+            "response": "answer",
+            "usage": {
+                "input_tokens": 10,
+                "cache_read_input_tokens": 30,
+                "cache_creation_input_tokens": 20,
+                "output_tokens": 5,
+            },
+        },
+    }
+    response, _ = _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), result, []
+    )
+    assert response.usage.input_tokens == 60
+    assert response.usage.total_tokens == 65
+    assert response.usage.input_tokens_details.cached_tokens == 30
+    assert response.usage.input_tokens_details.cache_write_tokens == 20
+    assert response.usage.output_tokens_details.reasoning_tokens is None
+
+
+@pytest.mark.parametrize(
+    "missing", ["input_tokens", "cached_input_tokens", "cache_write_input_tokens", "input_tokens_include_cache"]
+)
+def test_partial_detailed_usage_never_falls_back_to_an_exclusive_subtotal(missing):
+    details = {
+        "input_tokens": 10,
+        "cached_input_tokens": 30,
+        "cache_write_input_tokens": 20,
+        "input_tokens_include_cache": False,
+        "output_tokens": 5,
+        "output_tokens_include_reasoning": True,
+    }
+    del details[missing]
+    result = {
+        "status": "succeeded",
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "metadata": {"nemo_fabric.detailed_token_usage.v1": details},
+        },
+        "output": {"response": "answer"},
+    }
+    response, _ = _agent(adapter_id="nvidia.fabric.claude")._response_from_result(
+        NeMoGymResponseCreateParamsNonStreaming(input="task"), result, []
+    )
+    assert response.usage is None
+
+
+@pytest.mark.parametrize(("included", "expected"), [(False, 12), (True, 5), (None, None)])
+def test_detailed_reasoning_is_added_only_when_declared_exclusive(included, expected):
+    result = {
+        "status": "succeeded",
+        "output": {"response": "answer"},
+        "usage": {
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "metadata": {
+                "nemo_fabric.detailed_token_usage.v1": {
+                    "output_tokens": 5,
+                    "reasoning_tokens": 7,
+                    "output_tokens_include_reasoning": included,
+                }
+            },
+        },
+    }
+    response, _ = _agent()._response_from_result(NeMoGymResponseCreateParamsNonStreaming(input="task"), result, [])
+    if expected is None:
+        assert response.usage is None
+    else:
+        assert response.usage.output_tokens == expected
+        assert response.usage.total_tokens == 10 + expected
+
+
+@pytest.mark.parametrize("status", [400, 429, 503])
+async def test_host_execution_keeps_ungradable_model_failures_on_the_exception_path(status, tmp_path):
+    from types import SimpleNamespace
+
+    instance = _agent(cwd=str(tmp_path), adapter_id="nvidia.fabric.claude")
+    result = _FakeResult()
+    result.status = "failed"
+    result.error = SimpleNamespace(
+        code="claude_result_failed",
+        message="model request rejected",
+        metadata={"subtype": "error_during_execution", "api_error_status": status},
+    )
+    fabric = MagicMock()
+    fabric.run = AsyncMock(return_value=result)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://model/v1"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        body = NeMoGymResponseCreateParamsNonStreaming(input="task")
+        if status == 400:
+            response, _ = await instance._create_response(body)
+            assert response.status == "failed" and response.error.message == "model request rejected"
+        else:
+            with pytest.raises(RuntimeError, match="Fabric invocation failed"):
+                await instance._create_response(body)

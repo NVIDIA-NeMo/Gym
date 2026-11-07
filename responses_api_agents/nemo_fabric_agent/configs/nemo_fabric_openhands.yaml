@@ -10,11 +10,3 @@ nemo_fabric_openhands:
       model_provider: openai
       harness_settings: {}
       fabric_config: {}
-
-nemo_fabric_openhands_environment_server:
-  environment_servers:
-    legacy_agent:
-      entrypoint: app.py
-      agent_server:
-        type: responses_api_agents
-        name: nemo_fabric_openhands

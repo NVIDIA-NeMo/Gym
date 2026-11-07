@@ -88,6 +88,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
         "harbor_oracle_agent",
         "terminus_2_sandboxed_agent",
         "miniswe_sandboxed_agent",
+        "nemo_fabric_agent",
     ],
 )
 def test_migration_respects_agent_session_templates(
@@ -160,6 +161,20 @@ def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: P
     resolved = _parse(config, composition, strict=True)
     assert _environment_servers_by_agent(resolved) == {agent_type: ["session_environment"]}
     assert resolved[agent_type].responses_api_agents[agent_type].resources_server is None
+
+
+@pytest.mark.parametrize("preset", ["claude", "mini_swe_agent", "deepagents"])
+def test_fabric_preset_composes_with_exactly_one_session_environment(tmp_path: Path, preset: str) -> None:
+    agent_name = f"nemo_fabric_{preset}"
+    config = tmp_path / "run.yaml"
+    config.write_text(
+        "config_paths:\n"
+        f"  - responses_api_agents/nemo_fabric_agent/configs/{agent_name}.yaml\n"
+        + _server_fronting(agent_name, name="session_environment", server_type="single_agent_turn_legacy")
+    )
+    resolved = _parse(config, strict=True)
+    assert _environment_servers_by_agent(resolved) == {agent_name: ["session_environment"]}
+    assert resolved[agent_name].responses_api_agents.nemo_fabric_agent.resources_server is None
 
 
 def test_default_codex_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
