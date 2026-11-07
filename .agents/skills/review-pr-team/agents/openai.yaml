@@ -1,0 +1,4 @@
+interface:
+  display_name: "NeMo Gym Team PR Review"
+  short_description: "Review a Gym pull request with a team of agents and stage the review after sign-off"
+  default_prompt: "Use $review-pr-team to review NVIDIA-NeMo/Gym PR <number>."
