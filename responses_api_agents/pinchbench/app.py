@@ -505,13 +505,19 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
             if t.get("task_id") == task_id:
                 g = t.get("grading") or {}
                 run0 = (g.get("runs") or [{}])[0]
-                return {
+                result = {
                     "reward": float(g.get("mean", 0.0)),
                     "grading_type": run0.get("grading_type", "unknown"),
                     "breakdown": run0.get("breakdown", {}),
                     "notes": run0.get("notes", ""),
-                    "status": "success",
+                    # the skill's own run status ("success", "timeout" or "error"); a timed-out
+                    # run is still graded, so the reward above is unaffected
+                    "status": t.get("status") or "success",
                 }
+                for key in ("timed_out", "execution_time"):
+                    if key in t:
+                        result[key] = t[key]
+                return result
         return {"reward": 0.0, "grading_type": "unknown", "breakdown": {}, "notes": "", "status": "missing_task"}
 
     @staticmethod
@@ -900,6 +906,9 @@ class PinchBenchAgent(SimpleResponsesAPIAgent):
         }
         if non_clean_exit_rc is not None:
             raw_rollout["non_clean_exit_rc"] = non_clean_exit_rc
+        for key in ("timed_out", "execution_time"):
+            if key in result:
+                raw_rollout[key] = result[key]
 
         return PinchBenchVerifyResponse(
             **record,
