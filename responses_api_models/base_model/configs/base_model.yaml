@@ -1,0 +1,42 @@
+# A raw BASE checkpoint served behind the Responses API.
+#
+# Base models have no chat template and no tool calling, so this server flattens
+# the conversation to a `Role: content` transcript and calls /v1/completions
+# with a steer, an "Assistant: " primer and an opening action fence as prefill.
+#
+# BEFORE QUOTING ANY SCORE, probe the endpoint with the EXACT model name you
+# will send, against /v1/completions -- not /v1/models. A router answers HTTP
+# with no worker attached (503 "no active backend is ready for new requests"),
+# and a generation-side failure never reaches the verifier: the rollout falls
+# back to a prefix-only patch and scores a legitimate-looking 0.
+policy_model:
+  responses_api_models:
+    base_model:
+      entrypoint: app.py
+      openai_base_url: ${policy_base_url}
+      # Self-hosted vLLM ignores this. Deliberately NOT ${policy_api_key}: that
+      # key belongs to a different provider and should not be sent to a
+      # checkpoint host just because both are reachable.
+      openai_api_key: unused-for-local-vllm
+      # vLLM commonly serves a local checkpoint as literally "model"; hosted
+      # endpoints use the full slug. Hostnames lie -- confirm by probing.
+      openai_model: ${policy_model_name}
+
+      # The steer NAMES THE REPO ROOT. The default is /testbed (SWE-bench
+      # Verified); SWE-bench Pro is /app. A wrong root produces a syntactically
+      # perfect command against a path that does not exist -- a 0-byte patch
+      # that reads as model weakness rather than misconfiguration.
+      # steer: "..."
+
+      # The wire's default stop list fits the OpenAI cap of four entries, which
+      # some servers enforce by 400ing the whole request. Override it only to
+      # change where a turn ends.
+      # stop: ["\nTool Result:", "\nUser:", "\nSystem:", "\nAssistant:"]
+
+      # The reference bridge's values. 0.6 was its one sampling lever that moved
+      # scores (1.0 measurably penalises weaker checkpoints); 1024 tokens binds
+      # on the function-calling wire and is harmless on backticks, where the
+      # stop list ends the turn.
+      max_tokens: 1024
+      temperature: 0.6
+      debug: false

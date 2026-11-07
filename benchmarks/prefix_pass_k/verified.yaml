@@ -1,0 +1,69 @@
+# Prefix pass@K on SWE-bench Verified.
+#
+# Rows pin each instance to its decisive turn T. A rollout replays the captured
+# turns 1..T-1 into a fresh task container and the candidate must produce T
+# onward; scoring is the stock SWE-bench verification.
+#
+# `num_repeats` IS K. Gym reports mean reward (n_pass/K, sampled pass@1 at the
+# arm's temperature) and pass@K (n_pass >= 1, a prefix-conditioned potential
+# proxy) from the same rollouts; their difference is the diversity bonus.
+#
+# The checkpoint under test is `policy_model` from
+# responses_api_models/base_model/configs/base_model.yaml: point it at yours in
+# env.yaml (policy_base_url, policy_model_name) or on the command line.
+#
+# Gold check before quoting any number — replay 1..T with no model turns and
+# confirm it reproduces the trajectory's resolving patch:
+#   +prefix_pass_k_agent_verified.responses_api_agents.prefix_pass_k_agent.replay_through_target=true
+config_paths:
+- responses_api_agents/prefix_pass_k_agent/configs/prefix_pass_k_agent.yaml
+- resources_servers/swebench/configs/swebench.yaml
+
+prefix_pass_k_verified_resources_server:
+  _inherit_from: swebench_resources_server
+  resources_servers:
+    swebench:
+      allowed_agents: [prefix_pass_k_agent]
+      # SWE-bench Verified repos ship clean, and the replayed prefix must see
+      # the same history the trajectory saw.
+      apply_anti_cheating: false
+
+prefix_pass_k_agent_verified:
+  _inherit_from: prefix_pass_k_agent
+  responses_api_agents:
+    prefix_pass_k_agent:
+      resources_server:
+        type: resources_servers
+        name: prefix_pass_k_verified_resources_server
+      # As the reference replayed: `bash -c` with mini's env and BASH_ENV, whose
+      # .bashrc activates the image's conda `testbed` env. LANG/LC_ALL stay:
+      # the sandbox spec drops the image's own locale (see the agent).
+      interpreter: [bash, -c]
+      exec_env:
+        LANG: C.UTF-8
+        LC_ALL: C.UTF-8
+        PAGER: cat
+        MANPAGER: cat
+        LESS: -R
+        PIP_PROGRESS_BAR: "off"
+        TQDM_DISABLE: "1"
+        BASH_ENV: /root/.bashrc
+      record_git_state: true
+      # The SWE-bench server grades `git diff`, which misses work a rollout
+      # committed, staged or created; fold it back before grading, as the
+      # decisive turns were located (`git add -A && git diff --cached <base>`).
+      uncommit_worktree: true
+      datasets:
+        - name: prefix_pass_k_verified
+          type: benchmark
+          jsonl_fpath: benchmarks/prefix_pass_k/data/prefix_pass_k_verified_benchmark.jsonl
+          prepare_script: benchmarks/prefix_pass_k/prepare.py
+          num_repeats: 32
+
+prefix_pass_k_agent_verified_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: prefix_pass_k_agent_verified
