@@ -190,6 +190,11 @@ def _judge_error(
     each of its attempts with ``operation_id`` and ``attempt_id`` and records the reply's status.
     """
     message = f"{type(error).__name__}: {error}"
+    content = getattr(error, "response_content", None)
+    if content:
+        # The reply's own body names the upstream cause (a rejected credential, say), bounded like the reason.
+        text = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
+        message += f"; reply: {bounded_text(text, 500)}"
     return judge_call_failed(
         message,
         operation="judge.request",

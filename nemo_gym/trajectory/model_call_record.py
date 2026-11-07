@@ -311,6 +311,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
                 response.get("stop_reason"),
                 first_choice.get("finish_reason"),
                 incomplete_details.get("reason"),
+                # A Responses payload says nothing for a completed call; its adapter noted the chat finish reason.
+                exchange.get("finish_reason"),
             )
             if isinstance(value, str)
         ),
