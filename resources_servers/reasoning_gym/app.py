@@ -165,11 +165,12 @@ def _last_boxed_content(text: str) -> Optional[str]:
 def _normalize_latex_text(answer: str) -> str:
     """Turn LaTeX text markup inside a box back into plain text: ``\\ `` spaces, ``\\text{...}`` wrappers, ``$``.
 
-    The answer's own whitespace is kept: a common indent is removed (a box written as an indented block) and each
-    line is right-stripped, but line breaks and runs of spaces within a line stay, because they are part of the
-    oracle in grid tasks (``rotate_matrix``, ``futoshiki``), ``emoji_mystery`` sentences and ``codeio`` strings.
+    The answer's own whitespace is kept: a common indent is removed (a box written as an indented block, also when
+    a ``\\text{}`` or ``$`` wrapper sits around or inside it) and each line is right-stripped, but line breaks and
+    runs of spaces within a line stay, because they are part of the oracle in grid tasks (``rotate_matrix``,
+    ``futoshiki``), ``emoji_mystery`` sentences and ``codeio`` strings.
     """
-    text = textwrap.dedent(answer).strip().strip("$").strip()
+    text = re.sub(r"^\s*\$+|\$+\s*$", "", answer)
     # Unwrap \text{...}-style wrappers wherever they appear, innermost last, so nested wrappers all go.
     while True:
         match = _LATEX_TEXT_WRAPPER.search(text)
@@ -179,6 +180,9 @@ def _normalize_latex_text(answer: str) -> str:
         if end is None:
             break
         text = text[: match.start()] + text[match.end() : end] + text[end + 1 :]
+    # Dedent only now: a wrapper or $ around an indented block sits at column 0 itself, so a dedent before the
+    # unwrapping would see no common indent to remove.
+    text = textwrap.dedent(text).strip()
     # A thin space between digits is a thousands separator (1\,000); elsewhere \, is a space, like \  and \;.
     text = re.sub(r"(?<=\d)\\,(?=\d)", "", text)
     text = text.replace("\\ ", " ").replace("\\,", " ").replace("\\;", " ").replace("\\!", "")

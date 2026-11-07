@@ -338,11 +338,24 @@ class TestAnswerExtraction:
                 lambda gold: "\\boxed{\n" + "\n".join("    " + row for row in gold.splitlines()) + "\n}",
             ),
             ("boxed_rows_latex_spaces", lambda gold: "\\boxed{" + gold.replace(" ", "\\ ") + "}"),
+            (
+                "boxed_rows_indented_block_in_text_wrapper",
+                lambda gold: "\\boxed{\\text{\n" + "\n".join("    " + row for row in gold.splitlines()) + "\n}}",
+            ),
+            (
+                "boxed_rows_indented_block_in_dollars",
+                lambda gold: "\\boxed{$\n" + "\n".join("    " + row for row in gold.splitlines()) + "\n$}",
+            ),
+            (
+                "boxed_rows_each_in_text_wrapper",
+                lambda gold: "\\boxed{\n" + "\n".join("    \\text{" + row + "}" for row in gold.splitlines()) + "\n}",
+            ),
         ],
     )
     async def test_boxed_grid_answers_keep_their_rows(self, server, label, build):
         # rotate_matrix, binary_matrix and pool_matrix oracles are newline-separated rows scored by exact match, so
-        # the box normalization may remove a common indent but never join rows.
+        # the box normalization may remove a common indent but never join rows. The indent is removed also when a
+        # \text{} or $ wrapper sits around the block (the wrapper itself is at column 0) or on each row.
         entry, gold = _rotate_matrix_entry()
         result = await server.verify(_verify_request(entry, [_message(0, build(gold))]))
         assert result.extracted_answer == gold, label
