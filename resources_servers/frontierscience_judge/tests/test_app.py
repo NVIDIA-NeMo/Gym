@@ -18,15 +18,15 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError, judge_failsafe
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.frontierscience_judge.app import (
     FrontierScienceJudgeConfig,
     FrontierScienceJudgeServer,
@@ -81,6 +81,14 @@ class TestParseJudgement:
 
 
 class TestParseRubricScore:
+    @mark.parametrize("score", ["0", "2.5", "7", "10", ".5"])
+    def test_numeric_only_response(self, score: str) -> None:
+        assert parse_rubric_score("\n " + score + " \n") == approx(float(score))
+
+    @mark.parametrize("text", ["11", "-1", "nan", "inf", "7/10", "Reasoning\n7", "7\nReasoning"])
+    def test_numeric_fallback_requires_one_bounded_score(self, text: str) -> None:
+        assert parse_rubric_score(text) is None
+
     @mark.parametrize(
         "verdict",
         [
@@ -533,7 +541,10 @@ class TestFrontierScienceJudgeServer:
         assert result.rubric_score_normalized == approx(0.7)
         assert not result.invalid_judge_response
 
-    async def test_verify_research_mode_fails_below_threshold(self, config: FrontierScienceJudgeConfig) -> None:
+    @mark.parametrize("judge_text,score", [("Rubric notes...\nVERDICT: 6.5", 6.5), ("0", 0)])
+    async def test_verify_research_mode_fails_below_threshold(
+        self, config: FrontierScienceJudgeConfig, judge_text: str, score: float
+    ) -> None:
         rubric_config = config.model_copy(deep=True)
         rubric_config.judge_mode = "research"
         rubric_config.judge_prompt_path = "resources_servers/frontierscience_judge/prompts/research_judge.yaml"
@@ -542,7 +553,7 @@ class TestFrontierScienceJudgeServer:
         server = FrontierScienceJudgeServer(config=rubric_config, server_client=server_mock)
 
         response_mock = AsyncMock()
-        response_mock.json = AsyncMock(return_value=self._make_judge_response("Rubric notes...\nVERDICT: 6.5"))
+        response_mock.json = AsyncMock(return_value=self._make_judge_response(judge_text))
         response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
         server_mock.post = AsyncMock(return_value=response_mock)
 
@@ -558,8 +569,8 @@ class TestFrontierScienceJudgeServer:
         result = await server.verify(request)
         assert result.reward == approx(0.0)
         assert result.verdict == "NO"
-        assert result.rubric_score == approx(6.5)
-        assert result.rubric_score_normalized == approx(0.65)
+        assert result.rubric_score == approx(score)
+        assert result.rubric_score_normalized == approx(score / 10)
 
     async def test_verify_research_mode_prompt_contains_rubric(self, config: FrontierScienceJudgeConfig) -> None:
         rubric_config = config.model_copy(deep=True)

@@ -268,7 +268,7 @@ test("the default event writer reaches stdout past Pi's redirect", async () => {
   assert.equal(JSON.parse(child.stdout).type, "ng_gym_mcp_server_skipped");
 });
 
-test("a configured finish tool that no server offers fails setup", async (t) => {
+test("a configured finish tool must be offered, and by one server only", async (t) => {
   const f = await fixture(t);
   const a = agent();
   await assert.rejects(
@@ -281,6 +281,27 @@ test("a configured finish tool that no server offers fails setup", async (t) => 
   await assert.rejects(
     registerGymTools(agent(), { tavily: { ...f.config, terminal_tools: ["finish"] }, gdpval: down }, { emit: () => {} }),
     /^Error: No Gym MCP server offers the finish tools finish \(skipped optional servers: gdpval\)$/,
+  );
+  // Names are matched without the server, so either server's web_search would end the run.
+  const b = agent();
+  const search = { ...f.config, terminal_tools: ["web_search"] };
+  await assert.rejects(
+    registerGymTools(b, { tavily: search, web: search }),
+    /^Error: The required Gym MCP servers tavily, web offer the same finish tools$/,
+  );
+  assert.deepEqual(b.tools, []);
+  // As for grant names, an optional server is left out instead, so two optional ones leave no finish tool.
+  const c = agent();
+  const events = [];
+  await registerGymTools(c, { web: { ...search, required: false }, tavily: search }, { emit: (e) => events.push(e) });
+  assert.deepEqual(c.tools.map((tool) => tool.name), ["tavily_web_search"]);
+  assert.deepEqual(events, [
+    { type: "ng_gym_mcp_server_skipped", server: "web", error: "it shares finish tools with tavily" },
+  ]);
+  const optional = { ...search, required: false };
+  await assert.rejects(
+    registerGymTools(agent(), { web: optional, tavily: optional }, { emit: () => {} }),
+    /^Error: No Gym MCP server offers the finish tools web_search \(skipped optional servers: web, tavily\)$/,
   );
 });
 

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest
 from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse, model_response
 from responses_api_agents.nooa_agent.tests.test_runner import make_runner
@@ -42,3 +42,26 @@ async def test_model_transport_failure_requires_a_successful_retry(recover: bool
         assert caught.value.__cause__ is transport_error
         assert caught.value.result.termination_reason is None
         assert runner._server_client.post.await_count == 1
+
+
+async def test_swallowed_history_preparation_failure_is_ungradable_without_dispatch() -> None:
+    runner, _ = make_runner()
+    runner._server_client.post = AsyncMock()
+
+    async def invoke(agent, request):
+        try:
+            await agent.llm.acall([{"role": "assistant", "reasoning_content": {"invalid": "object"}}])
+        except ValueError:
+            pass
+        return "fallback answer"
+
+    runner._invocation_adapter = invoke
+    request = NOOARunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="question"),
+        model_url_path="/v1/responses",
+    )
+    with pytest.raises(NOOARunFailure) as caught:
+        await runner.run(request)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert caught.value.result.termination_reason is None
+    runner._server_client.post.assert_not_awaited()

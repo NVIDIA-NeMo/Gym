@@ -27,7 +27,7 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from uuid import uuid4
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 
 
@@ -128,22 +128,13 @@ def _unpack(
 # or `/logs`. Preserve the task's file modes. Some images run without the capability to switch
 # users at all; those fall back to the default user.
 TRANSFER_USER = "root"
-_NO_ROOT_MARKERS = ("CAP_SETUID", "identity switch", "switching to uid=0", "operation not permitted")
 
 
 async def exec_as_root(sandbox: AsyncSandbox, command: str, *, timeout_s: float) -> SandboxExecResult:
     """Run ``command`` as root, or as the default user when the sandbox cannot switch users."""
-    try:
-        result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s, user=TRANSFER_USER)
-    except Exception as exc:  # the SDK surfaces the refusal as a runtime error on some servers
-        if not any(marker in str(exc) for marker in _NO_ROOT_MARKERS):
-            raise
-        # The fallback goes through the same provider-error check below as the result-shaped refusal does.
+    result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s, user=TRANSFER_USER)
+    if result.error_type == "user_switch_unavailable":
         result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
-    else:
-        text = f"{result.stderr or ''} {result.stdout or ''}"
-        if result.return_code and any(marker in text for marker in _NO_ROOT_MARKERS):
-            result = await sandbox.exec(command, cwd="/", timeout_s=timeout_s)
     if result.error_type:
         raise SandboxUnavailableError(
             f"The sandbox could not run {command[:80]!r}: {result.error_type}: {result.stderr or result.stdout or ''}"
@@ -206,7 +197,7 @@ async def upload_dir(
     solution the task user must read; a verifier tree keeps its modes because tests may check them.
     ``ignore`` is called with each entry's path relative to ``source`` (posix form); an entry it names is left
     out, its subtree with it. The environment server passes the task digest's rule
-    (:func:`nemo_gym.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
+    (:func:`nemo_gym.data.tasks.harbor.digest.is_ignored`) for a task's own folders, so a ``tests/helper.pyc`` or an
     ``environment/__pycache__`` that the digest skips never reaches the sandbox; artifacts restored by
     :func:`upload_path` travel whole. ``replace_links`` is for a merge into a tree another user has written to:
     a symbolic link at any member's path is removed, as root, before the extraction, so the member lands where its

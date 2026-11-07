@@ -24,25 +24,32 @@ import pytest
 import yaml
 from datasets import Dataset
 from omegaconf import OmegaConf
+from pydantic import TypeAdapter, ValidationError
 
 import benchmarks.hle_diamond.prepare as prepare_module
+import benchmarks.hle_diamond.prepare_opencode as prepare_opencode_module
 import benchmarks.hle_diamond.prepare_text as prepare_text_module
-from nemo_gym.benchmarks import BENCHMARKS_DIR, BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
-from nemo_gym.config_types import ModelServerRef, is_almost_server, maybe_get_server_instance_config
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values
-from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
-from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
-from nemo_gym.global_config import GlobalConfigDictParserConfig, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import (
+    GlobalConfigDictParserConfig,
+    ModelServerRef,
+    get_first_server_config_dict,
+    is_almost_server,
+    maybe_get_server_instance_config,
+)
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.prompt import fill_prompt, load_prompt_config
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.data import fill_prompt, load_prompt_config
+from nemo_gym.environment import BENCHMARKS_DIR, BenchmarkConfig, load_manifest, resolve_manifest_config_path
+from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
+from nemo_gym.environment.discovery import _parse_no_environment_tolerating_unset_values
+from nemo_gym.environment.validation import _mirror_differences, _resolve_manifest_composition
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import resolve_provider_config
 from resources_servers.equivalence_llm_judge.app import (
     JudgeEvaluation,
     LLMJudgeResourcesServer,
@@ -145,10 +152,15 @@ def prepared_env(monkeypatch, tmp_path):
         return Dataset.from_dict({column: [row[column] for row in rows] for column in rows[0]})
 
     monkeypatch.setattr("datasets.load_dataset", fake_load_dataset)
-    monkeypatch.setattr("nemo_gym.global_config.maybe_get_global_config_dict", lambda: {"hf_token": "hf-fixture"})
+    monkeypatch.setattr(
+        "nemo_gym.config.global_config.maybe_get_global_config_dict", lambda: {"hf_token": "hf-fixture"}
+    )
     monkeypatch.setattr(prepare_module, "EXPECTED_CORPUS", FIXTURE_EXPECTATION)
     monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", tmp_path / "hle_diamond_benchmark.jsonl")
     monkeypatch.setattr(prepare_module, "OUTPUT_TEXT_FPATH", tmp_path / "hle_diamond_benchmark_text.jsonl")
+    monkeypatch.setattr(
+        prepare_module, "OUTPUT_OPENCODE_FPATH", tmp_path / "hle_diamond_benchmark_opencode_full.jsonl"
+    )
     return state, calls
 
 
@@ -198,6 +210,43 @@ class TestPrepare:
             assert leaked not in serialized
         assert serialized.count(IMAGE_DATA_URI) == 1
         assert "Wrote 4 problems" in capsys.readouterr().out
+
+    def test_opencode_prompt_keeps_every_row_in_one_user_turn_with_the_image_block(self, prepared_env, capsys):
+        """The OpenCode adapter forwards only the user turn, so the full set for opencode_full.yaml folds the
+        instruction after the question (prompts/opencode.yaml) and carries the image in that same turn."""
+        output = prepare_opencode_module.prepare()
+
+        assert output == prepare_module.OUTPUT_OPENCODE_FPATH
+        rows = _read_rows(output)
+        assert [row["uuid"] for row in rows] == [row["id"] for row in _source_rows()]
+        assert [list(row) for row in rows] == [ROW_FIELDS + ["responses_create_params"]] * 4
+        for row in rows:
+            (user,) = row["responses_create_params"]["input"]
+            assert user["role"] == "user"
+        by_id = {row["uuid"]: row for row in rows}
+        folded = by_id["q-reasoning-image"]["question"] + "\n\n" + UPSTREAM_SYSTEM_PROMPT
+        assert by_id["q-reasoning-image"]["responses_create_params"]["input"] == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": folded},
+                    {"type": "input_image", "image_url": IMAGE_DATA_URI, "detail": "high"},
+                ],
+            }
+        ]
+        assert by_id["q-knowledge-mc"]["responses_create_params"]["input"] == [
+            {"role": "user", "content": by_id["q-knowledge-mc"]["question"] + "\n\n" + UPSTREAM_SYSTEM_PROMPT}
+        ]
+        written = capsys.readouterr().out
+        assert "Wrote 4 problems" in written and "(1 with an image)" in written
+        assert prepare_module.OUTPUT_FPATH.exists() is False  # the default file is not touched
+
+        assert [row["uuid"] for row in _read_rows(prepare_opencode_module.main(["--limit", "1"]))] == [
+            "q-reasoning-text"
+        ]
+        with pytest.raises(SystemExit):
+            prepare_opencode_module.main(["--prompt", "opencode"])
+        assert "unrecognized arguments: --prompt" in capsys.readouterr().err
 
     def test_text_only_drops_image_rows_and_keeps_raw_fields(self, prepared_env):
         output = prepare_text_module.prepare()
@@ -281,6 +330,8 @@ class TestPrepare:
         monkeypatch.setattr("datasets.load_dataset", refuse)
         with pytest.raises(ValueError, match="positive integer"):
             prepare_module.prepare(limit=limit)
+        with pytest.raises(ValueError, match="prompt must be one of"):
+            prepare_module.prepare(prompt="pi")
 
     @pytest.mark.parametrize("argv", [["--limit", "0"], ["--limit", "-1"], ["--limit", "abc"], ["--limit", "1.5"]])
     def test_cli_rejects_non_positive_limit_at_parse_time(self, argv, capsys):
@@ -288,9 +339,10 @@ class TestPrepare:
             prepare_module.build_parser().parse_args(argv)
         assert "positive integer" in capsys.readouterr().err
 
-    def test_cli_accepts_text_only_and_limit(self):
+    def test_cli_accepts_text_only_prompt_and_limit(self):
         args = prepare_module.build_parser().parse_args(["--text-only", "--limit", "3"])
-        assert (args.text_only, args.limit) == (True, 3)
+        assert (args.text_only, args.limit, args.prompt) == (True, 3, "default")
+        assert prepare_module.build_parser().parse_args(["--prompt", "opencode"]).prompt == "opencode"
         assert prepare_module.build_parser().parse_args([]).limit is None
 
 
@@ -340,8 +392,27 @@ LISTED_BENCHMARKS = {
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
     "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle_diamond/prompts/opencode.yaml"),
+    "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_agent", None),
+    # Restates the dataset (Gym's _inherit_from is a single-step rename), so it is listed unlike opencode_search.
+    "hle_diamond/opencode_reference": (
+        "hle_diamond_text",
+        "hle_diamond_opencode_reference_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
+}
+FULL_OPENCODE_DATASET = {
+    "name": "hle_diamond_opencode_full",
+    "type": "benchmark",
+    "jsonl_fpath": "benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl",
+    "prompt_config": None,
+    "prepare_script": "benchmarks/hle_diamond/prepare_opencode.py",
+    "num_repeats": 1,
 }
 JUDGE_SERVER = "hle_diamond_equivalence_llm_judge_resources_server"
+REFERENCE_AGENT = "hle_diamond_opencode_reference_agent"
+REFERENCE_IMAGE_DIR = REPO_ROOT / "responses_api_agents" / "opencode_sandboxed_agent" / "hle_reference_image"
+ENVIRONMENT_NOTE = "/tmp/nemo-gym-environment.txt"
+ACK_ENV = "HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS"
 
 
 def _resolve_paths(config_paths: list[str]):
@@ -385,8 +456,45 @@ class TestConfigs:
         assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
 
     @pytest.mark.parametrize(
+        ("config_file", "with_search"), [("opencode_full.yaml", False), ("opencode_search_full.yaml", True)]
+    )
+    def test_full_presets_swap_only_the_dataset_of_the_opencode_agent(self, config_file, with_search):
+        """The 1000-row variants carry the composed preset's agent (effort, tools, network policy) over the
+        OpenCode-prompted full set with no rollout-time prompt; only opencode_full declares the dataset."""
+        resolved = _resolve(config_file)
+        agent = get_first_server_config_dict(resolved, "hle_diamond_opencode_agent")
+
+        assert [dict(dataset) for dataset in agent["datasets"]] == [FULL_OPENCODE_DATASET]
+        assert agent["opencode_config"]["provider"]["nemo_gym"]["models"]["dummy_model"]["options"] == {
+            "reasoningEffort": "high"
+        }
+        if with_search:
+            assert [server["name"] for server in agent["tool_servers"]] == ["tavily"]
+            assert agent["network_access"] == "model_and_tools"
+            assert "Tavily" in agent["sandbox_config"]["files"]["/tmp/nemo-gym-environment.txt"]
+            tavily = get_first_server_config_dict(resolved, "tavily")
+            assert tavily["exclude_domains_file_path"] == "benchmarks/hle_diamond/search_exclusions.json"
+        else:
+            assert "tool_servers" not in agent and agent["network_access"] == "model_only"
+        benchmark = BenchmarkConfig.from_config_path(HLE_DIAMOND_DIR / config_file, strict=False)
+        assert (benchmark.name, benchmark.agent_name, benchmark.dataset.prompt_config) == (
+            "hle_diamond_opencode_full",
+            "hle_diamond_opencode_agent",
+            None,
+        )
+
+    @pytest.mark.parametrize(
         "config_file",
-        ["config.yaml", "text.yaml", "opencode.yaml", "opencode_search.yaml", "pi.yaml", "pi_search.yaml"],
+        [
+            "config.yaml",
+            "text.yaml",
+            "opencode.yaml",
+            "opencode_search.yaml",
+            "opencode_full.yaml",
+            "opencode_search_full.yaml",
+            "pi.yaml",
+            "pi_search.yaml",
+        ],
     )
     def test_every_preset_shares_the_hle_judge_prompt_labels_and_partition_slices(self, config_file):
         judge = get_first_server_config_dict(_resolve(config_file), JUDGE_SERVER)
@@ -485,6 +593,8 @@ class TestLocalDockerOverride:
         [
             ("opencode.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("opencode_search.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
+            ("opencode_search_full.yaml", "hle_diamond_opencode_agent", "hle_diamond_pi_agent"),
             ("pi.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
             ("pi_search.yaml", "hle_diamond_pi_agent", "hle_diamond_opencode_agent"),
         ],
@@ -535,7 +645,108 @@ class TestLocalDockerOverride:
         assert "datasets" not in json.dumps(yaml.safe_load(text))
 
         discovered = {p.name for p in _benchmark_config_paths(BENCHMARKS_DIR) if p.is_relative_to(HLE_DIAMOND_DIR)}
-        assert discovered == {"config.yaml", "text.yaml", "opencode.yaml", "pi.yaml"}
+        assert discovered == {
+            "config.yaml",
+            "text.yaml",
+            "opencode.yaml",
+            "opencode_full.yaml",
+            "pi.yaml",
+            "opencode_reference.yaml",
+        }
+
+
+def _network_access_type():
+    from responses_api_agents.opencode_sandboxed_agent.app import OpenCodeSandboxedAgentConfig
+
+    return TypeAdapter(OpenCodeSandboxedAgentConfig.model_fields["network_access"].annotation)
+
+
+class TestReferencePreset:
+    """opencode_reference.yaml: opencode_search.yaml on the reference image under upstream's egress policy
+    (docs/evaluation-with-tools.md), which sandbox_docker_local.yaml may lift only when acknowledged."""
+
+    @staticmethod
+    def _agents(monkeypatch, *files: str):
+        monkeypatch.delenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", raising=False)
+        resolved = _resolve("opencode_reference.yaml", *files)
+        return resolved, get_first_server_config_dict(resolved, REFERENCE_AGENT)
+
+    def test_reference_agent_is_the_search_agent_on_the_reference_image_with_enforced_egress(self, monkeypatch):
+        resolved, reference = self._agents(monkeypatch)
+        search = get_first_server_config_dict(_resolve("opencode_search.yaml"), "hle_diamond_opencode_agent")
+
+        # The restated block (see the preset header) must not drift from opencode_search.yaml: the two agents
+        # differ only in the image and the environment note (ports are per-instance placeholders).
+        reference_dict, search_dict = OmegaConf.to_container(reference), OmegaConf.to_container(search)
+        differing = {k for k in set(reference_dict) | set(search_dict) if reference_dict.get(k) != search_dict.get(k)}
+        assert differing - {"port"} == {"sandbox_config"}
+        differing_sandbox = {
+            k
+            for k in set(reference_dict["sandbox_config"]) | set(search_dict["sandbox_config"])
+            if reference_dict["sandbox_config"].get(k) != search_dict["sandbox_config"].get(k)
+        }
+        assert differing_sandbox == {"image", "files"}
+        assert (reference["network_access"], reference["sandbox_provider"]) == ("model_and_tools", "sandbox")
+        assert [t["name"] for t in reference["tool_servers"]] == ["tavily"]
+        assert reference["sandbox_config"]["image"] == "gym-opencode-hle-reference:local"
+        # The search presets' image variable never selects the reference image.
+        monkeypatch.setenv("OPENCODE_SANDBOX_IMAGE", "gym-opencode-science:local")
+        monkeypatch.setenv("OPENCODE_REFERENCE_SANDBOX_IMAGE", "registry/reference@sha256:abc")
+        assert (
+            get_first_server_config_dict(_resolve("opencode_reference.yaml"), REFERENCE_AGENT)["sandbox_config"][
+                "image"
+            ]
+            == "registry/reference@sha256:abc"
+        )
+        # Only the reference agent is started: the search preset's agent is removed, the environment server retargeted.
+        assert resolved["hle_diamond_opencode_agent"] is None
+        env_server = resolved["hle_diamond_equivalence_llm_judge_environment_server"]
+        assert env_server["environment_servers"]["legacy_agent"]["agent_server"]["name"] == REFERENCE_AGENT
+
+    def test_reference_note_states_only_what_the_reference_image_provides(self, monkeypatch):
+        _, reference = self._agents(monkeypatch)
+        note = reference["sandbox_config"]["files"][ENVIRONMENT_NOTE]
+
+        assert "disabled" in note and "Python 3.11" in note
+        # The packages named are exactly upstream's pinned list, read from the image's verbatim copy.
+        pinned = re.findall(r"^([A-Za-z0-9_-]+)==", (REFERENCE_IMAGE_DIR / "requirements-tools.txt").read_text(), re.M)
+        named = note.split("these packages: ")[1].split(".")[0].split(", ")
+        assert sorted(named) == sorted(name.lower() for name in pinned) and len(named) == 12
+        for absent in ("SageMath", "Lean", "Mathlib", "/opt/science", "Tavily"):
+            assert absent not in note
+
+    def test_docker_override_refuses_the_reference_preset_unless_egress_is_acknowledged(self, monkeypatch):
+        monkeypatch.delenv(ACK_ENV, raising=False)
+        resolved, refused = self._agents(monkeypatch, "sandbox_docker_local.yaml")
+
+        # Composed onto the Docker provider, but with a network_access the agent config rejects at start.
+        assert list(resolve_provider_config(refused["sandbox_provider"], resolved)) == ["docker"]
+        assert refused["network_access"].startswith("refused") and ACK_ENV in refused["network_access"]
+        with pytest.raises(ValidationError):
+            _network_access_type().validate_python(refused["network_access"])
+        monkeypatch.setenv(ACK_ENV, "yes")  # only the exact label counts
+        with pytest.raises(ValidationError):
+            _network_access_type().validate_python(
+                self._agents(monkeypatch, "sandbox_docker_local.yaml")[1]["network_access"]
+            )
+
+        monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
+        resolved, acknowledged = self._agents(monkeypatch, "sandbox_docker_local.yaml")
+        assert _network_access_type().validate_python(acknowledged["network_access"]) == "inherit"
+        assert (acknowledged["sandbox_provider"], acknowledged["sandbox_config"]["image"]) == (
+            "sandbox_docker",
+            "gym-opencode-hle-reference:local",
+        )
+        note = acknowledged["sandbox_config"]["files"][ENVIRONMENT_NOTE]
+        assert "NOT restricted" in note and "disabled" not in note
+        assert "Python 3.11" in note and "SageMath" not in note and "Lean" not in note
+        assert acknowledged["sandbox_config"]["ttl_s"] == 14400  # the inherited sandbox_config survives
+        # The other presets are untouched by the knob: their override block stays unconditional.
+        monkeypatch.delenv(ACK_ENV)
+        search = get_first_server_config_dict(
+            _resolve("opencode_search.yaml", "sandbox_docker_local.yaml"), "hle_diamond_opencode_agent"
+        )
+        assert search["network_access"] == "inherit"
 
 
 README = HLE_DIAMOND_DIR / "README.md"
@@ -613,6 +824,7 @@ class TestDocumentedCommands:
     @pytest.mark.parametrize("benchmark", sorted(COMMANDS))
     def test_readme_commands_compose_the_overrides_after_the_preset_so_they_win(self, benchmark, monkeypatch):
         monkeypatch.delenv("HLE_DIAMOND_JUDGE_MODEL", raising=False)
+        monkeypatch.delenv(ACK_ENV, raising=False)
         paths, args = _cli_config_paths(self.COMMANDS[benchmark])
 
         assert args.split == "benchmark"
@@ -632,6 +844,12 @@ class TestDocumentedCommands:
         if "sandbox_docker_local.yaml" in names:
             assert names.index(Path(preset).name) < names.index("sandbox_docker_local.yaml")
             agent_name = BenchmarkConfig.from_config_path(Path(preset), strict=False).agent_name
+            if agent_name == REFERENCE_AGENT:
+                # The documented Docker pilot of the reference preset exports the acknowledgement; without
+                # it the same command is refused (TestReferencePreset).
+                assert get_first_server_config_dict(resolved, agent_name)["network_access"].startswith("refused")
+                monkeypatch.setenv(ACK_ENV, "egress-not-restricted")
+                resolved = _resolve_paths(paths)
             agent = get_first_server_config_dict(resolved, agent_name)
             assert (agent["sandbox_provider"], agent["network_access"]) == ("sandbox_docker", "inherit")
             assert list(resolve_provider_config(agent["sandbox_provider"], resolved)) == ["docker"]

@@ -27,7 +27,7 @@ from urllib.parse import quote
 
 from datasets import load_dataset
 
-from nemo_gym.global_config import get_hf_token
+from nemo_gym.config import get_hf_token
 
 
 UPSTREAM_COMMIT = "ca10a60a5fcae51e6948ffe1485d4153d421e6c5"  # pragma: allowlist secret

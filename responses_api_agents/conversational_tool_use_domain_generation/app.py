@@ -23,11 +23,10 @@ from typing import Any, Literal
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -35,8 +34,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter, chat_completion_usage_to_response_usage
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 PROTOCOL_VERSION = "domain-generation/v1"
@@ -186,7 +185,7 @@ class DomainGenerationAgent(SimpleResponsesAPIAgent):
         )
 
         response_params = body.responses_create_params.model_copy(update={"model": final_response.model})
-        response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        response = ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params,
             final_response,
         )

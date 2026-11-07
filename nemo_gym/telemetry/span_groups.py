@@ -75,7 +75,7 @@ class GymSpanGroup:
     cross-process propagation: adopts an inbound ``traceparent`` as the span's parent."""
 
     HTTP_CLIENT = "http_client"
-    """Outbound spans around ``nemo_gym.server_utils.request`` — Gym's single aiohttp
+    """Outbound spans around ``nemo_gym.client.http_client.request`` — Gym's single aiohttp
     egress point. The egress half of cross-process propagation: injects ``traceparent``
     into the outgoing headers."""
 

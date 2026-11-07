@@ -9,11 +9,13 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.base_responses_api_model import _CaptureMiddleware
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture import (
+from nemo_gym.client import NeMoGymAsyncOpenAI, ServerClient
+from nemo_gym.models import AnthropicConverter, VLLMWorkerCaptureHandler
+from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.models.token_capture import (
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    UNCOMMITTED_CALL_REASON,
     CaptureContext,
     FileLineageStore,
     InMemoryLineageStore,
@@ -28,11 +30,7 @@ from nemo_gym.token_id_capture import (
     set_token_sink,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
-from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission, StageResult
+from nemo_gym.models.token_capture.staging import CaptureAdmission, RolloutTokenCapture, StageResult
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 
 
@@ -276,7 +274,7 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         raise ValueError("injected final conversion failure")
 
     if failure == "serialization":
-        monkeypatch.setattr("nemo_gym.base_responses_api_model._orjson_dispatch_response", fail_conversion)
+        monkeypatch.setattr("nemo_gym.models.base_responses_api_model._orjson_dispatch_response", fail_conversion)
     elif endpoint == "responses":
         monkeypatch.setattr(type(model._converter), "chat_completion_to_response", fail_conversion)
     else:
@@ -349,16 +347,16 @@ class _ExternalBackend:
         self.lineage = InMemoryLineageStore()
 
     async def commit(self, entry: TokenEntry) -> None:
-        if entry.rollout_id in self.frozen:
-            raise RuntimeError(f"Token capture for rollout {entry.rollout_id} is already frozen")
-        rollout = self.entries.setdefault(entry.rollout_id, {})
+        if entry.capture_key in self.frozen:
+            raise RuntimeError(f"Token capture for rollout {entry.capture_key} is already frozen")
+        rollout = self.entries.setdefault(entry.capture_key, {})
         previous = rollout.get(entry.model_call_id)
         if previous is not None and previous != entry:
             raise ValueError(f"Conflicting model call {entry.model_call_id}")
         if previous is None:
             rollout[entry.model_call_id] = entry
             await self.lineage.put(entry)
-            self.versions[entry.rollout_id] = self.versions.get(entry.rollout_id, 0) + 1
+            self.versions[entry.capture_key] = self.versions.get(entry.capture_key, 0) + 1
 
 
 class _ExternalSink:
@@ -396,7 +394,7 @@ class _ExternalSource:
     async def freeze(self, rollout_id: str) -> TokenCaptureSnapshot:
         self.backend.frozen.add(rollout_id)
         return TokenCaptureSnapshot(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             entries=tuple(self.backend.entries.get(rollout_id, {}).values()),
             incomplete=rollout_id in self.backend.incomplete,
             snapshot_id=f"snapshot-{rollout_id}",
@@ -441,7 +439,7 @@ def _simulate_two_workers(
 
     def serve(client: TestClient, call_id: str, messages: list[dict]) -> tuple[dict, CaptureContext]:
         context = CaptureContext(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id=call_id,
             token_sink=sink_factory(),
             lineage_store=lineage_factory(),

@@ -70,13 +70,9 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
-)
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.global_config import (
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -84,38 +80,51 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import (
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.rollouts import (
+    AGENT_REQUEST_FAILED_FAILURE_CLASS,
+    ENVIRONMENT_SERVER_FAILURE_CLASS,
+    NG_ENVIRONMENT_SERVER_KEY,
+    NG_RESULT_TYPE_KEY,
+    NG_TERMINAL_KEY,
+    DispatchLatencyTracker,
+    RolloutCollectionHelper,
+    clear_model_call_captures_for_rollouts,
+    coverage_path_for,
+    get_max_rollout_attempts,
+    is_terminal_failure,
+    load_resubmit_offset,
+    manifest_path_for,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+    observed_elapsed,
+    record_resubmit_offset,
+)
+from nemo_gym.rollouts import journal_path_for as rollout_attempts_path_for
+from nemo_gym.rollouts.rollout_collection import (
+    _NO_RESULT_FAILURE_CLASSES,
+    _RUN_FAILURE_ERRORS,
+    _environment_server_for_agent,
+    _environment_servers_by_agent,
+    _record_rollout_outcome,
+)
+from nemo_gym.rollouts.rollout_records import prepare_append
+from nemo_gym.rollouts.rollout_recovery import is_answered_agent_deadline
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record, _has_observation_gap
+from nemo_gym.trajectory import NG_TRAJECTORY_KEY
+from nemo_gym.utils import (
     aggregation_sources_path_for,
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
 )
-from nemo_gym.rollout_collection import (
-    _NO_RESULT_FAILURE_CLASSES,
-    _RUN_FAILURE_ERRORS,
-    ENVIRONMENT_SERVER_FAILURE_CLASS,
-    NG_DISPATCH_DRAINED_KEY,
-    NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
-    NG_RESULT_TYPE_KEY,
-    NG_TERMINAL_KEY,
-    NG_TRAJECTORY_KEY,
-    DispatchLatencyTracker,
-    RolloutCollectionHelper,
-    _attach_trajectory_record,
-    _environment_server_for_agent,
-    _environment_servers_by_agent,
-    _has_observation_gap,
-    _record_rollout_outcome,
-    get_max_rollout_attempts,
-    is_terminal_failure,
-    load_resubmit_offset,
-    observed_elapsed,
-    record_resubmit_offset,
-)
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,
@@ -142,6 +151,8 @@ _OPERATIONAL_SERVER_FIELDS = frozenset({"concurrency"})
 # return ``(row, result)`` pairs (result == the agent's /run response, i.e. the
 # GDPVal verify response). Injected so tests can avoid real servers.
 RolloutRunner = Callable[[List[Dict[str, Any]]], Awaitable[List[Tuple[Dict[str, Any], Dict[str, Any]]]]]
+# Receives each ``(row, result)`` pair as soon as it completes, before the runner returns.
+RolloutResultSink = Callable[[Dict[str, Any], Dict[str, Any]], None]
 AssignmentRepair = Callable[
     [int, Sequence[str], Mapping[str, str]],
     Tuple[Dict[str, str], Dict[str, Any]],
@@ -220,6 +231,9 @@ _REVERIFIABLE_FAILURE_CLASSES = frozenset({_REFERENCE_MISSING_FAILURE_CLASS, _TR
 # Stamped on every row of a stage accepted by its partial-completion policy, so
 # aggregation can tell an accepted partial final stage from a degraded one.
 ACCEPTED_STAGE_ROW_COUNT_KEY = "accepted_stage_row_count"
+# Stamped on each planned row an accepted partial stage omitted, with that stage and its policy, so recovery counts
+# the row as omitted (complete by the stage's policy) and never plans it again.
+ACCEPTED_STAGE_OMISSION_KEY = "accepted_stage_omission"
 
 
 def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
@@ -229,12 +243,22 @@ def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
     it, or waiving it without `tolerate_unresolved`, would bias the fit. GDPVal's own failures are not retryable either: nothing repairs a
     deliverable tree within the run.
     """
-    if row.get(NG_TERMINAL_KEY) or row.get(NG_NO_PERSIST_KEY):
+    if row.get(NG_TERMINAL_KEY) or row.get(NG_NO_PERSIST_KEY) or is_answered_agent_deadline(row):
+        # A timeout that kept the agent's answer is the model's result: settled, never run again.
         return False
     failure_class = row.get(NG_FAILURE_CLASS_KEY)
     if failure_class == AGENT_TIMEOUT:
         return True
     return failure_class == ENVIRONMENT_SERVER_FAILURE_CLASS and row.get("_ng_failure_stage") != "agent"
+
+
+def _is_settled_failure(row: Mapping[str, Any]) -> bool:
+    """Whether a failed row is final for its stage: terminal, or an agent timeout that kept the agent's answer.
+
+    The agent's deadline is the model's result, so neither a resume nor an in-process retry runs it again; it stays
+    out of the fit like any other settled failure.
+    """
+    return is_terminal_failure(row) or is_answered_agent_deadline(row)
 
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:
@@ -480,6 +504,7 @@ def compute_fingerprint(
     materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     rollout_collection_config: Optional[Any] = None,
     resolved_global_config: Optional[Mapping[str, Any]] = None,
+    canonical_paths: bool = True,
 ) -> str:
     """Stable hash of the configured inputs that affect stage planning or judged results.
 
@@ -491,7 +516,73 @@ def compute_fingerprint(
     agent knobs in ``_OPERATIONAL_SERVER_FIELDS``, ``partial_completion``,
     ``retry_inprocess``, ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``, and the contents
     of the reference deliverable directories.
+
+    An existing absolute path in a server block is hashed as its real path, so two names of one directory (a
+    symlinked and a physical mount of the run directory, say, as different segments see ``$PWD``) hash alike.
+    ``canonical_paths=False`` gives the value earlier Gym versions wrote, for journals written before this rule.
     """
+    return _fingerprint_digest(
+        _fingerprint_payload(
+            multistage_config,
+            reference_elos,
+            distribution,
+            materialized_rows=materialized_rows,
+            rollout_collection_config=rollout_collection_config,
+            resolved_global_config=resolved_global_config,
+            canonical_paths=canonical_paths,
+        )
+    )
+
+
+def compute_fingerprint_with_components(
+    multistage_config: MultiStageRunConfig,
+    reference_elos: Mapping[str, float],
+    distribution: Mapping[str, Mapping[str, object]],
+    *,
+    materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    rollout_collection_config: Optional[Any] = None,
+    resolved_global_config: Optional[Mapping[str, Any]] = None,
+    canonical_paths: bool = True,
+) -> Tuple[str, Dict[str, str]]:
+    """Return ``compute_fingerprint``'s value and a digest of each component it hashes.
+
+    Both come from one payload, with the same serialization and hash. Each
+    top-level payload entry is a component, except ``runtime_components``, which
+    has one per server block (``runtime_components.<name>``). The digests only
+    name what changed when a journal is stale; a resume still compares the full
+    fingerprint alone.
+    """
+    payload = _fingerprint_payload(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows=materialized_rows,
+        rollout_collection_config=rollout_collection_config,
+        resolved_global_config=resolved_global_config,
+        canonical_paths=canonical_paths,
+    )
+    components = {name: _fingerprint_digest(value) for name, value in payload.items() if name != "runtime_components"}
+    for name, block in payload.get("runtime_components", {}).items():
+        components[f"runtime_components.{name}"] = _fingerprint_digest(block)
+    return _fingerprint_digest(payload), components
+
+
+def _fingerprint_digest(value: Any) -> str:
+    """SHA-256 of ``value`` in the fingerprint's canonical form (orjson with sorted keys)."""
+    return hashlib.sha256(orjson.dumps(value, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _fingerprint_payload(
+    multistage_config: MultiStageRunConfig,
+    reference_elos: Mapping[str, float],
+    distribution: Mapping[str, Mapping[str, object]],
+    *,
+    materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    rollout_collection_config: Optional[Any] = None,
+    resolved_global_config: Optional[Mapping[str, Any]] = None,
+    canonical_paths: bool = True,
+) -> Dict[str, Any]:
+    """The inputs ``compute_fingerprint`` hashes, as one JSON-ready mapping."""
 
     def jsonable(value: Any) -> Any:
         if hasattr(value, "model_dump"):
@@ -527,6 +618,22 @@ def compute_fingerprint(
             or name.startswith("endpoint_")
         )
 
+    def real_paths(value: Any) -> Any:
+        """Replace each string that names an absolute path with that path's real location.
+
+        A path that does not exist yet (a deliverables directory the run creates) still has its existing prefix
+        resolved, so the value is the same before and after the run creates it.
+        """
+        if not canonical_paths:
+            return value
+        if isinstance(value, Mapping):
+            return {key: real_paths(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [real_paths(item) for item in value]
+        if isinstance(value, str) and os.path.isabs(value) and not any(c.isspace() for c in value):
+            return os.path.realpath(value)
+        return value
+
     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
         """Serialize a component block without its unhashed top-level server fields."""
         result: Dict[str, Any] = {}
@@ -544,7 +651,7 @@ def compute_fingerprint(
             result[key] = {
                 str(server_name): (
                     {
-                        str(field): field_value
+                        str(field): real_paths(field_value)
                         for field, field_value in server_config.items()
                         if not is_unhashed_field(str(field))
                     }
@@ -617,8 +724,7 @@ def compute_fingerprint(
         transport_repair = (resolved_global_config.get("multistage") or {}).get("transport_assignment_repair")
         if transport_repair is not None:
             payload["transport_assignment_repair"] = jsonable(transport_repair)
-    encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
-    return hashlib.sha256(encoded).hexdigest()
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -991,6 +1097,7 @@ async def run_multistage_stages(
     resume: Optional[StageResume] = None,
     dispatch_longest_first: bool = False,
     assignment_repair: Optional[AssignmentRepair] = None,
+    runner_reports_each_result: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
@@ -1016,6 +1123,11 @@ async def run_multistage_stages(
     reference assignment) are replayed so selection is identical even when
     ``multistage.seed`` is ``None``. ``resume=None`` preserves the same execution
     semantics without file-backed persistence.
+
+    With ``runner_reports_each_result``, ``run_rollouts`` takes a keyword-only
+    ``on_result`` :data:`RolloutResultSink` and calls it for each pair as it
+    completes. Each row is then saved through ``resume.on_rows`` at once, so a
+    job killed mid-batch keeps the rows that already returned.
     """
     base_rng = rng or (
         random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
@@ -1064,6 +1176,46 @@ async def run_multistage_stages(
 
     max_attempts = get_max_rollout_attempts()
     retry_inprocess = bool(getattr(multistage_config, "retry_inprocess", False))
+
+    async def run_and_save(
+        index: int, rows: List[Dict[str, Any]], expected_stage_row_count: int, *, save_no_persist: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Run ``rows`` and return their tagged results, each saved once through ``resume.on_rows``.
+
+        Rows a reporting runner hands to ``on_result`` are saved as they complete;
+        the others are saved when the batch returns. Without ``save_no_persist``,
+        no-persist rows are not saved, so a drained retry journals no tombstone.
+        """
+
+        def tag(pairs: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]]) -> List[Dict[str, Any]]:
+            return tag_results(
+                pairs,
+                index,
+                expected_final_stage_index=total_stages - 1,
+                expected_stage_row_count=expected_stage_row_count,
+            )
+
+        def save(tagged: List[Dict[str, Any]]) -> None:
+            if not save_no_persist:
+                tagged = [row for row in tagged if not row.get(NG_NO_PERSIST_KEY)]
+            if resume is not None and tagged:
+                resume.on_rows(index, tagged)
+
+        if not runner_reports_each_result:
+            tagged = tag(await run_rollouts(rows))
+            save(tagged)
+            return tagged
+
+        saved_keys: set[Tuple[Any, Any]] = set()
+
+        def on_result(row: Dict[str, Any], result: Dict[str, Any]) -> None:
+            save(tag([(row, result)]))
+            saved_keys.add(_stage_key(row))
+
+        tagged = tag(await run_rollouts(rows, on_result=on_result))
+        save([row for row in tagged if _stage_key(row) not in saved_keys])
+        return tagged
+
     for index, stage in enumerate(multistage_config.stages):
         # A sidecar reuse flag is emitted only after the policy artifact exists.
         # Treat it as produced from this stage onward even when the judging row
@@ -1255,16 +1407,12 @@ async def run_multistage_stages(
             replayed=replayed,
         )
 
-        pairs = [] if pre_dispatch_partial_outcome is not None else await run_rollouts(pending_rows)
         expected_stage_row_count = len(stage_rows)
-        new_tagged = tag_results(
-            pairs,
-            index,
-            expected_final_stage_index=total_stages - 1,
-            expected_stage_row_count=expected_stage_row_count,
+        new_tagged = (
+            []
+            if pre_dispatch_partial_outcome is not None
+            else await run_and_save(index, pending_rows, expected_stage_row_count)
         )
-        if resume is not None:
-            resume.on_rows(index, new_tagged)
 
         # In-process retry: re-dispatch rows that came back retryable, applying the
         # same gate a resume would (success / terminal / max-attempt), until the cap
@@ -1276,7 +1424,7 @@ async def run_multistage_stages(
         # key is: attempts recorded at startup + this leg's initial dispatch + the
         # in-process retries made below.
         inprocess_attempts: Dict[Tuple[Any, Any], int] = {}
-        if retry_inprocess and pairs and resume is not None:
+        if retry_inprocess and new_tagged and resume is not None:
             startup_attempts = resume.attempts_by_stage.get(index, {})
             startup_budget = resume.budget_by_stage.get(index, {})
             # Sticky for the whole stage: once a key is known to have a reusable
@@ -1312,13 +1460,7 @@ async def run_multistage_stages(
                     inprocess_attempts[key] = inprocess_attempts.get(key, 0) + 1
                 if not retry_rows:
                     break
-                retry_pairs = await run_rollouts(retry_rows)
-                retried = tag_results(
-                    retry_pairs,
-                    index,
-                    expected_final_stage_index=total_stages - 1,
-                    expected_stage_row_count=expected_stage_row_count,
-                )
+                retried = await run_and_save(index, retry_rows, expected_stage_row_count, save_no_persist=False)
                 # Once the dispatch budget is gone every row comes back drained
                 # without a POST. A drained row means "we never got to try", not
                 # "the earlier persisted attempt is void": it must neither become
@@ -1328,8 +1470,6 @@ async def run_multistage_stages(
                 # partial-outcome shortcut for that key.
                 dispatched = [r for r in retried if not r.get(NG_NO_PERSIST_KEY)]
                 num_drained = len(retried) - len(dispatched)
-                if dispatched:
-                    resume.on_rows(index, dispatched)
                 _emit(
                     "stage_retry",
                     index=index,
@@ -1442,15 +1582,7 @@ async def run_multistage_stages(
 
                 replacement_ids = {item["after"] for item in round_replacements}
                 replacement_rows = [row for row in stage_rows if row_task_id(row) in replacement_ids]
-                replacement_pairs = await run_rollouts(replacement_rows)
-                replacement_tagged = tag_results(
-                    replacement_pairs,
-                    index,
-                    expected_final_stage_index=total_stages - 1,
-                    expected_stage_row_count=len(stage_rows),
-                )
-                if resume is not None:
-                    resume.on_rows(index, replacement_tagged)
+                replacement_tagged = await run_and_save(index, replacement_rows, len(stage_rows))
                 new_tagged.extend(replacement_tagged)
                 _emit(
                     "stage_transport_replacement",
@@ -1497,7 +1629,7 @@ async def run_multistage_stages(
         prior_attempts = resume.budget_by_stage.get(index, {}) if resume is not None else {}
         for result in new_tagged:
             key = (result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME])
-            resolved = _is_success_row(result) or is_terminal_failure(result)
+            resolved = _is_success_row(result) or _is_settled_failure(result)
             if (
                 not resolved
                 and result.get(NG_FAILURE_CLASS_KEY) is not None
@@ -1573,6 +1705,22 @@ async def run_multistage_stages(
             "stage_index": index,
             "num_tasks": len(task_ids),
             "num_rollouts": len(stage_rows),
+            # Only an accepted partial-stage policy can waive unresolved rows.
+            # Terminal/exhausted rows are already absent from unresolved_keys.
+            # A collector request outage can recover on a later allocation too;
+            # keep the in-process retry and partial-waiver policies unchanged.
+            "num_retryable": 0
+            if partial_outcome is not None
+            else sum(
+                _stage_key(row) in unresolved_keys
+                and (
+                    row.get(NG_NO_PERSIST_KEY)
+                    or _is_retryable_failure(row)
+                    or row.get(NG_FAILURE_CLASS_KEY) == AGENT_REQUEST_FAILED_FAILURE_CLASS
+                )
+                for row in new_tagged
+            )
+            + len(unresolved_keys - {_stage_key(row) for row in new_tagged}),
             "num_reused": num_reused,
             "reference_ids": list(reference_ids),
             "eval_elo": stage_elo,
@@ -1633,8 +1781,9 @@ def _require_final_stage_rows(
     Only a coverage rejection is terminal here. When the stage loop stopped with
     rows still retryable, a resume picks them up and the run is expected to
     continue in a later process; that path only logs how to continue, and the
-    run exits normally without a ``comparison/eval_elo``. Likewise a final stage
-    with *some* rows is not fatal: aggregation reports its per-stage fit and
+    completion check after aggregation fails a ``require_complete`` run so its
+    chain resumes it. Likewise a final stage with *some* rows is not fatal:
+    aggregation reports its per-stage fit and
     marks it degraded, with no headline ``comparison/eval_elo`` unless every
     expected final-stage row is present.
     """
@@ -1800,6 +1949,7 @@ def _resume_complete_stage(
         "num_tasks": len(task_ids),
         # Cached results can be incomplete even when the stage was marked complete.
         "num_rollouts": expected_stage_row_count,
+        "num_retryable": 0,
         "num_reused": 0,
         "reference_ids": reference_ids,
         "eval_elo": stage_elo,
@@ -1811,7 +1961,7 @@ def _resume_complete_stage(
         summary.update(
             partial=True,
             num_rollouts=expected_stage_row_count,
-            num_successful=len(cached_rows),
+            num_successful=len(included_keys),
             success_fraction=outcome.get("success_fraction"),
             num_omitted=len(_recorded_key_set(outcome, "omitted_keys")),
         )
@@ -1841,6 +1991,11 @@ def write_materialized_inputs(
             row["expected_stage_row_count"] = len(stage_rows)
             if outcome.get("status") == "partial_complete":
                 row[ACCEPTED_STAGE_ROW_COUNT_KEY] = len(outcome["included_keys"])
+                if _stage_key(row) in _recorded_key_set(outcome, "omitted_keys"):
+                    row[ACCEPTED_STAGE_OMISSION_KEY] = {
+                        "stage_index": index,
+                        "tolerate_unresolved": (outcome.get("policy") or {}).get("tolerate_unresolved") is True,
+                    }
         rows.extend(stage_rows)
     path = materialized_path_for(Path(output_fpath))
     path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
@@ -1952,6 +2107,56 @@ def read_journal(journal_fpath: str | Path) -> Tuple[Dict[int, dict], Dict[int, 
             elif status in {"complete", "partial_complete"}:
                 outcomes[int(index)] = record
     return plans, outcomes, fingerprint
+
+
+# Optional journal key: the run's per-component fingerprint digests, stored with
+# the fingerprint so a stale verdict can name what changed. The resume decision
+# never reads it, and readers that predate it ignore it.
+FINGERPRINT_COMPONENTS_KEY = "fingerprint_components"
+
+
+def read_journal_fingerprint_components(journal_fpath: str | Path) -> Optional[Dict[str, str]]:
+    """Component digests of the fingerprint ``read_journal`` returns.
+
+    They are read from the same record, the last one carrying a fingerprint,
+    so they describe that fingerprint. None when that record has none.
+    """
+    components: Optional[Dict[str, str]] = None
+    path = Path(journal_fpath)
+    if not path.exists():
+        return components
+    with path.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = orjson.loads(line)
+            if "fingerprint" in record:
+                value = record.get(FINGERPRINT_COMPONENTS_KEY)
+                components = dict(value) if isinstance(value, Mapping) else None
+    return components
+
+
+def describe_fingerprint_component_changes(
+    journal_components: Optional[Mapping[str, str]],
+    run_components: Optional[Mapping[str, str]],
+) -> str:
+    """Name the fingerprint components whose digests differ, in sorted order.
+
+    A component present on only one side differs too.
+    """
+    if journal_components is None:
+        return "components unknown (the journal predates component digests)"
+    if run_components is None:
+        return "components unknown (this run has no component digests)"
+    differing = sorted(
+        name
+        for name in set(journal_components) | set(run_components)
+        if journal_components.get(name) != run_components.get(name)
+    )
+    if not differing:
+        return "no component digest differs"
+    return "components differ: " + ", ".join(differing)
 
 
 def load_latest_attempt_dispositions(
@@ -2095,8 +2300,9 @@ def load_gated_keys(
     """Per-stage ``(task_index, rollout_index)`` keys that must not be re-dispatched.
 
     Mirrors ``_load_from_cache`` with the stage dimension added: a stage-row is
-    gated if it is a success (main jsonl), a terminal sidecar failure
-    (``_ng_failure_terminal``), or has hit ``get_max_rollout_attempts`` attempts
+    gated if it is a success (main jsonl), a settled sidecar failure
+    (``_ng_failure_terminal``, or an agent timeout that kept the agent's answer),
+    or has hit ``get_max_rollout_attempts`` attempts
     in the sidecar. Everything else is re-dispatched, and so are the terminal
     failures in ``_REVERIFIABLE_FAILURE_CLASSES``.
     """
@@ -2123,7 +2329,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + (line_index >= resubmit_offset)
-            if is_terminal_failure(fr) and fr.get(NG_FAILURE_CLASS_KEY) not in _REVERIFIABLE_FAILURE_CLASSES:
+            if _is_settled_failure(fr) and fr.get(NG_FAILURE_CLASS_KEY) not in _REVERIFIABLE_FAILURE_CLASSES:
                 terminal.add(key)
 
     for key in attempts:
@@ -2262,12 +2468,22 @@ def load_reuse_cached_keys(output_fpath: str | Path) -> Dict[int, set[Tuple[Any,
     return reuse_cached_keys
 
 
-def append_journal_record(journal_fpath: str | Path, record: Mapping[str, Any], fingerprint: str) -> None:
-    """Append a single journal record stamped with the run fingerprint."""
+def append_journal_record(
+    journal_fpath: str | Path,
+    record: Mapping[str, Any],
+    fingerprint: str,
+    *,
+    fingerprint_components: Optional[Mapping[str, str]] = None,
+) -> None:
+    """Append a single journal record stamped with the run fingerprint and, when given, its component digests."""
     path = Path(journal_fpath)
     path.parent.mkdir(parents=True, exist_ok=True)
     out = dict(record)
     out["fingerprint"] = fingerprint
+    # Digests describe only the fingerprint stamped here; a replayed record may carry others.
+    out.pop(FINGERPRINT_COMPONENTS_KEY, None)
+    if fingerprint_components is not None:
+        out[FINGERPRINT_COMPONENTS_KEY] = dict(fingerprint_components)
     with path.open("ab") as handle:
         handle.write(orjson.dumps(out) + b"\n")
         handle.flush()
@@ -2324,7 +2540,13 @@ def _gate_partial_outcome_omissions(
             gated_keys.setdefault(stage_index, set()).update(_recorded_key_set(outcome, "omitted_keys"))
 
 
-def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, fingerprint: str) -> StageResume:
+def build_file_resume(
+    output_fpath: str | Path,
+    journal_fpath: str | Path,
+    fingerprint: str,
+    *,
+    fingerprint_components: Optional[Mapping[str, str]] = None,
+) -> StageResume:
     """Build a file-backed :class:`StageResume` from the journal + rollout files."""
     output_fpath = Path(output_fpath)
     journal_fpath = Path(journal_fpath)
@@ -2337,6 +2559,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": recovered_restart, "status": "restart_cleanup_complete"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
 
     plans, outcomes, _ = read_journal(journal_fpath)
@@ -2362,6 +2585,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": restart_stage, "status": "restart_from_stage"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
         aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
         _prune_downstream_files(output_fpath, restart_stage)
@@ -2369,6 +2593,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": restart_stage, "status": "restart_cleanup_complete"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
         plans, outcomes, _ = read_journal(journal_fpath)
         rows_by_stage = load_persisted_rows(output_fpath)
@@ -2382,10 +2607,10 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         latest_attempt_dispositions_by_stage = load_latest_attempt_dispositions(journal_fpath)
 
     def on_plan(index: int, plan: dict) -> None:
-        append_journal_record(journal_fpath, plan, fingerprint)
+        append_journal_record(journal_fpath, plan, fingerprint, fingerprint_components=fingerprint_components)
 
     def on_outcome(index: int, outcome: dict) -> None:
-        append_journal_record(journal_fpath, outcome, fingerprint)
+        append_journal_record(journal_fpath, outcome, fingerprint, fingerprint_components=fingerprint_components)
 
     def on_rows(index: int, rows: List[Dict[str, Any]]) -> None:
         dispositions = [
@@ -2412,6 +2637,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
                     "attempts": no_persist_dispositions,
                 },
                 fingerprint,
+                fingerprint_components=fingerprint_components,
             )
         route_stage_rows(output_fpath, rows)
         if persisted_dispositions:
@@ -2423,6 +2649,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
                     "attempts": persisted_dispositions,
                 },
                 fingerprint,
+                fingerprint_components=fingerprint_components,
             )
 
     def on_restart(index: int) -> None:
@@ -2430,6 +2657,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": index, "status": "restart_from_stage"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
         aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
         _prune_downstream_files(output_fpath, index)
@@ -2437,6 +2665,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": index, "status": "restart_cleanup_complete"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
 
     return StageResume(
@@ -2474,7 +2703,7 @@ async def run_rollout_collection(
     if (global_config_dict.get("multistage") or {}).get("enabled"):
         return await run_e2e_multistage(rollout_collection_config, global_config_dict)
 
-    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollouts import RolloutCollectionHelper
 
     await RolloutCollectionHelper().run_from_config(rollout_collection_config)
     return None
@@ -2493,8 +2722,8 @@ async def run_e2e_multistage(
     """
     from contextlib import nullcontext
 
-    from nemo_gym.observability.model_calls import observability_enabled_from_config
-    from nemo_gym.rollout_collection import RolloutCollectionHelper, _attach_ng_perf
+    from nemo_gym.rollouts import RolloutCollectionHelper, observability_enabled_from_config
+    from nemo_gym.rollouts.rollout_perf import _attach_ng_perf
 
     multistage_config = parse_multistage_config(global_config_dict.get("multistage") or {})
     observability_enabled = observability_enabled_from_config(global_config_dict)
@@ -2554,7 +2783,9 @@ async def run_e2e_multistage(
             _attach_trajectory_record(row, result)
         _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
-    async def verify_cached(row: Dict[str, Any], semaphore: Any, server_client: Any) -> Tuple[Dict, Optional[Dict]]:
+    async def verify_cached(
+        row: Dict[str, Any], semaphore: Any, server_client: Any, on_result: RolloutResultSink
+    ) -> Tuple[Dict, Optional[Dict]]:
         """Score a deliverable an earlier stage produced, without running the policy again.
 
         The result is None when the resources server holds no deliverable for the row.
@@ -2586,9 +2817,12 @@ async def run_e2e_multistage(
             iter(server_client.global_config_dict[environment_server]["environment_servers"])
         )
         attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
+        on_result(row, result)
         return row, result
 
-    async def dispatch(rows: List[Dict[str, Any]], semaphore: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    async def dispatch(
+        rows: List[Dict[str, Any]], semaphore: Any, on_result: RolloutResultSink
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         if not rows:
             return results
@@ -2596,15 +2830,8 @@ async def run_e2e_multistage(
         if dispatch_budget_s is not None:
             remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
         clear_model_call_captures_for_rollouts(rows, capture_dirs)
-        for future in helper._run_examples_with_metadata(
-            rows,
-            semaphore=semaphore,
-            dispatch_budget_s=remaining_budget_s,
-            drain_margin_s=drain_margin_s,
-            latency_tracker=latency_tracker,
-            route_failures_to_sidecar=route_failures_to_sidecar,
-        ):
-            completed = await future
+
+        def finish(completed: Any) -> None:
             # A failure while verifying comes after the rollout, so a retry judges the persisted deliverable;
             # without one, /verify answers 404 and the policy runs again.
             if (
@@ -2617,10 +2844,35 @@ async def run_e2e_multistage(
             if completed.environment_server_type is not None:
                 completed.result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
             attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
+            on_result(completed.row, completed.result)
             results.append((completed.row, completed.result))
+
+        completions = helper._run_examples_with_metadata(
+            rows,
+            semaphore=semaphore,
+            dispatch_budget_s=remaining_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+            route_failures_to_sidecar=route_failures_to_sidecar,
+        )
+        try:
+            for future in completions:
+                finish(await future)
+        except BaseException:
+            # One raising rollout ends the batch; save the siblings that finished but were not consumed yet.
+            if hasattr(completions, "aclose_and_drain"):
+                for settled in await completions.aclose_and_drain():
+                    if not settled.cancelled() and settled.exception() is None:
+                        finish(settled.result())
+            raise
         return results
 
-    async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    outcomes_recorded = 0
+
+    async def run_rollouts(
+        rows: List[Dict[str, Any]], *, on_result: RolloutResultSink
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        nonlocal outcomes_recorded
         semaphore = None
         if semaphore_size:
             from asyncio import Semaphore
@@ -2636,21 +2888,34 @@ async def run_e2e_multistage(
             helper.resolve_task_sources(
                 [row for row in reused if NG_ENVIRONMENT_SERVER_KEY not in row], server_client.global_config_dict
             )
-        judging = asyncio.gather(*(verify_cached(row, semaphore, server_client) for row in reused))
+        judging = asyncio.gather(*(verify_cached(row, semaphore, server_client, on_result) for row in reused))
         try:
-            results = await dispatch([row for row in rows if not row.get("reuse_cached_deliverable")], semaphore)
+            results = await dispatch(
+                [row for row in rows if not row.get("reuse_cached_deliverable")], semaphore, on_result
+            )
         except BaseException:
             judging.cancel()
             raise
         judged = await judging
         results.extend((row, result) for row, result in judged if result is not None)
         # No deliverable was persisted for these rows, so the policy runs, as old Stirrup did.
-        results.extend(await dispatch([row for row, result in judged if result is None], semaphore))
+        results.extend(await dispatch([row for row, result in judged if result is None], semaphore, on_result))
+        outcomes_recorded += sum(
+            not result.get(NG_NO_PERSIST_KEY)
+            and (
+                bool(result.get(NG_TERMINAL_KEY))
+                or (
+                    result.get(NG_FAILURE_CLASS_KEY) != "kill_shaped"
+                    and result.get("_ng_failure_stage") != "admission"
+                )
+            )
+            for _, result in results
+        )
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
     journal_fpath = journal_path_for(output_fpath)
-    fingerprint = compute_fingerprint(
+    fingerprint, fingerprint_components = compute_fingerprint_with_components(
         multistage_config,
         reference_elos,
         distribution,
@@ -2667,7 +2932,24 @@ async def run_e2e_multistage(
 
         assignment_repair = make_assignment_repair(global_config_dict, transport_config)
 
-    resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
+    # A journal written before paths were canonicalized carries the raw-path value: accept it for the same inputs.
+    legacy_fingerprint = compute_fingerprint(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows=materialized_rows,
+        rollout_collection_config=rollout_collection_config,
+        resolved_global_config=global_config_dict,
+        canonical_paths=False,
+    )
+    resume = _prepare_resume(
+        rollout_collection_config,
+        output_fpath,
+        journal_fpath,
+        fingerprint,
+        fingerprint_components=fingerprint_components,
+        accepted_fingerprints=(legacy_fingerprint,),
+    )
 
     # Rewrite the materialized inputs from the journal on every plan and outcome: a stage's
     # references come from the previous stage's ELO, and its accepted row count from its outcome.
@@ -2697,6 +2979,7 @@ async def run_e2e_multistage(
         resume=resume,
         dispatch_longest_first=bool(getattr(rollout_collection_config, "dispatch_longest_first", False)),
         assignment_repair=assignment_repair,
+        runner_reports_each_result=True,
     )
 
     print(latency_tracker.summary())
@@ -2716,14 +2999,29 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
     )
+    # A stage accepted by its partial-completion policy is complete at its accepted size; every other stage
+    # owes all planned rollouts, so a stop with retryable or undispatched rows still fails the run.
+    expected = sum(
+        stage["num_successful"] if stage.get("partial") else stage["num_rollouts"] for stage in stage_summaries
+    )
+    # Accepted omissions are already excluded from expected; crediting them again could hide another stage's gaps.
     rollout_collection_config.check_completion(
-        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
+        expected=expected,
+        results=all_results,
+        retryable=any(stage["num_retryable"] > 0 for stage in stage_summaries),
+        made_progress=outcomes_recorded > 0,
     )
     return aggregate_metrics_fpath
 
 
 def _prepare_resume(
-    rollout_collection_config, output_fpath: Path, journal_fpath: Path, fingerprint: str
+    rollout_collection_config,
+    output_fpath: Path,
+    journal_fpath: Path,
+    fingerprint: str,
+    *,
+    fingerprint_components: Optional[Mapping[str, str]] = None,
+    accepted_fingerprints: Sequence[str] = (),
 ) -> StageResume:
     """Build the file-backed :class:`StageResume` for the run.
 
@@ -2731,18 +3029,29 @@ def _prepare_resume(
     and rows incrementally, giving a later resume state to read. Prior state is
     reused only when ``resume_from_cache`` is set and both the rollouts file and a
     fingerprint-matching journal exist; every other case renames the prior
-    rollouts, failure sidecar, journal and aggregate metrics to
-    ``<name>.stale.<ns>`` and starts fresh (with the reason logged).
+    rollouts, failure sidecar, journals, manifest, materialized inputs, coverage and aggregate metrics to
+    ``<name>.stale.<ns>`` and starts fresh (with the reason logged). The reason
+    for a stale journal names the fingerprint components that differ; the
+    digests never change the decision. ``accepted_fingerprints`` are other values that describe the same inputs
+    (the fingerprint an earlier Gym version computed for them); a journal carrying one of them resumes too.
     """
     import sys
 
     resume_requested = bool(getattr(rollout_collection_config, "resume_from_cache", False))
+    if resume_requested:
+        # Rows are appended as each rollout completes, so a kill can cut the last line short.
+        for path in (output_fpath, failures_path_for(output_fpath), journal_fpath):
+            if path.exists():
+                prepare_append(path)
     if not resume_requested:
         reason = "resume_from_cache not set"
     elif not output_fpath.exists() or not journal_fpath.exists():
         reason = f"no prior cache (rollouts exist={output_fpath.exists()}, journal exists={journal_fpath.exists()})"
-    elif read_journal(journal_fpath)[2] != fingerprint:
-        reason = f"journal STALE (fingerprint {read_journal(journal_fpath)[2]} != {fingerprint})"
+    elif (journal_fingerprint := read_journal(journal_fpath)[2]) not in (fingerprint, *accepted_fingerprints):
+        changes = describe_fingerprint_component_changes(
+            read_journal_fingerprint_components(journal_fpath), fingerprint_components
+        )
+        reason = f"journal STALE (fingerprint {journal_fingerprint} != {fingerprint}): {changes}"
     else:
         reason = None
 
@@ -2757,6 +3066,12 @@ def _prepare_resume(
             resubmit_offset_path_for(output_fpath),
             journal_fpath,
             aggregate_metrics_path_for(output_fpath),
+            # A previous single-pass run owns these additional companions.
+            # Preserve them together so they cannot claim the new stage output.
+            manifest_path_for(output_fpath),
+            rollout_attempts_path_for(output_fpath),
+            materialized_path_for(output_fpath),
+            coverage_path_for(output_fpath),
             aggregation_sources_path_for(output_fpath),
         ):
             if stale.exists():
@@ -2767,7 +3082,7 @@ def _prepare_resume(
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
         if getattr(rollout_collection_config, "resubmit", False):
             record_resubmit_offset(output_fpath)
-    return build_file_resume(output_fpath, journal_fpath, fingerprint)
+    return build_file_resume(output_fpath, journal_fpath, fingerprint, fingerprint_components=fingerprint_components)
 
 
 def _log_event(name: str, data: dict) -> None:  # pragma: no cover
