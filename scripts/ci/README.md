@@ -40,6 +40,16 @@ suite runs offline too when the provider sets `UV_OFFLINE=1` for the nested inst
 whose Git source, direct or transitive, is not pinned to a full commit (a branch, a tag, an
 abbreviated SHA, or no ref) still needs the network, because `uv` must fetch to resolve it.
 
+`reward_diff.py` is a GitHub-only, non-blocking helper outside this contract. For each resources server a
+pull request changes, the `Reward diff` job re-scores the server's saved rollouts
+(`data/example_rollouts.jsonl`) with the base and PR verifiers in-process and writes the reward changes to the
+job summary. It calls no model, so a verifier that needs a judge model reports its rollouts as unscorable. To
+check a change against more rollouts locally, pass any `rollouts.jsonl` from `gym eval run`:
+
+```bash
+python scripts/ci/reward_diff.py run resources_servers/<name> --base-ref origin/main --rollouts /path/to/rollouts.jsonl
+```
+
 ## Shared server-test data
 
 IFBench source and NLTK resources live under
