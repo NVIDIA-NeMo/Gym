@@ -115,8 +115,7 @@ EXPECTED_IN_PROCESS_TASK_SIGNATURES = {
 # deprecation first. Update this list in the same change.
 EXPECTED_IN_PROCESS_RESULT_FIELDS = {
     "PlannedBenchmark": ["plan", "rows"],
-    "TaskResult": ["task_id", "outcome", "raw"],
-    "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output"],
+    "RolloutOutcome": ["reward", "failure", "masked", "prompt", "output", "raw"],
     "TaskFailure": [
         "kind",
         "source",
@@ -159,7 +158,6 @@ def test_everything_an_external_caller_needs_is_exported_from_the_environment_pa
         "serve_benchmark",
         "TaskRunner",
         "PlannedBenchmark",
-        "TaskResult",
         "RolloutOutcome",
         "TaskFailure",
         "EvalPlan",

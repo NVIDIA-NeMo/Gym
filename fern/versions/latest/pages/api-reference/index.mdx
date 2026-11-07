@@ -101,8 +101,8 @@ from nemo_gym.environment import TaskRunner, plan_benchmark
 
 planned = plan_benchmark("ifeval")          # resolve, prepare, plan and collate the benchmark
 runner = TaskRunner(planned.rows, registry_server=BaseServerConfig(host="127.0.0.1", port=11000))
-result = await runner.run_task(planned.task_ids()[0])
-print(result.outcome.reward)
+outcome = await runner.run_task(planned.task_ids()[0])
+print(outcome.reward)
 ```
 
 `plan_benchmark` builds the same plan as `gym eval plan` and collates the benchmark's rows. It reads no
@@ -113,13 +113,13 @@ run's config and the other servers' addresses.
 ### What is experimental
 
 Import everything from `nemo_gym.environment`: `plan_benchmark`, `serve_benchmark`, `TaskRunner`, `PlannedBenchmark`,
-`TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`.
+`RolloutOutcome`, `TaskFailure` and `EvalPlan`. The error type is `nemo_gym.config.ConfigError`.
 
 This API is experimental: signatures, result fields and behavior may change or be removed without a deprecation
 period. `plan_benchmark`, `serve_benchmark` and `TaskRunner` warn on stderr when they are used. A test pins the current
 names and fields so that a change is deliberate.
 
-`run_task` runs one rollout of a task. Its `TaskResult` has the rollout's typed `outcome`: the `reward` (None when none
+`run_task` runs one rollout of a task and returns its typed `RolloutOutcome`: the `reward` (None when none
 exists, as for a failed `/run`), a `TaskFailure` when a failure was reported, whether it was `masked`, and the `prompt` and
 `output` as JSON text for display. A failed `/run` does not raise: the outcome has a `failure` and no reward.
 
@@ -134,7 +134,7 @@ A failure reports what Gym observed and leaves the decision to you:
 
 Group failures by `domain` and a new kind under an existing domain needs no change from you.
 
-`TaskResult.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part of the contract: depend on `outcome`, and use `raw` for debugging.
+`RolloutOutcome.raw` holds Gym's raw `/run` response (the failure record for a failed `/run`). Its keys are not part of the contract: depend on the other fields, and use `raw` for debugging.
 
 ### Constraints
 

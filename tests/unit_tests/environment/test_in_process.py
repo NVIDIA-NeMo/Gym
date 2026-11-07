@@ -135,7 +135,7 @@ class TestOutcomes:
 
         result = await runner.run_task("a")
 
-        assert result.outcome == outcome
+        assert result == outcome
         assert result.raw == raw
 
 
@@ -187,7 +187,7 @@ class TestFailedRuns:
         result = await runner.run_task("a")
 
         assert result.raw == record.model_dump(mode="json")
-        assert result.outcome == RolloutOutcome(
+        assert result == RolloutOutcome(
             reward=None,
             failure=TaskFailure(
                 kind="model_request_error",
@@ -216,7 +216,7 @@ class TestFailedRuns:
         record = _record(source=source, delivery=delivery, http_status=None, exception_type=None)
         monkeypatch.setattr(RolloutCollectionHelper, "run_outcomes", _FakeResults(record))
 
-        failure = (await runner.run_task("a")).outcome.failure
+        failure = (await runner.run_task("a")).failure
 
         assert failure is not None
         assert (failure.kind, failure.source) == (kind, source)
@@ -247,8 +247,7 @@ class TestTaskRunner:
 
         result = await runner.run_task("b", rollout_id="trial-7")
 
-        assert result.task_id == "b"
-        assert result.outcome.reward == 1.0
+        assert result.reward == 1.0
         assert [row["task_id"] for row in runs.sent[0]] == ["b"]
         assert [row["_ng_rollout_id"] for row in runs.sent[0]] == ["trial-7"]
 
@@ -310,7 +309,7 @@ class TestTaskRunner:
 
         result = await runner.run_task("a")
 
-        assert result.outcome.reward == 1.0
+        assert result.reward == 1.0
 
     def test_refuses_a_materialized_task_row(self) -> None:
         materialized = {

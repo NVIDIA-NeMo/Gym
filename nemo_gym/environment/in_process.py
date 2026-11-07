@@ -6,8 +6,8 @@
 ```python
 planned = plan_benchmark("ifeval")                        # resolve, prepare, plan and collate
 runner = TaskRunner(planned.rows, registry_server=BaseServerConfig(host="127.0.0.1", port=11000))
-result = await runner.run_task(planned.plan.tasks[0].task_id.task_id)
-result.outcome.reward                                     # None when the rollout has no reward
+outcome = await runner.run_task(planned.plan.tasks[0].task_id.task_id)
+outcome.reward                                            # None when the rollout has no reward
 ```
 
 To start the servers from Python too, serve the benchmark and give the yielded registry server to the runner:
@@ -27,11 +27,11 @@ The registry server is the server that serves the run's config and the other ser
 talks to it.
 
 This is the API for callers outside Gym. They import the names `nemo_gym.environment` exports (`plan_benchmark`,
-`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `TaskResult`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`)
+`serve_benchmark`, `TaskRunner`, `PlannedBenchmark`, `RolloutOutcome`, `TaskFailure` and `EvalPlan`)
 and `ConfigError` from
 `nemo_gym.config`. It is experimental: signatures and result fields may change without a deprecation period, and
-tests pin the current ones. `TaskResult.raw` is Gym's raw `/run` response (the failure record for a failed `/run`),
-whose keys can change: depend on `TaskResult.outcome`, and use `raw` for debugging.
+tests pin the current ones. `RolloutOutcome.raw` is Gym's raw `/run` response (the failure record for a failed
+`/run`), whose keys can change: depend on the other fields, and use `raw` for debugging.
 """
 
 import json
@@ -40,7 +40,7 @@ import tempfile
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Optional
 
@@ -137,7 +137,8 @@ class RolloutOutcome:
 
     `reward` is None when no reward exists, as for a failed `/run`: an infrastructure failure is not a score of zero.
     `masked` is True when Gym excludes the rollout from training statistics. `prompt` and `output` are the input
-    and output items as JSON text, for display and debugging, or None when the rollout has none.
+    and output items as JSON text, for display and debugging, or None when the rollout has none. `raw` is Gym's own
+    `/run` response (the failure record for a failed `/run`), whose keys can change: use it for debugging only.
     """
 
     reward: Optional[float]
@@ -145,18 +146,7 @@ class RolloutOutcome:
     masked: bool = False
     prompt: Optional[str] = None
     output: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class TaskResult:
-    """One task's rollout: its typed `outcome`, and Gym's `raw` `/run` response (the failure record for a failed `/run`).
-
-    Depend on `outcome`. `raw` is Gym's own shape, whose keys can change: use it for debugging only.
-    """
-
-    task_id: str
-    outcome: RolloutOutcome
-    raw: dict[str, Any]
+    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
 
 @experimental
@@ -304,7 +294,7 @@ class TaskRunner:
     def task_ids(self) -> list[str]:
         return list(self._row_of_task)
 
-    async def run_task(self, task_id: str, *, rollout_id: Optional[str] = None) -> TaskResult:
+    async def run_task(self, task_id: str, *, rollout_id: Optional[str] = None) -> RolloutOutcome:
         """Run one rollout of a task.
 
         `rollout_id` names the rollout for Gym's rollout correlation (e.g. verification events). It must differ between
@@ -322,7 +312,7 @@ class TaskRunner:
             [(_, result)] = [await rollout for rollout in completions]
         finally:
             await completions.aclose()
-        return TaskResult(task_id=task_id, outcome=_outcome(result), raw=_raw(result))
+        return _outcome(result)
 
 
 def _raw(result: Mapping[str, Any] | RolloutFailureRecord) -> dict[str, Any]:
@@ -331,7 +321,7 @@ def _raw(result: Mapping[str, Any] | RolloutFailureRecord) -> dict[str, Any]:
 
 def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome:
     if isinstance(result, RolloutFailureRecord):
-        return RolloutOutcome(reward=None, failure=_failure_of_record(result))
+        return RolloutOutcome(reward=None, failure=_failure_of_record(result), raw=_raw(result))
     kind, reason = result.get("failure_kind"), result.get("failure_reason")
     failure = None
     if kind:
@@ -348,6 +338,7 @@ def _outcome(result: Mapping[str, Any] | RolloutFailureRecord) -> RolloutOutcome
         masked=bool(result.get("mask_sample")),
         prompt=None if prompt is None else json.dumps(prompt, default=str),
         output=None if output is None else json.dumps(output, default=str),
+        raw=_raw(result),
     )
 
 
