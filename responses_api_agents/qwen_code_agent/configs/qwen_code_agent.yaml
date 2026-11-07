@@ -28,7 +28,7 @@ qwen_code_agent:
       max_tool_calls: null
       approval_mode: yolo
       system_prompt: null
-      exclude_tools: []
+      exclude_tools: [web_fetch, web_search]
       settings: {}
       # Agent-server archive from build_runtime.sh, for sandboxes without internet access.
       runtime_archive: null
@@ -37,3 +37,4 @@ qwen_code_agent:
       # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
       sandbox_provider: null
       sandbox_config: {}
+      network_access: inherit  # model_only limits an owned sandbox's egress to the model host

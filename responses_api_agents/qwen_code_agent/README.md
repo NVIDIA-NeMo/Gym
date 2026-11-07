@@ -58,7 +58,9 @@ gym eval run --no-serve \
 | `max_session_turns`, `max_tool_calls` | `null` | `--max-session-turns` and `--max-tool-calls`. A request's `max_tool_calls` wins. |
 | `approval_mode` | `yolo` | Headless runs need `yolo` (or `auto-edit`, `auto`) to execute tools. |
 | `timeout` | `3600` | Seconds per activation, children included, enforced by the sandbox's process supervisor. |
-| `exclude_tools`, `settings` | empty | Extra `--exclude-tools`, and settings merged under the generated `settings.json` (the model routes it sets win). |
+| `exclude_tools` | `[web_fetch, web_search]` | Extra `--exclude-tools`. The web tools are off by default, so tasks are solved without looking answers up online; set `[]` to turn web access on. |
+| `settings` | `{}` | Merged under the generated `settings.json` (the model routes it sets win). |
+| `network_access` | `inherit` | Egress of an agent-owned sandbox; `model_only` allows only the model servers' host. |
 
 `subagent_model` works by writing a user-level `general-purpose` agent definition with that `model`. Its system
 prompt is the built-in one, copied from Qwen Code 0.25.1 into [general-purpose-agent.md](general-purpose-agent.md).
@@ -83,6 +85,13 @@ Qwen Code runs in `SandboxAccess.workdir` through the shared `harness_runner.sh`
 settings, agent definitions and session transcripts live under `QWEN_HOME` in a private session directory, so tool
 shells keep the task's `HOME`. `SandboxAccess.env` is forwarded, except `QWEN_*`, `OPENAI_*` and the adapter's
 `NEMO_GYM_MODEL_API_KEY`. Close removes only the session directory.
+
+`network_access: model_only` limits an agent-owned sandbox's egress to the model servers' host (every port). npm cannot reach its registry
+then, so set `runtime_archive`. The
+OpenSandbox policy is set when the sandbox is created, so a session that borrows a task sandbox rejects any value
+other than `inherit`, as does a provider without network policies, an explicit
+`sandbox_config.provider_options.network_policy`, or a `subagent_model_server` on another host. Qwen Code uses no tool
+grants, so `model_and_tools` is rejected. Each refusal fails the seed with HTTP 422.
 
 ## Requests, results and outcomes
 

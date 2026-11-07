@@ -11,6 +11,7 @@ from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import time
 from typing import Any, ClassVar, Literal
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -27,9 +28,11 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     SandboxCommand,
+    SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
@@ -97,7 +100,8 @@ class QwenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Headless runs cannot answer approval prompts.
     approval_mode: Literal["yolo", "auto-edit", "auto"] = "yolo"
     system_prompt: str | None = None
-    exclude_tools: list[str] = Field(default_factory=list)
+    # Web tools are off so a task is solved from the sandbox, not looked up online.
+    exclude_tools: list[str] = Field(default_factory=lambda: ["web_fetch", "web_search"])
     # Merged under the generated settings.json, which keeps the model routes and settings it sets.
     settings: dict[str, JsonValue] = Field(default_factory=dict)
     # Agent-server tar.gz from build_runtime.sh, uploaded into sandboxes without internet access.
@@ -107,6 +111,14 @@ class QwenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
     sandbox_provider: str | None = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
+    network_access: SandboxNetworkAccess = Field(
+        default="inherit",
+        description=(
+            "Egress of a sandbox Qwen Code creates: `model_only` allows only the model servers' host. Qwen Code uses no "
+            "tool grants, so `model_and_tools` is rejected. A borrowed task sandbox keeps its owner's network, so a "
+            "session that borrows one rejects any other value than `inherit`."
+        ),
+    )
 
     @model_validator(mode="after")
     def check_subagent_settings(self) -> "QwenCodeAgentConfig":
@@ -145,6 +157,12 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
             raise AgentSeedRejectedError(f"Qwen Code sessions pin qwen_version {QWEN_VERSION}")
         access = body.sandbox_access
         owns_sandbox = access is None
+        if self.config.network_access == "model_and_tools":
+            raise AgentSeedRejectedError("Qwen Code uses no tool grants; set network_access to model_only or inherit")
+        if not owns_sandbox and self.config.network_access != "inherit":
+            raise AgentSeedRejectedError(
+                "Qwen Code network_access applies only to a sandbox it creates, not a borrowed one"
+            )
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise AgentSeedRejectedError("Qwen Code requires sandbox_access or a configured sandbox_provider")
@@ -172,6 +190,37 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         global_config = get_global_config_dict()
         provider = create_provider(resolve_provider_config(provider_ref, global_config))
         if owns_sandbox:
+            settings = dict(self.config.sandbox_config)
+            metadata = settings.pop("metadata", None) or {}
+            settings["metadata"] = {
+                **resolve_provider_metadata(provider_ref, global_config),
+                **metadata,
+                "agent_session_id": body.agent_session_id[:63],
+            }
+            settings["workdir"] = str(path)
+            settings.setdefault("ttl_s", int(self.config.sandbox_install_timeout_seconds + self.config.timeout + 600))
+            try:
+                model_url = self.resolve_model_base_url(self.config.model_server.name, trace_context=False)
+                subagent = self.config.subagent_model_server
+                # The policy allows one model host, so a subagent server elsewhere would fail only mid-run.
+                if (
+                    self.config.network_access != "inherit"
+                    and subagent
+                    and urlsplit(self.resolve_model_base_url(subagent.name, trace_context=False)).hostname
+                    != urlsplit(model_url).hostname
+                ):
+                    raise AgentSeedRejectedError(
+                        "network_access allows one model host; subagent_model_server is on another"
+                    )
+                spec = restrict_sandbox_network(
+                    SandboxSpec(**settings),
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=model_url,
+                )
+            except BaseException:
+                await provider.aclose()
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -194,18 +243,7 @@ class QwenCodeAgent(SimpleResponsesAPIAgent):
         try:
             async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
                 if owns_sandbox:
-                    settings = dict(self.config.sandbox_config)
-                    metadata = settings.pop("metadata", None) or {}
-                    settings["metadata"] = {
-                        **resolve_provider_metadata(provider_ref, global_config),
-                        **metadata,
-                        "agent_session_id": body.agent_session_id[:63],
-                    }
-                    settings["workdir"] = str(path)
-                    settings.setdefault(
-                        "ttl_s", int(self.config.sandbox_install_timeout_seconds + self.config.timeout + 600)
-                    )
-                    await sandbox.start(SandboxSpec(**settings))
+                    await sandbox.start(spec)
                     state.sandbox_id = sandbox.sandbox_id
                     made = await sandbox.exec(f"mkdir -p -- {quote(str(path))}", cwd="/", timeout_s=30)
                     if made.return_code != 0 or made.error_type:
