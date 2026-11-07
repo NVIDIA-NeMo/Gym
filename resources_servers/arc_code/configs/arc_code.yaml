@@ -1,0 +1,8 @@
+arc_code_resources_server:
+  resources_servers:
+    arc_code:
+      entrypoint: app.py
+      domain: knowledge
+      verified: false
+      description: Solve ARC-style grid puzzles by writing and running Python; the final grid is checked by exact match.
+      value: Improve code-assisted, visual puzzle solving.
