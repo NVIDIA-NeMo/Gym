@@ -119,3 +119,12 @@ def test_nemotron_overlays_still_bind_existing_agents(staged: bool, monkeypatch:
             assert settings.datasets == []
         environment = get_first_server_config_dict(config, f"{prefix}_environment_server")
         assert environment.agent_server.name == agent_name
+
+
+@pytest.mark.parametrize("environment", ["opencode_math", "opencode_reasoning_gym"])
+def test_host_run_presets_deny_web_fetches(environment: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    # These presets run OpenCode on the Gym host through /run, where network_access does not apply, and grade
+    # what the model knows, so the harness must not fetch answers from the web.
+    config = _resolve_config(f"environments/{environment}/config.yaml", monkeypatch)
+    agent = get_first_server_config_dict(config, f"{environment}_agent")
+    assert agent.opencode_config.permission.webfetch == "deny"

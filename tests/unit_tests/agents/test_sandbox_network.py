@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import logging
 from types import SimpleNamespace
 
 import pytest
@@ -113,3 +114,26 @@ def test_a_required_tool_grant_needs_model_and_tools(network_access: str) -> Non
             restrict()
         return
     assert {rule["target"] for rule in restrict().provider_options["network_policy"]["egress"]} >= {"tools.example"}
+
+
+def test_a_restriction_is_logged_with_its_mode_and_hosts(caplog: pytest.LogCaptureFixture) -> None:
+    # The log line is the only record of whether a run's sandbox was restricted.
+    with caplog.at_level(logging.INFO, logger="nemo_gym.agents.utils.sandbox_network"):
+        restrict_sandbox_network(
+            SandboxSpec(image="task"),
+            network_access="model_and_tools",
+            provider=OPENSANDBOX,
+            model_base_url=MODEL_URL,
+            tool_urls=TOOL_URLS,
+        )
+    [record] = [r for r in caplog.records if r.name == "nemo_gym.agents.utils.sandbox_network"]
+    assert "network_access=model_and_tools" in record.getMessage()
+    assert "model.example, search.example, tools.example" in record.getMessage()
+
+
+def test_inherit_logs_nothing(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.INFO, logger="nemo_gym.agents.utils.sandbox_network"):
+        restrict_sandbox_network(
+            SandboxSpec(image="task"), network_access="inherit", provider=OPENSANDBOX, model_base_url=MODEL_URL
+        )
+    assert not [r for r in caplog.records if r.name == "nemo_gym.agents.utils.sandbox_network"]
