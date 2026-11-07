@@ -104,6 +104,9 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
+    if harness == "opencode_multimodal":
+        # The sandbox setup installs the native executable.
+        return
     if harness == "nooa":
         subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
         return

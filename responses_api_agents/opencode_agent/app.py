@@ -22,6 +22,7 @@ import os
 import re
 import shlex
 import shutil
+import sqlite3
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
@@ -84,6 +85,7 @@ from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
     SandboxExecResult,
+    SandboxProvider,
     SandboxSpec,
     create_provider,
     resolve_provider_config,
@@ -361,6 +363,7 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
         ),
     )
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    capture_failure_artifacts: bool = False
     report_agent_sandbox_oom: bool = False
     # Connection and per-call timeout of a sandbox session's MCP tool grants; OpenCode's default is 30 s.
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
@@ -573,6 +576,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             env["OPENAI_API_KEY"] = "EMPTY"  # pragma: allowlist secret
         return env
 
+    def _prepare_command(self, command: list[str], project_dir: Path, env: dict[str, str]) -> list[str]:
+        """Allow specialized agents to isolate the process without replacing collection."""
+        return command
+
     async def _run_opencode(
         self,
         instruction: str,
@@ -582,6 +589,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         collect_observations: bool = True,
         trajectory: Optional[TrajectoryRecord] = None,
         timeout: float | None = None,
+        artifact_path: Optional[Path] = None,
     ) -> tuple[list[Any], dict[str, int], str, AgentObservationBundle]:
         """Run one headless OpenCode session and read its persisted artifact."""
         try:
@@ -613,6 +621,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         cmd.append(prompt)
 
         try:
+            cmd = self._prepare_command(cmd, project_dir, env)
             timed_out = False
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -633,6 +642,29 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
 
             db_path = data_home / "opencode" / "opencode.db"
+            if artifact_path is not None:
+                failed = timed_out or proc.returncode != 0
+                failure_message = (
+                    f"OpenCode failed (timeout={timed_out}, exit={proc.returncode}): "
+                    + stderr.decode(errors="replace")[-2000:]
+                )
+                if failed and not self.config.capture_failure_artifacts:
+                    raise RuntimeError(failure_message)
+                if failed and not db_path.is_file():
+                    raise RuntimeError(failure_message)
+                if not db_path.is_file():
+                    raise RuntimeError("OpenCode did not produce its session database")
+                source = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
+                try:
+                    destination = sqlite3.connect(artifact_path)
+                    try:
+                        source.backup(destination)
+                    finally:
+                        destination.close()
+                finally:
+                    source.close()
+                if failed:
+                    raise RuntimeError(failure_message)
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"
             output_items, usage = (
                 ([], {"input_tokens": 0, "output_tokens": 0})
@@ -879,6 +911,50 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 | ({"ng_trajectory": trajectory.model_dump(mode="json")} if trajectory is not None else {})
             )
 
+    session_state_type: ClassVar[type[OpenCodeSandboxSession]] = OpenCodeSandboxSession
+
+    def _validate_sandbox_options(self) -> None:
+        """Reject settings the session launcher cannot honor before allocating a sandbox."""
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        if unsupported:
+            raise HTTPException(
+                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+            )
+        if self.config.env or self.config.extra_args or self.config.command != "opencode":
+            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+
+    async def _prepare_session_launch(
+        self,
+        state: OpenCodeSandboxSession,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        payload: dict[str, Any],
+    ) -> None:
+        """Stage adapter-specific inputs before the shared supervised launch."""
+
+    def _sandbox_network_access(self) -> SandboxNetworkAccess:
+        """Provider policy selected by this adapter; subclasses may translate their policy names."""
+        return self.config.network_access
+
+    def _restrict_owned_sandbox_network(
+        self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
+    ) -> SandboxSpec:
+        return restrict_sandbox_network(
+            spec,
+            network_access=self._sandbox_network_access(),
+            provider=provider,
+            model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+            tool_urls=[
+                str(access.connection.url)
+                for access in self.effective_tool_accesses(body)
+                if isinstance(access, MCPToolAccess)
+            ],
+            required_tool_urls=[
+                str(access.connection.url)
+                for access in self.effective_tool_accesses(body)
+                if isinstance(access, MCPToolAccess) and access.required
+            ],
+        )
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
         if self.config.model_server is None:
@@ -893,7 +969,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         else:
             if not isinstance(body.sandbox_access.connection, DirectSandboxConnection):
                 raise HTTPException(422, "OpenCode requires direct SandboxAccess")
-            if self.config.network_access != "inherit":
+            if self._sandbox_network_access() != "inherit":
                 raise AgentSeedRejectedError(
                     "OpenCode network_access applies only to a sandbox it creates, not a borrowed one"
                 )
@@ -939,13 +1015,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
-        if unsupported:
-            raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
-            )
-        if self.config.env or self.config.extra_args or self.config.command != "opencode":
-            raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+        self._validate_sandbox_options()
         if not all(_is_sandbox_path(path) for path in self.config.plugins):
             raise AgentSeedRejectedError("OpenCode plugins must be absolute, normalized paths inside the sandbox")
         if self.config.export_dir is not None and (
@@ -972,23 +1042,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             try:
-                spec = restrict_sandbox_network(
-                    spec,
-                    network_access=self.config.network_access,
-                    provider=provider,
-                    model_base_url=self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
-                    tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess)
-                    ],
-                    # model_only blocks these hosts, so a required grant is refused before the sandbox exists.
-                    required_tool_urls=[
-                        str(access.connection.url)
-                        for access in self.effective_tool_accesses(body)
-                        if isinstance(access, MCPToolAccess) and access.required
-                    ],
-                )
+                spec = self._restrict_owned_sandbox_network(spec, provider, body)
             except BaseException:
                 await provider.aclose()
                 raise
@@ -1002,7 +1056,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         # Caller-assigned IDs are wire identifiers, never filesystem paths.
         directory = f"/tmp/nemo-gym-opencode-sessions/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
-        state = OpenCodeSandboxSession(
+        state = self.session_state_type(
             request=body,
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
@@ -1700,6 +1754,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             async with asyncio.timeout_at(deadline):
                 await self.sem.acquire()
             try:
+                async with asyncio.timeout_at(deadline):
+                    await self._prepare_session_launch(state, body, payload)
                 await state.execute(
                     payload,
                     timeout=timeout,

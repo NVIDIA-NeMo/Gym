@@ -205,7 +205,7 @@ def compute_staging_digest(
     schema_version: int,
     digest_version: int,
     extras_digest_version: int,
-    capture_key: str,
+    capture_key: str | None = None,
     model_call_id: str,
     parent_call_id: str | None,
     mode: str,
@@ -219,8 +219,13 @@ def compute_staging_digest(
     extras_digest: str,
     chain_hash: str,
     cumulative_hash: str,
+    rollout_id: str | None = None,
 ) -> str:
-    """Compute the v2 digest for one staged call delta."""
+    """Compute the v2 digest, accepting the legacy owner keyword without changing bytes."""
+    if rollout_id is not None:
+        if capture_key is not None:
+            raise ValueError("Supply capture_key or legacy rollout_id, not both")
+        capture_key = rollout_id
     if type(schema_version) is not int or schema_version != STAGING_SCHEMA_VERSION:
         raise ValueError(f"unsupported staging schema version {schema_version}")
     if type(digest_version) is not int or digest_version != STAGING_DIGEST_VERSION:

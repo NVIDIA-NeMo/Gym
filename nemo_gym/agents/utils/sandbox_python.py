@@ -359,12 +359,20 @@ class SandboxPythonRuntime:
 
     async def _build_site_packages(self, platform: SandboxPlatform, destination: Path) -> None:
         uv = shutil.which("uv")
-        if uv is None:
+        if self.requirements and uv is None:
             raise RuntimeError("Building a sandbox Python runtime requires uv on the Agent Server host")
         LOG.info("Building the %s sandbox runtime for %s into %s", self.harness, platform.wheel_platform, destination)
         destination.parent.mkdir(parents=True, exist_ok=True)
         scratch = Path(tempfile.mkdtemp(prefix=".build-", dir=destination.parent))
         try:
+            if not self.requirements:
+                # A stdlib-only adapter still installs the checksum-verified private
+                # interpreter, but needs no package installer or task-image Python.
+                (scratch / _SITE_PACKAGES).mkdir(parents=True)
+                archive = scratch / "site-packages.tar.gz"
+                await asyncio.to_thread(_write_archive, scratch / "python", archive)
+                os.replace(archive, destination)
+                return
             constraints = scratch / "constraints.txt"
             constraints.write_text("".join(f"{pin}\n" for pin in _agent_environment_pins()))
             argv = [

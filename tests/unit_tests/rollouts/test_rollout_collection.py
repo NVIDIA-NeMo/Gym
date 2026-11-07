@@ -2129,6 +2129,106 @@ class TestRolloutCollection:
         with pytest.raises(ClientResponseError):
             await next(RolloutCollectionHelper().run_examples([failing_row()]))
 
+    @pytest.mark.parametrize("num_failures", [1, 8, 9])
+    async def test_run_examples_configured_failure_routing_preserves_siblings(
+        self, monkeypatch: pytest.MonkeyPatch, num_failures: int
+    ) -> None:
+        async def post(*args, **kwargs):
+            row = kwargs["json"]
+            if row[TASK_INDEX_KEY_NAME] < num_failures:
+                raise http_error(500, "OpenCode process exited")
+            await asyncio.sleep(0)
+            return FakeResponse(200, {"reward": 1.0, "response": {"output": []}})
+
+        mocked_post = AsyncMock(side_effect=post)
+        client = install_fake_server_client(monkeypatch, mocked_post)
+        client.global_config_dict.route_failures_to_sidecar = True
+        results = []
+        for future in RolloutCollectionHelper().run_examples([failing_row(i) for i in range(16)]):
+            row, result = await future
+            results.append((row[TASK_INDEX_KEY_NAME], result))
+
+        assert len(results) == 16
+        assert mocked_post.await_count == 16
+        for index, result in results:
+            if index < num_failures:
+                assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+                assert result["instance_config"]["mask_sample"] is True
+                assert "reward" not in result
+                assert "response" not in result
+            else:
+                assert result == {"reward": 1.0, "response": {"output": []}}
+
+    @pytest.mark.parametrize("configured,explicit", [(True, False), (False, True)])
+    async def test_run_examples_explicit_failure_routing_overrides_config(
+        self, monkeypatch: pytest.MonkeyPatch, configured: bool, explicit: bool
+    ) -> None:
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+        client.global_config_dict.route_failures_to_sidecar = configured
+        iterator = RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=explicit)
+        if explicit:
+            _, result = await next(iterator)
+            assert result["instance_config"]["mask_sample"] is True
+        else:
+            with pytest.raises(ClientResponseError):
+                await next(iterator)
+
+    @pytest.mark.parametrize("ledger_write_fails", [False, True])
+    async def test_run_examples_invalidates_failed_training_capture(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ledger_write_fails: bool
+    ) -> None:
+        from nemo_gym.models.token_capture.lineage import FileLineageStore
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+        client.global_config_dict.route_failures_to_sidecar = True
+        client.global_config_dict.token_id_capture = {
+            "enabled": True,
+            "external_staging": True,
+            "rebuild_response": False,
+            "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
+            "lineage_store_kwargs": {"root": str(tmp_path)},
+        }
+        ledger = FileLineageStore(tmp_path)
+        await ledger.begin_call("7-0", "existing-call")
+        before = await ledger.manifest("7-0")
+        if ledger_write_fails:
+            monkeypatch.setattr(
+                FileLineageStore, "record_failure", AsyncMock(side_effect=OSError("ledger unavailable"))
+            )
+
+        iterator = RolloutCollectionHelper().run_examples([failing_row()])
+        if ledger_write_fails:
+            # Never return a recoverable row while its captured prefix still looks trainable.
+            with pytest.raises(OSError, match="ledger unavailable"):
+                await next(iterator)
+            assert await ledger.manifest("7-0") == before
+        else:
+            _, result = await next(iterator)
+            assert result["instance_config"]["mask_sample"] is True
+            after = await ledger.manifest("7-0")
+            assert after["records"] == before["records"]
+            assert all(failure in after["failures"] for failure in before["failures"])
+            assert any(failure["reason"] == "agent_run_failed" for failure in after["failures"])
+            assert (await ledger.manifest("8-0"))["failures"] == []
+
+    def test_run_examples_requires_ledger_for_failed_training_capture(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = install_fake_server_client(monkeypatch, AsyncMock())
+        client.global_config_dict.token_id_capture = {
+            "enabled": True,
+            "external_staging": True,
+            "rebuild_response": False,
+        }
+        with pytest.raises(ValueError, match="requires a shared CaptureLedger"):
+            RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
+        client.post.assert_not_called()
+
+    def test_run_examples_rejects_invalid_failure_routing_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        client = install_fake_server_client(monkeypatch, AsyncMock())
+        client.global_config_dict.route_failures_to_sidecar = "false"
+        with pytest.raises(ValueError, match="must be a boolean"):
+            RolloutCollectionHelper().run_examples([failing_row()])
+        client.post.assert_not_called()
+
     @pytest.mark.parametrize("retry_requests", [True, False])
     @pytest.mark.parametrize("connection_refused", [False, True])
     async def test_run_examples_controls_transport_replay(

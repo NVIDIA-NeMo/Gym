@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compose after one catalog config, plus model and sandbox-provider configurations.
+config_paths:
+- benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml
+visual_opencode:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      network_access: model_only
+visual_agent:
+  _inherit_from: visual_opencode
+  responses_api_agents:
+    _delete_key: simple_agent
+    opencode_multimodal_agent:
+      num_workers: 1
+      command: opencode
+      sandbox: null
+      env:
+        PATH: ""
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ???
+        workdir: /testbed
+        ttl_s: 18000
+
+# Replace the compatibility relay inherited from the runtime profile.
+visual_opencode_environment_server: null

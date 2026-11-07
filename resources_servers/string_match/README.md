@@ -31,6 +31,11 @@ Data links: ?
 
 The verify response echoes `expected_answer` and the `extracted_answer` the grader actually saw, which is what to look at when a reward is unexpectedly 0.0.
 
+Set the resources-server `entrypoint` to `app_passrate.py` to remove trailing
+`<|im_end|>`, `<|endoftext|>` and `<|eot_id|>` markers before answer extraction.
+This optional entrypoint uses the same matching rules and preserves the original
+response. The default `app.py` behavior is unchanged.
+
 # Example usage
 
 ```bash

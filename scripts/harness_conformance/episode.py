@@ -5,8 +5,10 @@
 
 import argparse
 import asyncio
+import base64
 import importlib
 import importlib.util
+import io
 import json
 import math
 import os
@@ -19,6 +21,7 @@ from pathlib import Path
 
 import uvicorn
 import yaml
+from fastapi import Request, Response
 
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, SimpleResponsesAPIAgent
 from nemo_gym.core import NeMoGymResponse
@@ -40,7 +43,7 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
     """Record session runtime pins or require a preinstalled legacy runtime."""
     if harness == "simple":
         return {"installation": "builtin"}
-    if use_agent_sessions and harness != "hermes":
+    if use_agent_sessions and harness not in ("hermes", "opencode_multimodal"):
         runtime = {"installation": "agent_session"}
         if harness == "nooa":
             adapter = Path(__file__).resolve().parents[2] / "responses_api_agents/nooa_agent"
@@ -53,6 +56,8 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
                 observer_sha256=digest_file(Path(__file__).with_name("nooa_observer.py")),
             )
         return runtime
+    if harness == "opencode_multimodal":
+        harness = "opencode"
     if harness == "hermes":
         if importlib.util.find_spec("run_agent") is None or importlib.util.find_spec("model_tools") is None:
             raise RuntimeError(
@@ -99,10 +104,41 @@ def _config(
     defaults_path = (
         Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/configs/{harness}_agent.yaml"
     )
-    defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
-        f"{harness}_agent"
-    ]
+    defaults = {}
+    if harness != "opencode_multimodal":
+        defaults = yaml.safe_load(defaults_path.read_text())[f"{harness}_agent"]["responses_api_agents"][
+            f"{harness}_agent"
+        ]
     agent.update({key: value for key, value in defaults.items() if key.endswith("_version")})
+    if harness == "opencode_multimodal":
+        root = Path(__file__).resolve().parents[2]
+        profile = yaml.safe_load(
+            (root / "benchmarks/opencode_multimodal_benchmarks/opencode_eval_agent.yaml").read_text()
+        )
+        budget = yaml.safe_load(
+            (root / "responses_api_agents/opencode_multimodal_agent/configs/eval_55_grace10.yaml").read_text()
+        )
+        profile_agent = budget["visual_opencode"]["responses_api_agents"]["opencode_multimodal_agent"]
+        profile_agent.update(profile["visual_opencode"]["responses_api_agents"]["opencode_multimodal_agent"])
+        # An explicit local asset config avoids auto-installation or host-specific paths in the suite.
+        runtime_path = os.environ.get("GYM_MULTIMODAL_SANDBOX_CONFIG")
+        if not runtime_path:
+            raise RuntimeError("Set GYM_MULTIMODAL_SANDBOX_CONFIG to JSON with command and sandbox fields")
+        runtime = json.loads(Path(runtime_path).read_text())
+        if use_agent_sessions:
+            profile_agent.update(
+                command="opencode",
+                sandbox=None,
+                env={},
+                sandbox_executable_path=runtime["command"],
+                sandbox_executable_sha256=digest_file(Path(runtime["command"])),
+                sandbox_path_prefix=[str(Path(runtime["sandbox"]["python_env"]) / "bin")],
+            )
+        else:
+            profile_agent.update(command=runtime["command"], sandbox=runtime["sandbox"])
+        profile_agent.update(agent)
+        agent = profile_agent
+        agent.update(entrypoint="eval.py", workspace_root=str(directory / "workspace"), timeout=timeout)
     if harness == "nooa":
         agent.pop("model")
         agent.pop("concurrency")
@@ -188,9 +224,11 @@ def _config(
 
 async def run_episode(*, harness: str, scenario_name: str, directory: Path, timeout: float) -> None:
     """Start fresh servers and let Gym write the rollout without modifying the harness."""
-    module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
+    entrypoint = "eval" if harness == "opencode_multimodal" else "app"
+    module = importlib.import_module(f"responses_api_agents.{harness}_agent.{entrypoint}")
     agent_cls = getattr(module, HARNESSES[harness])
-    config_cls = getattr(module, HARNESSES[harness] + "Config")
+    config_name = "OpenCodeMultimodalEvalConfig" if harness == "opencode_multimodal" else HARNESSES[harness] + "Config"
+    config_cls = getattr(module, config_name)
     use_agent_sessions = _supports_agent_sessions(agent_cls)
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
@@ -199,7 +237,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     runtime = check_runtime(harness, use_agent_sessions=use_agent_sessions)
     runtime["agent_interface"] = "agent_sessions" if use_agent_sessions else "legacy_run"
     runtime["adapter_sha256"] = digest_file(
-        Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/app.py"
+        Path(__file__).resolve().parents[2] / f"responses_api_agents/{harness}_agent/{entrypoint}.py"
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
@@ -209,7 +247,13 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         probe = BorrowedSandboxProbe(scenario, directory)
     else:
         probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
-        probe = probe_cls(scenario, directory)
+        probe = probe_cls(
+            scenario,
+            directory,
+            sandbox_workspace_root=directory / "workspace"
+            if harness == "opencode_multimodal" and not use_agent_sessions
+            else None,
+        )
     probe.save()
     tasks = []
     servers = []
@@ -229,8 +273,10 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
         )
         if scenario.compaction is not None:
             agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
-            if harness in ("opencode", "pi"):
+            if harness in ("opencode", "opencode_multimodal", "pi"):
                 agent_config.update(context_window=32768 if scenario.compaction else 65536, max_output_tokens=8192)
+                if harness == "opencode_multimodal":
+                    agent_config["compaction_auto"] = bool(scenario.compaction)
             elif harness == "codex":
                 agent_config.update(model_context_window=32768, model_auto_compact_token_limit=24000)
             elif harness == "stirrup":
@@ -274,7 +320,26 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                 LegacyAgentEnvironmentServerConfig,
             )
 
-            environment_cls = LegacyAgentEnvironmentServer
+            class ObservedLegacyEnvironment(LegacyAgentEnvironmentServer):
+                async def run_legacy(self, request: Request) -> Response:
+                    response = await super().run_legacy(request)
+                    if response.status_code == 200:
+                        retained = json.loads(response.body).get("response")
+                        if isinstance(retained, dict):
+                            probe.agent_responses.append(
+                                {
+                                    **{key: retained.get(key) for key in ("status", "error")},
+                                    "metadata": {
+                                        AGENT_OUTCOME_METADATA_KEY: (retained.get("metadata") or {}).get(
+                                            AGENT_OUTCOME_METADATA_KEY
+                                        )
+                                    },
+                                }
+                            )
+                            probe.save()
+                    return response
+
+            environment_cls = ObservedLegacyEnvironment
             environment_config_cls = LegacyAgentEnvironmentServerConfig
         from nemo_gym.client import get_global_aiohttp_client, setup_server_client
         from nemo_gym.rollouts import RolloutCollectionConfig, RolloutCollectionHelper
@@ -318,10 +383,23 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                             raise RuntimeError("probe server exited during startup")
                     await asyncio.sleep(0.01)
             inputs = directory / "requests.jsonl"
-            task = scenario.task()
+            task_row = scenario.task()
+            if harness == "opencode_multimodal":
+                from PIL import Image
+
+                image = io.BytesIO()
+                Image.new("RGB", (3, 2), "red").save(image, format="PNG")
+                image_url = "data:image/png;base64," + base64.b64encode(image.getvalue()).decode()
+                params = task_row["responses_create_params"]
+                params.update(temperature=0.6, top_p=0.95)
+                content = params["input"][0]["content"]
+                params["input"][0]["content"] = [
+                    {"type": "input_text", "text": content},
+                    {"type": "input_image", "image_url": image_url, "detail": "auto"},
+                ]
             if harness == "simple":
-                task["responses_create_params"]["model"] = "conformance-model"
-                task["responses_create_params"]["tools"] = [
+                task_row["responses_create_params"]["model"] = "conformance-model"
+                task_row["responses_create_params"]["tools"] = [
                     {
                         "type": "function",
                         "name": "bash",
@@ -334,7 +412,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
                         },
                     }
                 ]
-            inputs.write_text(json.dumps(task) + "\n")
+            inputs.write_text(json.dumps(task_row) + "\n")
             async with asyncio.timeout(timeout + 10):
                 await RolloutCollectionHelper().run_from_config(
                     RolloutCollectionConfig(
