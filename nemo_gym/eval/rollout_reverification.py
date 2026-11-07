@@ -729,9 +729,8 @@ def check_saved_patch_replay(
         )
 
 
-# Collection's stamps naming the Environment Server and its result type: kept on the re-verified row, never sent
-# to /verify.
-_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
+# Collection identity is retained for grouping and cache resume, never sent to /verify.
+_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY, RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME)
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
@@ -780,8 +779,8 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     if replay_patch:
         payload["saved_model_patch"] = saved_patch
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
-    # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
-    # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
+    # Outcome identity belongs to the collected attempt, not the materialized input.
+    # Keep it for aggregation and resume without sending it to /verify (see _IDENTITY_KEYS).
     for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
