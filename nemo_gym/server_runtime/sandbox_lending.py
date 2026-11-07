@@ -28,16 +28,16 @@ SHUTDOWN_STOP_CONCURRENCY = 64
 class LentSandboxes:
     """Start, lend and stop one sandbox per resources session, from the server's sandbox configuration.
 
-    A server's typed seed calls :meth:`lend` and its typed close calls :meth:`release`, both under the server's
+    A server's episode seed calls :meth:`lend` and its episode close calls :meth:`release`, both under the server's
     :class:`ResourcesSessionLocks` lock. The server keeps any other session state, such as task files it serves or a
     tool workspace, and calls :meth:`release_all` at shutdown. A server that grades in the lent sandbox after the
     episode reads it with :meth:`get` before the close.
 
     The harness gets an ``operate`` descriptor, which asks the provider to let it use the sandbox but not destroy it
-    (providers without leases ignore the scope). Every stop runs to its end
-    within ``STOP_TIMEOUT_S``, also when the request that asked for it is cancelled. A session that is never closed
-    keeps its sandbox until shutdown, or until the provider reclaims it after ``sandbox_config.ttl_s``, so set
-    ``ttl_s`` above the episode deadline plus the time that grading and cleanup take.
+    (providers without leases ignore the scope). A stop goes on when the request that asked for it is cancelled, and
+    gives up after ``STOP_TIMEOUT_S``. A session that is never closed keeps its sandbox until shutdown, or until the
+    provider reclaims it after ``sandbox_config.ttl_s``, so set ``ttl_s`` above the episode deadline plus the time
+    that grading and cleanup take.
     """
 
     def __init__(
