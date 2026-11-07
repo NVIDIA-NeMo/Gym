@@ -112,6 +112,10 @@ class _Call:
     _private: int = 7
 
 
+class _UndecoratedCall(_Call):
+    pass
+
+
 class _Size(enum.Enum):
     WIDE = 2**70
 
@@ -123,6 +127,16 @@ def test_dataclasses_and_enums_holding_a_wide_integer_are_written_not_passed_to_
     # Fields named with a leading underscore are left out, as orjson leaves them out.
     assert dumps_json(_Call("f", {"n": WIDE}), default=str) == b'{"name":"f","arguments":{"n":1180591620717411303424}}'
     assert dumps_json({"size": _Size.WIDE}, default=str) == b'{"size":1180591620717411303424}'
+
+    # orjson refuses an undecorated subclass of a dataclass, so the fallback does too, or calls default.
+    undecorated = _UndecoratedCall("f", {"n": 1})
+    with pytest.raises(orjson.JSONEncodeError):
+        orjson.dumps(undecorated)
+    with pytest.raises(orjson.JSONEncodeError):
+        dumps_json(undecorated)
+    assert dumps_json({"n": WIDE, "v": undecorated}, default=lambda _: "default") == (
+        b'{"n":1180591620717411303424,"v":"default"}'
+    )
 
 
 def test_nesting_deeper_than_orjson_allows_round_trips() -> None:
