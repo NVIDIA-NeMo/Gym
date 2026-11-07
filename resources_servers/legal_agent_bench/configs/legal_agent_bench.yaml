@@ -29,33 +29,35 @@ responses_create_params:
 
 legal_agent_bench_harbor_agent:
   responses_api_agents:
-    harbor_agent:
+    harbor_agent_general:
       entrypoint: ../../resources_servers/legal_agent_bench/harbor_bridge.py
-      concurrency: 1
-
-      harbor_datasets:
-        legal_agent_bench:
-          local_dataset_path: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
-
-      harbor_agent_name: null
-      harbor_agent_import_path: resources_servers.legal_agent_bench.legal_harbor_agent:LegalAgentBenchHarborAgent
-      harbor_agent_kwargs:
-        agent_id: legal-agent-bench
-        agent_config_id: legal-agent-bench
-        run_timestamp: nemo-gym
-        skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
-        max_turns: 60
-        shell_timeout: 60
-        agent_model_max_tokens: 32768
-        agent_model_timeout_seconds: 1800
-
-      harbor_environment_type: docker
-      harbor_environment_import_path: null
-      harbor_environment_kwargs: {}
-
+      # Host data tooling uses LAB's schema; Harbor still owns task verification.
+      resources_server:
+        type: resources_servers
+        name: legal_agent_bench
       model_server:
         type: responses_api_models
         name: policy_model
+      harbor_resolve_paths_from_gym_root: true
+      harbor_unique_job_names: true
+      job:
+        jobs_dir: results/legal_agent_bench/harbor_jobs
+        datasets:
+        - path: ${legal_agent_bench.resources_servers.legal_agent_bench.harbor_tasks_dir}
+        agents:
+        - import_path: resources_servers.legal_agent_bench.legal_harbor_agent:LegalAgentBenchHarborAgent
+          model_name: ${policy_model_name}
+          override_timeout_sec: 10800
+          kwargs:
+            skills_dir: ${legal_agent_bench.resources_servers.legal_agent_bench.harness_skills_dir}
+            max_turns: 60
+            shell_timeout: 60
+            agent_model_max_tokens: 65536
+            agent_model_timeout_seconds: 1800
+        environment:
+          type: docker
+        verifier:
+          override_timeout_sec: 3600
 
       datasets:
       - name: example
@@ -67,12 +69,6 @@ legal_agent_bench_harbor_agent:
         jsonl_fpath: resources_servers/legal_agent_bench/data/generated/all.jsonl
         license: MIT
 
-      harbor_agent_override_timeout: 10800
-      harbor_agent_max_timeout: null
-      harbor_verifier_override_timeout: 3600
-      harbor_verifier_max_timeout: null
-      harbor_timeout_multiplier: null
-      harbor_jobs_dir: results/legal_agent_bench/harbor_jobs
 
 legal_agent_bench_environment_server:
   environment_servers:

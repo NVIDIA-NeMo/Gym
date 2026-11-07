@@ -144,9 +144,9 @@ def test_benchmark_config_is_isolated_and_resolves_shared_cache_paths() -> None:
     assert "legal_agent_bench_harbor_agent" not in resolved
 
     resource = resolved.legal_agent_bench_benchmark_resources_server.resources_servers.legal_agent_bench
-    agent = resolved.legal_agent_bench_benchmark_harbor_agent.responses_api_agents.harbor_agent
-    assert agent.harbor_datasets.legal_agent_bench.local_dataset_path == resource.harbor_tasks_dir
-    assert agent.harbor_agent_kwargs.skills_dir == resource.harness_skills_dir
-    assert agent.harbor_agent_kwargs.max_turns == 60
+    agent = resolved.legal_agent_bench_benchmark_harbor_agent.responses_api_agents.harbor_agent_general
+    assert agent.job.datasets[0].path == resource.harbor_tasks_dir
+    assert agent.job.agents[0].kwargs.skills_dir == resource.harness_skills_dir
+    assert agent.job.agents[0].kwargs.max_turns == 60
     assert len(agent.datasets) == 1
     assert agent.datasets[0].type == "benchmark"

@@ -48,7 +48,7 @@ CACHE_MARKER = ".nemo_gym_asset.json"
 CACHE_FORMAT_VERSION = 4
 REWARD_MODES = ("full_task", "criteria_pass_rate")
 REWARD_MODE_ENV_KEY = "LEGAL_AGENT_BENCH_REWARD_MODE"
-LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "vendor" / "harvey_labs" / "lab_harbor"
+LAB_HARBOR_SOURCE_DIR = PACKAGE_DIR / "lab_harbor"
 TOOL_RUNNER_SOURCE = LAB_HARBOR_SOURCE_DIR / "container_tool_runner.py"
 VERIFIER_TEMPLATE_SOURCES = {
     "tests/legal_agent_bench_verify.py": PACKAGE_DIR / "verifier.py",

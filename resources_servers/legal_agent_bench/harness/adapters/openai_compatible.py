@@ -1,15 +1,23 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 Harvey AI
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: MIT
+
+# Original Harvey LAB portions remain under MIT; NVIDIA modifications follow.
+# SPDX-FileCopyrightText: Modifications Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# LAB protocol source (MIT): https://github.com/harveyai/harvey-labs/blob/
+# f46ef86e4788545622db25dcffa3aebb7a139929/harness/adapters/base.py
 """Translate the LAB harness protocol to Gym's Chat Completions API."""
 
 from __future__ import annotations
 
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientTimeout
 
-from harness.adapters.base import ModelAdapter, ModelResponse, ToolCall
+from nemo_gym.client import request
+
+from .base import ModelAdapter, ModelResponse, ToolCall
 
 
 class OpenAICompatibleAdapter(ModelAdapter):
@@ -21,7 +29,7 @@ class OpenAICompatibleAdapter(ModelAdapter):
         base_url: str,
         api_key: str | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 32768,
+        max_tokens: int = 65536,
         reasoning_effort: str | None = None,
         timeout_seconds: float | None = None,
         omit_temperature: bool | None = None,
@@ -110,10 +118,12 @@ class OpenAICompatibleAdapter(ModelAdapter):
         """Call the selected Gym model server without loading config in the Ray worker."""
         timeout = ClientTimeout(total=self.timeout_seconds)
         headers = {"Authorization": f"Bearer {self.api_key or 'EMPTY'}"}
-        async with ClientSession(timeout=timeout, headers=headers) as client:
-            async with client.post(self._chat_completions_endpoint(), json=payload) as response:
-                response.raise_for_status()
-                return await response.json()
+        response = await request(
+            "POST", self._chat_completions_endpoint(), json=payload, timeout=timeout, headers=headers
+        )
+        async with response:
+            response.raise_for_status()
+            return await response.json()
 
     def _chat_completions_endpoint(self) -> str:
         base_url = self.base_url.rstrip("/")
