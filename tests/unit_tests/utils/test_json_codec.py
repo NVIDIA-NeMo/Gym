@@ -109,6 +109,7 @@ def test_fallback_writes_other_types_as_orjson_does() -> None:
 class _Call:
     name: str
     arguments: dict
+    _private: int = 7
 
 
 class _Size(enum.Enum):
@@ -119,6 +120,7 @@ def test_dataclasses_and_enums_holding_a_wide_integer_are_written_not_passed_to_
     narrow = _Call("f", {"n": 1})
     assert dumps_json(narrow, default=str) == orjson.dumps(narrow)
 
+    # Fields named with a leading underscore are left out, as orjson leaves them out.
     assert dumps_json(_Call("f", {"n": WIDE}), default=str) == b'{"name":"f","arguments":{"n":1180591620717411303424}}'
     assert dumps_json({"size": _Size.WIDE}, default=str) == b'{"size":1180591620717411303424}'
 
