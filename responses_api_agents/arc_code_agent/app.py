@@ -373,7 +373,8 @@ class ArcCodeAgent(SimpleResponsesAPIAgent):
             ledger.add_text(text)
 
         def add_tool_output(call_id: str, text: str) -> None:
-            history.append(NeMoGymFunctionCallOutput(call_id=call_id, output=text))
+            # `type` is passed explicitly: the request is serialized with exclude_unset, which would drop a defaulted type.
+            history.append(NeMoGymFunctionCallOutput(type="function_call_output", call_id=call_id, output=text))
             ledger.add_text(text)
 
         def record(resp: NeMoGymResponse) -> None:

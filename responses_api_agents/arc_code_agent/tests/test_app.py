@@ -22,6 +22,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_converter import VLLMConverter
 from nemo_gym.server_utils import ServerClient
 from resources_servers.arc_code.app import ArcCodeResourcesServer, ArcCodeResourcesServerConfig, ArcCodeVerifyRequest
 from responses_api_agents.arc_code_agent import arc_prompt
@@ -140,6 +142,10 @@ class Harness:
             return _FakeHTTPResponse(result.model_dump())
         assert server_name == "policy_model" and url_path == "/v1/responses"
         self.model_calls.append(json)
+        # The model server converts the request exactly as the wire carries it (exclude_unset): it must be convertible.
+        VLLMConverter(return_token_id_information=False).responses_to_chat_completion_create_params(
+            NeMoGymResponseCreateParamsNonStreaming.model_validate(json.model_dump(exclude_unset=True))
+        )
         return _FakeHTTPResponse(self.replies.pop(0))
 
     async def run(self, expected: Optional[list] = None, rollout_index: int = 0):
