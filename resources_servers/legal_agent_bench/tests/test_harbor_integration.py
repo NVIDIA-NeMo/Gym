@@ -16,6 +16,10 @@ import pytest
 from omegaconf import OmegaConf
 
 from resources_servers.legal_agent_bench.harbor_bridge import REPO_ROOT, LegalAgentBenchHarborBridge
+from resources_servers.legal_agent_bench.lab_harbor import scoring as lab_scoring
+from resources_servers.legal_agent_bench.lab_harbor.judge import (
+    _extract_judge_message_text,
+)
 from resources_servers.legal_agent_bench.legal_harbor_agent import (
     LegalAgentBenchHarborAgent,
     OpenAICompatibleAdapter,
@@ -27,10 +31,6 @@ from resources_servers.legal_agent_bench.prepare import (
     SMOKE_TASK_IDS,
     _marker,
     flatten_task_id,
-)
-from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor import scoring as lab_scoring
-from resources_servers.legal_agent_bench.vendor.harvey_labs.lab_harbor.judge import (
-    _extract_judge_message_text,
 )
 from resources_servers.legal_agent_bench.verifier import (
     _build_reward,
@@ -233,7 +233,9 @@ async def test_policy_adapter_uses_gym_model_server(monkeypatch) -> None:
             observed["payload"] = json
             return Response()
 
-    monkeypatch.setattr("harness.adapters.openai_compatible.ClientSession", Session)
+    monkeypatch.setattr(
+        "resources_servers.legal_agent_bench.harness.adapters.openai_compatible.ClientSession", Session
+    )
     adapter = OpenAICompatibleAdapter(
         model="policy-model",
         base_url="http://policy/v1",
