@@ -692,7 +692,7 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
             timed_out=stop_reason == "wall_time",
             finished_naturally=bool(output.get("finished_naturally")),
             terminal_response_id=output.get("terminal_response_id"),
-            # Usage is reported only when every model response carried it.
+            # Pending, failed, or partially accounted attempts make aggregate usage unknown.
             usage_known=not output.get("calls_without_usage"),
         )
         state.observations = self._observations(

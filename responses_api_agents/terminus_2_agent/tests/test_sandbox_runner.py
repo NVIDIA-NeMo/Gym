@@ -239,6 +239,8 @@ def test_sigterm_saves_the_turns_taken_so_far(tmp_path: Path, episode, stop_requ
     result = json.loads((tmp_path / "output.json").read_text())
     assert result["stop_reason"] == reason
     assert result["finished_naturally"] is False
+    # The pending second request must not turn the first response subtotal into complete usage.
+    assert result["calls_without_usage"] == 1
     assert [step["source"] for step in result["trajectory"]["steps"]].count("agent") >= 1
 
 

@@ -114,7 +114,7 @@ class NemoGymLLM(BaseLLM):
 
         self.context_length_exceeded = False
         self.last_response_id: str | None = None
-        # Every answered call, in order; a call that returned no usage is counted, not estimated.
+        # Every answered call, in order; pending or unaccounted attempts keep aggregate usage unknown.
         self.response_ids: list[str] = []
         self.calls_without_usage = 0
         self._extra_chat_params = (
@@ -166,6 +166,9 @@ class NemoGymLLM(BaseLLM):
         }
         payload.update(self._extra_chat_params)
 
+        # The signal handler snapshots this counter before cancellation unwinds the await.
+        # Keep failed/retried attempts unknown too; only a fully accounted response clears its entry.
+        self.calls_without_usage += 1
         response_dict = await self._post_chat_completions(payload)
 
         # Gym's proxy uses this sentinel when it turns a vLLM context error into HTTP 200.
@@ -178,8 +181,6 @@ class NemoGymLLM(BaseLLM):
         if isinstance(response_id, str) and response_id:
             self.last_response_id = response_id
             self.response_ids.append(response_id)
-        if not isinstance(response_dict.get("usage"), dict):
-            self.calls_without_usage += 1
 
         choices = response_dict.get("choices", [])
         choice = choices[0] if isinstance(choices, list) and choices else {}
@@ -234,7 +235,7 @@ class NemoGymLLM(BaseLLM):
                 routed_experts,
             )
 
-        return LLMResponse(
+        result = LLMResponse(
             content=content,
             reasoning_content=reasoning_content,
             usage=usage,
@@ -242,6 +243,9 @@ class NemoGymLLM(BaseLLM):
             completion_token_ids=completion_token_ids,
             logprobs=logprobs,
         )
+        if usage is not None:
+            self.calls_without_usage -= 1
+        return result
 
     def get_model_context_limit(self) -> int:
         fallback_context_limit = 1000000
@@ -414,11 +418,13 @@ class NemoGymLLM(BaseLLM):
 
     def _extract_usage_info(self, response: dict[str, Any]) -> UsageInfo | None:
         usage = response.get("usage")
-        if not isinstance(usage, dict):
+        if not isinstance(usage, dict) or not all(
+            type(usage.get(key)) is int and usage[key] >= 0 for key in ("prompt_tokens", "completion_tokens")
+        ):
             return None
 
-        prompt_tokens = usage.get("prompt_tokens", 0) or 0
-        completion_tokens = usage.get("completion_tokens", 0) or 0
+        prompt_tokens = usage["prompt_tokens"]
+        completion_tokens = usage["completion_tokens"]
         prompt_tokens_details = usage.get("prompt_tokens_details") or {}
         cache_tokens = (
             prompt_tokens_details.get("cached_tokens", 0) if isinstance(prompt_tokens_details, dict) else 0

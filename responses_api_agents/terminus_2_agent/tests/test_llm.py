@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import logging
 from unittest.mock import AsyncMock, patch
 
@@ -320,3 +321,49 @@ def test_output_limit_none_when_missing():
 )
 def test_chat_completions_endpoint(api_base, expected):
     assert _make_llm(api_base=api_base)._chat_completions_endpoint() == expected
+
+
+@pytest.mark.parametrize("answered_first", [False, True])
+async def test_pending_call_is_unknown_before_cancellation_and_after_it(answered_first):
+    llm = _make_llm()
+    if answered_first:
+        response, _ = await _call(
+            llm, _mock_response(usage={"prompt_tokens": 10, "completion_tokens": 2}), prompt="one"
+        )
+        assert response.usage.prompt_tokens == 10
+    entered = asyncio.Event()
+
+    async def pending(payload):
+        entered.set()
+        await asyncio.Event().wait()
+
+    with patch.object(llm, "_post_chat_completions", side_effect=pending):
+        task = asyncio.create_task(llm.call(prompt="pending"))
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            # SIGTERM's snapshot occurs here, before the runner cancels the call.
+            assert llm.calls_without_usage == 1
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert llm.calls_without_usage == 1
+
+
+@pytest.mark.parametrize("usage", [None, {}, {"prompt_tokens": 10}, {"prompt_tokens": True, "completion_tokens": 2}])
+async def test_partial_usage_does_not_clear_an_unaccounted_call(usage):
+    llm = _make_llm()
+    response, _ = await _call(llm, _mock_response(usage=usage), prompt="question")
+    assert response.usage is None
+    assert llm.calls_without_usage == 1
+
+
+async def test_a_failed_attempt_remains_unknown_after_a_successful_retry():
+    from tenacity import wait_none
+
+    llm = _make_llm()
+    response = _mock_response(usage={"prompt_tokens": 10, "completion_tokens": 2})
+    with patch.object(llm, "_post_chat_completions", side_effect=[httpx.ReadTimeout("lost reply"), response]):
+        result = await llm.call.retry_with(wait=wait_none())(llm, prompt="question")
+    assert result.usage.prompt_tokens == 10
+    assert llm.calls_without_usage == 1
