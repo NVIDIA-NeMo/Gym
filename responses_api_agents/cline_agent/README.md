@@ -69,9 +69,21 @@ grant, and for the host-only settings `command`, `env`, `extra_args`, `repo_dir`
 
 Concurrent replacement of a stale runtime uses `flock` with a 60-second wait. Without `flock`, a cold
 install and reuse of a verified runtime still work; replacing a stale directory fails without deleting
-it. Install `flock` or use a fresh sandbox to recover. Cline does not implement a `network_access`
-setting or tighten the provider's network policy for agent-owned sandboxes. Borrowed sandboxes retain
-the Resources Server's policy; installation needs access to npm and execution needs the Model Server.
+it. Install `flock` or use a fresh sandbox to recover.
+
+`network_access: inherit` (the default) keeps the provider's network policy. For agent-owned sandboxes,
+`network_access: model_only` uses OpenSandbox's policy to deny egress except to the Model Server's host
+(all its ports and paths, including co-hosted services). It refuses providers without that policy,
+loopback or wildcard model endpoints, and a simultaneous `sandbox_config.provider_options.network_policy`
+before allocating a sandbox. Borrowed sandboxes retain the Resources Server's policy and refuse
+`model_only`; Cline does not consume external tool grants, so there is no `model_and_tools` mode.
+
+Restricted setup downloads the pinned npm archive on the Agent Server, verifies its SHA-512, and uploads
+only the binary. The sandbox checks its transfer digest and version before the same locked publication;
+verified runtimes are reused without downloading. The image must already contain Bash, glibc and coreutils;
+missing prerequisites are a final seed refusal, with the owned sandbox stopped. No sandbox package manager
+or registry access is needed. The Agent Server needs HTTPS access to `registry.npmjs.org`. Under `inherit`,
+installation keeps the in-sandbox download and automatic package setup described above.
 
 **Activation.** Cline runs in `SandboxAccess.workdir` under Gym's process supervisor, through the
 shared `harness_runner.sh`. Everything Cline writes goes to `/tmp/nemo-gym-cline-sessions/<id>`:
@@ -160,6 +172,13 @@ directory (`CLINE_DATA_DIR` and the settings, session, db, and team paths all po
 concurrent rollouts share no provider settings or session state and the user's `~/.cline` is never
 touched or read. `CLINE_SESSION_BACKEND_MODE=local` keeps each run in its own process rather than a
 shared hub daemon. The whole run dir is removed afterwards.
+
+Both the host path (`/v1/responses` and `/run`) and agent sessions refuse non-null request
+`max_output_tokens` with HTTP 422. Rejection precedes host CLI setup or session activation binding;
+`/run` also refuses it before seeding Resources. Cline cannot enforce a shared output budget across its
+model calls. Remove this field from task rows or activation requests and configure a per-call cap on
+the Model Server instead, such as
+`policy_model.responses_api_models.vllm_model.extra_body.max_tokens`. A corrected request can run normally.
 
 ## SWE-bench
 

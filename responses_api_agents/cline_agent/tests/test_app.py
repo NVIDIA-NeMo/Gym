@@ -22,7 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import yaml
-from fastapi import Request
+from fastapi import HTTPException, Request
 from omegaconf import OmegaConf
 
 from nemo_gym.client import ServerClient
@@ -37,6 +37,7 @@ from nemo_gym.core import (
 from responses_api_agents.cline_agent.app import (
     ClineAgent,
     ClineAgentConfig,
+    ClineAgentRunRequest,
     _extract_instruction,
     parse_cline_events,
     quote_prompt,
@@ -620,6 +621,41 @@ class TestModelServer:
         response = asyncio.run(agent.responses(request=request, body=body))
         assert response.usage.output_tokens_details.reasoning_tokens == 6
         assert response.usage.total_tokens == 20
+
+    def test_host_budget_refusal_precedes_cli_setup_and_corrected_request_runs(self, tmp_path) -> None:
+        workspace = tmp_path / "ws"
+        agent = _make_model_server_agent(repo_dir=str(tmp_path), workspace_root=str(workspace))
+        request = Request({"type": "http", "session": {}, "path_params": {"rollout_id": "rollout"}})
+        body = NeMoGymResponseCreateParamsNonStreaming(input="solve this", max_output_tokens=32)
+        process = MagicMock(returncode=0)
+        process.communicate = AsyncMock(return_value=(_lines(_text_end("done"), _run_result()).encode(), b""))
+        with patch(
+            "responses_api_agents.cline_agent.app.asyncio.create_subprocess_exec", return_value=process
+        ) as spawn:
+            with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+                asyncio.run(agent.responses(request, body))
+            assert refused.value.status_code == 422
+            spawn.assert_not_called()
+            assert agent._local_setup_task is None and not workspace.exists()
+
+            response = asyncio.run(agent.responses(request, body.model_copy(update={"max_output_tokens": None})))
+
+        assert response.output_text == "done"
+        assert spawn.call_count == 2  # Actual host path: auth, then the CLI activation.
+        assert "auth" in spawn.call_args_list[0].args and "--json" in spawn.call_args_list[1].args
+        assert not list(workspace.iterdir())
+
+    def test_run_budget_refusal_precedes_resources_seed(self) -> None:
+        agent = _make_agent()
+        agent.server_client.post = AsyncMock()
+        body = ClineAgentRunRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="solve this", max_output_tokens=32)
+        )
+        request = Request({"type": "http", "session": {}, "path_params": {}})
+        with pytest.raises(HTTPException, match="max_output_tokens") as refused:
+            asyncio.run(agent.run(request, body))
+        assert refused.value.status_code == 422
+        agent.server_client.post.assert_not_awaited()
 
 
 class TestConfigYaml:

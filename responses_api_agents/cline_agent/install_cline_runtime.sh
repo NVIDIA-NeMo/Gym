@@ -8,12 +8,15 @@ trap 'status=$?; echo "Cline installer failed (exit $status) at line $LINENO: $B
 # Cline ships a self-contained glibc binary per platform in @cline/cli-linux-<arch>; Node is not needed.
 # Task files and the task's PATH are left alone; packages are added only when download tools are missing.
 #
-# usage: install_cline_runtime.sh RUNTIME VERSION SHA512_X64 SHA512_ARM64
+# usage: install_cline_runtime.sh RUNTIME VERSION SHA512_X64 SHA512_ARM64 [BINARY SHA512_BINARY]
 # The SHA-512 digests (hex) are those of the npm tarballs the adapter pins for VERSION.
+# With BINARY, the Agent Server verified that tarball and uploaded only its binary; no network is needed here.
 runtime=$1
 version=$2
 sha512_x64=$3
 sha512_arm64=$4
+source_binary=${5:-}
+binary_sha512=${6:-}
 [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'An exact Cline version is required' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Cline sandbox sessions require Linux' >&2; exit 1; }
 case "$(uname -m)" in
@@ -51,28 +54,37 @@ install_packages() {
   fi
 }
 
-missing=0
-for command in curl tar gzip sha512sum; do
-  if ! command -v "$command" >/dev/null 2>&1; then missing=1; fi
-done
-if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-bundle.crt ]; then missing=1; fi
-if [ "$missing" = 1 ]; then
-  install_packages curl ca-certificates tar gzip coreutils
+if [ -z "$source_binary" ]; then
+  missing=0
+  for command in curl tar gzip sha512sum; do
+    if ! command -v "$command" >/dev/null 2>&1; then missing=1; fi
+  done
+  if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-bundle.crt ]; then missing=1; fi
+  if [ "$missing" = 1 ]; then
+    install_packages curl ca-certificates tar gzip coreutils
+  fi
+else
+  [[ "$binary_sha512" =~ ^[0-9a-f]{128}$ ]] || { echo 'Missing verified Cline binary SHA-512' >&2; exit 1; }
 fi
 
 mkdir -p "$(dirname "$runtime")"
 staging=$(mktemp -d "$runtime.XXXXXX")
 trap 'rm -rf -- "$staging"' EXIT
-archive="$staging/cli-linux-${arch}-${version}.tgz"
-curl -fsSL --retry 3 "https://registry.npmjs.org/@cline/cli-linux-${arch}/-/cli-linux-${arch}-${version}.tgz" -o "$archive"
-echo "$expected  $archive" | sha512sum -c -
-# Only the binary: the package also carries the hub dashboard's web assets, which headless runs never serve.
-tar -xzf "$archive" -C "$staging" package/bin/cline
-mv "$staging/package/bin/cline" "$staging/cline"
+if [ -n "$source_binary" ]; then
+  cp -- "$source_binary" "$staging/cline"
+  echo "$binary_sha512  $staging/cline" | sha512sum -c -
+else
+  archive="$staging/cli-linux-${arch}-${version}.tgz"
+  curl -fsSL --retry 3 "https://registry.npmjs.org/@cline/cli-linux-${arch}/-/cli-linux-${arch}-${version}.tgz" -o "$archive"
+  echo "$expected  $archive" | sha512sum -c -
+  # Only the binary: the package also carries the hub dashboard's web assets, which headless runs never serve.
+  tar -xzf "$archive" -C "$staging" package/bin/cline
+  mv "$staging/package/bin/cline" "$staging/cline"
+  rm -rf "$staging/package" "$archive"
+fi
 chmod 755 "$staging/cline"
 actual=$(CLINE_NO_AUTO_UPDATE=1 "$staging/cline" --version)
 [ "$actual" = "$version" ] || { echo "Cline version mismatch: $actual" >&2; exit 1; }
-rm -rf "$staging/package" "$archive"
 touch "$staging/ready"
 # Publish the runtime with one rename, so a concurrent session never sees a partial directory. A runtime
 # that another installer published meanwhile is kept; only a stale or partial one is replaced, under a lock

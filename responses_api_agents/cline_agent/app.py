@@ -23,9 +23,10 @@ import shutil
 import signal
 from asyncio import Semaphore
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, ClassVar, Optional
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
@@ -46,6 +47,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restricted_network_policy,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
@@ -549,6 +551,14 @@ class ClineAgentConfig(BaseResponsesAPIAgentConfig):
     # Server supplies no sandbox_access, and the SandboxSpec fields for it.
     sandbox_provider: Optional[str] = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
+    network_access: Literal["inherit", "model_only"] = Field(
+        default="inherit",
+        description=(
+            "Egress of an agent-owned sandbox: inherit keeps the provider policy; model_only permits only the "
+            "Model Server's host. Borrowed sandboxes require inherit. Restricted setup uploads the pinned runtime "
+            "from the Agent Server and needs Bash and coreutils in the image."
+        ),
+    )
     # Seconds for preparing the session and installing (or reusing) Cline inside the task sandbox.
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
 
@@ -869,6 +879,10 @@ class ClineAgent(SimpleResponsesAPIAgent):
             else:
                 if not isinstance(access.connection, DirectSandboxConnection):
                     raise AgentSeedRejectedError("Cline supports only direct SandboxAccess")
+                if self.config.network_access != "inherit":
+                    raise AgentSeedRejectedError(
+                        "Cline network_access applies only to a sandbox it starts, not a borrowed one"
+                    )
                 workdir, provider_ref = access.workdir, access.connection.provider_config_ref
             if not isinstance(workdir, str):
                 raise AgentSeedRejectedError("Cline sandbox workdir must be an absolute path string")
@@ -888,29 +902,45 @@ class ClineAgent(SimpleResponsesAPIAgent):
             raise
         except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
-        if owns_sandbox:
-            sandbox = AsyncSandbox(provider)
-        else:
-            try:
-                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
-            except BaseException:
-                try:
-                    await provider.aclose()
-                except BaseException as cleanup_error:
-                    LOG.exception("Cline provider cleanup failed after connect failed")
-                    if isinstance(cleanup_error, NgFailureEvent):
-                        observe_failure(cleanup_error)
-                    else:
-                        cleanup_failure = NgFailureEvent(
-                            boundary="sandbox",
-                            failure_kind="session_release_failed",
-                            failure_reason=f"Cline provider cleanup failed: {type(cleanup_error).__name__}",
-                            operation="aclose",
-                            stage="cleanup",
+        try:
+            if owns_sandbox:
+                if self.config.network_access == "model_only":
+                    options = spec.provider_options or {}
+                    if not isinstance(options, Mapping):
+                        raise AgentSeedRejectedError("Cline sandbox_config.provider_options must be a mapping")
+                    if "network_policy" in options:
+                        raise AgentSeedRejectedError(
+                            "Set network_access or sandbox_config.provider_options.network_policy, not both"
                         )
-                        cleanup_failure.__cause__ = cleanup_error
-                        observe_failure(cleanup_failure)
-                raise
+                    try:
+                        policy = restricted_network_policy(
+                            provider.name,
+                            [self.resolve_model_base_url(self.config.model_server.name, trace_context=False)],
+                        )
+                    except ValueError as error:
+                        raise AgentSeedRejectedError(str(error)) from error
+                    spec = replace(spec, provider_options={**options, "network_policy": policy})
+                sandbox = AsyncSandbox(provider)
+            else:
+                sandbox = await AsyncSandbox.connect(access.connection.descriptor, provider=provider)
+        except BaseException:
+            try:
+                await provider.aclose()
+            except BaseException as cleanup_error:
+                LOG.exception("Cline provider cleanup failed after sandbox setup failed")
+                if isinstance(cleanup_error, NgFailureEvent):
+                    observe_failure(cleanup_error)
+                else:
+                    cleanup_failure = NgFailureEvent(
+                        boundary="sandbox",
+                        failure_kind="session_release_failed",
+                        failure_reason=f"Cline provider cleanup failed: {type(cleanup_error).__name__}",
+                        operation="aclose",
+                        stage="cleanup",
+                    )
+                    cleanup_failure.__cause__ = cleanup_error
+                    observe_failure(cleanup_failure)
+            raise
         state = ClineSandboxSession(
             request=body,
             session=SandboxSession(
@@ -924,14 +954,24 @@ class ClineAgent(SimpleResponsesAPIAgent):
         )
         try:
             async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):
+                restricted = self.config.network_access != "inherit"
                 if owns_sandbox:
                     await sandbox.start(spec)
-                    # Providers need not create SandboxSpec.workdir. Never prepare a borrowed task here.
-                    created = await sandbox.exec(f"mkdir -p -- {shlex.quote(str(path))}", cwd="/", timeout_s=30)
-                    if created.return_code != 0 or created.error_type:
-                        raise RuntimeError(f"Cannot create the Cline sandbox workdir {path}: {created.stderr}")
-                await state.prepare(timeout=self.config.sandbox_install_timeout_seconds)
-                await state.install_runtime(version=version, timeout=self.config.sandbox_install_timeout_seconds)
+                    if not restricted:
+                        # Restricted setup checks its image prerequisites before creating the workdir.
+                        created = await sandbox.exec(f"mkdir -p -- {shlex.quote(str(path))}", cwd="/", timeout_s=30)
+                        if created.return_code != 0 or created.error_type:
+                            raise RuntimeError(f"Cannot create the Cline sandbox workdir {path}: {created.stderr}")
+                await state.prepare(
+                    timeout=self.config.sandbox_install_timeout_seconds,
+                    allow_package_install=not restricted,
+                    create_workdir=owns_sandbox and restricted,
+                )
+                await state.install_runtime(
+                    version=version,
+                    timeout=self.config.sandbox_install_timeout_seconds,
+                    download_on_host=restricted,
+                )
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -956,10 +996,21 @@ class ClineAgent(SimpleResponsesAPIAgent):
     def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
         return state.session if isinstance(state, ClineSandboxSession) else None
 
+    @staticmethod
+    def _validate_output_budget(body: NeMoGymResponseCreateParamsNonStreaming) -> None:
+        """Refuse a response-wide budget before starting host or sandbox work."""
+        if body.max_output_tokens is not None:
+            raise HTTPException(
+                422,
+                "Cline cannot enforce request max_output_tokens across model calls; "
+                "omit it and configure a per-call limit on the Model Server instead",
+            )
+
     def _validate_session_request(
         self, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponseCreateParamsNonStreaming:
         """Accept only the controls a sandbox session applies; Cline has no per-request sampling flags."""
+        self._validate_output_budget(body)
         supported = {"input", "instructions", "model"}
         for name, field in type(body).model_fields.items():
             value = getattr(body, name)
@@ -1205,6 +1256,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
             # Session close owns cancellation. Losing an HTTP waiter must not stop the harness.
             return (await asyncio.shield(state.task)).model_copy(deep=True)
 
+        self._validate_output_budget(body)
         body = body.model_copy(deep=True)
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -1263,6 +1315,7 @@ class ClineAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "Cline /run requires resources_server; sandbox sessions use an Environment Server"
             )
+        self._validate_output_budget(body.responses_create_params)
         async with self.sem:
             cookies = request.cookies
 

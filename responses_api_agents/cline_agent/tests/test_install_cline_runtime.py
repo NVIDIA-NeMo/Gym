@@ -214,3 +214,41 @@ def test_missing_checksum_for_the_architecture_is_refused(tmp_path):
     installed = _install(tmp_path, tmp_path / "runtime-3.0.55", "", package=package)
     assert installed.returncode != 0
     assert "No pinned SHA-512" in installed.stderr
+
+
+@pytest.mark.parametrize("valid_digest,reports", [(True, VERSION), (False, VERSION), (True, "3.0.54")])
+def test_uploaded_binary_uses_locked_publisher_without_download_tools(tmp_path, valid_digest, reports):
+    source = tmp_path / "cline.upload"
+    source.write_text(f'#!/bin/sh\n[ "$1" = --version ] && echo {reports}\n')
+    digest = hashlib.sha512(source.read_bytes()).hexdigest() if valid_digest else "0" * 128
+    runtime = tmp_path / "runtime-3.0.55"
+    command, env = _installer(tmp_path, runtime, "0" * 128, package=None)
+    command.extend([str(source), digest])
+    bin_dir = tmp_path / "bin"
+    for name in (
+        "bash",
+        "sh",
+        "uname",
+        "getconf",
+        "sha512sum",
+        "mkdir",
+        "dirname",
+        "mktemp",
+        "rm",
+        "mv",
+        "chmod",
+        "touch",
+        "cp",
+    ):
+        (bin_dir / name).symlink_to(shutil.which(name))
+    # No curl, tar, gzip or package manager: offline publication must not need them.
+    (bin_dir / "curl").unlink()
+    env["PATH"] = str(bin_dir)
+    installed = subprocess.run(command, capture_output=True, text=True, env=env, timeout=60)
+    if valid_digest and reports == VERSION:
+        assert installed.returncode == 0, installed.stderr
+        assert sorted(p.name for p in runtime.iterdir()) == ["cline", "ready"]
+    else:
+        assert installed.returncode != 0
+        assert not runtime.exists()
+    assert not (tmp_path / "curl.log").exists()

@@ -326,6 +326,139 @@ async def test_owned_sandbox_gets_a_ttl_and_episode_labels(monkeypatch, sandbox_
     assert spec.workdir == "/app"
 
 
+@pytest.mark.parametrize(
+    "provider_name,model_host,options,reason",
+    [
+        ("docker", "10.0.0.5", {}, "OpenSandbox network-policy provider"),
+        ("opensandbox", "127.0.0.1", {}, "sandbox-reachable host"),
+        ("opensandbox", "0.0.0.0", {}, "sandbox-reachable host"),
+        ("opensandbox", "localhost", {}, "sandbox-reachable host"),
+        ("opensandbox", "10.0.0.5", {"network_policy": {"defaultAction": "allow"}}, "not both"),
+    ],
+)
+def test_restricted_seed_refuses_unenforceable_policy_before_allocation(
+    monkeypatch, provider_name, model_host, options, reason
+):
+    provider = SimpleNamespace(name=provider_name, aclose=AsyncMock())
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    constructor = MagicMock()
+    constructor.connect = AsyncMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    instance = agent(
+        sandbox_provider="sandbox", network_access="model_only", sandbox_config={"provider_options": options}
+    )
+    instance.server_client.global_config_dict.policy_model.responses_api_models.vllm_model.host = model_host
+    assert reason in check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=False))
+    constructor.assert_not_called()
+    constructor.connect.assert_not_awaited()
+    provider.aclose.assert_awaited_once()
+
+
+def test_borrowed_sandbox_refuses_network_changes_before_connect(monkeypatch):
+    provider = MagicMock()
+    monkeypatch.setattr(app, "create_provider", provider)
+    instance = agent(network_access="model_only")
+    assert "not a borrowed one" in check_agent_seed_rejected(instance.setup_webserver(), seed())
+    provider.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("restricted", [False, True])
+async def test_owned_network_policy_preserves_options_and_uses_offline_setup(monkeypatch, restricted):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    prepare, install = AsyncMock(), AsyncMock()
+    monkeypatch.setattr(adapter.ClineSandboxSession, "prepare", prepare)
+    monkeypatch.setattr(adapter.ClineSandboxSession, "install_runtime", install)
+    options = {"platform": "linux/amd64"}
+    if not restricted:
+        options["network_policy"] = {"defaultAction": "allow"}
+    instance = agent(
+        sandbox_provider="sandbox",
+        sandbox_config={"provider_options": options},
+        network_access="model_only" if restricted else "inherit",
+    )
+    state = await instance._seed_agent_session_state(seed(borrowed=False))
+    spec = remote.start.await_args.args[0]
+    assert spec.provider_options == {
+        **options,
+        "network_policy": {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.5"}]}
+        if restricted
+        else {"defaultAction": "allow"},
+    }
+    assert spec.ttl_s == 2100 and spec.metadata["gym-rollout"] == "rollout"
+    prepare.assert_awaited_once_with(timeout=600, allow_package_install=not restricted, create_workdir=restricted)
+    install.assert_awaited_once_with(version="3.0.55", timeout=600, download_on_host=restricted)
+    await instance._close_agent_session_state(state)
+    remote.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_policy_refusal_survives_provider_cleanup_failure(monkeypatch):
+    provider = SimpleNamespace(name="docker", aclose=AsyncMock(side_effect=RuntimeError("release failed")))
+    monkeypatch.setattr(app, "create_provider", lambda config: provider)
+    constructor = MagicMock()
+    monkeypatch.setattr(app, "AsyncSandbox", constructor)
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(app.AgentSeedRejectedError, match="OpenSandbox network-policy provider"):
+            await agent(sandbox_provider="sandbox", network_access="model_only")._seed_agent_session_state(
+                seed(borrowed=False)
+            )
+    constructor.assert_not_called()
+    assert any(event.failure_kind == "session_release_failed" for event in log.report.events.values())
+
+
+@pytest.mark.asyncio
+async def test_restricted_setup_refusal_stops_owned_sandbox(monkeypatch):
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), start=AsyncMock(), stop=AsyncMock())
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
+    refused = app.AgentSeedRejectedError("Cline model_only requires bash in the sandbox image")
+    monkeypatch.setattr(adapter.ClineSandboxSession, "prepare", AsyncMock(side_effect=refused))
+    instance = agent(sandbox_provider="sandbox", network_access="model_only")
+    with pytest.raises(app.AgentSeedRejectedError) as error:
+        await instance._seed_agent_session_state(seed(borrowed=False))
+    assert error.value is refused
+    remote.start.assert_awaited_once()
+    remote.stop.assert_awaited_once()
+
+
+def test_restricted_seed_refuses_missing_mkdir_before_trying_to_create_workdir(monkeypatch, tmp_path):
+    # Execute the actual prerequisite script with an image-like PATH that has no mkdir.
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    for name in ("bash", "uname", "getconf"):
+        (commands / name).symlink_to(shutil.which(name))
+    workdir = tmp_path / "task"
+
+    async def execute(command, **kwargs):
+        process = await asyncio.create_subprocess_exec(
+            "/bin/sh",
+            "-c",
+            command,
+            env={"PATH": str(commands)},
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 10)
+        return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
+
+    remote = SimpleNamespace(
+        exec=AsyncMock(side_effect=execute), start=AsyncMock(), stop=AsyncMock(), upload=AsyncMock()
+    )
+    monkeypatch.setattr(app, "AsyncSandbox", MagicMock(return_value=remote))
+    monkeypatch.setattr(app, "create_provider", lambda config: SimpleNamespace(name="opensandbox", aclose=AsyncMock()))
+    instance = agent(sandbox_provider="sandbox", network_access="model_only", sandbox_config={"workdir": str(workdir)})
+    reason = check_agent_seed_rejected(instance.setup_webserver(), seed(borrowed=False))
+    assert "requires mkdir" in reason and "preinstall Bash and coreutils" in reason
+    remote.exec.assert_awaited_once()
+    remote.upload.assert_not_awaited()
+    remote.stop.assert_awaited_once()
+    assert not workdir.exists()
+
+
 @pytest.mark.asyncio
 async def test_failed_install_releases_and_failed_release_retains_state(monkeypatch):
     remote = SimpleNamespace(exec=AsyncMock(side_effect=[result(), result("no network", code=6)]), upload=AsyncMock())
@@ -667,7 +800,7 @@ async def test_unknown_session_never_falls_back_to_the_host():
     ("body", "message"),
     [
         ({"input": "Q", "temperature": 0.5}, "do not support request field temperature"),
-        ({"input": "Q", "max_output_tokens": 10}, "do not support request field max_output_tokens"),
+        ({"input": "Q", "max_output_tokens": 10}, "cannot enforce request max_output_tokens"),
         ({"input": "Q", "metadata": {"other": "x"}}, "do not support request field metadata"),
         ({"input": "Q", "model": "another-model"}, "selected by the agent configuration"),
         (

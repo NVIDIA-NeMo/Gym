@@ -3,23 +3,30 @@
 """Cline runtime, input staging and artifacts over the shared task-sandbox lifecycle."""
 
 import asyncio
+import hashlib
 import json
 import logging
+import tarfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from shlex import quote
+from tempfile import TemporaryDirectory
 from time import perf_counter
+from typing import TypeVar
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
+    AgentSeedRejectedError,
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.client import raise_for_status, request
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
 from nemo_gym.sandbox import SandboxExecResult, read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
@@ -28,6 +35,7 @@ from nemo_gym.trajectory import AgentObservationBundle
 LOG = logging.getLogger(__name__)
 INSTALLER = "install_cline_runtime.sh"
 STDERR_TAIL_BYTES = 16000
+_T = TypeVar("_T")
 
 # SHA-512 (hex) of the npm tarballs @cline/cli-linux-{x64,arm64}, which carry Cline's self-contained binary.
 # They are npm's own `dist.integrity` for each release; add a release here before pinning it in cline_version.
@@ -59,6 +67,78 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
+
+_OFFLINE_PREREQUISITES = """set -eu
+for tool in bash uname getconf mkdir dirname mktemp rm mv chmod touch cp sha512sum; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "Cline model_only requires $tool in the sandbox image; preinstall Bash and coreutils." >&2
+        exit 1
+    }
+done
+"""
+
+
+async def _complete_file_io(operation: Callable[[], _T]) -> _T:
+    """Join an active file operation before cancellation can close its files or remove its temporary directory."""
+    task = asyncio.create_task(asyncio.to_thread(operation))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break
+        # Observe a worker failure without replacing the caller's cancellation.
+        try:
+            task.result()
+        except Exception:
+            pass
+        raise
+
+
+def _extract_cline_binary(archive_path: Path, destination: Path) -> str:
+    """Extract only the verified archive's binary and hash the bytes that will be uploaded."""
+    # Read only the regular binary member; package paths, links and dashboard assets are never extracted.
+    binary_digest = hashlib.sha512()
+    with tarfile.open(archive_path, "r:gz") as archive:
+        member = archive.getmember("package/bin/cline")
+        if not member.isfile():
+            raise RuntimeError("Cline archive package/bin/cline must be a regular file")
+        with archive.extractfile(member) as source, destination.open("wb") as output:
+            while chunk := source.read(1024 * 1024):
+                binary_digest.update(chunk)
+                output.write(chunk)
+    return binary_digest.hexdigest()
+
+
+async def download_cline_binary(*, version: str, architecture: str, destination: Path) -> str:
+    """Fetch and verify the pinned npm archive on the Agent Server; never execute its binary there."""
+    expected = CLINE_RUNTIME_SHA512[version][architecture]
+    archive_path = destination.with_suffix(".tgz")
+    response = await request(
+        "GET",
+        f"https://registry.npmjs.org/@cline/cli-linux-{architecture}/-/cli-linux-{architecture}-{version}.tgz",
+        _max_num_tries=3,
+    )
+    digest = hashlib.sha512()
+    try:
+        await raise_for_status(response)
+        with archive_path.open("wb") as output:
+
+            def write_chunk(chunk: bytes) -> None:
+                digest.update(chunk)
+                output.write(chunk)
+
+            async for chunk in response.content.iter_chunked(1024 * 1024):
+                await _complete_file_io(lambda: write_chunk(chunk))
+    finally:
+        response.release()
+    if digest.hexdigest() != expected:
+        raise RuntimeError(f"Cline {version} {architecture} archive failed SHA-512 verification")
+    return await _complete_file_io(lambda: _extract_cline_binary(archive_path, destination))
 
 
 class HarnessProcessInfo(BaseModel):
@@ -123,23 +203,61 @@ class ClineSandboxSession(AgentSessionState):
     def executable(self) -> str:
         return f"{self.runtime}/cline"
 
-    async def prepare(self, *, timeout: float) -> None:
-        """Make sure Bash exists and create the private session directories outside the task workdir."""
+    async def prepare(
+        self, *, timeout: float, allow_package_install: bool = True, create_workdir: bool = False
+    ) -> None:
+        """Check prerequisites before creating session directories and, when owned, the task workdir."""
         workdir, directory = quote(self.session.workdir), quote(self.session.session_dir)
         result = await self.session.sandbox.exec(
-            _BASH_BOOTSTRAP
+            (_BASH_BOOTSTRAP if allow_package_install else _OFFLINE_PREREQUISITES)
+            + (f"mkdir -p -- {workdir}\n" if create_workdir else "")
             + f"test -d {workdir} || {{ echo 'Cline task workdir is missing' >&2; exit 1; }}\n"
             + f"umask 077 && mkdir -p -- {directory}/config {directory}/data/settings",
             cwd="/",
             timeout_s=timeout,
         )
+        if not allow_package_install and result.return_code != 0 and not result.error_type:
+            raise AgentSeedRejectedError(
+                f"Cline restricted sandbox preparation failed: {result.stderr or result.stdout}"
+            )
         check_sandbox_setup(result, "Cline session preparation")
 
-    async def install_runtime(self, *, version: str, timeout: float) -> None:
+    async def install_runtime(self, *, version: str, timeout: float, download_on_host: bool = False) -> None:
         """Install or reuse the pinned Cline binary, then stage the shared harness runner."""
         directory, sandbox = self.session.session_dir, self.session.sandbox
         digests = CLINE_RUNTIME_SHA512[version]
         await sandbox.upload(Path(__file__).with_name(INSTALLER), f"{directory}/{INSTALLER}")
+        extra = []
+        if download_on_host:
+            probe = await sandbox.exec(
+                "set -eu\n"
+                '[ "$(uname -s)" = Linux ] && getconf GNU_LIBC_VERSION >/dev/null 2>&1 || '
+                "{ echo 'Cline requires glibc Linux' >&2; exit 1; }\n"
+                f"if [ -f {quote(self.runtime + '/ready')} ] && "
+                f'[ "$(CLINE_NO_AUTO_UPDATE=1 {quote(self.executable)} --version 2>/dev/null)" '
+                f"= {quote(version)} ]; "
+                "then echo ready; else uname -m; fi",
+                cwd="/",
+                timeout_s=timeout,
+            )
+            if probe.return_code != 0 and not probe.error_type:
+                raise AgentSeedRejectedError(
+                    f"Cline restricted runtime is unsupported: {probe.stderr or probe.stdout}"
+                )
+            check_sandbox_setup(probe, "Cline restricted runtime probe")
+            platform = (probe.stdout or "").strip()
+            if platform == "ready":
+                await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+                return
+            architecture = {"x86_64": "x64", "aarch64": "arm64"}.get(platform)
+            if architecture is None:
+                raise AgentSeedRejectedError(f"Cline supports Linux x86_64/aarch64 sandboxes only, got {platform!r}")
+            with TemporaryDirectory(prefix="nemo-gym-cline-download-") as temporary:
+                binary = Path(temporary) / "cline"
+                digest = await download_cline_binary(version=version, architecture=architecture, destination=binary)
+                uploaded = f"{directory}/cline.upload"
+                await sandbox.upload(binary, uploaded)
+            extra = [uploaded, digest]
         installed = await sandbox.exec(
             " ".join(
                 quote(part)
@@ -150,6 +268,7 @@ class ClineSandboxSession(AgentSessionState):
                     version,
                     digests["x64"],
                     digests["arm64"],
+                    *extra,
                 )
             ),
             cwd="/",
