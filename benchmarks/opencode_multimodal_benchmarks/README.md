@@ -6,7 +6,6 @@ used independently of OpenCode:
 - [VStar](vstar/README.md)
 - [HRBench8K](hrbench8k/README.md)
 - [VTCBench](vtcbench/README.md)
-- [BabyVision](babyvision/README.md)
 - [Agent-X GoalAcc](agentx/README.md)
 - [ZeroBench](zerobench/README.md)
 
@@ -115,8 +114,11 @@ the submitted run's health and recovery gates.
 ## Dataset identity
 
 VStar/HRBench8K, Agent-X and ZeroBench are checked against the pinned manifests or
-source checksum. VTCBench and BabyVision TSV releases are caller-supplied: pass
+source checksum. VTCBench TSV releases are caller-supplied: pass
 `prepare_script_args.sha256` for qualification and retain the preparation's
 `dataset.json` with its source and prepared-task hashes. Use a separate output
 path for a different release or preprocessing policy. A caller-supplied variant
 must not be reported as the pinned reference run without matching these hashes.
+
+Prepared VStar, HRBench8K and VTCBench image inputs use embedded data URLs.
+Hosted model endpoints need no access to the preparation machine’s image paths.

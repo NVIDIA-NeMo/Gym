@@ -8,7 +8,7 @@ integration_profile: custom-gym-verifier
 domain: agent
 description: 100 main-split questions scored by exact final-answer matching.
 modality: image
-licensing: Apache-2.0
+licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
 reward:
@@ -25,7 +25,7 @@ datasets:
   type: benchmark
   jsonl_fpath: benchmarks/opencode_multimodal_benchmarks/data/zerobench.jsonl
   prepare_script: benchmarks/opencode_multimodal_benchmarks/zerobench_prepare.py
-  num_repeats: 1
+  num_repeats: 5
 model_server: policy_model
 canonical_split: zerobench
 prompt_source: prepared

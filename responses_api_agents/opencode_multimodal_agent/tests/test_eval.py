@@ -240,10 +240,8 @@ def test_native_training_prompt_keeps_eval_runtime_repairs(monkeypatch, tmp_path
 @pytest.mark.parametrize(
     "reason,kind",
     [
-        ("OpenCode failed (timeout=False, exit=133): Bun crashed", "agent_run_error"),
         ("OpenCode failed (timeout=True, exit=-9):", "agent_timeout"),
-        ("Missing assistant turns or exceeded max_turns", "agent_run_error"),
-        ("OpenCode recorded a model/runtime error; do not score this rollout", "agent_run_error"),
+        ("Missing assistant turns or exceeded max_turns", "agent_limit"),
     ],
 )
 async def test_episode_crash_is_persistable_zero(monkeypatch, tmp_path, reason, kind):
@@ -280,9 +278,7 @@ async def test_episode_crash_is_persistable_zero(monkeypatch, tmp_path, reason, 
         ({"name": "ContextOverflowError", "data": {}}, "error", ("model_context_limit", None)),
     ],
 )
-async def test_provider_evidence_survives_self_call_without_changing_score(
-    monkeypatch, tmp_path, provider_error, finish, expected
-):
+async def test_provider_evidence_selects_scoring_or_retry(monkeypatch, tmp_path, provider_error, finish, expected):
     runner = evaluation(monkeypatch, tmp_path)
     runner.config.capture_failure_artifacts = True
     database = _session_db(
@@ -299,6 +295,12 @@ async def test_provider_evidence_survives_self_call_without_changing_score(
     error = ClientResponseError(SimpleNamespace(real_url="http://agent/v1/responses"), (), status=500)
     error.response_content = json.dumps({"detail": detail}).encode()
     monkeypatch.setattr(OpenCodeMultimodalAgent, "run", AsyncMock(side_effect=error))
+    model_caused = expected[0] == "model_context_limit" or expected == ("model_request_error", 400)
+    if not model_caused:
+        with pytest.raises(ClientResponseError) as caught:
+            await runner.run(MagicMock(), OpenCodeMultimodalRunRequest(responses_create_params=body()))
+        assert caught.value is error
+        return
     result = await runner.run(MagicMock(), OpenCodeMultimodalRunRequest(responses_create_params=body()))
     assert AgentOutcome.model_validate_json(result.response.metadata[AGENT_OUTCOME_METADATA_KEY]) == outcome
     assert result.response.error.message == reason
@@ -367,6 +369,10 @@ def test_terminal_model_result_handles_unavailable_evidence(tmp_path, contents):
         ("/seed_session", 500, "seed failed"),
         ("/v1/responses", 503, "service unavailable"),
         ("/v1/responses", 500, "FileNotFoundError: input image"),
+        ("/v1/responses", 500, "OpenCode failed (timeout=False, exit=133): Bun crashed"),
+        ("/v1/responses", 500, "OpenCode failed (timeout=False, exit=1): unshare: Operation not permitted"),
+        ("/v1/responses", 500, "OpenCode recorded a model/runtime error; do not score this rollout"),
+        ("/v1/responses", 500, "OpenCode did not produce its session database"),
     ],
 )
 async def test_infrastructure_and_judge_failures_remain_unjudged(monkeypatch, tmp_path, path, status, reason):
@@ -419,3 +425,35 @@ def test_eval_web_tools_are_independent_and_do_not_override_other_denies(monkeyp
     assert cfg["permission"]["bash"]["*"] == "allow"
     monkeypatch.setenv("OPENCODE_ENABLE_EXA", "0" if websearch else "1")
     assert evaluation_agent._env(str(tmp_path))["OPENCODE_ENABLE_EXA"] == ("1" if websearch else "0")
+
+
+def test_eval_defaults_exclude_training_reward_shaping():
+    values = config().model_dump()
+    values.pop("tool_rewards")
+    assert config().tool_rewards is not None
+    assert OpenCodeMultimodalEvalConfig.model_validate(values).tool_rewards is None
+
+
+@pytest.mark.parametrize(
+    "entrypoint,budget,error",
+    [
+        ("app.py", {"regular_turns": 55, "grace_turns": 10}, "visual_eval"),
+        ("visual_eval.py", {"regular_turns": 30, "grace_turns": 10}, "must match"),
+        ("visual_eval.py", None, "explicitly enable"),
+        ("visual_eval.py", {"regular_turns": 55, "grace_turns": 10}, None),
+        ("hosted_visual_eval.py", {"regular_turns": 55, "grace_turns": 10}, None),
+    ],
+)
+def test_enforced_budget_requires_matching_gateway(monkeypatch, tmp_path, entrypoint, budget, error):
+    runner = evaluation(monkeypatch, tmp_path)
+    runner.config = OpenCodeMultimodalEvalConfig.model_validate(
+        runner.config.model_dump() | {"max_turns": 65, "turn_budget": {"regular_turns": 55, "grace_turns": 10}}
+    )
+    runner.server_client.global_config_dict = {
+        "policy_model": {"responses_api_models": {"vllm_model": {"entrypoint": entrypoint, "turn_budget": budget}}}
+    }
+    if error:
+        with pytest.raises(ValueError, match=error):
+            runner._validate_turn_budget_gateway()
+    else:
+        runner._validate_turn_budget_gateway()

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
+from nemo_gym.models.token_capture import assistant_fingerprint, conversation_digest
 from responses_api_models.vllm_model.app import VLLMModel
 from responses_api_models.vllm_model.app_opencode import (
     OPENCODE_1_17_11_MAX_STEPS,
@@ -95,3 +95,61 @@ def test_final_answer_budget_metadata_reaches_engine(reserve):
     )
     assert result["nemo_final_answer_reserve"] == reserve
     assert result["messages"] == body.messages
+
+
+@pytest.mark.asyncio
+async def test_real_dispatch_delivers_normalized_history_and_reserve_to_engine(monkeypatch):
+    import json
+    from unittest.mock import MagicMock
+
+    from fastapi import Request
+
+    from nemo_gym.client import ServerClient
+
+    config = OpenCodeVLLMModelConfig(
+        host="localhost",
+        port=8081,
+        name="policy",
+        entrypoint="app_opencode.py",
+        base_url="http://localhost/v1",
+        api_key="unused",
+        model="policy",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+    )
+    with patch.object(OpenCodeVLLMModel, "_post_init"):
+        server = OpenCodeVLLMModel(config=config, server_client=MagicMock(spec=ServerClient))
+    seen = []
+
+    class Engine:
+        async def create_chat_completion(self, **kwargs):
+            seen.append(kwargs)
+            return {
+                "id": "response",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "policy",
+                "choices": [
+                    {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Answer: B"}}
+                ],
+            }
+
+    engine = Engine()
+    monkeypatch.setattr(OpenCodeVLLMModel, "_resolve_client", lambda self, request: engine)
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "Earlier answer", "reasoning_content": "Earlier reasoning"},
+        {"role": "assistant", "content": OPENCODE_1_17_11_MAX_STEPS},
+    ]
+    response = await server.chat_completions_dispatch(
+        Request({"type": "http", "headers": [], "state": {}, "session": {}}),
+        {"messages": messages, "metadata": {"extra_body": json.dumps({"nemo_final_answer_reserve": 2048})}},
+    )
+    assert json.loads(response.body)["choices"][0]["message"]["content"] == "Answer: B"
+    assert len(seen) == 1
+    sent = seen[0]
+    assert sent["nemo_final_answer_reserve"] == 2048
+    assert sent["messages"][-1]["role"] == "user"
+    assert sent["messages"][1]["reasoning_content"] == "Earlier reasoning"
+    assert assistant_fingerprint(sent["messages"]) == assistant_fingerprint(messages[:-1])
+    assert messages[-1]["role"] == "assistant"

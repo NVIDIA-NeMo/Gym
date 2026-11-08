@@ -2222,6 +2222,32 @@ class TestRolloutCollection:
             RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
         client.post.assert_not_called()
 
+    @pytest.mark.parametrize("store", ["default", "memory"])
+    async def test_external_staging_resolves_shared_default_ledger(self, monkeypatch, tmp_path, store):
+        from nemo_gym.models.token_capture.lineage import FileLineageStore
+
+        client = install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(500)))
+        client.global_config_dict.token_id_capture = {
+            "enabled": True,
+            "external_staging": True,
+            "rebuild_response": False,
+            "dir": str(tmp_path),
+        }
+        if store == "memory":
+            client.global_config_dict.token_id_capture.lineage_store = (
+                "nemo_gym.models.token_capture.lineage:InMemoryLineageStore"
+            )
+            with pytest.raises(ValueError, match="shared CaptureLedger"):
+                RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
+            client.post.assert_not_called()
+        else:
+            _, result = await next(
+                RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
+            )
+            assert result["instance_config"]["mask_sample"] is True
+            manifest = await FileLineageStore(tmp_path).manifest("7-0")
+            assert any(row["reason"] == "agent_run_failed" for row in manifest["failures"])
+
     def test_run_examples_rejects_invalid_failure_routing_config(self, monkeypatch: pytest.MonkeyPatch) -> None:
         client = install_fake_server_client(monkeypatch, AsyncMock())
         client.global_config_dict.route_failures_to_sidecar = "false"
@@ -15137,7 +15163,8 @@ class TestEnrichRunResult:
 
         assert reply[ATTEMPT_INDEX_KEY_NAME] == 2
 
-    async def test_enrichment_returns_the_typed_failure_record_for_a_failed_run(self, monkeypatch) -> None:
+    @pytest.mark.parametrize("configured", [False, True])
+    async def test_enrichment_returns_the_typed_failure_record_for_a_failed_run(self, monkeypatch, configured) -> None:
         """Through the real dispatcher: with enrichment a judge failure is the typed record, not the legacy dict."""
         from nemo_gym.rollouts.rollout_outcomes import RolloutFailureRecord
 
@@ -15152,10 +15179,11 @@ class TestEnrichRunResult:
         async def post(*args, **kwargs):
             return FakeResponse(200, dict(judge_failed))
 
-        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        client.global_config_dict.route_failures_to_sidecar = configured
         _, typed = await next(
             RolloutCollectionHelper().run_examples(
-                [failing_row()], route_failures_to_sidecar=True, enrich_results=True
+                [failing_row()], route_failures_to_sidecar=None if configured else True, enrich_results=True
             )
         )
         assert isinstance(typed, RolloutFailureRecord)

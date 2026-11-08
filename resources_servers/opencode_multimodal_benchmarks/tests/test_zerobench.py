@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import base64
 import io
 import json
 from unittest.mock import AsyncMock
@@ -44,7 +45,10 @@ async def test_verify_and_complete_coverage(server, monkeypatch):
     assert "accuracy" not in metrics and metrics["ZeroBench/complete"] is False
     second = (await server.verify(request("ZeroBench", "", "cat"))).model_dump()
     second["verifier_metadata"].update(expected_samples=2, index="2")
-    assert server.compute_metrics([[first], [second]])["accuracy"] == 0.5
+    metrics = server.compute_metrics([[first], [second]])
+    assert metrics["ZeroBench/pass@1"] == 0.5
+    assert metrics["ZeroBench/complete"] is False
+    assert "accuracy" not in metrics and "ZeroBench/pass@5" not in metrics
     judge.assert_not_awaited()
 
 
@@ -78,7 +82,7 @@ def test_prepare_images_and_reference_isolation(tmp_path, monkeypatch):
     assert "secret-reference" not in json.dumps(policy)
     content = policy["input"][0]["content"]
     assert content[0]["text"] == "Which color?" + ANSWER_INSTRUCTION
-    assert __import__("pathlib").Path(content[1]["image_url"]).read_bytes() == raw
+    assert base64.b64decode(content[1]["image_url"].split(",", 1)[1]) == raw
     rows.pop()
     with pytest.raises(ValueError, match="question ID"):
         zerobench_prepare.prepare("source.parquet")
@@ -90,3 +94,45 @@ def test_reject_changed_source(tmp_path):
     source.write_bytes(b"not the canonical release")
     with pytest.raises(ValueError, match="checksum"):
         zerobench_prepare.prepare(str(source))
+
+
+def test_five_attempt_success_is_not_mean_accuracy(server):
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME
+
+    tasks = [
+        [
+            {
+                ROLLOUT_INDEX_KEY_NAME: repeat,
+                "verifier_metadata": {"benchmark": "ZeroBench", "index": str(task), "expected_samples": 3},
+                "reward": int(task == 0 and repeat == 0),
+            }
+            for repeat in range(5)
+        ]
+        for task in range(3)
+    ]
+    metrics = server.compute_metrics(tasks)
+    assert metrics["ZeroBench/complete"] is True
+    assert metrics["ZeroBench/pass@5"] == pytest.approx(1 / 3)
+    assert metrics["accuracy"] == pytest.approx(1 / 3)
+    assert metrics["ZeroBench/pass@1"] == pytest.approx(1 / 15)
+    tasks[-1].pop()
+    partial = server.compute_metrics(tasks)
+    assert partial["ZeroBench/complete"] is False
+    assert "ZeroBench/pass@5" not in partial and "accuracy" not in partial
+
+
+def test_masked_attempt_cannot_complete_pass_at_five(server):
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME
+
+    attempts = [
+        {
+            ROLLOUT_INDEX_KEY_NAME: i,
+            "verifier_metadata": {"benchmark": "ZeroBench", "index": "0", "expected_samples": 1},
+            "reward": 0,
+            "mask_sample": i == 4,
+        }
+        for i in range(5)
+    ]
+    metrics = server.compute_metrics([attempts])
+    assert metrics["ZeroBench/complete"] is False
+    assert "accuracy" not in metrics

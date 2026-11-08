@@ -4,12 +4,15 @@
 
 from typing import TYPE_CHECKING, Any
 
+from pydantic import field_validator
+
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     observe_llm_judge_grading,
     observe_programmatic_grading,
 )
+from nemo_gym.utils import final_assistant_text as final_answer
 from nemo_gym.verification import JudgeError, record_parsed_judge_verdict
 from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import final_response
 from resources_servers.opencode_multimodal_benchmarks.mcq import (
@@ -18,8 +21,13 @@ from resources_servers.opencode_multimodal_benchmarks.mcq import (
     matcher_prompt,
     visible_answer,
 )
-from resources_servers.opencode_multimodal_benchmarks.scoring import BABYVISION_JUDGE_PROMPT, boxed_answer
-from resources_servers.opencode_multimodal_benchmarks.vtcbench import judge_prompt, judge_score, rule_score
+from resources_servers.opencode_multimodal_benchmarks.task_data import TaskData
+from resources_servers.opencode_multimodal_benchmarks.vtcbench import (
+    final_answer_text,
+    judge_prompt,
+    judge_score,
+    rule_score,
+)
 from resources_servers.opencode_multimodal_benchmarks.zerobench import score as zerobench_score
 
 
@@ -27,18 +35,14 @@ if TYPE_CHECKING:
     from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig
 
 
-def final_answer(output: list[dict[str, Any]]) -> str:
-    """Read the final assistant text, without grading an unfinished reasoning/tool turn."""
-    for item in reversed(output):
-        if item.get("type") in {"reasoning", "function_call"}:
-            break
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            return "".join(part["text"] for part in item["content"] if part["type"] == "output_text")
-    return ""
-
-
 class VisualVerifyRequest(BaseVerifyRequest):
     verifier_metadata: dict[str, Any]
+
+    @field_validator("verifier_metadata")
+    @classmethod
+    def validate_task(cls, value: dict[str, Any]) -> dict[str, Any]:
+        """Use the published task schema at the actual verification boundary."""
+        return TaskData.model_validate(value).model_dump()
 
 
 class VisualVerifyResponse(VisualVerifyRequest, BaseVerifyResponse):
@@ -67,6 +71,8 @@ class VisualVerifier:
         task = body.verifier_metadata
         prediction = visible_answer(final_answer(body.response.model_dump()["output"]))
         benchmark = task["benchmark"]
+        if benchmark == "VTCBench":
+            prediction = final_answer_text(prediction)
 
         def response(hit: float, extracted: str | None, scorer: str, **details: Any) -> VisualVerifyResponse:
             return VisualVerifyResponse(
@@ -83,7 +89,11 @@ class VisualVerifier:
 
             return observe_programmatic_grading(exact_match)
         if benchmark == "VTCBench":
-            scorer = "vtcbench-public-rules-llm-v2" if self.config.vtc_llm_fallback else "vtcbench-public-rules-v2"
+            scorer = (
+                "vtcbench-final-answer-rules-llm-v3"
+                if self.config.vtc_llm_fallback
+                else "vtcbench-final-answer-rules-v3"
+            )
             if not self.config.vtc_llm_fallback or rule_score(task, prediction):
                 return observe_programmatic_grading(
                     lambda: response(rule_score(task, prediction), prediction, scorer, extraction_method="rule")
@@ -120,9 +130,19 @@ class VisualVerifier:
                 )
 
             async def judge_mcq() -> VisualVerifyResponse:
-                extracted = infer_option(await self._judge(matcher_prompt(task, prediction)), task["options"])
+                prompt = matcher_prompt(task, prediction)
+                extracted = infer_option(await self._judge(prompt), task["options"])
                 if extracted is None:
-                    raise JudgeError("Invalid MCQ judge verdict")
+                    # A changed format instruction addresses the known reference-prompt ambiguity;
+                    # never repeat a deterministic parse failure with the same prompt.
+                    clarification = (
+                        "\nMatch the provided answer to an option in Example 3 now. "
+                        "Do not solve the image question or ask for more input. "
+                        "Return only one uppercase option letter, or Z if none matches."
+                    )
+                    extracted = infer_option(await self._judge(prompt + clarification), task["options"])
+                if extracted is None:
+                    raise JudgeError("Invalid MCQ judge verdict after format clarification")
                 record_parsed_judge_verdict()
                 return response(
                     extracted == task["answer"].strip().upper(),
@@ -133,32 +153,6 @@ class VisualVerifier:
                 )
 
             return await observe_llm_judge_grading(judge_mcq)
-        if benchmark == "BabyVision":
-
-            async def judge_babyvision() -> VisualVerifyResponse:
-                extracted = boxed_answer(prediction)
-                extracted = prediction if extracted is None else extracted
-                verdict = (
-                    (
-                        await self._judge(
-                            BABYVISION_JUDGE_PROMPT.format(
-                                question=task["question"],
-                                groundtruth=task["answer"],
-                                modeloutput=extracted,
-                            )
-                        )
-                    )
-                    .strip()
-                    .lower()
-                )
-                if verdict not in ("true", "false"):
-                    raise JudgeError("Invalid BabyVision judge verdict")
-                record_parsed_judge_verdict()
-                return response(
-                    verdict == "true", extracted, "babyvision-judge-v1", judge_model=self.config.judge_model
-                )
-
-            return await observe_llm_judge_grading(judge_babyvision)
         raise ValueError(f"Unsupported visual benchmark: {benchmark}")
 
 

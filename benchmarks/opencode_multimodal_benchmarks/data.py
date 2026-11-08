@@ -20,7 +20,7 @@ from pathlib import Path
 from PIL import Image
 
 
-BENCHMARKS = ("VTCBench", "VStarBench", "HRBench8K", "BabyVision")
+BENCHMARKS = ("VTCBench", "VStarBench", "HRBench8K")
 ANSWER_INSTRUCTION = (
     "End your response with a separate line in this exact format:\n"
     "Answer: <final answer>\n"
@@ -50,21 +50,16 @@ def options_from_row(row: dict) -> dict[str, str]:
 def question(row: dict, benchmark: str, answer_format: bool) -> str:
     text = row["question"].strip()
     options = options_from_row(row)
-    if benchmark == "BabyVision":
-        # Original final-answer instruction (also in VLMEvalKit babyvision.py):
-        # https://github.com/UniPat-AI/BabyVision/blob/7f92fd4b1dc1c68b7b936a9bc09c68b4a944a55a/babyvision_eval/evaluate_model.py
-        text += "\nThink about the question and give your final answer in \\boxed{Answer} format."
-    else:
-        text = f"Question: {text}\n"
-        if row.get("hint", "").strip():
-            text = f"Hint: {row['hint'].strip()}\n" + text
-        if options:
-            text += "Options:\n" + "".join(f"{key}. {value}\n" for key, value in options.items())
-            text += "Please select the correct answer from the options above."
-            if benchmark == "VTCBench":
-                text += " Answer with the option letter only."
-        elif benchmark == "VTCBench":
-            text += "Answer the question using a single word or phrase."
+    text = f"Question: {text}\n"
+    if row.get("hint", "").strip():
+        text = f"Hint: {row['hint'].strip()}\n" + text
+    if options:
+        text += "Options:\n" + "".join(f"{key}. {value}\n" for key, value in options.items())
+        text += "Please select the correct answer from the options above."
+        if benchmark == "VTCBench":
+            text += " Answer with the option letter only."
+    elif benchmark == "VTCBench":
+        text += "Answer the question using a single word or phrase."
     if answer_format and benchmark == "VTCBench":
         text += "\n\n" + ANSWER_INSTRUCTION
     return text

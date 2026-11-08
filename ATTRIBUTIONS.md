@@ -22553,3 +22553,23 @@ and NVIDIA copyright notice:
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 NVIDIA Corporation. All rights reserved.
 ```
+
+
+## OpenCode multimodal evaluation adapters
+
+Dataset access and redistribution terms remain the dataset publishers' terms;
+these source-code licenses do not license the benchmark data. Catalog manifests
+record unknown dataset licensing where an applicable license has not been established.
+
+| Adapted source | Exact revision | Affected Gym files | Source license |
+| --- | --- | --- | --- |
+| [VLMEvalKit matching utilities and prompts](https://github.com/open-compass/VLMEvalKit/tree/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval) | `ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5` | `resources_servers/opencode_multimodal_benchmarks/mcq.py`, `reporting.py`; `benchmarks/opencode_multimodal_benchmarks/data.py` | Apache-2.0; original source-file URLs are in each header |
+| [VTC-Bench evaluator subtree](https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py) | `5e0a5533f597b0c56dae7d9705771498202ab19b` | `resources_servers/opencode_multimodal_benchmarks/vtcbench.py` | Apache-2.0 for the VLMEvalKit evaluator subtree; no assertion about dataset licensing |
+| [ZeroBench scoring example](https://github.com/jonathan-roberts1/zerobench/blob/0debbe43deddfe54f9965a6fdfd4f70a20d8ab62/README.md#code) | `0debbe43deddfe54f9965a6fdfd4f70a20d8ab62` | `resources_servers/opencode_multimodal_benchmarks/zerobench.py` | MIT |
+| [OpenCode maximum-step directive](https://github.com/anomalyco/opencode/blob/67aec2212010d67775c35e696d8b8b54902eb338/packages/core/src/session/runner/max-steps.ts) | `67aec2212010d67775c35e696d8b8b54902eb338` | `responses_api_agents/opencode_agent/protocol.py`; imported by the multimodal agent and `responses_api_models/vllm_model/app_opencode.py` | MIT |
+| [Agent-X Goal Accuracy rubric](https://github.com/mbzuai-oryx/Agent-X/blob/1dcd5a66267f0582898c692a5eef9d4a52d0dc2f/evaluation/multiagent_evaluation.py) | `1dcd5a66267f0582898c692a5eef9d4a52d0dc2f` | `resources_servers/opencode_multimodal_benchmarks/agentx_rubric.py` | **Unconfirmed: licensing review remains open.** Attribution does not establish permission. |
+
+Full applicable notices for confirmed sources are retained in the component
+`third-party-notices.md` files. The Agent-X rubric remains unchanged pending its
+licensing decision. BabyVision is outside this integration; an attribution to a
+VLMEvalKit source file with that name records helper-code provenance only.

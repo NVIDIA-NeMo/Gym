@@ -453,7 +453,8 @@ def test_legacy_staging_digest_keyword_preserves_bytes() -> None:
     args = _digest_args()
     expected = compute_staging_digest(**args)
     args["rollout_id"] = args.pop("capture_key")
-    assert compute_staging_digest(**args) == expected
+    with pytest.warns(FutureWarning, match="rollout_id is deprecated"):
+        assert compute_staging_digest(**args) == expected
     args["capture_key"] = args["rollout_id"]
     with pytest.raises(ValueError, match="not both"):
         compute_staging_digest(**args)

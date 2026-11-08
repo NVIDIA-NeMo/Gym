@@ -546,3 +546,21 @@ def test_missing_session_provider_is_a_final_http_refusal(monkeypatch):
     )
     detail = check_agent_seed_rejected(obj.setup_webserver(), seed)
     assert "sandbox_provider" in detail
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["missing_resource", "unknown_agent_ref"])
+async def test_invalid_run_route_is_permanent_before_network_calls(monkeypatch, mode):
+    from fastapi import HTTPException
+
+    obj = agent(monkeypatch)
+    run_body = OpenCodeMultimodalRunRequest(responses_create_params=body())
+    if mode == "missing_resource":
+        obj.config.resources_server = None
+    else:
+        run_body.image_tools_base_agent_ref = {"name": "unknown-agent", "type": "responses_api_agents"}
+    obj.server_client.post = AsyncMock()
+    with pytest.raises(HTTPException) as caught:
+        await obj.run(MagicMock(cookies={}), run_body)
+    assert caught.value.status_code == 422
+    obj.server_client.post.assert_not_awaited()

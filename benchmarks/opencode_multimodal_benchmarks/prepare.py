@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Prepare benchmark JSONL for Gym; reference labels never enter policy input."""
 
+import base64
 import json
+import mimetypes
 from pathlib import Path
 from typing import Any
 
@@ -11,7 +13,18 @@ from benchmarks.opencode_multimodal_benchmarks.data import prepare as prepare_ta
 from benchmarks.opencode_multimodal_benchmarks.data import sha256_file
 
 
-BENCHMARKS = {"vstar": "VStarBench", "hrbench8k": "HRBench8K", "vtcbench": "VTCBench", "babyvision": "BabyVision"}
+BENCHMARKS = {"vstar": "VStarBench", "hrbench8k": "HRBench8K", "vtcbench": "VTCBench"}
+
+
+def image_data_url(path: str) -> str:
+    """Embed prepared image bytes so hosted endpoints do not need local filesystem access."""
+    if path.startswith("data:image/"):
+        return path
+    mime, _ = mimetypes.guess_type(path)
+    if mime is None or not mime.startswith("image/"):
+        raise ValueError(f"Unsupported prepared image type: {Path(path).suffix}")
+    encoded = base64.b64encode(Path(path).read_bytes()).decode("ascii")
+    return f"data:{mime};base64,{encoded}"
 
 
 def task_row(task: dict[str, Any]) -> dict[str, Any]:
@@ -22,7 +35,10 @@ def task_row(task: dict[str, Any]) -> dict[str, Any]:
                     "role": "user",
                     "content": [
                         {"type": "input_text", "text": task["prompt"]},
-                        *[{"type": "input_image", "image_url": path, "detail": "auto"} for path in task["images"]],
+                        *[
+                            {"type": "input_image", "image_url": image_data_url(path), "detail": "auto"}
+                            for path in task["images"]
+                        ],
                     ],
                 }
             ],

@@ -6,6 +6,7 @@ opencode_multimodal_benchmarks:
   resources_servers:
     opencode_multimodal_benchmarks:
       entrypoint: app.py
+      judge_required: false
       judge_model: null
       datasets:
       - name: zerobench
@@ -16,7 +17,7 @@ opencode_multimodal_benchmarks:
         prepare_dependencies:
         - Pillow
         - pyarrow
-        num_repeats: 1
+        num_repeats: 5
         taskset: visual_tasks
 visual_agent:
   responses_api_agents:

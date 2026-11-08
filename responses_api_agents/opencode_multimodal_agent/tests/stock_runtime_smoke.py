@@ -20,7 +20,7 @@ from PIL import Image
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+from nemo_gym.models.token_capture import assistant_fingerprint
 from responses_api_agents.opencode_multimodal_agent.app import (
     OpenCodeMultimodalAgent,
     OpenCodeMultimodalAgentConfig,

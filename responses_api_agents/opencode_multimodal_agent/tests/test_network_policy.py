@@ -373,6 +373,7 @@ def test_inherit_preserves_existing_provider_restrictions(monkeypatch, provider_
 
 
 @pytest.mark.parametrize("mode", ["inherit", "all"])
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux network namespaces")
 def test_inherit_runner_preserves_outer_network_namespace_and_proxy(tmp_path, mode):
     runner = Path(__file__).parents[1] / "network_runner.py"
     expected_ns = os.readlink("/proc/self/ns/net")
@@ -447,3 +448,33 @@ def test_unknown_provider_cannot_silently_skip_restriction(monkeypatch, mode):
         agent(monkeypatch, network_access=mode)._restrict_owned_sandbox_network(
             SandboxSpec(image="test-image"), SimpleNamespace(name="unsupported"), seed()
         )
+
+
+@pytest.mark.parametrize("mode", ["model_only", "model_and_tools"])
+def test_restricted_launch_always_uses_model_network_wrapper(monkeypatch, tmp_path, mode):
+    from responses_api_agents.opencode_multimodal_agent import app as module
+
+    obj = evaluation(monkeypatch, tmp_path)
+    obj.config.network_access = mode
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "opencode.json").write_text(
+        json.dumps({"provider": {"nemo": {"options": {"baseURL": "http://model.example:8000/v1"}}}})
+    )
+    monkeypatch.setattr(module.shutil, "which", lambda *args, **kwargs: "/usr/bin/true")
+    monkeypatch.setattr(
+        module, "sandbox_command", lambda cfg, cwd, executable, env, command: ["bwrap", "--clearenv", "--", *command]
+    )
+    launch = obj._prepare_command(
+        ["opencode", "run", "--dir", str(workspace), "--file", "--", "question"], workspace, {}
+    )
+    assert launch[0] == sys.executable and Path(launch[1]).name == "network_runner.py"
+    assert launch[launch.index("--mode") + 1] == mode
+    assert launch[launch.index("--model-url") + 1] == "http://model.example:8000/v1"
+    assert "--bubblewrap" in launch and "bwrap" in launch
+
+
+def test_restricted_local_launch_cannot_omit_filesystem_sandbox(monkeypatch, tmp_path):
+    obj = agent(monkeypatch, network_access="model_only", sandbox=None)
+    with pytest.raises(ValueError, match="requires the filesystem sandbox"):
+        obj._prepare_command(["opencode", "run"], tmp_path, {})

@@ -16,7 +16,7 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from nemo_gym.agents import Body, SandboxNetworkAccess
+from nemo_gym.agents import Body, SandboxNetworkAccess, resolve_agent_timeout
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -28,15 +28,18 @@ from nemo_gym.core import (
 )
 from nemo_gym.trajectory import AgentEpisode, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.app import (
-    _INTERNAL_OBSERVATIONS_KEY,
-    _INTERNAL_TRAJECTORY_KEY,
     OpenCodeAgent,
     OpenCodeAgentConfig,
     OpenCodeAgentRunRequest,
     OpenCodeAgentVerifyResponse,
-    _parse_opencode_session,
 )
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
+from responses_api_agents.opencode_agent.protocol import (
+    AGENT_OBSERVATIONS_KEY,
+    AGENT_TRAJECTORY_KEY,
+    OPENCODE_1_17_11_MAX_STEPS,
+)
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig, sandbox_command
@@ -348,7 +351,6 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         if self.config.final_answer_reserve is None:
             return
         # This version-scoped directive is replaced before both lineage and capture.
-        from responses_api_models.vllm_model.app_opencode import OPENCODE_1_17_11_MAX_STEPS
 
         policy = {
             "max_turns": self.config.max_turns,
@@ -478,12 +480,14 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             runner = self.model_copy(update={"config": episode_config})
             database = directory / "opencode.db"
             trajectory = TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped")
+            timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
             await runner._run_opencode(
                 text,
                 system_prompt,
                 rollout_id=rollout_id,
                 collect_observations=False,
                 artifact_path=database,
+                timeout=timeout,
             )
             output, usage, turns = await asyncio.to_thread(
                 parse_visual_session,
@@ -502,7 +506,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
                     self.config.tool_rewards,
                 )
             observations = await asyncio.to_thread(
-                _parse_opencode_session,
+                parse_opencode_observations,
                 database,
                 rollout_id or "multimodal",
                 trajectory,
@@ -525,6 +529,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
                 id=f"resp_{uuid4().hex}",
                 created_at=int(time()),
                 model=self.config.model,
+                metadata={"agent_timeout_sec": str(timeout)},
                 object="response",
                 output=output,
                 tool_choice=body.tool_choice,
@@ -542,7 +547,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
                 ),
             )
             if collect_observations:
-                response = response.model_copy(update={_INTERNAL_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
+                response = response.model_copy(update={AGENT_TRAJECTORY_KEY: trajectory.model_dump(mode="json")})
             return AgentEpisode(response=response, observations=observations)
 
     async def responses(
@@ -555,6 +560,12 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     async def run(self, request: Request, body: OpenCodeMultimodalRunRequest) -> OpenCodeMultimodalVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Agent sessions must run through the Environment Server")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "The /run endpoint requires resources_server")
+        if body.image_tools_base_agent_ref is not None:
+            name = body.image_tools_base_agent_ref.get("name")
+            if name not in self.config.resources_server_by_agent:
+                raise HTTPException(422, "Unknown image_tools_base_agent_ref")
         self._network_access_for_request(body.responses_create_params)
         self._tools_for_request(body.responses_create_params)
         async with self.sem:
@@ -577,8 +588,8 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             await raise_for_status(reply)
             raw = await get_response_json(reply)
             evidence = EpisodeEvidence.model_validate(raw.pop("opencode_evidence"))
-            raw_trajectory = raw.pop(_INTERNAL_TRAJECTORY_KEY, None)
-            observations = raw.pop(_INTERNAL_OBSERVATIONS_KEY, None)
+            raw_trajectory = raw.pop(AGENT_TRAJECTORY_KEY, None)
+            observations = raw.pop(AGENT_OBSERVATIONS_KEY, None)
             rollout_id = self.rollout_id_from_run(body)
             trajectory = (
                 scope_opencode_trajectory(TrajectoryRecord.model_validate(raw_trajectory), body, rollout_id)

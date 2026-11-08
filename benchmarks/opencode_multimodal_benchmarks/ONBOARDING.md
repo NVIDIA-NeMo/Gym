@@ -8,12 +8,11 @@ prepare Gym task rows, run the agent, and score its answers through the
 
 | Configuration | Data | Scoring |
 |---|---|---|
-| `vstar.yaml` | VStar TSV and images | Multiple-choice accuracy |
-| `hrbench8k.yaml` | HRBench8K TSV and images | Mean accuracy across cycles |
-| `vtcbench.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
-| `agentx.yaml` | Agent-X source data or prepared bundle | GoalAcc on 605 non-generative tasks |
-| `babyvision.yaml` | BabyVision TSV and images | LLM answer verification |
-| `zerobench.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
+| `vstar/opencode_relay.yaml` | VStar TSV and images | Multiple-choice accuracy |
+| `hrbench8k/opencode_relay.yaml` | HRBench8K TSV and images | Mean accuracy across cycles |
+| `vtcbench/opencode_relay.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
+| `agentx/opencode_relay.yaml` | Agent-X source data or prepared bundle | GoalAcc on 605 non-generative tasks |
+| `zerobench/opencode_relay.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
 
 ## Prepare data
 
@@ -25,15 +24,14 @@ stored in `verifier_metadata`, separately from the agent's inputs.
 
 Supply these preparation arguments through Gym's `prepare_kwargs`:
 
-- `benchmark`: `vstar`, `hrbench8k`, `vtcbench`, or `babyvision`.
+- `benchmark`: `vstar`, `hrbench8k`, or `vtcbench`.
 - `tsv`: path to the dataset file.
 - `sha256`: SHA256 of that file.
 - `image_root`: directory for externally referenced images.
 - `limit`: optional number of tasks for a smoke run.
 
 TSV files can contain embedded images or image paths. Use relative image paths
-for portable datasets. BabyVision questions must already include their answer
-choices. VStar and HRBench8K inputs are checked against the manifests in
+for portable datasets. VStar and HRBench8K inputs are checked against the manifests in
 [`manifests/`](manifests/) before applying `limit`; keep the original image bytes.
 
 ### Agent-X
@@ -65,11 +63,12 @@ Download `data/zerobench-00000-of-00001.parquet` at revision
 question IDs, preserves image bytes, and keeps answers outside policy input.
 Do not check the gated dataset or its answers into source control.
 
-Compose `zerobench.yaml` with `opencode_eval_agent.yaml` for evaluation without a
+Compose `zerobench/opencode_relay.yaml` with `opencode_eval_agent.yaml` for evaluation without a
 judge. The public question suffix requests a final answer in curly braces. The
 scorer follows the [public example](https://github.com/jonathan-roberts1/zerobench#code),
-including last-brace extraction and whitespace behavior. A single repeat reports
-single-attempt accuracy; it does not measure pass@5 or five-attempt reliability.
+including last-brace extraction and whitespace behavior. The default is five repeats;
+`ZeroBench/pass@5` is the primary metric. Mean single-attempt accuracy is labeled
+`ZeroBench/pass@1`. Incomplete attempts cannot certify a complete pass@5 score.
 
 ## Configure a run
 
@@ -113,14 +112,13 @@ score zero.
   Set `vtc_llm_fallback: false` for rule-only scoring.
 - **Agent-X:** use the GoalAcc rubric. Objective answers receive 0 or 1;
   subjective answers receive a score from 0 to 1. Image-generation tasks are excluded.
-- **BabyVision:** judge the boxed answer, or the full final response when no box
-  is present.
 
 Unresolved judge failures need rejudging before reporting a complete benchmark
 score. For agent sessions, the Environment Server's `agent_outcome_policy`
 determines whether a failed attempt is verified, retried or left ungraded.
-The OpenCode compatibility evaluation `/run` path records recognized agent
-crashes with zero reward and failure metadata.
+The OpenCode compatibility evaluation `/run` path scores established model-caused
+failures as zero. Provider 429/5xx, transport, runtime setup and unclassified process
+failures retain the retry/failure-sidecar path rather than settling tasks as wrong.
 
 Source implementations are linked beside the scoring code in the
 [resources server](../../resources_servers/opencode_multimodal_benchmarks/).

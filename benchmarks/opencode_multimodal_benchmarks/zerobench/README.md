@@ -10,7 +10,7 @@ Prepared rows contain the question and image inputs in
 are required by the verifier. The catalog configuration uses `simple_agent` for
 image-question answering; a tool-using harness is a separate configuration choice.
 
-Extract the last curly-braced answer and compare case-insensitively using the public exact-match scorer. No judge is needed. One repeat is single-attempt accuracy, not pass@5.
+Extract the last curly-braced answer and compare case-insensitively using the public exact-match scorer. No judge is needed. The default is five repeats per task. `ZeroBench/pass@5` and the headline `accuracy` report success in five attempts; `ZeroBench/pass@1` is the separately labeled mean single-attempt score. Fewer than five valid attempts per task cannot produce a complete pass@5 result.
 
 Private reasoning is removed before grading. Empty final answers score zero.
 Unresolved judge errors remain errors, not incorrect model answers. The reward
@@ -45,14 +45,14 @@ See [run configuration](../README.md#run-configuration) before running:
 
 ```bash
 gym eval run --benchmark opencode_multimodal_benchmarks/zerobench \
-  --model-type openai_model --split benchmark --limit 5 --num-repeats 1 \
+  --model-type openai_model --split benchmark --limit 5 --num-repeats 5 \
   --output results/zerobench_smoke.jsonl
 ```
 
 Remove the smoke limit for a complete score. Save the resolved configuration,
 judge identity, sampling, budgets, timeouts, repeats and supported random seeds.
-The prepared requests use temperature 0.6 and top-p 0.95; the catalog sets one
-repeat. Agent/model limits are supplied by the run configuration.
+The prepared requests use temperature 0.6 and top-p 0.95; the catalog sets five
+repeats. Agent/model limits are supplied by the run configuration.
 
 The integration code is Apache-2.0; source dataset terms remain those of its
 publisher. See [implementation provenance](../../../resources_servers/opencode_multimodal_benchmarks/third-party-notices.md)

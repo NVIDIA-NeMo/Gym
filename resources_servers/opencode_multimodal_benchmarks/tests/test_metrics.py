@@ -11,9 +11,10 @@ from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.metrics import compute_aggregate_metrics
 from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
+from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats
 
 
-@pytest.fixture(params=["VStarBench", "HRBench8K", "VTCBench", "BabyVision", "AgentX_GoalAcc"])
+@pytest.fixture(params=["VStarBench", "HRBench8K", "VTCBench", "AgentX_GoalAcc"])
 def repeated_benchmark(request):
     benchmark = request.param
     config_type, server_type = (
@@ -89,3 +90,17 @@ def test_duplicate_sample_identity_is_rejected(repeated_benchmark):
         row[TASK_INDEX_KEY_NAME] = 3
     with pytest.raises(ValueError, match="Duplicate benchmark sample ID"):
         aggregate(server, rows + duplicate)
+
+
+def test_sample_repeat_guard_is_independent_of_framework_validation(repeated_benchmark):
+    _, _, rows = repeated_benchmark
+    with pytest.raises(ValueError, match="^Duplicate sample repeat$"):
+        average_repeats([[rows[0], deepcopy(rows[0])]])
+
+
+def test_repeat_metadata_must_be_identical(repeated_benchmark):
+    _, _, rows = repeated_benchmark
+    changed = deepcopy(rows[1])
+    changed["verifier_metadata"]["category"] = "changed"
+    with pytest.raises(ValueError, match="^Inconsistent metadata across sample repeats$"):
+        average_repeats([[rows[0], changed]])

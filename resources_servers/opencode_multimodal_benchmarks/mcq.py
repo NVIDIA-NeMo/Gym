@@ -10,8 +10,8 @@
 import re
 
 
-MCQ_SCORER = "mcq-vlmeval-llm-v2"
-_VERBOSE_ANSWER = re.compile(r"(?i)(?:correct\s+)?answer\s+is\s+\**([ABCD])\**")
+MCQ_SCORER = "mcq-final-answer-llm-v3"
+_VERBOSE_ANSWER = re.compile(r"(?i:(?:correct\s+)?answer\s+is\s+)\**([A-Z])\b\**")
 
 
 def visible_answer(prediction: str) -> str:

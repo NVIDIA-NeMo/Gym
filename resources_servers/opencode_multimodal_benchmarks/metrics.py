@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Average repeated measurements without treating repeats as additional tasks."""
 
+from math import comb
 from typing import Any
 
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME
@@ -33,3 +34,20 @@ def average_repeats(tasks: list[list[dict[str, Any]]]) -> tuple[list[dict[str, A
         rows.append(repeats[0] | {"reward": sum(row["reward"] for row in repeats) / len(repeats)})
     balanced = bool(repeat_sets) and all(indices == repeat_sets[0] for indices in repeat_sets)
     return rows, balanced
+
+
+def pass_at_k(tasks: list[list[dict[str, Any]]], *, k: int) -> float | None:
+    """Estimate success in k attempts; incomplete or masked attempts cannot certify it."""
+    if k < 1:
+        raise ValueError("k must be positive")
+    estimates = []
+    for repeats in tasks:
+        valid = [row for row in repeats if not row.get("mask_sample", False) and row.get("evaluation_completed", True)]
+        if len(valid) < k:
+            return None
+        if any(row["reward"] not in (0, 1) for row in valid):
+            raise ValueError("pass@k requires binary rewards")
+        n = len(valid)
+        correct = sum(int(row["reward"]) for row in valid)
+        estimates.append(1.0 if n - correct < k else 1.0 - comb(n - correct, k) / comb(n, k))
+    return sum(estimates) / len(estimates) if estimates else None

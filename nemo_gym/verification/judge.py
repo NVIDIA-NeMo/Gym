@@ -296,6 +296,7 @@ async def call_judge(
             server_name=server_name,
             url_path=url_path,
             json=json,
+            _max_num_tries=1,
             **({"timeout": timeout} if timeout is not None else {}),
             **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
         )

@@ -9,11 +9,13 @@ from benchmarks.opencode_multimodal_benchmarks.prepare import task_row
 from responses_api_agents.opencode_multimodal_agent.app import OpenCodeMultimodalRunRequest
 
 
-def test_prepared_image_request_validates_against_native_agent():
-    row = task_row({"prompt": "What color?", "images": ["/tmp/image.png"], "answer": "A"})
+def test_prepared_image_request_validates_against_native_agent(tmp_path):
+    image = tmp_path / "image.png"
+    image.write_bytes(b"image bytes")
+    row = task_row({"prompt": "What color?", "images": [str(image)], "answer": "A"})
     parsed = OpenCodeMultimodalRunRequest.model_validate(row)
     content = parsed.responses_create_params.model_dump()["input"][0]["content"]
-    assert content[1]["image_url"] == "/tmp/image.png"
+    assert content[1]["image_url"] == "data:image/png;base64,aW1hZ2UgYnl0ZXM="
     assert content[1]["detail"] == "auto"
     assert parsed.verifier_metadata["answer"] == "A"
     assert "answer" not in parsed.responses_create_params.model_dump()

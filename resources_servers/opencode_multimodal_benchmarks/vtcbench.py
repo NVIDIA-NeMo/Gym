@@ -10,6 +10,11 @@ Source: https://github.com/zhuzil/VTC-Bench/blob/
 5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py
 """
 
+import re
+
+from resources_servers.opencode_multimodal_benchmarks.mcq import infer_option
+
+
 MCQ_PROMPT = (
     "You are a information extractor that extracts multiple choice letter answer choices from a "
     "paragraph that contains the answer choice and sometimes explaination of why that choice is "
@@ -66,24 +71,30 @@ VQA_PROMPT = (
 )
 
 
+def final_answer_text(prediction: str) -> str:
+    """Use the last explicit Answer line, or the final nonempty line."""
+    lines = [line.strip() for line in prediction.splitlines() if line.strip()]
+    for line in reversed(lines):
+        match = re.fullmatch(r"(?:final\s+)?answer\s*:\s*(.*)", line, flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return lines[-1] if lines else ""
+
+
 def rule_score(task: dict, prediction: str) -> int:
-    """Match the public evaluator's rules on the whole visible response."""
-    prediction = prediction.strip().lower()
-    answer = str(task["answer"]).strip().lower()
-    options = {key: str(value).strip().lower() for key, value in task["options"].items() if key in "ABCDEFG"}
-    if options or (len(answer) == 1 and answer in "abcd"):
-        first = prediction[:1]
-        if len(answer) == 1 and answer in "abcdefg":
-            return int(first == answer and (len(prediction) == 1 or prediction[1] in ". -"))
-        if first and first in "abcdefg":
-            return int(options.get(first.upper()) == answer)
-        return int(any(option in prediction and option == answer for option in options.values()))
-    pred_normalized = " ".join(prediction.split())
-    answer_normalized = " ".join(answer.split())
-    return int(
-        pred_normalized == answer_normalized
-        or (len(answer_normalized.split()) < 5 and answer_normalized in pred_normalized)
-    )
+    """Grade the selected final answer; ambiguous prose requires the judge."""
+    prediction = final_answer_text(prediction)
+    answer = str(task["answer"]).strip()
+    if not answer:
+        raise ValueError("VTCBench requires a nonempty reference answer")
+    options = {key: str(value).strip() for key, value in task["options"].items() if key in "ABCDEFG"}
+    if options:
+        selected = infer_option(prediction, options)
+        if len(answer) == 1 and answer.upper() in options:
+            return int(selected == answer.upper())
+        if selected in options:
+            return int(options[selected].casefold() == answer.casefold())
+    return int(" ".join(prediction.casefold().split()) == " ".join(answer.casefold().split()))
 
 
 def judge_prompt(task: dict, prediction: str) -> str:
@@ -97,6 +108,9 @@ def judge_prompt(task: dict, prediction: str) -> str:
 
 def judge_score(task: dict, verdict: str) -> int | None:
     """Return None for an invalid verdict, preserving the public parsing rules."""
+    if not isinstance(verdict, str):
+        return None
+    verdict = verdict.strip()
     if "Failed to obtain answer via API." in verdict:
         return None
     if task["options"]:

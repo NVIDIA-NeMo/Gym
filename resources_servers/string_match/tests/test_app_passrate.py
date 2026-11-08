@@ -64,3 +64,11 @@ async def test_verify_preserves_response(
     assert result.extracted_answer == extracted_answer
     assert body.model_dump() == original
     assert result.response.model_dump() == body.response.model_dump()
+
+
+@pytest.mark.parametrize("tail", [" " * 100000, (" <|im_end|>" * 10000)])
+def test_long_trailing_markers_and_whitespace(tail):
+    from resources_servers.string_match.app import strip_trailing_eos
+
+    assert strip_trailing_eos("42" + tail) == "42"
+    assert strip_trailing_eos("a<|im_end|>b") == "a<|im_end|>b"

@@ -110,7 +110,7 @@ def test_reference_never_becomes_policy_input():
     "status,raw,expected", [(200, '{"Score": 0.65}', 0.65), (200, "invalid", None), (503, "", None)]
 )
 async def test_judge_transport(server, monkeypatch, status, raw, expected):
-    from resources_servers.opencode_multimodal_benchmarks import agentx
+    from resources_servers.opencode_multimodal_benchmarks import app as judge_module
 
     monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
     response = MagicMock()
@@ -119,7 +119,7 @@ async def test_judge_transport(server, monkeypatch, status, raw, expected):
     response.__aenter__ = AsyncMock(return_value=response)
     response.__aexit__ = AsyncMock(return_value=None)
     transport = AsyncMock(return_value=response)
-    monkeypatch.setattr(agentx, "request", transport)
+    monkeypatch.setattr(judge_module, "request", transport)
     server.config.judge_attempts = 1
     task = {"GT_json": "reference", "query_type_raw": "Subjective", "query_type": "subjective"}
     if expected is None:
@@ -172,3 +172,12 @@ async def test_unclosed_thinking_is_empty_without_judging(server, monkeypatch):
     result = await server.verify(request("AgentX_GoalAcc", "<thinking>unfinished private analysis"))
     assert result.reward == 0 and result.extracted == ""
     judge.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["judge_concurrency", "judge_timeout", "judge_attempts"])
+@pytest.mark.parametrize("value", [0, -1])
+def test_invalid_judge_limits_fail_at_configuration(field, value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        AgentXConfig(host="localhost", port=12345, name="visual", entrypoint="agentx.py", **{field: value})

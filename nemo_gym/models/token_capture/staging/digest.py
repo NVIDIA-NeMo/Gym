@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
+import warnings
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -225,6 +226,11 @@ def compute_staging_digest(
     if rollout_id is not None:
         if capture_key is not None:
             raise ValueError("Supply capture_key or legacy rollout_id, not both")
+        warnings.warn(
+            "compute_staging_digest.rollout_id is deprecated; use capture_key instead",
+            FutureWarning,
+            stacklevel=2,
+        )
         capture_key = rollout_id
     if type(schema_version) is not int or schema_version != STAGING_SCHEMA_VERSION:
         raise ValueError(f"unsupported staging schema version {schema_version}")

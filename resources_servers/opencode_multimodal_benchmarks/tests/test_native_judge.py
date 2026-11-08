@@ -83,12 +83,10 @@ async def test_native_judge_uses_captured_model_route_without_local_key(monkeypa
 @pytest.mark.parametrize("agentx", [False, True])
 @pytest.mark.parametrize("missing", ["model", "route"])
 async def test_missing_judge_configuration_fails_before_network(monkeypatch, agentx, missing):
-    from resources_servers.opencode_multimodal_benchmarks import agentx as agentx_module
     from resources_servers.opencode_multimodal_benchmarks import app as app_module
 
     transport = AsyncMock(side_effect=AssertionError("Must not make a network call"))
     monkeypatch.setattr(app_module, "request", transport)
-    monkeypatch.setattr(agentx_module, "request", transport)
     monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
     config_type = AgentXConfig if agentx else VisualBenchmarksConfig
     server_type = AgentXServer if agentx else VisualBenchmarksServer
@@ -109,7 +107,6 @@ async def test_missing_judge_configuration_fails_before_network(monkeypatch, age
 @pytest.mark.parametrize("agentx", [False, True])
 @pytest.mark.parametrize("recover", [False, True])
 async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(monkeypatch, agentx, recover):
-    from resources_servers.opencode_multimodal_benchmarks import agentx as agentx_module
     from resources_servers.opencode_multimodal_benchmarks import app as app_module
 
     client = MagicMock(spec=ServerClient)
@@ -165,7 +162,7 @@ async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(
         return response
 
     client.post = AsyncMock(side_effect=post)
-    module = agentx_module if agentx else app_module
+    module = app_module
     monkeypatch.setattr(module.asyncio, "sleep", AsyncMock())
     body = request("AgentX_GoalAcc" if agentx else "VStarBench", "the fuzzy feline")
     if agentx:
@@ -179,3 +176,123 @@ async def test_native_judge_deadline_cancels_attempt_and_preserves_retry_policy(
     assert attempts == (2 if recover else 1)
     assert cancelled == [1]
     assert not server._judge_sem.locked()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"judge_model": "judge"},
+        {"judge_model": "judge", "judge_server": "policy_model"},
+        {"judge_model": "judge", "judge_server": "judge", "judge_endpoint": "https://judge.example/chat"},
+    ],
+)
+def test_required_judge_configuration_fails_at_startup(settings):
+    with pytest.raises(JudgeError):
+        VisualBenchmarksServer(
+            config=VisualBenchmarksConfig(
+                host="localhost", port=1, name="visual", entrypoint="app.py", judge_required=True, **settings
+            ),
+            server_client=MagicMock(spec=ServerClient),
+        )
+
+
+@pytest.mark.asyncio
+async def test_direct_judge_owns_retries_and_releases_slot_during_backoff(monkeypatch):
+    from resources_servers.opencode_multimodal_benchmarks import app as module
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    server = VisualBenchmarksServer(
+        config=VisualBenchmarksConfig(
+            host="localhost",
+            port=1,
+            name="visual",
+            entrypoint="app.py",
+            judge_model="judge",
+            judge_endpoint="https://judge.example/chat",
+            judge_attempts=2,
+            judge_concurrency=1,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    failed = MagicMock(status=503)
+    failed.__aenter__ = AsyncMock(return_value=failed)
+    failed.__aexit__ = AsyncMock(return_value=None)
+    success = MagicMock(status=200)
+    success.__aenter__ = AsyncMock(return_value=success)
+    success.__aexit__ = AsyncMock(return_value=None)
+    success.json = AsyncMock(return_value={"choices": [{"message": {"content": "A"}}]})
+    transport = AsyncMock(side_effect=[failed, success])
+    monkeypatch.setattr(module, "request", transport)
+
+    async def backoff(seconds):
+        assert not server._judge_sem.locked()
+
+    monkeypatch.setattr(module.asyncio, "sleep", backoff)
+    assert await server._judge("prompt") == "A"
+    assert transport.await_count == 2
+    assert all(call.kwargs["_max_num_tries"] == 1 for call in transport.call_args_list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 401, 403, 422])
+async def test_direct_judge_does_not_retry_permanent_http_errors(monkeypatch, status):
+    from resources_servers.opencode_multimodal_benchmarks import app as module
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fake-test-key")
+    response = MagicMock(status=status)
+    response.__aenter__ = AsyncMock(return_value=response)
+    response.__aexit__ = AsyncMock(return_value=None)
+    transport = AsyncMock(return_value=response)
+    monkeypatch.setattr(module, "request", transport)
+    server = VisualBenchmarksServer(
+        config=VisualBenchmarksConfig(
+            host="localhost",
+            port=1,
+            name="visual",
+            entrypoint="app.py",
+            judge_model="judge",
+            judge_endpoint="https://judge.example/chat",
+            judge_attempts=3,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    with pytest.raises(JudgeError):
+        await server._judge("prompt")
+    transport.assert_awaited_once()
+
+
+def test_typo_in_judge_configuration_is_rejected():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="judge_modle"):
+        VisualBenchmarksConfig(host="localhost", port=1234, name="visual", entrypoint="app.py", judge_modle="typo")
+
+
+def test_policy_judge_alias_is_rejected_at_startup():
+    from unittest.mock import MagicMock
+
+    from nemo_gym.client import ServerClient
+    from nemo_gym.verification import JudgeError
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {
+        "agent": {
+            "responses_api_agents": {
+                "simple_agent": {"model_server": {"type": "responses_api_models", "name": "custom_policy"}}
+            }
+        }
+    }
+    with pytest.raises(JudgeError, match="policy model"):
+        VisualBenchmarksServer(
+            config=VisualBenchmarksConfig(
+                host="localhost",
+                port=1234,
+                name="visual",
+                entrypoint="app.py",
+                judge_required=True,
+                judge_model="policy",
+                judge_server="custom_policy",
+            ),
+            server_client=client,
+        )

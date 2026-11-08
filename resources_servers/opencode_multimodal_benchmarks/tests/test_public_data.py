@@ -16,7 +16,7 @@ from resources_servers.opencode_multimodal_benchmarks.mcq import infer_option
     "prediction",
     [
         "The correct answer is **B**. Here is a long explanation of the image contents.",
-        "The answer is c. A is incorrect, B is incorrect and so is D.",
+        "The answer is C. A is incorrect, B is incorrect and so is D.",
     ],
 )
 def test_verbose_option_does_not_require_judge(prediction):
@@ -114,3 +114,11 @@ def test_mcq_pins_ids_labels_cycles_and_media(monkeypatch, tmp_path, benchmark):
     image.write_bytes(b"corrupt")
     with pytest.raises(ValueError, match="image checksum"):
         canonical.validate_mcq_tasks([task], benchmark)
+
+
+@pytest.mark.parametrize(
+    "prediction,expected",
+    [("The answer is dog.", "B"), ("The correct answer is bird.", "C"), ("The answer is a tricky one", None)],
+)
+def test_prose_is_not_an_option_letter(prediction, expected):
+    assert infer_option(prediction, {"A": "cat", "B": "dog", "C": "bird", "D": "fish"}) == expected

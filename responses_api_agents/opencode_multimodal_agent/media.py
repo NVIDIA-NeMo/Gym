@@ -20,7 +20,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.trajectory import AgentInvocation
-from responses_api_agents.opencode_agent.app import _parse_opencode_session, parse_opencode_session
+from nemo_gym.utils import final_assistant_text
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations, parse_opencode_session
 
 
 def stage_inputs(
@@ -130,7 +131,7 @@ def parse_visual_session(
         raise ValueError("OpenCode dropped initial images")
     # The visible answer belongs to the root, but usage includes child model calls.
     _, usage = parse_opencode_session(database)
-    bundle = _parse_opencode_session(database, root)
+    bundle = parse_opencode_observations(database, root)
     invocation = next(
         record for record in bundle.records if isinstance(record, AgentInvocation) and record.invocation_id == root
     )
@@ -172,14 +173,9 @@ def parse_visual_session(
 
 def final_answer(output: list[dict], *, strip_reasoning: bool = False) -> str:
     """Extract the scoring copy; optional training cleanup never mutates history."""
-    for item in reversed(output):
-        if item.get("type") in {"reasoning", "function_call"}:
-            break
-        if item.get("type") == "message" and item.get("role") == "assistant":
-            text = "".join(part["text"] for part in item["content"] if part["type"] == "output_text")
-            if not strip_reasoning:
-                return text
-            text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
-            text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
-            return re.split(r"</(?:think|thinking)>", text)[-1].strip()
-    return ""
+    text = final_assistant_text(output)
+    if not strip_reasoning:
+        return text
+    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.DOTALL)
+    text = re.split(r"<(?:think|thinking)>", text, maxsplit=1)[0]
+    return re.split(r"</(?:think|thinking)>", text)[-1].strip()

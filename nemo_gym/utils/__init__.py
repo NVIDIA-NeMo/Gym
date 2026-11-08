@@ -22,6 +22,7 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
+    from nemo_gym.utils.assistant_text import final_assistant_text
     from nemo_gym.utils.exception_inspection import bounded_text, explicit_causes
     from nemo_gym.utils.path_utils import (
         aggregation_sources_path_for,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "final_assistant_text": "assistant_text",
     "IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME": "server_process",
     "IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME": "server_process",
     "aggregation_sources_path_for": "path_utils",

@@ -316,3 +316,43 @@ The interpreter is launched by absolute path with `-I`; task Python libraries an
 environment variables remain available to the tools. Session close leaves the
 shared runtime intact. Failed installation closes the session, retaining the
 handle if cleanup must be retried.
+
+
+### Shared-code compatibility
+
+Evaluation infrastructure failures propagate to the collector's retry/failure
+sidecar instead of becoming settled wrong answers. Established model-caused
+failures retain zero rewards. A failed `/run` without a verified result has no
+reward, and its partial training capture is masked. Recording a failure in an
+external staging ledger must succeed before collection returns a recoverable row;
+a ledger-write failure stops collection so the prefix cannot appear trainable.
+
+`run_examples(route_failures_to_sidecar=None)` reads the global configuration;
+when absent, the effective default remains false. An explicit boolean overrides
+that configuration. Config-driven and explicit routing both return typed failure
+records when enrichment is enabled. External staging resolves the same configured,
+installed, then file-backed ledger as the model server, and rejects a process-local
+ledger for cross-process collection.
+
+The corresponding NeMo-RL consumer is pinned at
+`ad05579e04776fedc38c4ee53b17b645cdfa4520`. Its
+`nemo_rl/experience/route_assembly.py` consumes
+`routed_experts_prefix_boundary`, a one-token routed-expert envelope emitted by
+`nemo_rl/models/generation/vllm/vllm_worker_async.py`. The staging adapter validates
+this envelope and preserves its bytes for digest verification. The deprecated
+`compute_staging_digest(rollout_id=...)` alias supports that revision's data-plane
+tests; new callers use `capture_key`, and the alias emits `FutureWarning`.
+
+The shared OpenCode runner moves filesystem copies off the event loop and bounds
+process-group cleanup after timeout/cancellation. Shared string matching exposes
+`strip_trailing_eos: true` without changing default grading or captured responses;
+the previous `app_passrate.py` entrypoint delegates to the common verifier.
+
+An enforced turn budget requires matching agent and visual gateway configuration
+and rejects another model entrypoint at agent startup. Existing turn counting and
+notice/grace thresholds are retained. The hosted gateway preset preserves explicit
+server sampling/template settings while omitting harness sampling defaults.
+
+The compatibility Bubblewrap path's shared host `/proc` behavior remains unchanged;
+its isolation review is still open. Agent-X rubric permission is also unresolved.
+Neither issue is resolved by the unit-test results.

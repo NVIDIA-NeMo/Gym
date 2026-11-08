@@ -3,7 +3,6 @@
 #
 # Adapted material: Apache-2.0, Copyright 2023 VLMEvalKit Authors.
 # Source: https://github.com/open-compass/VLMEvalKit/blob/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval/dataset/utils/hrbench.py
-# Source: https://github.com/open-compass/VLMEvalKit/blob/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval/dataset/babyvision.py
 # Full license: resources_servers/opencode_multimodal_benchmarks/third-party-notices.md
 """VLMEvalKit benchmark aggregation, without a VLMEvalKit dependency."""
 
@@ -11,16 +10,6 @@ from collections import defaultdict
 from typing import Any
 
 
-# Original BabyVision category mapping and reporting convention:
-# https://github.com/UniPat-AI/BabyVision/blob/7f92fd4b1dc1c68b7b936a9bc09c68b4a944a55a/babyvision_eval/compute_score.py
-# Also present in VLMEvalKit:
-# https://github.com/open-compass/VLMEvalKit/blob/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval/dataset/babyvision.py
-BABYVISION_TYPES = {
-    "Fine-grained Discrimination": "1",
-    "Visual Tracking": "2",
-    "Spatial Perception": "3",
-    "Visual Pattern Recognition": "4",
-}
 MCQ_ABBREVIATIONS = {
     "coarse_perception": "CP",
     "finegrained_perception (instance-level)": "FP-S",
@@ -101,29 +90,4 @@ def benchmark_report(benchmark: str, rows: list[dict[str, Any]]) -> list[dict[st
                     record[MCQ_ABBREVIATIONS.get(name, name)] = accuracy([row for row in group if row[field] == name])
             report.append(record)
         return report
-    if benchmark == "BabyVision":
-        types = defaultdict(list)
-        subtypes = defaultdict(list)
-        for row in rows:
-            category = row["category"]
-            types[category].append(row)
-            subtypes[(category, row["l2_category"])].append(row)
-        groups = [("Overall", rows)]
-        groups += [(name, types[name]) for name in sorted(types, key=lambda name: BABYVISION_TYPES.get(name, "0"))]
-        groups += [
-            (category + "/" + subtype, subtypes[(category, subtype)])
-            for category, subtype in sorted(
-                subtypes,
-                key=lambda key: BABYVISION_TYPES.get(key[0], "0") + key[0] + "/" + key[1],
-            )
-        ]
-        return [
-            {
-                "split": name,
-                "tot": len(group),
-                "hit": (sum(row["hit"] for row in group) if all(row["hit"] is not None for row in group) else None),
-                "acc": (100 * value if (value := accuracy(group)) is not None else None),
-            }
-            for name, group in groups
-        ]
     raise ValueError(f"Unsupported benchmark report: {benchmark}")

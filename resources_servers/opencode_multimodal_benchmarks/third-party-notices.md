@@ -11,14 +11,27 @@ headers do not replace terms applicable to third-party material.
   revision `5e0a5533f597b0c56dae7d9705771498202ab19b`.
   The evaluator subtree is Apache-2.0; its VLMEvalKit license is reproduced below.
   Source: https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py
-- `scoring.py` includes BabyVision's judge prompt at revision
-  `7f92fd4b1dc1c68b7b936a9bc09c68b4a944a55a`. The same prompt, final-answer
-  instruction and category mapping also appear in VLMEvalKit (Apache-2.0):
-  https://github.com/open-compass/VLMEvalKit/blob/ebac2d9bda8fa28dc426a3b2ccc8f53c886dc0c5/vlmeval/dataset/babyvision.py
-  Source: https://github.com/UniPat-AI/BabyVision/blob/7f92fd4b1dc1c68b7b936a9bc09c68b4a944a55a/babyvision_eval/utils.py
 - `agentx_rubric.py` adapts Agent-X's Goal Accuracy rubric at revision
   `1dcd5a66267f0582898c692a5eef9d4a52d0dc2f`.
   Source: https://github.com/mbzuai-oryx/Agent-X/blob/1dcd5a66267f0582898c692a5eef9d4a52d0dc2f/evaluation/multiagent_evaluation.py
+
+## Scoring deviations
+
+The `mcq-final-answer-llm-v3` scorer requires an uppercase, word-bounded option
+letter after prose such as "answer is". Words such as "dog" and the article
+"a" cannot supply option letters. Ambiguous outputs use the reference-blind judge. If its reply cannot be parsed,
+one additional call clarifies the output format and explicitly forbids solving
+the image question. The clarification contains no reference answer.
+
+The `vtcbench-final-answer-rules[-llm]-v3` scorer selects the last explicit
+`Answer:` line, falling back to the final nonempty line. Free-answer rules require
+normalized exact equality; substring matches in reasoning do not award credit.
+Ambiguous free answers use the configured semantic judge. This deliberately
+changes the pinned evaluator's whole-response substring rule. Results must be
+rebaselined and retain the scorer version and judge identity.
+
+ZeroBench's default metric is pass@5 with five independent attempts. The
+single-attempt exact-match rule is unchanged; mean reward is labeled pass@1.
 
 ## VLMEvalKit license
 

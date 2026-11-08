@@ -54,6 +54,11 @@ def task(benchmark="VStarBench", answer="A"):
         "l2_category": "detail",
         "cycle_category": "1",
         "split": "test",
+        "expected_samples": 1,
+        "GT_json": json.dumps({"value": answer}),
+        "query_type": "objective",
+        "query_type_raw": "Objective",
+        "modality": "Image",
     }
 
 
@@ -104,15 +109,7 @@ async def test_reference_blind_mcq_judge(server, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict,reward", [("True", 1), ("False", 0)])
-async def test_babyvision_semantic_judge(server, monkeypatch, verdict, reward):
-    monkeypatch.setattr(VisualBenchmarksServer, "_judge", AsyncMock(return_value=verdict))
-    result = await server.verify(request("BabyVision", r"\boxed{four}", answer="4"))
-    assert result.reward == reward and result.extracted == "four"
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("benchmark", ["BabyVision", "VStarBench"])
+@pytest.mark.parametrize("benchmark", ["VStarBench"])
 async def test_invalid_judge_is_not_wrong(server, monkeypatch, benchmark):
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", AsyncMock(return_value="unparseable"))
     with pytest.raises(JudgeError):
@@ -132,14 +129,22 @@ def test_hrbench_cycle_weighting(server):
         task("HRBench8K") | {"hit": 1},
         task("HRBench8K") | {"hit": 0, "cycle_category": "2"},
     ]
-    results = [[{"verifier_metadata": row | {"index": str(i)}, "reward": row["hit"]}] for i, row in enumerate(rows)]
+    results = [
+        [{"verifier_metadata": row | {"index": str(i), "expected_samples": 3}, "reward": row["hit"]}]
+        for i, row in enumerate(rows)
+    ]
     metrics = server.compute_metrics(results)
     assert metrics["accuracy"] == 0.5  # row mean would incorrectly be 2/3
     assert metrics["HRBench8K/report"] == benchmark_report("HRBench8K", rows)
 
 
-def test_labels_are_not_policy_input():
-    row = task_row(task(answer="secret-reference") | {"prompt": "Public question", "images": ["/tmp/a.png"]})
+def test_labels_are_not_policy_input(tmp_path):
+    image = tmp_path / "question.png"
+    image.write_bytes(b"image bytes")
+    row = task_row(task(answer="secret-reference") | {"prompt": "Public question", "images": [str(image)]})
+    image_input = row["responses_create_params"]["input"][0]["content"][1]
+    assert image_input["image_url"] == "data:image/png;base64,aW1hZ2UgYnl0ZXM="
+    assert str(tmp_path) not in json.dumps(row["responses_create_params"])
     assert "secret-reference" not in json.dumps(row["responses_create_params"])
     assert row["verifier_metadata"]["answer"] == "secret-reference"
     assert "max_output_tokens" not in row["responses_create_params"]
@@ -194,5 +199,35 @@ async def test_missing_final_message_is_scored_as_incorrect(server, monkeypatch,
 
 @pytest.mark.asyncio
 async def test_unknown_benchmark_is_not_silently_scored(server):
-    with pytest.raises(ValueError, match="Unsupported visual benchmark"):
+    with pytest.raises(ValueError, match="benchmark"):
         await server.verify(request("NotABenchmark", "A"))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_type", ["reasoning", "function_call"])
+async def test_unfinished_final_turn_does_not_grade_earlier_answer(server, monkeypatch, terminal_type):
+    body = request("VStarBench", "A")
+    payload = body.model_dump()
+    payload["response"]["output"].append(
+        {"type": "reasoning", "id": "unfinished", "summary": []}
+        if terminal_type == "reasoning"
+        else {"type": "function_call", "id": "tool", "call_id": "tool", "name": "bash", "arguments": "{}"}
+    )
+    judge = AsyncMock(return_value="A")
+    monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
+    result = await server.verify(VisualVerifyRequest.model_validate(payload))
+    assert result.reward == 0
+    assert result.scorer == "empty-answer-v1"
+    judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mcq_invalid_format_gets_one_changed_reference_blind_prompt(server, monkeypatch):
+    judge = AsyncMock(side_effect=["Please provide Example 3", "B"])
+    monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
+    result = await server.verify(request("VStarBench", "a visually similar creature"))
+    assert result.extracted == "B" and result.reward == 0
+    first, second = [call.args[0] for call in judge.await_args_list]
+    assert second.startswith(first)
+    assert "Do not solve the image question" in second
+    assert "correct option is A" not in second

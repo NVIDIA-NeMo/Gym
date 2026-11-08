@@ -22,10 +22,12 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import sqlite3
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from shlex import quote
@@ -137,8 +139,14 @@ from responses_api_agents.opencode_agent.snapshot import stored_message_ids, sto
 
 
 LOG = logging.getLogger(__name__)
-_INTERNAL_OBSERVATIONS_KEY = "_ng_agent_observations"
-_INTERNAL_TRAJECTORY_KEY = "_ng_trajectory"
+from responses_api_agents.opencode_agent.protocol import (
+    AGENT_OBSERVATIONS_KEY as _INTERNAL_OBSERVATIONS_KEY,
+)
+from responses_api_agents.opencode_agent.protocol import (
+    AGENT_TRAJECTORY_KEY as _INTERNAL_TRAJECTORY_KEY,
+)
+
+
 _TESTED_OUTCOME_VERSION = "1.17.11"
 _API_ERROR = "APIError"
 _CONTEXT_OVERFLOW_ERROR = "ContextOverflowError"
@@ -621,7 +629,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         cmd.append(prompt)
 
         try:
-            cmd = self._prepare_command(cmd, project_dir, env)
+            cmd = await asyncio.to_thread(self._prepare_command, cmd, project_dir, env)
             timed_out = False
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -629,14 +637,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
+                start_new_session=True,
             )
+            communication = asyncio.create_task(proc.communicate())
+
+            async def stop_and_drain() -> tuple[bytes, bytes]:
+                # SIGTERM lets the network wrapper clean up its nested namespace.
+                with suppress(ProcessLookupError):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    return await asyncio.wait_for(asyncio.shield(communication), 5)
+                except asyncio.TimeoutError:
+                    with suppress(ProcessLookupError):
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    try:
+                        return await asyncio.wait_for(asyncio.shield(communication), 5)
+                    except asyncio.TimeoutError as error:
+                        communication.cancel()
+                        await asyncio.gather(communication, return_exceptions=True)
+                        raise RuntimeError("OpenCode cleanup timed out; process termination is unconfirmed") from error
+
             try:
-                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                _, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
             except asyncio.TimeoutError:
-                proc.kill()
-                _, stderr = await proc.communicate()
+                _, stderr = await stop_and_drain()
                 timed_out = True
                 LOG.warning("opencode timed out after %ss", timeout)
+            except asyncio.CancelledError:
+                await stop_and_drain()
+                raise
 
             if proc.returncode not in (0, None):
                 LOG.warning("opencode exited %d: %s", proc.returncode, stderr.decode(errors="replace")[:500])
@@ -654,15 +683,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise RuntimeError(failure_message)
                 if not db_path.is_file():
                     raise RuntimeError("OpenCode did not produce its session database")
-                source = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
-                try:
-                    destination = sqlite3.connect(artifact_path)
+
+                def save_database() -> None:
+                    source = sqlite3.connect(db_path.resolve().as_uri() + "?mode=ro", uri=True)
                     try:
-                        source.backup(destination)
+                        destination = sqlite3.connect(artifact_path)
+                        try:
+                            source.backup(destination)
+                        finally:
+                            destination.close()
                     finally:
-                        destination.close()
-                finally:
-                    source.close()
+                        source.close()
+
+                await asyncio.to_thread(save_database)
                 if failed:
                     raise RuntimeError(failure_message)
             invocation_id = rollout_id or f"opencode-{uuid4().hex}"

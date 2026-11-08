@@ -15,12 +15,12 @@ from responses_api_agents.opencode_multimodal_agent.eval import OpenCodeMultimod
 ROOT = Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "babyvision", "agentx", "zerobench"])
+@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "agentx", "zerobench"])
 @pytest.mark.parametrize("sessions", [False, True])
 def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     monkeypatch.chdir(ROOT)
     prefix = "benchmarks/opencode_multimodal_benchmarks"
-    suffix = f"{benchmark}/config.yaml" if sessions else f"{benchmark}.yaml"
+    suffix = f"{benchmark}/config.yaml" if sessions else f"{benchmark}/opencode_relay.yaml"
     profile = "opencode_sessions.yaml" if sessions else "opencode_eval_agent.yaml"
     if benchmark == "agentx" and sessions:
         suffix = "agentx/opencode.yaml"

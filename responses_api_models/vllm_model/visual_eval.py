@@ -10,9 +10,10 @@ from typing import Any
 from fastapi import Body, HTTPException, Request
 from pydantic import Field, PrivateAttr, model_validator
 
+from nemo_gym.agents import FINAL_TURN_NOTICE, EvalTurnBudget
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming, current_rollout_id
 from nemo_gym.models import start_model_execution
-from responses_api_agents.opencode_multimodal_agent.eval_budget import FINAL_TURN_NOTICE, EvalTurnBudget
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.image_guard import IMAGE_LIMIT_NOTICE as IMAGE_LIMIT_NOTICE
 from responses_api_models.vllm_model.image_guard import limit_request_images
@@ -119,3 +120,6 @@ class VisualEvalModel(VLLMModel):
 
 if __name__ == "__main__":
     VisualEvalModel.run_webserver()
+
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = VisualEvalModel.run_webserver()

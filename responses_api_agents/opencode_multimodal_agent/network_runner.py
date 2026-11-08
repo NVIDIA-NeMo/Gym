@@ -125,16 +125,21 @@ def loopback_up() -> None:
 
 
 async def run_child(command: list[str], env: dict[str, str] | None = None) -> int:
-    process = await asyncio.create_subprocess_exec(*command, env=env)
+    process = await asyncio.create_subprocess_exec(*command, env=env, start_new_session=True)
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, lambda s=sig: process.send_signal(s) if process.returncode is None else None)
+        loop.add_signal_handler(sig, lambda s=sig: os.killpg(process.pid, s) if process.returncode is None else None)
     try:
         return await process.wait()
     finally:
+        # Kill the attempt's process group, including children that outlive the
+        # immediate command. Never signal the caller's own process group.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
         if process.returncode is None:
-            process.kill()
-            await process.wait()
+            await asyncio.wait_for(process.wait(), 5)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.remove_signal_handler(sig)
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -174,7 +179,7 @@ async def run(args: argparse.Namespace) -> int:
     if args.mode == "model_and_tools":
         allowed.update(origin(url) for url in args.tool_url)
     # /tmp keeps Unix socket addresses below Linux's length limit.
-    with tempfile.TemporaryDirectory(prefix="gym-net-") as directory:
+    with tempfile.TemporaryDirectory(prefix="gym-net-", dir="/tmp") as directory:
         path = str(Path(directory) / "proxy.sock")
         server = await asyncio.start_unix_server(lambda r, w: proxy(r, w, allowed), path)
         os.chmod(path, 0o600)

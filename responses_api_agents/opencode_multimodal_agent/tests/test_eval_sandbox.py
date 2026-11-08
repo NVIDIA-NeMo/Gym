@@ -13,13 +13,14 @@ from PIL import Image
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig, sandbox_command
 
 
+SANDBOX_TEST_CONFIG = os.environ.get("GYM_MULTIMODAL_SANDBOX_CONFIG") or os.environ.get("GYM_EVAL_SANDBOX_TEST_CONFIG")
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("workspace_tmp", [False, True])
-@pytest.mark.skipif(
-    not os.environ.get("GYM_EVAL_SANDBOX_TEST_CONFIG"), reason="requires installed bubblewrap and tool Python"
-)
+@pytest.mark.skipif(not SANDBOX_TEST_CONFIG, reason="requires installed bubblewrap and tool Python")
 async def test_concurrent_episodes_have_private_tmp_and_inputs(tmp_path, workspace_tmp):
-    settings = json.loads(Path(os.environ["GYM_EVAL_SANDBOX_TEST_CONFIG"]).read_text())
+    settings = json.loads(Path(SANDBOX_TEST_CONFIG).read_text())
     cfg = EvalSandboxConfig.model_validate(settings["sandbox"])
     cfg.workspace_tmp = workspace_tmp
     env = {

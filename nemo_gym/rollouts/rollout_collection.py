@@ -216,7 +216,11 @@ from nemo_gym.client.server_client import (
 )
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.data.task_selection import select_tasks
-from nemo_gym.models.token_capture.config import TokenCaptureConfig, token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.config import (
+    TokenCaptureConfig,
+    resolve_lineage_store,
+    token_capture_enabled_for_agent,
+)
 from nemo_gym.models.token_capture.config import token_capture_config as read_token_capture_config
 from nemo_gym.models.token_capture.consumer import (
     clear_token_captures_for_rollouts,
@@ -2476,7 +2480,7 @@ def _reply_failure_kind(headers: Any) -> Optional[str]:
 def _agent_request_failure_row(exc: BaseException, status: Optional[int], headers: Any = None) -> Dict[str, Any]:
     """One sidecar row for a `/run` call that came back without a result.
 
-    No reward and no response: an infrastructure failure is not a verifier score of zero, and a
+    No reward and no response: an unverified failed call is not a verifier score of zero, and a
     placeholder would read as real generation data to token capture, aggregation and trainers.
     The class says whether the rollout ran. A NeMo Gym server answers 500 when its own handler
     raises, so any status it answered with means the rollout ran and broke, which is also how a
@@ -5303,8 +5307,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         if route_failures_to_sidecar and server_client.global_config_dict.get("token_id_capture", {}).get(
             "external_staging", False
         ):
-            failure_ledger = read_token_capture_config(server_client.global_config_dict).build_lineage_store()
-            if not isinstance(failure_ledger, CaptureLedger):
+            capture_config = read_token_capture_config(server_client.global_config_dict)
+            file_root = (
+                capture_config.resolved_dir()
+                if capture_config.enabled and capture_config.token_id_capture.sink is None
+                else None
+            )
+            failure_ledger = resolve_lineage_store(capture_config.build_lineage_store(), file_root=file_root)
+            if not isinstance(failure_ledger, CaptureLedger) or not failure_ledger.is_process_shared():
                 raise ValueError("routing externally staged rollout failures requires a shared CaptureLedger")
         if environment_server_name is not None:
             for row in examples:
@@ -5722,9 +5732,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
+        global_config = self.setup_server_client(head_server_config).global_config_dict
+        if route_failures_to_sidecar is None:
+            route_failures_to_sidecar = global_config.get("route_failures_to_sidecar", False)
+        if not isinstance(route_failures_to_sidecar, bool):
+            raise ValueError("route_failures_to_sidecar must be a boolean")
         enrich = None
         if enrich_results:
-            global_config = self.setup_server_client(head_server_config).global_config_dict
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
 

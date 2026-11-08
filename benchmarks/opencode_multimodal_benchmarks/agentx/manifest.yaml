@@ -8,7 +8,7 @@ integration_profile: custom-gym-verifier
 domain: agent
 description: 605 non-generative image/video tasks scored with the GoalAcc rubric.
 modality: image and video
-licensing: Apache-2.0
+licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
 reward:

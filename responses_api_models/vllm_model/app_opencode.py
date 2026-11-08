@@ -11,13 +11,13 @@ from pydantic import Field
 
 from nemo_gym.models import Body
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from responses_api_agents.opencode_agent.protocol import OPENCODE_1_17_11_MAX_STEPS as OPENCODE_1_17_11_MAX_STEPS
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.image_guard import limit_request_images
 
 
 # OpenCode's harness constant; keep exact matching version-scoped.
 # prompt.ts appends this as an assistant message, although it is not model output.
-OPENCODE_1_17_11_MAX_STEPS = "CRITICAL - MAXIMUM STEPS REACHED\n\nThe maximum number of steps allowed for this task has been reached. Tools are disabled until next user input. Respond with text only.\n\nSTRICT REQUIREMENTS:\n1. Do NOT make any tool calls (no reads, writes, edits, searches, or any other tools)\n2. MUST provide a text response summarizing work done so far\n3. This constraint overrides ALL other instructions, including any user requests for edits or tool use\n\nResponse must include:\n- Statement that maximum steps for this agent have been reached\n- Summary of what has been accomplished so far\n- List of any remaining tasks that were not completed\n- Recommendations for what should be done next\n\nAny attempt to use tools is a critical violation. Respond with text ONLY."
 
 
 def normalize_opencode_final_instruction(body: dict) -> dict:

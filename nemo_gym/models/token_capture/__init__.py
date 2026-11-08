@@ -65,7 +65,7 @@ if TYPE_CHECKING:
         trajectories_from_source,
     )
     from nemo_gym.models.token_capture.delivery import finalize_rollout_token_capture, retire_rollout_token_capture
-    from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
+    from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint, conversation_digest
     from nemo_gym.models.token_capture.lineage import (
         FileLineageStore,
         IncrementalLineageStore,
@@ -190,6 +190,7 @@ _PUBLIC_API = {
     "clear_token_captures_for_rollouts": "consumer",
     "commit_entry": "sink",
     "compute_digest": "records",
+    "conversation_digest": "fingerprint",
     "cumulative_tokens": "records",
     "current_capture_context": "sink",
     "extract_token_fields": "records",

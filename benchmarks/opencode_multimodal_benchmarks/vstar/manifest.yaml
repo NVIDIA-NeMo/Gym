@@ -8,7 +8,7 @@ integration_profile: custom-gym-verifier
 domain: agent
 description: 191 multiple-choice visual search tasks.
 modality: image
-licensing: Apache-2.0
+licensing: unknown
 authors:
 - NVIDIA NeMo Gym contributors
 reward:

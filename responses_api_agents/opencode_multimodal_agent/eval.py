@@ -17,7 +17,7 @@ from pydantic import Field, model_validator
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
 from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, TrajectoryRecord
-from responses_api_agents.opencode_agent.artifacts import _parse_opencode_session, parse_opencode_session
+from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations, parse_opencode_session
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_multimodal_agent.app import (
     OpenCodeMultimodalAgent,
@@ -28,12 +28,14 @@ from responses_api_agents.opencode_multimodal_agent.app import (
 from responses_api_agents.opencode_multimodal_agent.eval_budget import EvalTurnBudget
 from responses_api_agents.opencode_multimodal_agent.eval_failures import episode_failure_kind, terminal_model_result
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig
+from responses_api_agents.opencode_multimodal_agent.rewards import OpenCodeToolRewardConfig
 from responses_api_agents.opencode_multimodal_agent.system_prompt import system_prompt_plugin
 
 
 class OpenCodeMultimodalEvalConfig(OpenCodeMultimodalAgentConfig):
     """Opt-in eval policy; training defaults remain on the native entrypoint."""
 
+    tool_rewards: OpenCodeToolRewardConfig | None = None
     final_answer_reserve: int | None = Field(default=None, gt=0)
     strip_reasoning_for_grading: bool = False
     build_system_prompt: str | None = Field(default=None, min_length=1)
@@ -66,6 +68,24 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
     """Reuse native execution, artifact parsing and verification in a private filesystem."""
 
     config: OpenCodeMultimodalEvalConfig
+
+    def model_post_init(self, __context: Any) -> None:
+        self._validate_turn_budget_gateway()
+        super().model_post_init(__context)
+
+    def _validate_turn_budget_gateway(self) -> None:
+        budget = self.config.turn_budget
+        if budget is None:
+            return
+        block = self.server_client.global_config_dict.get(self.config.model_server.name, {})
+        models = block.get("responses_api_models", {})
+        gateway = models.get("vllm_model", {})
+        if gateway.get("entrypoint") not in {"visual_eval.py", "hosted_visual_eval.py"}:
+            raise ValueError("An enforced eval turn budget requires a visual_eval model gateway")
+        if EvalTurnBudget.model_validate(gateway.get("turn_budget") or {}) != budget:
+            raise ValueError("Agent and model gateway turn budgets must match")
+        if not gateway.get("turn_budget"):
+            raise ValueError("The model gateway must explicitly enable the eval turn budget")
 
     def _web_tool_environment(self) -> dict[str, str]:
         websearch = self.config.opencode_config.get("tools", {}).get("websearch", False)
@@ -114,7 +134,7 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
                         if outcome.failure_kind != "unknown":
                             detail[AGENT_OUTCOME_METADATA_KEY] = outcome.model_dump_json()
                 failed_trajectory = TrajectoryRecord(task_id="unscoped", rollout_id=rollout_id or "unscoped")
-                observations = _parse_opencode_session(
+                observations = parse_opencode_observations(
                     artifact_path,
                     rollout_id or "multimodal",
                     failed_trajectory,
@@ -165,6 +185,24 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
             kind = episode_failure_kind(reason)
             if exc.status != 500 or not path.endswith("/v1/responses") or kind is None:
                 raise
+            if metadata is not None:
+                outcome = AgentOutcome.model_validate_json(metadata[AGENT_OUTCOME_METADATA_KEY])
+                if outcome.failure_kind == "model_context_limit" or (
+                    outcome.failure_kind == "model_request_error" and outcome.status_code in (400, 413, 422)
+                ):
+                    kind = outcome.failure_kind
+                else:
+                    raise
+            elif kind == "agent_timeout":
+                pass
+            elif "Missing assistant turns or exceeded max_turns" in reason:
+                kind = "agent_limit"
+            elif "Unfinished OpenCode assistant turn" in reason:
+                kind = "agent_invalid_output"
+            else:
+                # A process crash, setup failure or absent/corrupt artifact does
+                # not establish that the model supplied an incorrect answer.
+                raise
             response = NeMoGymResponse(
                 id=f"resp_failed_{uuid4().hex}",
                 created_at=int(time()),
@@ -179,8 +217,8 @@ class OpenCodeMultimodalEvalAgent(OpenCodeMultimodalAgent):
                 tools=body.responses_create_params.tools,
                 parallel_tool_calls=body.responses_create_params.parallel_tool_calls,
             )
-            # A normal persisted zero row makes collection complete and gates this
-            # task on resume. Keep the diagnosis, but never invent a final answer.
+            # Only established model failures settle a task as an incorrect answer.
+            # Infrastructure failures above retain the collector's retry/sidecar path.
             return OpenCodeMultimodalVerifyResponse.model_validate(
                 body.model_dump()
                 | {

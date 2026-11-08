@@ -3,7 +3,11 @@
 """Exercise the proxy against local servers without external service access."""
 
 import asyncio
+import os
+import signal
+import sys
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import pytest
 
@@ -95,3 +99,85 @@ async def test_allowed_connect_tunnels_bidirectional_bytes():
             assert await asyncio.wait_for(reader.readexactly(4), 5) == b"PING"
             writer.close()
             await writer.wait_closed()
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="observes Linux process state")
+@pytest.mark.asyncio
+async def test_cancelled_wrapper_stops_descendants(tmp_path):
+    from responses_api_agents.opencode_multimodal_agent.network_runner import run_child
+
+    pidfile = tmp_path / "descendant.pid"
+    code = (
+        "import subprocess,time;from pathlib import Path;"
+        "p=subprocess.Popen(['sleep','30']);"
+        f"Path({str(pidfile)!r}).write_text(str(p.pid));time.sleep(30)"
+    )
+    task = asyncio.create_task(run_child([sys.executable, "-c", code]))
+    child = None
+    try:
+        for _ in range(100):
+            if pidfile.is_file():
+                child = int(pidfile.read_text())
+                break
+            await asyncio.sleep(0.02)
+        assert child is not None, "probe child did not start"
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 5)
+        for _ in range(100):
+            try:
+                state = Path(f"/proc/{child}/stat").read_text().rsplit(")", 1)[1].split()[0]
+                if state == "Z":
+                    break
+            except FileNotFoundError:
+                break
+            await asyncio.sleep(0.02)
+        else:
+            pytest.fail("cancelled wrapper left its descendant running")
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        if child is not None:
+            try:
+                os.kill(child, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="requires Linux user and network namespaces")
+@pytest.mark.asyncio
+async def test_real_network_wrapper_blocks_direct_host_connection():
+    async def target(reader, writer):
+        writer.close()
+        await writer.wait_closed()
+
+    async with serve(target) as port:
+        # Prove the target is reachable outside the wrapper before testing denial.
+        reader, writer = await asyncio.open_connection("127.0.0.1", port)
+        writer.close()
+        await writer.wait_closed()
+        code = (
+            "import socket;"
+            f"s=socket.socket();s.settimeout(1);result=s.connect_ex(('127.0.0.1',{port}));"
+            "print(result);raise SystemExit(0 if result else 7)"
+        )
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            str(Path(__file__).parents[1] / "network_runner.py"),
+            "--mode",
+            "model_only",
+            "--model-url",
+            f"http://127.0.0.1:{port}/v1",
+            "--",
+            sys.executable,
+            "-c",
+            code,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
+    if process.returncode and b"unshare failed: Operation not permitted" in stderr:
+        pytest.skip("host disables unprivileged user/network namespaces")
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert int(stdout.strip()) != 0

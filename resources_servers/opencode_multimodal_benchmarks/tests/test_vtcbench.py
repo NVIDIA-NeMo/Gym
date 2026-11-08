@@ -13,24 +13,24 @@ from resources_servers.opencode_multimodal_benchmarks.vtcbench import judge_scor
 @pytest.mark.parametrize(
     "answer,prediction,options,expected",
     [
-        ("5", "There are 5", {}, 1),
+        ("5", "There are 5", {}, 0),
         ("5", "Explanation\nAnswer: 5", {}, 1),
         ("5", "five", {}, 0),
         ("26,000", "26000", {}, 0),
         ("a b c d e", "prefix a b c d e suffix", {}, 0),
-        ("New York", "new\n   york", {}, 1),
+        ("New York", "new\n   york", {}, 0),
         ("A", "A. cat", {"A": "cat"}, 1),
         ("A", "A-cat", {"A": "cat"}, 1),
-        ("A", "Answer: A", {"A": "cat"}, 0),
-        ("A", r"\boxed{A}", {"A": "cat"}, 0),
-        ("A", "A)", {"A": "cat"}, 0),
+        ("A", "Answer: A", {"A": "cat"}, 1),
+        ("A", r"\boxed{A}", {"A": "cat"}, 1),
+        ("A", "A)", {"A": "cat"}, 1),
         ("cat", "A", {"A": "cat"}, 1),
-        ("cat", "the cat", {"A": "cat"}, 1),
-        ("cat", "a cat", {"B": "cat"}, 0),
+        ("cat", "the cat", {"A": "cat"}, 0),
+        ("cat", "a cat", {"B": "cat"}, 1),
         ("A", "A", {}, 1),
     ],
 )
-def test_public_rule_cases(answer, prediction, options, expected):
+def test_final_answer_rule_cases(answer, prediction, options, expected):
     assert rule_score({"answer": answer, "options": options}, prediction) == expected
 
 
@@ -41,7 +41,7 @@ async def test_rule_hit_never_calls_judge(server, monkeypatch, prediction):
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
     result = await server.verify(request("VTCBench", prediction))
     assert result.reward == 1 and result.extraction_method == "rule"
-    assert result.scorer == "vtcbench-public-rules-llm-v2"
+    assert result.scorer == "vtcbench-final-answer-rules-llm-v3"
     judge.assert_not_awaited()
 
 
@@ -50,12 +50,12 @@ async def test_rule_hit_never_calls_judge(server, monkeypatch, prediction):
 async def test_mcq_fallback(server, monkeypatch, verdict, reward):
     judge = AsyncMock(return_value=verdict)
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
-    result = await server.verify(request("VTCBench", r"\boxed{A}"))
+    result = await server.verify(request("VTCBench", "the furry animal"))
     assert result.reward == reward and result.extraction_method == "llm"
     assert result.judge_model == server.config.judge_model
     prompt = judge.call_args.args[0]
     assert "Ground Truth" not in prompt
-    assert "Options: A. cat B. dog " in prompt and r"\boxed{A}" in prompt
+    assert "Options: A. cat B. dog " in prompt and "the furry animal" in prompt
 
 
 @pytest.mark.asyncio
@@ -95,8 +95,8 @@ async def test_rule_only_mode(server, monkeypatch):
     judge = AsyncMock()
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
     result = await server.verify(request("VTCBench", "Answer: A"))
-    assert result.reward == 0 and result.extraction_method == "rule"
-    assert result.scorer == "vtcbench-public-rules-v2"
+    assert result.reward == 1 and result.extraction_method == "rule"
+    assert result.scorer == "vtcbench-final-answer-rules-v3"
     judge.assert_not_awaited()
 
 
@@ -115,3 +115,22 @@ def test_multiselect_and_invalid_mcq_verdicts():
     assert judge_score(task, "B") == 0
     assert judge_score(task, "A, B") is None
     assert judge_score(task, "ab") is None
+
+
+@pytest.mark.parametrize(
+    "answer,prediction,options,expected",
+    [
+        ("3", "maybe 30 or 2. Answer: 7", {}, 0),
+        ("3", "maybe 3 or 2.\nAnswer: 7", {}, 0),
+        ("no", "I do not know.\nAnswer: yes", {}, 0),
+        ("A", "A man is shown.\nAnswer: B", {"A": "man", "B": "woman"}, 0),
+        ("B", "A man is shown.\nAnswer: B", {"A": "man", "B": "woman"}, 1),
+        ("New York", "Reasoning\nAnswer: new york", {}, 1),
+    ],
+)
+def test_reasoning_cannot_override_final_answer(answer, prediction, options, expected):
+    assert rule_score({"answer": answer, "options": options}, prediction) == expected
+
+
+def test_judge_mcq_verdict_tolerates_surrounding_whitespace():
+    assert judge_score({"options": {"A": "cat"}, "answer": "A"}, " A\n") == 1

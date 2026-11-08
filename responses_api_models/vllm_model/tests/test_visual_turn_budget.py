@@ -143,3 +143,36 @@ async def test_budget_is_opt_in(monkeypatch):
 
     monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
     assert await model.chat_completions(request(), body()) is expected
+
+
+@pytest.mark.parametrize("overrides", [{"num_workers": 4}, {"use_completions_api": True}])
+def test_real_gateway_configuration_rejects_unsupported_budget_modes(overrides):
+    from pydantic import ValidationError
+
+    from responses_api_models.vllm_model.visual_eval import VisualEvalModelConfig
+
+    with pytest.raises(ValidationError, match="Enforced eval turn budgets require"):
+        VisualEvalModelConfig(
+            host="localhost",
+            port=8081,
+            name="policy",
+            entrypoint="visual_eval.py",
+            base_url="http://localhost/v1",
+            api_key="unused",
+            model="policy",
+            return_token_id_information=False,
+            uses_reasoning_parser=False,
+            turn_budget=EvalTurnBudget(),
+            **overrides,
+        )
+
+
+@pytest.mark.asyncio
+async def test_multiple_completions_are_rejected_before_engine(monkeypatch):
+    model = gateway(monkeypatch, EvalTurnBudget())
+    upstream = __import__("unittest.mock", fromlist=["AsyncMock"]).AsyncMock()
+    monkeypatch.setattr(VLLMModel, "chat_completions", upstream)
+    with rollout_context("episode"), pytest.raises(HTTPException) as error:
+        await model.chat_completions(request(), body().model_copy(update={"n": 2}))
+    assert error.value.status_code == 400
+    upstream.assert_not_awaited()

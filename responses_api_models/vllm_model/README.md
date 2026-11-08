@@ -181,3 +181,14 @@ and 503 responses do not extend the configured HTTP attempt count.
 These settings also apply after endpoint-file rebinding.
 `request_timeout_seconds` bounds each HTTP attempt; it is not an overall
 agent retry budget. Agent-level retries remain separately configured.
+
+
+### Hosted visual evaluation
+
+Compose `configs/vllm_model.yaml` with `configs/hosted_visual_eval.yaml` for a
+hosted Chat Completions endpoint. The latter drops OpenCode's request sampling
+defaults before applying explicitly configured `sampling_overrides`, `extra_body`
+and `chat_template_kwargs`. Omitted settings use provider defaults; configured
+values are preserved and provider validation errors remain visible. Image limits
+are disabled in this preset unless explicitly configured. An enforced turn budget
+also requires the matching agent/gateway `turn_budget` configuration.

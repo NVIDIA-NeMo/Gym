@@ -49,7 +49,6 @@ async def observed(server: VisualBenchmarksServer, body: object) -> dict:
     [
         ("VStarBench", "the fuzzy feline", "A", 1),
         ("HRBench8K", "the fuzzy feline", "B", 0),
-        ("BabyVision", "cat", "true", 1),
         ("VTCBench", "an uncertain animal", "A", 1),
     ],
 )
