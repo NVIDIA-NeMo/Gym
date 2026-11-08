@@ -1,5 +1,5 @@
 input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mooncakemetricstry2___kvcacheremoveintermediatemamba.sqsh
-output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___dwdp_nvfp4.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___dwdp_nvfp4_optim.sqsh
 
 slurm:
   account: nemotron_rl_algo
@@ -17,7 +17,7 @@ vllm:
 
 flashinfer:
   repo: https://github.com/bxyu-nvidia/flashinfer
-  branch: bxyu/v0.7.0.post1-dwdpnvfp4
+  branch: bxyu/v0.7.0.post1-dwdpnvfp4-optim
   invalidate_modules:
   - trtllm_gen_routing
   cpus_per_task: 128
@@ -54,7 +54,7 @@ warmup:
 run:
   env:
     _copy: shared_run_warmup_env_vars
-    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-nvfp4
+    EXPERIMENT_NAME: opencode_swe_verified/super_3.5_GA-BF16-p2d2-dwdp-nvfp4-optim
     SBATCH_TIMELIMIT: "01:30:00"
   args: |
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
