@@ -244,6 +244,7 @@ def test_sandbox_credentials_resolve_only_inside_gym(monkeypatch, tmp_path, rout
 def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, route, harnesses):
     monkeypatch.delenv(ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, raising=False)
     config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
+    config.policy.model_name = "test-model"
     recipe.configure_gym(
         config,
         harnesses=harnesses,
@@ -253,7 +254,7 @@ def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, rou
         prepared=SimpleNamespace(tasks=[], folder=tmp_path / "tasks"),
     )
     gym = OmegaConf.merge(
-        config.env.nemo_gym,
+        OmegaConf.to_container(config.env.nemo_gym, resolve=True),
         {
             "policy_model_name": "test-model",
             "policy_base_url": "http://127.0.0.1:9000/v1",
@@ -556,6 +557,13 @@ def test_preparation_materializes_the_requested_update_budget(
     )
     manifest = recipe.prepare(args)
     config = OmegaConf.load(args.output_dir / "config.yaml")
+    # The RL driver resolves the whole prepared config before Gym injects any aliases.
+    resolved_config = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
+    if route == "old-run":
+        for harness in set(harnesses) & {"hermes", "pi"}:
+            name = recipe.OLD_AGENTS[harness]
+            agent = resolved_config["env"]["nemo_gym"][name]["responses_api_agents"][name]
+            assert agent["model"] == resolved_config["policy"]["model_name"] == str(args.model_path)
     train = [json.loads(line) for line in (args.output_dir / "train.jsonl").read_text().splitlines()]
     assert manifest["hardware_profile"] == hardware_profile
     assert config.cluster.num_nodes == 1 and config.cluster.gpus_per_node == gpus

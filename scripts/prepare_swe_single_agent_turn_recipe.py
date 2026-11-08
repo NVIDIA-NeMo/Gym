@@ -243,7 +243,7 @@ def configure_gym(
             settings.pop("chat_template_kwargs_enabled")
             settings.update(
                 runtime_python=None,
-                model="${policy_model_name}",
+                model=config.policy.model_name,
                 concurrency=32,
                 sandbox_timeout=480,
                 chat_template_kwargs={"truncate_history_thinking": False},
@@ -252,7 +252,7 @@ def configure_gym(
             settings.update(
                 entrypoint="app.py",
                 model_server={"type": "responses_api_models", "name": "policy_model"},
-                model="${policy_model_name}",
+                model=config.policy.model_name,
                 sandbox_provider="sandbox",
                 sandbox_config={},
                 network_access="inherit",
@@ -413,10 +413,10 @@ def prepare(args: argparse.Namespace) -> dict:
     config = load_rl_config(rl_root)
     config.cluster.gpus_per_node = profile.gpus_per_node
     config.policy.generation.colocated.resources.gpus_per_node = profile.generation_gpus
+    config.policy.model_name = str(model_path)
     configure_gym(
         config, harnesses=args.harnesses, route=args.route, output=output, parser_cache=parser_cache, prepared=prepared
     )
-    config.policy.model_name = str(model_path)
     config.policy.megatron_cfg.expert_model_parallel_size = ep
     config.grpo.num_prompts_per_step = 8 * len(args.harnesses)
     config.policy.train_global_batch_size = 4 * config.grpo.num_prompts_per_step
