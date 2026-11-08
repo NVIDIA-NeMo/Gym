@@ -41,13 +41,14 @@ def test_examples_are_safe_task_rows_that_materialize_as_task_data() -> None:
         assert task["task_id"] == {"taskset": "nemo_user_sim:example", "task_id": task_id}
         task_input = TaskData.model_validate(task["task_input"])
         expected_revision = installed_usersim_revision()
-        expected_personas_version = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
+        expected_personas_versions = UserSimResourcesServerConfig.model_fields[
+            "nemotron_personas_versions"
+        ].default_factory()
         assert isinstance(expected_revision, str)
-        assert isinstance(expected_personas_version, str)
         _validate_resolved_row(
             task_input.resolved_row,
             expected_revision=expected_revision,
-            expected_personas_version=expected_personas_version,
+            expected_personas_versions=expected_personas_versions,
         )
         provenance = json.loads(resolved_row["usersim_provenance"])
         assert provenance["nemotron_personas_version"] == "synthetic"

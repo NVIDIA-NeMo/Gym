@@ -34,7 +34,7 @@ from resources_servers.nemo_user_sim.episode_contracts import (
 
 
 REVISION = installed_usersim_revision()
-PERSONAS_VERSION = "0.0.2"
+PERSONAS_VERSIONS = {"en_US": "0.0.2", "ja_JP": "0.0.2", "ko_KR": "0.0.1"}
 
 
 def _resolved_row(probe_type: str = "tool_calling", *, provenance_as_text: bool = True) -> dict:
@@ -160,7 +160,7 @@ def _install_evaluator_scripts(
 @pytest.mark.parametrize("as_text", [True, False])
 def test_resolved_row_accepts_json_and_legacy_mapping_provenance(as_text: bool) -> None:
     row = _resolved_row(provenance_as_text=as_text)
-    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
+    _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
     assert _decode_provenance(row["usersim_provenance"])["bank_version"] == {}
 
 
@@ -217,7 +217,7 @@ def test_resolved_row_rejects_invalid_provenance(provenance: object, message: st
     row = _resolved_row()
     row["usersim_provenance"] = provenance
     with pytest.raises(ValueError, match=message):
-        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_version=PERSONAS_VERSION)
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_seed_requires_pinned_personas_version_for_validation_tasks() -> N
         )
     assert error.value.status_code == 422
 
-    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_version
+    row["usersim_provenance"]["nemotron_personas_version"] = server.config.nemotron_personas_versions["en_US"]
     response = await server.seed_session(
         _request("pinned-personas-version"),
         _seed_body(row, taskset="nemo_user_sim:validation"),
@@ -695,3 +695,17 @@ def test_the_session_keeps_its_owner_at_least_as_long_as_the_tombstone(overrides
     for name, value in overrides.items():
         setattr(server.config, name, value)
     assert server.owned_session_routing()["close_retry_window_seconds"] == window
+
+@pytest.mark.parametrize(
+    ("locale", "version", "accepted"),
+    [("ko_KR", "0.0.1", True), ("ko_KR", "0.0.2", False), ("ja_JP", "0.0.2", True), ("xx_XX", "0.0.2", False)],
+)
+def test_resolved_row_checks_personas_version_of_its_locale(locale: str, version: str, accepted: bool) -> None:
+    row = _resolved_row(provenance_as_text=False)
+    row["locale"] = locale
+    row["usersim_provenance"]["nemotron_personas_version"] = version
+    if accepted:
+        _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)
+    else:
+        with pytest.raises(ValueError, match=f"for locale {locale!r}"):
+            _validate_resolved_row(row, expected_revision=REVISION, expected_personas_versions=PERSONAS_VERSIONS)

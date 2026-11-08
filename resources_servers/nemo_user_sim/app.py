@@ -70,6 +70,20 @@ ASSISTANT_QUALITY_AXES = ("helpfulness", "accuracy", "coherence")
 SIMULATION_FAILED = "usersim:simulation_failed"
 # UserSim records commits in git's 12-character short form.
 USERSIM_REVISION_LENGTH = 12
+# Matches the pins in environments/nemo_user_sim/prepare.py; a test keeps the two aligned.
+NEMOTRON_PERSONAS_VERSIONS = {
+    "de_DE": "0.0.1",
+    "en_GB": "0.0.1",
+    "en_IN": "0.0.2",
+    "en_SG": "0.0.1",
+    "en_US": "0.0.2",
+    "fr_FR": "0.0.1",
+    "hi_Deva_IN": "0.0.2",
+    "hi_Latn_IN": "0.0.2",
+    "ja_JP": "0.0.2",
+    "ko_KR": "0.0.1",
+    "pt_BR": "0.0.1",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -97,7 +111,8 @@ class UserSimResourcesServerConfig(BaseResourcesServerConfig):
         default_factory=installed_usersim_revision,
         pattern=rf"^[0-9a-f]{{{USERSIM_REVISION_LENGTH}}}$",
     )
-    nemotron_personas_version: str = "0.0.2"
+    # Locale -> Nemotron-Personas version that prepared rows of that locale must record.
+    nemotron_personas_versions: dict[str, str] = Field(default_factory=lambda: dict(NEMOTRON_PERSONAS_VERSIONS))
     probe_scorer_model: ModelServerRef
     judge_max_output_tokens: int = Field(16_384, gt=0)
     judge_max_output_tokens_non_ascii: int = Field(32_768, gt=0)
@@ -241,7 +256,7 @@ class UserSimResourcesServer(SimpleResourcesServer):
             _validate_resolved_row(
                 task.resolved_row,
                 expected_revision=self.config.usersim_revision,
-                expected_personas_version=self.config.nemotron_personas_version,
+                expected_personas_versions=self.config.nemotron_personas_versions,
             )
         except (ValidationError, ValueError) as error:
             detail = error.errors() if isinstance(error, ValidationError) else str(error)
@@ -541,7 +556,7 @@ def _validate_resolved_row(
     row: Mapping[str, Any],
     *,
     expected_revision: str,
-    expected_personas_version: str,
+    expected_personas_versions: Mapping[str, str],
 ) -> None:
     required = ("persona", "probe_type", "conversation_language", "trajectory_id", "usersim_config")
     missing = [name for name in required if not row.get(name)]
@@ -555,9 +570,13 @@ def _validate_resolved_row(
     if not isinstance(code_sha, str) or not code_sha.startswith(expected_revision):
         raise ValueError(f"Resolved UserSim row revision {code_sha!r} does not match {expected_revision!r}")
     personas_version = provenance.get("nemotron_personas_version")
-    if personas_version != "synthetic" and personas_version != expected_personas_version:
+    locale = row.get("locale")
+    expected_personas_version = expected_personas_versions.get(locale) if isinstance(locale, str) else None
+    if personas_version != "synthetic" and (
+        expected_personas_version is None or personas_version != expected_personas_version
+    ):
         raise ValueError(
-            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} "
+            f"Resolved UserSim row Nemotron-Personas version {personas_version!r} for locale {locale!r} "
             f"is neither 'synthetic' nor the configured version {expected_personas_version!r}"
         )
 

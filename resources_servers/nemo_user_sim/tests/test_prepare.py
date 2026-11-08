@@ -76,11 +76,35 @@ def test_usersim_revision_pins_are_aligned() -> None:
 
     resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
     assert "usersim_revision" not in resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim
-    configured_personas_version = (
-        resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim.nemotron_personas_version
+    assert "nemotron_personas_versions" not in resources_config.nemo_user_sim_resources.resources_servers.nemo_user_sim
+
+
+def test_persona_pins_cover_every_usersim_locale() -> None:
+    from usersim.engine.core.locale import supported_locales
+
+    versions_factory = UserSimResourcesServerConfig.model_fields["nemotron_personas_versions"].default_factory
+    assert versions_factory() == prepare_module.NEMOTRON_PERSONAS_VERSIONS
+    assert set(prepare_module.NEMOTRON_PERSONAS_SHA256) == set(prepare_module.NEMOTRON_PERSONAS_VERSIONS)
+    assert set(prepare_module.NEMOTRON_PERSONAS_VERSIONS) == set(supported_locales())
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in prepare_module.NEMOTRON_PERSONAS_SHA256.values())
+    assert prepare_module._persona_resource("hi_Deva_IN") == (
+        "nvidia/nemotron-personas/nemotron-personas-dataset-hi_deva_in:0.0.2"
     )
-    personas_version_default = UserSimResourcesServerConfig.model_fields["nemotron_personas_version"].default
-    assert configured_personas_version == personas_version_default == prepare_module.NEMOTRON_PERSONAS_VERSION
+
+
+@pytest.mark.parametrize(("probe", "locale"), sorted(prepare_module.UNSUPPORTED_PROBE_LOCALES))
+def test_skipped_probe_locales_are_unsupported_by_usersim(tmp_path: Path, probe: str, locale: str) -> None:
+    from usersim.engine.external import materialize_episode_inputs
+
+    # UserSim checks a probe's bank for the locale before it reads any persona data.
+    with pytest.raises(ValueError, match="probe assets are missing or unusable"):
+        materialize_episode_inputs(
+            locale=locale,
+            num_rows=1,
+            probe_mix={probe: 1.0},
+            random_seed=1,
+            models_path=tmp_path / "models.toml",
+        )
 
 
 def test_probe_seed_and_task_id_are_stable() -> None:
@@ -98,7 +122,7 @@ def test_validate_persona_asset_requires_pinned_file(tmp_path: Path, monkeypatch
     monkeypatch.setenv("DATA_DESIGNER_MANAGED_ASSETS_PATH", str(managed_assets_path))
     with pytest.raises(
         RuntimeError,
-        match=re.escape(prepare_module.NEMOTRON_PERSONAS_DOWNLOAD_COMMAND),
+        match=re.escape(prepare_module._persona_download_command("en_US")),
     ):
         prepare_module._validate_persona_asset("en_US")
 
@@ -109,9 +133,9 @@ def test_validate_persona_asset_requires_pinned_file(tmp_path: Path, monkeypatch
 
     expected_asset = b"pinned asset"
     asset_path.write_bytes(expected_asset)
-    monkeypatch.setattr(
-        prepare_module,
-        "NEMOTRON_PERSONAS_SHA256",
+    monkeypatch.setitem(
+        prepare_module.NEMOTRON_PERSONAS_SHA256,
+        "en_US",
         prepare_module.hashlib.sha256(expected_asset).hexdigest(),
     )
     assert prepare_module._validate_persona_asset("en_US") == managed_assets_path
@@ -122,9 +146,9 @@ def test_download_persona_asset_installs_verified_ngc_resource(
 ) -> None:
     managed_assets_path = tmp_path / "managed-assets"
     expected_asset = b"pinned asset"
-    monkeypatch.setattr(
-        prepare_module,
-        "NEMOTRON_PERSONAS_SHA256",
+    monkeypatch.setitem(
+        prepare_module.NEMOTRON_PERSONAS_SHA256,
+        "en_US",
         prepare_module.hashlib.sha256(expected_asset).hexdigest(),
     )
     calls: list[list[str]] = []
@@ -150,7 +174,7 @@ def test_download_persona_asset_installs_verified_ngc_resource(
         "registry",
         "resource",
         "download-version",
-        prepare_module.NEMOTRON_PERSONAS_RESOURCE,
+        "nvidia/nemotron-personas/nemotron-personas-dataset-en_us:0.0.2",
     ]
     assert result == managed_assets_path / "datasets" / "en_US.parquet"
     assert result.read_bytes() == expected_asset
@@ -271,9 +295,10 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
                         "persona": {"source": "usersim"},
                         "theme": {"source": "usersim"},
                         "trajectory_id": f"usersim-{probe}",
+                        "locale": "en_US",
                         "usersim_provenance": {
                             "code_sha": prepare_module.USERSIM_REVISION,
-                            "nemotron_personas_version": prepare_module.NEMOTRON_PERSONAS_VERSION,
+                            "nemotron_personas_version": "0.0.2",
                         },
                         "usersim_config": {
                             "assets_dir": f"/tmp/usersim-assets-{index}",
@@ -303,11 +328,7 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert all(
         row["resolved_row"]["usersim_provenance"]["code_sha"] == prepare_module.USERSIM_REVISION for row in rows
     )
-    assert all(
-        row["resolved_row"]["usersim_provenance"]["nemotron_personas_version"]
-        == prepare_module.NEMOTRON_PERSONAS_VERSION
-        for row in rows
-    )
+    assert all(row["resolved_row"]["usersim_provenance"]["nemotron_personas_version"] == "0.0.2" for row in rows)
     assert all("assets_dir" not in row["resolved_row"]["usersim_config"] for row in rows)
     for index, row in enumerate(rows):
         task = materialize_task(row, taskset="nemo_user_sim:validation", task_index=index)
@@ -328,7 +349,84 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert 'alias = "assistant_model", model = "assistant_model"' in model_configs[0]
     assert 'alias = "judge_model", model = "judge_model"' in model_configs[0]
     assert kwargs["env"]["USERSIM_CODE_SHA"] == prepare_module.USERSIM_REVISION
-    assert kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"] == prepare_module.NEMOTRON_PERSONAS_VERSION
+    assert kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"] == "0.0.2"
     assert kwargs["env"]["DATA_DESIGNER_MANAGED_ASSETS_PATH"] == str(managed_assets_path)
     assert Path(str(kwargs["cwd"])).name.startswith("usersim-materialize-")
     assert prepare_module.os.environ.get("UV_PROJECT_ENVIRONMENT") == parent_environment
+
+
+def test_materialization_skips_probes_without_a_bank_for_the_locale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    managed_assets_path = tmp_path / "managed-assets"
+    (managed_assets_path / "datasets").mkdir(parents=True)
+    (managed_assets_path / "datasets" / "en_SG.parquet").write_bytes(b"cached asset")
+    destination = tmp_path / "resolved.jsonl"
+    materialized: list[str] = []
+
+    def fake_materialize_episode_inputs(**kwargs: object) -> list[dict[str, object]]:
+        [probe] = kwargs["probe_mix"]
+        materialized.append(probe)
+        return [{"trajectory_id": f"usersim-{probe}"}]
+
+    for name in ("usersim", "usersim.cli", "usersim.engine", "usersim.engine.core"):
+        package = types.ModuleType(name)
+        package.__path__ = []
+        monkeypatch.setitem(sys.modules, name, package)
+    ngc_module = types.ModuleType("usersim.cli._ngc")
+    ngc_module.ensure_ngc_cli = ngc_module.ensure_ngc_org = ngc_module.has_ngc_key = lambda: None
+    monkeypatch.setitem(sys.modules, "usersim.cli._ngc", ngc_module)
+    probes_module = types.ModuleType("usersim.engine.core.probes")
+    probes_module.known_probes = lambda: ("financial_services", "general_open_ended")
+    monkeypatch.setitem(sys.modules, "usersim.engine.core.probes", probes_module)
+    external_module = types.ModuleType("usersim.engine.external")
+    external_module.materialize_episode_inputs = fake_materialize_episode_inputs
+    monkeypatch.setitem(sys.modules, "usersim.engine.external", external_module)
+    arguments = [
+        str(REPOSITORY_ROOT),
+        "en_SG",
+        "1042",
+        str(managed_assets_path),
+        str(tmp_path / "m"),
+        str(destination),
+    ]
+    monkeypatch.setattr(sys, "argv", ["-c", *arguments])
+
+    exec(compile(prepare_module._MATERIALIZE_SCRIPT, "<materialize-script>", "exec"), {})
+
+    assert materialized == ["general_open_ended"]
+
+
+def test_prepare_materializes_each_requested_locale_with_its_persona_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tasks_path = tmp_path / "nemo_user_sim.jsonl"
+    monkeypatch.setattr(prepare_module, "TASKS_FPATH", tasks_path)
+    monkeypatch.setattr(prepare_module, "_validate_persona_asset", lambda locale: tmp_path / "assets")
+    monkeypatch.setattr(prepare_module.shutil, "which", lambda executable: f"/bin/{executable}")
+    environments: list[tuple[str, str]] = []
+
+    def fake_materialize(command: list[str], **kwargs: object) -> subprocess.CompletedProcess:
+        locale, version = command[9], kwargs["env"]["USERSIM_NEMOTRON_PERSONAS_VERSION"]
+        environments.append((locale, version))
+        row = {
+            "trajectory_id": f"usersim-{locale}",
+            "locale": locale,
+            "usersim_provenance": {"code_sha": prepare_module.USERSIM_REVISION, "nemotron_personas_version": version},
+        }
+        Path(command[-1]).write_text(json.dumps(row) + "\n")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(prepare_module.subprocess, "run", fake_materialize)
+
+    prepare_module.prepare(locales=["en_US", "ko_KR", "en_US"])
+
+    assert environments == [("en_US", "0.0.2"), ("ko_KR", "0.0.1")]
+    rows = [json.loads(line) for line in tasks_path.read_text().splitlines()]
+    assert [row["task_id"] for row in rows] == ["usersim-en_US", "usersim-ko_KR"]
+
+
+@pytest.mark.parametrize("locales", [[], ["en_US", "xx_XX"]])
+def test_prepare_rejects_unknown_locales(locales: list[str]) -> None:
+    with pytest.raises(ValueError, match="Unsupported locales"):
+        prepare_module.prepare(locales=locales)

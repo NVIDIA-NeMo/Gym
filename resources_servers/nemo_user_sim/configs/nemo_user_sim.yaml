@@ -64,7 +64,6 @@ nemo_user_sim_resources:
       domain: agent
       verified: false
       description: Materialized-row validation and verification for Environment-owned UserSim.
-      nemotron_personas_version: "0.0.2"
       datasets:
         - name: example
           type: example

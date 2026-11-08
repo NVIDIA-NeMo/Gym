@@ -17,7 +17,9 @@ input for every registered probe:
 gym eval prepare --config environments/nemo_user_sim/config.yaml
 ```
 
-The resulting `environments/nemo_user_sim/data/nemo_user_sim.jsonl` contains 14 rows. Each
+The resulting `environments/nemo_user_sim/data/nemo_user_sim.jsonl` contains 14 `en_US` rows.
+To add locales, pass `"++prepare_script_args.locales=[en_US,ja_JP]"`; each locale downloads its own
+Nemotron-Personas dataset (0.3 to 4.5 GB) the first time. Each
 generated row contains a
 stable string `task_id` and the complete NeMo User Sim row under `resolved_row`.
 Gym adds the remaining task metadata when it materializes the dataset for a
