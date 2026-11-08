@@ -278,6 +278,30 @@ async def test_close_cancels_outstanding_activation_after_remote_cleanup():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "timed_out", "outcome"), [(0, False, "completed"), (1, False, "failed"), (None, True, "timeout")]
+)
+async def test_close_exports_borrowed_sandbox_receipt_without_claiming_owner_teardown(code, timed_out, outcome):
+    from nemo_gym.trajectory import AgentObservationBundle
+
+    session = AsyncMock()
+    session.cleanup = {"return_code": code, "timed_out": timed_out, "cleanup_confirmed": True, "error": None}
+    original = AgentObservationBundle(source="prime_child")
+    state = ChildSession(
+        request=borrowed_seed(), runtime="/runtime", session=session, observations=original, sandbox_id="task-sandbox"
+    )
+    reply = await agent()._close_agent_session_state(state)
+    observation = reply.agent_observations.records[-1]
+    assert observation.kind == "sandbox"
+    assert observation.sandbox_id == "task-sandbox"
+    assert observation.provider == "sandbox"
+    assert observation.outcome == outcome
+    assert observation.exit_code == code
+    assert observation.teardown_confirmed is None
+    assert not original.records
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("kind", ["complete", "no_usage", "model_error", "turn_limit", "bad_capture"])
 async def test_execution_preserves_output_usage_and_error_distinctions(tmp_path, kind):
     import json
@@ -323,12 +347,19 @@ async def test_execution_preserves_output_usage_and_error_distinctions(tmp_path,
     body = NeMoGymResponseCreateParamsNonStreaming(
         input=[{"role": "system", "content": "System"}, {"role": "user", "content": "Inspect task"}]
     )
-    with patch("responses_api_agents.prime_agent.child_app.read_text", AsyncMock(return_value=json.dumps(captured))):
+
+    async def read_artifact(sandbox, *, path):
+        if path.endswith("effective-session.json"):
+            return json.dumps({"systemPrompt": "Native SDK system prompt"})
+        return json.dumps(captured)
+
+    with patch("responses_api_agents.prime_agent.child_app.read_text", AsyncMock(side_effect=read_artifact)):
         if kind == "bad_capture":
             with pytest.raises(RuntimeError):
                 await instance._execute_child(state, body)
         else:
             result = await instance._execute_child(state, body)
+            assert state.observations.records[0].conversation[0].content == "Native SDK system prompt"
             if kind == "model_error":
                 assert result.status == "failed"
                 assert "Request timed out" in result.error.message

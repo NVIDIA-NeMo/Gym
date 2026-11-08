@@ -156,7 +156,9 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits `permission`, `tools`, and a boolean `snapshot`, preserving Gym capture.
+Omit `snapshot` to keep OpenCode's default. Setting it to `false` disables its file snapshot
+and undo history; record this setting when comparing benchmark runs.
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the

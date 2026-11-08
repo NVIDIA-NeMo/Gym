@@ -65,10 +65,16 @@ an automatic final response. Compaction, auto-refinement, and retries are disabl
 The 65,536-token output reservation shrinks to fit remaining context with an
 8,192-token margin. Do not remove or override that per-call cap in the Model Server.
 
-Capability level: **Evaluation**. Close returns explicit observation gaps; this mode
-claims neither training nor full trajectory conformance. Raw SDK events, controller
+Capability level: **Evaluation with native observation export**. Close exports captured SDK turns, model
+response IDs, tool outcomes and supervised process metadata; unavailable evidence remains an explicit gap.
+This mode claims neither training nor full trajectory conformance. Raw SDK events, controller
 receipts, effective prompts/tools, model requests, and supervisor cleanup receipts
 are saved. Function-calling shell probes do not apply: the only exposed tool is
 IPython. Terminal-Bench support is not claimed. The first pairing is Partner IF's
 repository/report task. A second pairing and runtime reproducibility checks remain
 required before this experimental entrypoint is ready to merge.
+
+Session close exports the native SDK conversation as Gym observations. Kernel errors remain failed tool
+observations even when the SDK's outer isError flag is false; missing model response IDs remain evidence gaps.
+The borrowed sandbox's provider/ID and cleanup receipt describe supervised process completion. Agent close
+does not destroy that sandbox; teardown remains the Resources Server's responsibility.

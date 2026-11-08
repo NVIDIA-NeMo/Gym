@@ -69,11 +69,14 @@ def test_prepare_refuses_content_other_than_the_pinned_release(prepared, content
 
 
 # The release's task IDs; there is no pif_023.
-RELEASE_TASK_IDS = [f"pif_{index:03d}" for index in (*range(1, 23), *range(24, 29))]
+RELEASE_TASK_IDS = [f"pif_{index:03d}" for index in (*range(1, 23), *range(24, 30))]
 
 
 def test_routes_cover_the_release_and_name_its_environments():
     config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
+    runtime = prepare_module.BENCHMARK_DIR / "config_ngc_replay_runtime.yaml"
+    assert "benchmarks/partner_if/config_ngc_replay_runtime.yaml" in config["config_paths"]
+    config |= yaml.safe_load(runtime.read_text())
     routes = config["partner_if_dispatcher"]["responses_api_agents"]["partner_if_dispatcher"]["task_routes"]
     assert list(routes) == RELEASE_TASK_IDS
     assert len(RELEASE_TASK_IDS) == prepare_module.ROW_COUNT

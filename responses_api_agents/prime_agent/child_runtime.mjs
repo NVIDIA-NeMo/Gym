@@ -53,8 +53,9 @@ try {
   if (session.getActiveToolNames().join(',') !== 'ipython') throw new Error('Expected only native IPython');
   writeFileSync(join(args.state,'effective-session.json'),JSON.stringify({rlmDepth:session.rlmDepth,systemPrompt:session.systemPrompt,tools:session.getAllTools().filter(t=>t.name==='ipython'),model:args.model,cwd:args.cwd}));
   session.subscribe(event => {
-    events.push(event);
-    log('events.jsonl',event);
+    const observed = {...event,gymObservedAt:Date.now()/1000};
+    events.push(observed);
+    log('events.jsonl',observed);
     if (event.type === 'message_end' && event.message.role === 'assistant') turns++;
     if (event.type === 'turn_end' && turns >= args.maxTurns && event.message.content.some(b=>b.type==='toolCall') && !['error','aborted'].includes(event.message.stopReason)) {
       termination='turn_limit';

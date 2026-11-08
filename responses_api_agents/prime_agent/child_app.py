@@ -36,7 +36,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.sandbox import AsyncSandbox, create_provider, read_text, resolve_provider_config, upload_text
-from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.prime_agent.app import (
     PrimeAgent,
@@ -44,6 +44,7 @@ from responses_api_agents.prime_agent.app import (
     _extract_instruction,
     parse_prime_agent_events,
 )
+from responses_api_agents.prime_agent.child_observations import child_observations
 
 
 LOG = logging.getLogger(__name__)
@@ -80,6 +81,8 @@ class ChildSession(AgentSessionState):
     runtime: str
     task: asyncio.Task[NeMoGymResponse] | None = None
     activation: NeMoGymResponseCreateParamsNonStreaming | None = None
+    observations: AgentObservationBundle | None = None
+    sandbox_id: str | None = None
 
 
 class PrimeChildAgent(PrimeAgent):
@@ -119,6 +122,7 @@ class PrimeChildAgent(PrimeAgent):
         directory = f"/tmp/nemo-gym-prime/{uuid4().hex}"
         state = ChildSession(
             request=body,
+            sandbox_id=sandbox.sandbox_id,
             runtime=f"{directory}/runtime",
             session=SandboxSession(
                 sandbox=sandbox, session_dir=directory, workdir=body.sandbox_access.workdir, harness="Prime child"
@@ -169,20 +173,46 @@ class PrimeChildAgent(PrimeAgent):
             await asyncio.wait_for(
                 asyncio.gather(state.task, return_exceptions=True), timeout=self.config.session_close_timeout_seconds
             )
-        return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id,
-            agent_observations=AgentObservationBundle(
+        observations = (
+            state.observations.model_copy(update={"records": list(state.observations.records)})
+            if state.observations is not None
+            else AgentObservationBundle(
                 source="prime",
                 gaps=[
                     ObservationGap(
-                        code="harness_turn_observations_unavailable",
-                        detail="Evaluation-only child adapter; raw SDK events retained",
-                    ),
-                    ObservationGap(
-                        code="model_call_ownership_unavailable", detail="Use rollout-prefixed Model Server captures"
+                        code="observation_capture_failed", detail="No native SDK capture was available at close"
                     ),
                 ],
-            ),
+            )
+        )
+        cleanup = state.session.cleanup
+        if (
+            isinstance(cleanup, dict)
+            and isinstance(state.sandbox_id, str)
+            and state.request.sandbox_access is not None
+        ):
+            outcome = (
+                "timeout"
+                if cleanup["timed_out"]
+                else "failed"
+                if cleanup["error"] or cleanup["return_code"] not in (0, None)
+                else "cancelled"
+                if cleanup["return_code"] is None
+                else "completed"
+            )
+            observations.records.append(
+                SandboxObservation(
+                    role="agent",
+                    provider=state.request.sandbox_access.connection.provider_config_ref,
+                    sandbox_id=state.sandbox_id,
+                    outcome=outcome,
+                    exit_code=cleanup["return_code"],
+                    error_type=cleanup["error"] or (None if outcome == "completed" else outcome),
+                )
+            )
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
         )
 
     def validate_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> None:
@@ -269,6 +299,15 @@ class PrimeChildAgent(PrimeAgent):
             value = json.loads(await read_text(state.session.sandbox, path=f"{directory}/state/capture.json"))
             if value.get("version") != 1 or value.get("termination") not in {"completed", "turn_limit"}:
                 raise RuntimeError("Prime child did not produce a complete SDK capture")
+            effective = json.loads(
+                await read_text(state.session.sandbox, path=f"{directory}/state/effective-session.json")
+            )
+            state.observations = child_observations(
+                value,
+                system_prompt=effective["systemPrompt"],
+                model_ref=self.config.model_server,
+                invocation_id=state.request.agent_session_id,
+            )
             destination = Path(self.config.artifact_directory).expanduser() / uuid4().hex
             destination.mkdir(parents=True, mode=0o700)
             (destination / "capture.json").write_text(json.dumps(value))

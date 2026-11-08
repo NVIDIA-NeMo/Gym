@@ -939,11 +939,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "snapshot"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/snapshot only; unsupported: {sorted(unsupported)}",
             )
+        if "snapshot" in self.config.opencode_config and type(self.config.opencode_config["snapshot"]) is not bool:
+            raise HTTPException(422, "OpenCode sandbox snapshot must be a boolean")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
         if not all(_is_sandbox_path(path) for path in self.config.plugins):

@@ -5,6 +5,7 @@
 # nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
 config_paths:
   - resources_servers/partner_if/configs/verifier_base.yaml
+  - benchmarks/partner_if/config_ngc_replay_runtime.yaml
   # opencode_agent's command deny-list, which partner_if_swe_agent inherits.
   - responses_api_agents/opencode_agent/configs/permissions/default.yaml
 
@@ -23,6 +24,7 @@ partner_if_policy_model:
 partner_if:
   resources_servers:
     partner_if:
+      accept_verification_input: true
       allow_provisional_rubrics: true
       judge_responses_create_params: {input: [], max_output_tokens: 32768, temperature: 0.0}
       judge_max_concurrency: 2
@@ -172,6 +174,8 @@ partner_if_swe_agent:
       session_close_timeout_seconds: 60
       session_close_retry_window_seconds: 300
       opencode_config:
+        # Disable native file snapshots; retain Gym model and trajectory captures.
+        snapshot: false
         permission:
           webfetch: deny
           websearch: deny
@@ -257,7 +261,7 @@ partner_if_prime_environment_server:
       resources_tool_transports: []
       agent_server: {type: responses_api_agents, name: partner_if_prime_agent}
 
-# The dispatcher routes each task to its environment, so all five share one dataset and one score.
+# The dispatcher routes each task to its environment, so all six share one dataset and one score.
 partner_if_dispatcher:
   responses_api_agents:
     partner_if_dispatcher:
@@ -291,6 +295,7 @@ partner_if_dispatcher:
         pif_026: {type: environment_servers, name: partner_if_swe_environment_server}
         pif_027: {type: environment_servers, name: partner_if_prime_environment_server}
         pif_028: {type: environment_servers, name: partner_if_environment_server}
+        pif_029: {type: environment_servers, name: partner_if_ngc_replay_environment_server}
       datasets:
         - name: partner_if
           type: benchmark

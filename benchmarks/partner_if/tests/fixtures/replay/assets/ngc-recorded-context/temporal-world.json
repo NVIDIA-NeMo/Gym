@@ -1,0 +1,27 @@
+{
+  "connection": {
+    "address": "workflow.example.invalid:7233",
+    "namespace": "public-example"
+  },
+  "workflow_details": {
+    "example-workflow": {
+      "workflow_id": "example-workflow",
+      "run_id": "example-run",
+      "events": [
+        {
+          "event_id": 1,
+          "type": "started"
+        }
+      ]
+    }
+  },
+  "workflows": {
+    "test": [
+      {
+        "workflow_id": "example-workflow",
+        "run_id": "example-run",
+        "history_length": 2
+      }
+    ]
+  }
+}
