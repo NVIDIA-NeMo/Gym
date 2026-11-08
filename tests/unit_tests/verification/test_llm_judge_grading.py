@@ -11,7 +11,7 @@ from nemo_gym.server_runtime import verifier_observability
 from nemo_gym.server_runtime.verifier_observability import observe_llm_judge_grading
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import judge
-from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict
+from nemo_gym.verification.judge import call_judge, record_parsed_judge_verdict, record_superseded_judge_reply
 
 
 class JudgeReply(BaseModel):
@@ -138,3 +138,54 @@ async def test_one_parsed_reply_does_not_cover_a_later_fallback(judge_server):
     assert value["reward"] == 0.0
     assert invocation.grading_operations[0].outcome == "unknown"
     assert len(invocation.grading_operations[0].dependencies) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("parsed", [True, False], ids=["verdict on re-ask", "no verdict at all"])
+async def test_a_reply_asked_again_stays_a_dependency_and_settles_with_the_verdict(judge_server, parsed):
+    client, replies = judge_server
+    replies.extend([{"id": "no-verdict"}, {"id": "verdict"}])
+    invocation = VerifierInvocation(invocation_id="verify-reask")
+    token = verifier_observability._active_verifier.set(invocation)
+
+    async def calculate():
+        await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+        record_superseded_judge_reply()  # no verdict: the same prompt is asked again
+        await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+        if parsed:
+            record_parsed_judge_verdict()
+        return _result(1.0)
+
+    try:
+        await observe_llm_judge_grading(calculate)
+    finally:
+        verifier_observability._active_verifier.reset(token)
+    operation = invocation.grading_operations[0]
+    # Every reply the judge sent stays a dependency, so they match the invocation's owned calls one to one.
+    assert [d.response_id for d in operation.dependencies] == ["no-verdict", "verdict"]
+    assert operation.outcome == ("completed" if parsed else "unknown")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("judged", [False, True], ids=["no judge call", "judge call"])
+async def test_a_judge_optional_grading_without_a_judge_call_records_no_operation(judge_server, judged):
+    client, replies = judge_server
+    replies.append({"id": "judge-response-1"})
+    invocation = VerifierInvocation(invocation_id="verify-optional")
+    token = verifier_observability._active_verifier.set(invocation)
+
+    async def calculate():
+        if judged:
+            await call_judge(client, server_name="judge", url_path="/v1/responses", json={}, response_model=JudgeReply)
+            record_parsed_judge_verdict()
+        return _result(1.0)
+
+    try:
+        await observe_llm_judge_grading(calculate, judge_optional=True)
+    finally:
+        verifier_observability._active_verifier.reset(token)
+    if judged:
+        assert [operation.outcome for operation in invocation.grading_operations] == ["completed"]
+    else:
+        # observe_verifier then records the grade as the verifier's own, which a judge-free grade is.
+        assert invocation.grading_operations is None
