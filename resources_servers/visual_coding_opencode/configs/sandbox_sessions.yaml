@@ -1,0 +1,101 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Visual coding with OpenCode in a sandbox session: the same task, prompt and judge as visual_coding_opencode.yaml, but
+# opencode_agent runs each task in its own sandbox through the Environment Server instead of running the OpenCode CLI
+# on the agent's host. The resources server lends no sandbox, so each session creates one through the `sandbox`
+# provider. The prompt image goes into the sandbox and is attached with `opencode run --file`. Gym's token capture
+# records the model calls, so the same config serves evaluation and RL training.
+#
+# Needs a sandbox image built from resources_servers/visual_coding_opencode/sandbox_image/Dockerfile
+# (VISUAL_CODING_OPENCODE_SANDBOX_IMAGE) and the OpenSandbox provider settings (OPENSANDBOX_DOMAIN,
+# OPENSANDBOX_API_KEY). The sandbox reaches only the model server, by address.
+config_paths:
+  - resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# The sandbox calls the model server by address, so only the model servers advertise this host's address. The head
+# server (its config endpoint is unauthenticated) and the agent (a request without a session runs OpenCode on this
+# host) stay on loopback.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
+visual_coding_opencode:
+  resources_servers:
+    visual_coding_opencode:
+      domain: other
+      verified: false
+      description: Image questions solved by OpenCode in a sandbox session with a Python image toolkit, GPT-judged final answers.
+      value: Train and evaluate tool-assisted fine-grained visual reasoning, with Gym's token capture for RL.
+
+# Drop the agent that runs the OpenCode CLI on the agent's host; the session agent below takes its place.
+visual_coding_opencode_agent: null
+
+visual_coding_opencode_session_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      description: Visual coding with OpenCode in a sandbox session that has a Python image toolkit
+      resources_server:
+        type: resources_servers
+        name: visual_coding_opencode
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      concurrency: 64
+      thinking: false
+      # The only hard stop besides the context window: OpenCode itself has no turn cap.
+      timeout: 1800
+      context_window: 131072
+      max_output_tokens: 32768
+      session_close_timeout_seconds: 90
+      sandbox_provider: sandbox
+      # The sandbox reaches only the model server, so the model cannot look answers up. It cannot download OpenCode
+      # either, so the image carries the binary, pinned by its SHA-256.
+      network_access: model_only
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
+      sandbox_config:
+        image: ${oc.env:VISUAL_CODING_OPENCODE_SANDBOX_IMAGE,null}
+        # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        resources: {cpu: 2, memory_mib: 8192}
+      opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+          # Subagents run in sessions of their own, outside the scored chain of model calls.
+          task: false
+        permission:
+          bash: allow
+          edit: allow
+          # OpenCode asks before it reads or writes outside the working directory, as when the model saves a crop
+          # under /tmp. `opencode run` rejects every request that would ask, and a rejection ends the run with no
+          # answer. The sandbox holds only this task, so allow every path.
+          external_directory: allow
+          # OpenCode also asks when the model repeats an identical tool call, and that rejection ends the run too.
+          doom_loop: allow
+        compaction:
+          # Automatic compaction continues from a summary, in model calls that training cannot join to the scored
+          # call. With it off, a run that fills the context ends with a context-limit error.
+          auto: false
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/visual_coding_opencode/data/example.jsonl
+        num_repeats: 1
+
+# The Environment Server runs each episode as an agent session: it seeds the session, sends the task, and closes it.
+visual_coding_opencode_environment_server: null
+visual_coding_opencode_session_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visual_coding_opencode
+      agent_server:
+        type: responses_api_agents
+        name: visual_coding_opencode_session_agent
