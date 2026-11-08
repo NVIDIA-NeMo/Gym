@@ -465,7 +465,7 @@ class GymResponsesLLM(UnifiedLLM):
         if self._on_call is not None:
             self._on_call(call)
         try:
-            # CodeAct rebuilds context after an LLM error. Retry throttling here
+            # CodeAct rebuilds context after an LLM error. Retry transient HTTP errors here
             # so every wire attempt retains this logical call's exact request.
             for attempt in range(3):
                 try:
@@ -478,7 +478,7 @@ class GymResponsesLLM(UnifiedLLM):
                     )
                     await raise_for_status(http_response)
                 except aiohttp.ClientResponseError as error:
-                    if error.status == 429 and attempt < 2:
+                    if error.status in {408, 429, 500, 502, 503, 504} and attempt < 2:
                         await asyncio.sleep(2**attempt)
                         continue
                     # Expose the response body for NOOA context-overflow detection.

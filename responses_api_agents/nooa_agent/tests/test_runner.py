@@ -748,7 +748,9 @@ async def test_model_rejection_preserves_original_provider_error(
         )
     )
 
-    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (3 if status == 429 else 1)
+    assert runner._server_client.post.await_count == (3 if wrapped else 1) * (
+        3 if status in {408, 429, 500, 502, 503, 504} else 1
+    )
     root = next(item for item in result.trajectory.invocations if item.parent_invocation_id is None)
     assert root.status == "failed"
     assert root.error_type == ("GenerationError" if wrapped else "ClientResponseError")
