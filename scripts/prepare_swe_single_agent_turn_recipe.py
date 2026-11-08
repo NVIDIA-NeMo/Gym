@@ -371,6 +371,10 @@ def prepare(args: argparse.Namespace) -> dict:
     generations = getattr(args, "generations_per_prompt", 4)
     if generations <= 0:
         raise ValueError("Generations per prompt must be positive")
+    tasks_per_step = min(8, args.count)
+    inflight = getattr(args, "max_inflight_prompts", None)
+    if inflight is not None and inflight <= 0:
+        raise ValueError("Maximum inflight prompts must be positive")
     profile_name = getattr(args, "hardware_profile", DEFAULT_HARDWARE_PROFILE)
     if profile_name not in HARDWARE_PROFILES:
         raise ValueError(f"Unsupported hardware profile: {profile_name}")
@@ -387,8 +391,8 @@ def prepare(args: argparse.Namespace) -> dict:
     ).strip()
     if gym_pin != gym_revision:
         raise ValueError("The reviewed RL commit must pin this Gym revision in its submodule and dependency lock")
-    if args.steps in (1, 5) and (args.count != 8 or args.harnesses != ["opencode"]):
-        raise ValueError("The one/five-update qualification uses OpenCode and the first eight tasks")
+    if args.steps in (1, 5) and (args.count not in (2, 4, 8) or args.harnesses != ["opencode"]):
+        raise ValueError("The one/five-update qualification uses OpenCode and two, four or eight tasks")
     rows, tasks = select_rows(args.source, args.roster, args.image_pins, count=args.count)
     model, revision, ep = MODELS[args.model]
     model_path = args.model_path.resolve()
@@ -452,12 +456,14 @@ def prepare(args: argparse.Namespace) -> dict:
     )
     # BF16 TRTLLM refit shards MoE experts across the serving ranks.
     config.policy.generation.vllm_cfg.expert_parallel_size = ep
-    config.grpo.num_prompts_per_step = 8 * len(args.harnesses)
+    config.grpo.num_prompts_per_step = tasks_per_step * len(args.harnesses)
     config.grpo.num_generations_per_prompt = generations
     config.policy.train_global_batch_size = generations * config.grpo.num_prompts_per_step
     config.grpo.max_num_steps = args.steps
-    config.grpo.max_num_epochs = math.ceil(args.steps * 8 / args.count)
-    config.async_rl.max_inflight_prompts = 4 if args.steps in (1, 5) else 8 if len(args.harnesses) == 1 else 16
+    config.grpo.max_num_epochs = math.ceil(args.steps * tasks_per_step / args.count)
+    config.async_rl.max_inflight_prompts = (
+        inflight if inflight is not None else 4 if args.steps in (1, 5) else 8 if len(args.harnesses) == 1 else 16
+    )
     config.data.train.data_path = str(train)
     config.checkpointing.checkpoint_dir = str(output / "checkpoints")
     if args.steps == 1:
@@ -483,8 +489,8 @@ def prepare(args: argparse.Namespace) -> dict:
         "hardware_profile": profile_name,
         "tasks": tasks,
         "steps": args.steps,
-        "episodes": args.steps * 8 * len(args.harnesses) * generations,
-        "ordering": "cohort of eight tasks, task, harness; no shuffle; repeat full epochs",
+        "episodes": args.steps * tasks_per_step * len(args.harnesses) * generations,
+        "ordering": f"cohort of {tasks_per_step} tasks, task, harness; no shuffle; repeat full epochs",
         "runtime_files_sha256": {},
         "files_sha256": {
             name: digest((output / name).read_bytes())
@@ -536,8 +542,9 @@ def main() -> None:
         default=DEFAULT_HARDWARE_PROFILE,
         help="Whole-node hardware: four B300s on ARM64 (default), or eight H100s on x86_64; half used for generation",
     )
-    parser.add_argument("--count", choices=(8, 16, 32, 64), type=int, default=32)
-    parser.add_argument("--steps", choices=(1, 5, 20), type=int, default=20)
+    parser.add_argument("--count", choices=(2, 4, 8, 16, 32, 64), type=int, default=32)
+    parser.add_argument("--steps", choices=(1, 5, 10, 20), type=int, default=20)
+    parser.add_argument("--max-inflight-prompts", type=int, help="Explicit concurrent prompt limit for matched runs")
     parser.add_argument(
         "--generations-per-prompt", type=int, default=4, help="Training samples per task; also sets global batch size"
     )

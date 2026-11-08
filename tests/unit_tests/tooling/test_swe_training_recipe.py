@@ -578,6 +578,10 @@ def rl_arithmetic_resolver():
         (5, 8, ["opencode"], "single-agent-turn", 4),
         (5, 8, ["opencode"], "single-agent-turn", 8),
         (20, 8, ["opencode"], "single-agent-turn", 4),
+        (5, 2, ["opencode"], "single-agent-turn", 8),
+        (10, 4, ["opencode"], "old-run", 8),
+        (10, 4, ["opencode"], "single-agent-turn", 8),
+        (10, 4, ["opencode"], "harbor", 8),
         (20, 32, list(recipe.OLD_AGENTS), "old-run", 4),
         (20, 32, list(recipe.OLD_AGENTS), "single-agent-turn", 4),
         (20, 32, list(recipe.OLD_AGENTS), "harbor", 4),
@@ -660,6 +664,8 @@ def test_preparation_materializes_the_requested_update_budget(
         codex_catalog=codex_catalog if "codex" in harnesses else None,
         hardware_profile=hardware_profile,
     )
+    if count < 8:
+        args.max_inflight_prompts = 2
     manifest = recipe.prepare(args)
     config = OmegaConf.load(args.output_dir / "config.yaml")
     # The RL driver resolves the whole prepared config before Gym injects any aliases.
@@ -680,11 +686,17 @@ def test_preparation_materializes_the_requested_update_budget(
     assert config.policy.generation.vllm_cfg.expert_parallel_size == expert_parallel_size
     assert resolved_config["policy"]["make_sequence_length_divisible_by"] == 4
     width = len(harnesses)
-    assert len(train) == count * width and manifest["episodes"] == steps * 8 * width * generations
-    assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps * 8 // count
-    assert config.grpo.num_prompts_per_step == 8 * width and config.grpo.num_generations_per_prompt == generations
-    assert config.policy.train_global_batch_size == 8 * width * generations
-    assert config.async_rl.max_inflight_prompts == (4 if steps in (1, 5) else 8 if width == 1 else 16)
+    tasks_per_step = min(8, count)
+    assert len(train) == count * width and manifest["episodes"] == steps * tasks_per_step * width * generations
+    assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps * tasks_per_step // count
+    assert (
+        config.grpo.num_prompts_per_step == tasks_per_step * width
+        and config.grpo.num_generations_per_prompt == generations
+    )
+    assert config.policy.train_global_batch_size == tasks_per_step * width * generations
+    assert config.async_rl.max_inflight_prompts == (
+        2 if count < 8 else 4 if steps in (1, 5) else 8 if width == 1 else 16
+    )
     expected_ids = [(row["instance_id"], f"swe_rebench_{harness}") for row in rows for harness in harnesses]
     if route == "old-run":
         assert [(row["instance_id"], row["task_source"]) for row in train] == expected_ids
@@ -729,7 +741,11 @@ def test_preparation_materializes_the_requested_update_budget(
     assert not config.grpo.val_at_start and not config.grpo.val_at_end and config.grpo.val_period == 0
     assert config.data.validation is None and not config.data.shuffle and not config.data.use_multiple_dataloader
     assert config.async_rl.sampler == {"name": "in_order", "max_lookahead_versions": 0}
-    assert config.async_rl.min_groups_for_streaming_train == config.async_rl.max_buffered_rollouts == 8 * width
+    assert (
+        config.async_rl.min_groups_for_streaming_train
+        == config.async_rl.max_buffered_rollouts
+        == tasks_per_step * width
+    )
     assert config.async_rl.rollout_failure.min_step_batch_fraction == 1
     assert config.async_rl.rollout_failure.max_consecutive_dropped_prompts == 0
     assert config.async_rl.rollout_failure.max_skipped_prompts == 0
