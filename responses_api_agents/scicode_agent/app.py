@@ -144,6 +144,8 @@ class ScicodeAgentContext(BaseModel):
 class ScicodeSessionState(AgentSessionState):
     context: ScicodeAgentContext
     operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+    # The first activation's path; a retry through another path (another capture segment) is refused.
+    activation_path: Optional[str] = None
     # The activation's model calls, returned as agent observations when the session closes.
     invocation: Optional[AgentInvocation] = None
     gaps: List[ObservationGap] = field(default_factory=list)
@@ -253,11 +255,13 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
         prefilled_steps_code: Dict[str, str],
         params: NeMoGymResponseCreateParamsNonStreaming,
         generate: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]],
+        on_turn: Optional[Callable[[_StepTurn], None]] = None,
     ) -> _SolvedProblem:
         """Generate code for each sub-step, accumulating prior code as context.
 
         ``generate`` makes one model call and returns the response JSON. A context-window error ends generation:
-        that sub-step and every later one get the out-of-context sentinel.
+        that sub-step and every later one get the out-of-context sentinel. ``on_turn`` sees each generated sub-step
+        as it completes, so a caller keeps the model calls that ran before a later step fails.
         """
         total = len(sub_steps)
         previous_llm_code = [None] * total
@@ -319,7 +323,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 raise
 
             model_response = NeMoGymResponse.model_validate(last_response_json)
-            turns.append(_StepTurn(user_content=user_content, response=model_response, timestamp=turn_timestamp))
+            turn = _StepTurn(user_content=user_content, response=model_response, timestamp=turn_timestamp)
+            turns.append(turn)
+            if on_turn is not None:
+                on_turn(turn)
             step_record["status"] = "generated"
             # The top-level response retains only the final step. Preserve stop
             # evidence for every generation, even when model-call capture is off.
@@ -388,6 +395,10 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             raise TypeError("Expected SciCode session state")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
             raise HTTPException(409, "Activation requires the seeded session's rollout path")
+        if state.activation_path is None:
+            state.activation_path = request.url.path
+        elif state.activation_path != request.url.path:
+            raise HTTPException(409, "Activation path does not match the session's first activation")
         model_url_path = self.url_path_for_request("/v1/responses", request)
         try:
             return await state.operations.execute(
@@ -412,6 +423,13 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
 
         invocation = AgentInvocation(invocation_id="root", in_session=True)
         state.invocation = invocation
+
+        def record(turn: _StepTurn) -> None:
+            refs = self._model_call_refs(turn.response)
+            if not refs:
+                state.gaps.append(ObservationGap(code="model_call_reference_unavailable", invocation_id="root"))
+            invocation.model_calls.extend(refs)
+
         try:
             solved = await self._solve(
                 problem_id=context.problem_id,
@@ -420,16 +438,12 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
                 prefilled_steps_code=context.prefilled_steps_code,
                 params=params,
                 generate=generate,
+                on_turn=record,
             )
         except BaseException as error:
             invocation.status = "failed" if isinstance(error, Exception) else "incomplete"
             invocation.error_type = type(error).__name__
             raise
-        for turn in solved.turns:
-            refs = self._model_call_refs(turn.response)
-            if not refs:
-                state.gaps.append(ObservationGap(code="model_call_reference_unavailable", invocation_id="root"))
-            invocation.model_calls.extend(refs)
         # As /run's trajectory: prefilled or skipped sub-steps are not model decisions, so no invocation without a turn.
         invocation.status = "incomplete" if solved.out_of_context else "completed"
         if not solved.turns:
@@ -470,7 +484,8 @@ class ScicodeAgent(SimpleResponsesAPIAgent):
             generate=generate,
         )
 
-        verify_request_data = body.model_dump()
+        # The row's agent_context is the session path's copy of the problem; /verify reads the row itself.
+        verify_request_data = body.model_dump(exclude={"agent_context"})
         verify_request_data["solutions"] = solved.solutions
         verify_request_data["response"] = solved.response
         verify_request_data["token_usage_version"] = TOKEN_USAGE_VERSION

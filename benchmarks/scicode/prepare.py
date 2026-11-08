@@ -27,7 +27,10 @@ must be staged manually at the path the resources server is configured to read.
 
 from pathlib import Path
 
+from pydantic import ValidationError
+
 from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
+from nemo_gym.server_runtime import AgentContext
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -87,7 +90,14 @@ def prepare() -> Path:
                 # problem_id is unique across both splits, so it doubles as the rollout uuid.
                 "uuid": entry["problem_id"],
             }
-            row["agent_context"] = scicode_agent_context(row)
+            agent_context = scicode_agent_context(row)
+            try:
+                AgentContext.model_validate(agent_context)
+            except ValidationError as error:
+                # Its /run still works; an agent session refuses the row with 422 for lack of context.
+                print(f"Problem {row['problem_id']} gets no agent_context: {error}")
+            else:
+                row["agent_context"] = agent_context
             rows.append(json.dumps(row) + "\n")
 
     with open(OUTPUT_FPATH, "w") as f:

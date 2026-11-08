@@ -752,6 +752,8 @@ class TestAgentSessions:
                 assert activation.status_code == 200, activation.text
                 # The same activation again joins the first: the loop does not run twice.
                 assert client.post(path, json=params).json() == activation.json()
+                capture_path = path.replace("/v1/responses", "/training-token-capture/v1/responses")
+                assert client.post(capture_path, json=params).status_code == 409
                 close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
                 closed = client.post("/v1/agent_sessions/close", json=close)
 
@@ -771,3 +773,52 @@ class TestAgentSessions:
         generated = [step["response_id"] for step in verify["step_usage"] if step["status"] == "generated"]
         assert [call["response_id"] for call in observed["records"][0]["model_calls"]] == generated
         assert observed["records"][0]["status"] == ("incomplete" if overflow_step is not None else "completed")
+
+    def test_failed_activation_keeps_the_model_calls_it_made(self):
+        # The third sub-step's model call fails; the two before it were made and captured.
+        body = _run_request(n_steps=4)
+        policy = _ScriptedPolicy()
+
+        async def post(server_name, url_path, json, cookies=None):
+            if len(policy.requests) == 2:
+                raise RuntimeError("model server unavailable")
+            return policy.reply(_wire(json))
+
+        agent = _agent()
+        agent.server_client.post = AsyncMock(side_effect=post)
+        seed = _seed(_agent_context(body))
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with (
+            patch.object(app, "raise_for_status", AsyncMock()),
+            TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+        ):
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            assert client.post(path, json={"input": []}).status_code == 500
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
+
+        (invocation,) = closed.json()["agent_observations"]["records"]
+        assert (invocation["status"], invocation["error_type"]) == ("failed", "RuntimeError")
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["r0", "r1"]
+
+
+@pytest.mark.asyncio
+async def test_run_does_not_send_the_rows_agent_context_to_verify():
+    agent = _agent()
+    captured = {}
+
+    def _post(server_name, url_path, json, cookies):
+        if url_path == "/v1/responses":
+            return _Resp(_model_json("x = 1"))
+        captured["verify"] = json
+        return _Resp({"reward": 0.0})
+
+    agent.server_client.post = AsyncMock(side_effect=_post)
+    body = _run_request(n_steps=1)
+    body = ScicodeAgentRunRequest.model_validate(
+        body.model_dump() | {"agent_context": {"values": _agent_context(body)}}
+    )
+    with patch.object(app, "raise_for_status", AsyncMock()):
+        await agent.run(_FakeRequest(), body)
+    assert "agent_context" not in captured["verify"]
+    assert captured["verify"]["uuid"] == "1"
