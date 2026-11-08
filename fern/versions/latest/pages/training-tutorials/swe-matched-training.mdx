@@ -1,0 +1,90 @@
+---
+title: "Matched SWE training"
+description: "Prepare comparable old-agent, single-agent-turn and Harbor training inputs"
+position: 8
+---
+
+# Matched SWE training
+
+This experimental recipe runs repeated SWE-rebench tasks through NeMo RL's existing single-controller GRPO entrypoint. `old-run` relays the actual OpenCode `/run` endpoint. `single-agent-turn` and `harbor` use agent sessions with OpenCode, Hermes or Pi. Other harnesses and old-path pairings are not wired here yet. Preparation and offline checks do not establish training success or equivalence between routes.
+
+The default is 32 tasks, 20 updates, eight prompts per harness per update and four generations per prompt. Rows follow task order, then harness order, without shuffling. Each group of eight tasks is one update; four updates visit the full 32-task roster. A three-harness run has 24 prompts per update and 96 episodes. The same seed, model, tasks and training settings must be used for both comparison arms.
+
+## Inputs and code revisions
+
+Use clean, reviewed Gym and RL checkouts. The RL checkout's `3rdparty/Gym-workspace/Gym` must pin that Gym revision, with RL's dependency lock reconciled. Pass the exact RL commit explicitly when preparing; the generated provenance records both code revisions and lock hashes. The recipe requires the sampling-transport reconciliation in [RL #5121](https://github.com/NVIDIA-NeMo/RL/pull/5121) until that change is included upstream.
+
+The committed [selection manifest](https://github.com/NVIDIA-NeMo/Gym/blob/main/examples/training/swe_selection.json) contains 64 ordered task IDs and payload hashes, with immutable Linux AMD64 image pins for the first 32. The default and nested 8/16-task subsets require no private roster files. Selecting 64 requires a supplied image manifest covering the additional tasks. `--roster` and `--image-pins` accept explicit alternatives, which are recorded in provenance.
+
+The source rows remain an external research input, not a public dataset download. The recorded AGA location is:
+
+```text
+/scratch/fsw/portfolios/nemotron/projects/nemotron_n4_post/users/tkonuk/projects/nemotron-4/heartbeat/nt4-nano/data/swe/swe3787_profiledv3_kd6000_opencode_only_1to4of8_plus30pct0of8_noleak_rowshuffle20261017.jsonl
+```
+
+Access and current existence at that historical location must be checked in your environment. An existing local copy is also accepted, including gzip. The preparer requires 3,787-row pool bytes with uncompressed SHA-256 `a30289395f2e847c99f1e64b3662643e8a18df7a52fdf74c5965d394345640a7`; substituting another public SWE dataset does not reproduce this selection.
+
+Place the verifier parser checkout under `$PARSER_CACHE/SWE-rebench-V2` at commit `c71902a8cf8d2b725f63d51f199f4d3e56f68d2d` of [SWE-rebench-V2](https://github.com/SWE-rebench/SWE-rebench-V2). The directory must remain clean.
+
+Choose a Hugging Face snapshot directory ending in the selected commit:
+
+| Model option | Repository | Revision |
+| --- | --- | --- |
+| `4b` | `nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16` | `dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` |
+| `30b` | `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16` | `bf77c3174f68ad409e1c2aa60daeb46e32d1c606` |
+
+For example, `hf download nvidia/NVIDIA-Nemotron-3-Nano-4B-BF16 --revision dfaf35de3e30f1867dd8dbc38a7fc9fb52d3914f` prints the downloaded snapshot path. Preparation reads Hub file hashes without downloading weights. Launch checks the actual local bytes against those hashes, including configuration and tokenizer files.
+
+## Prepare one arm
+
+Set `NEMO_RL_ROOT`, `RL_REVISION`, `SOURCE_ROWS`, `PARSER_CACHE`, `MODEL_PATH` and `OUTPUT_DIR` to your selected inputs. Run from the Gym checkout:
+
+```bash
+uv run python scripts/prepare_swe_single_agent_turn_recipe.py \
+  --rl-root "$NEMO_RL_ROOT" --rl-revision "$RL_REVISION" \
+  --source "$SOURCE_ROWS" --parser-cache "$PARSER_CACHE" \
+  --model 4b --model-path "$MODEL_PATH" --output-dir "$OUTPUT_DIR" \
+  --route single-agent-turn --harnesses opencode --count 32 --steps 20
+```
+
+Prepare a fresh output directory for each arm. Change `--route` to `old-run` for the OpenCode baseline or `harbor` for converted tasks. Use `--harnesses opencode hermes pi` for the available mixed session routes. `--count 8 --steps 5 --harnesses opencode` selects the smaller qualification run. Add `--wandb-project` with an existing destination, and provide `WANDB_ENTITY` and credentials through the environment. Without that option, local logs remain enabled.
+
+The output contains `source.jsonl`, `train.jsonl`, `config.yaml` and `provenance.json`. Harbor also contains converted tasks, their vendored verifier code and prepared image metadata. Verifier fields remain outside the model prompt. Preparation rejects skipped Harbor tasks, modified source rows, changed code and missing image pins. It starts no model, sandbox or training job.
+
+## Build and identify the runtime
+
+Use RL's official `docker/Dockerfile`, its selected dependency lock and initialized submodules. Build a Linux ARM64 release image from the reviewed local checkout:
+
+```bash
+cd "$NEMO_RL_ROOT"
+git submodule update --init --recursive
+docker buildx build --platform linux/arm64 --target release \
+  --build-context nemo-rl=. --build-arg NEMO_RL_COMMIT="$RL_REVISION" \
+  -f docker/Dockerfile --tag "$IMAGE_TAG" --push .
+```
+
+Record the resulting immutable image reference as `registry/repository@sha256:...`, then convert that exact image to the cluster's SquashFS format using its supported Enroot workflow. The launcher requires a build receipt JSON with `image`, `platform` (`linux/arm64`), `gym_commit`, `rl_commit`, `gym_lock_sha256`, `rl_lock_sha256` and `squashfs_sha256`. Obtain these from the actual build checkout, lockfiles, image registry and SquashFS bytes. A receipt describes a completed build; copying expected recipe values into a receipt is not build evidence.
+
+The launcher compares that receipt with preparation, hashes the SquashFS, and checks production source files again inside the image. It imports Gym and RL from the image's checked paths. Source mounts do not replace the installed dependencies. A successful preflight still does not prove optimizer, weight-refit or checkpoint behavior.
+
+## Submit one four-GPU node
+
+This recipe targets a whole ARM64 node with four GB300 GPUs, with two GPUs training and two serving vLLM. Both use tensor parallelism of two. It requires at least 32 host CPUs and 128 GiB RAM. Check account, partition, QOS and available hardware before submission; eight-GPU H100 nodes need a different qualified recipe.
+
+Keep the prepared assets, parser, model snapshot, container and both source checkouts under `SHARED_ROOT`. Set `CONTAINER` to the SquashFS, `CONTAINER_PROVENANCE` to its build receipt, and `CONFIG_PATH` to the prepared YAML. Supply the required `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` through the environment. Then run from Gym:
+
+```bash
+export SLURM_ACCOUNT SLURM_PARTITION SHARED_ROOT
+export NEMO_RL_ROOT CONTAINER CONTAINER_PROVENANCE CONFIG_PATH
+export OPENSANDBOX_DOMAIN OPENSANDBOX_API_KEY
+bash scripts/launch_swe_single_agent_turn_training.sh --dry-run
+bash scripts/launch_swe_single_agent_turn_training.sh
+```
+
+The dry run performs host checks and prints the command without submitting. The real invocation uses the selected RL `ray.sub`, one node, and `examples/run_grpo_single_controller.py`. `SLURM_QOS`, `WALLTIME` and `EXP_NAME` are optional. Prepare another arm to change training settings; the launcher accepts no hidden configuration overrides.
+
+## Inspect the evidence
+
+Before training, run the gold, empty-patch and infrastructure-failure verifier controls through the selected routes. Keep incomplete verification masked and report unknown termination causes honestly. During training, preserve full rollout records, token/logprob captures, training masks, retry and cleanup evidence. A call hitting its output limit can trigger RL's existing overlong filtering for the whole rollout, even if a later call succeeds.
+
+Require nonempty trainable tokens, finite loss and gradients, actual optimizer updates, successful refits and step-10/20 model and optimizer checkpoints for the full run. Compare rewards over complete four-update task cycles, per harness and task, with actual throughput and collection time. Checkpoints from the five-update qualification do not satisfy the full-run checkpoint requirement. Neither preparing this recipe nor passing its unit tests is a learning result.
