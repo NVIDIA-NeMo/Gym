@@ -12,8 +12,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import orjson
 import pytest
-from aiohttp import ClientPayloadError
+from aiohttp import ClientPayloadError, ClientResponseError
 
+from nemo_gym.agents.utils.verify_call import masked_verify_failure, verify_route_failure
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_transport import FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, agent_route_failure, failure_report_for
@@ -61,6 +62,17 @@ def verify_transport_masked(task: int = 0) -> dict:
         response=ANSWER,
         **_route_failure_fields(ClientPayloadError("Response payload is not completed")),
     )
+
+
+def verify_http_error_masked(task: int = 0) -> dict:
+    """The row an agent returns from /run when the verifier answered 500: the saved answer, masked by the agent's helper."""
+    error = ClientResponseError(
+        MagicMock(real_url="http://verifier/verify"), (), status=500, message="Internal Server Error"
+    )
+    failure = verify_route_failure(error, operation_id="op", attempt=1)
+    failure.__cause__ = error
+    row = masked_verify_failure({"response": ANSWER}, failure)
+    return ident(task, **row, **{k: v for k, v in _route_failure_fields(error).items() if k.startswith("_ng")})
 
 
 def verifier_unmeasurable(task: int = 0) -> dict:
@@ -138,6 +150,13 @@ def test_the_selector_takes_judge_and_verify_transport_masks_and_ungraded_result
     # No saved answer, or a failures-sidecar row: never selected here.
     assert reverification_cause(saved_row_evidence(verify_transport_masked() | {"response": None})) is None
     assert reverification_cause(saved_row_evidence(verify_transport_masked() | {"_ng_failure_class": "x"})) is None
+
+
+def test_a_masked_verify_http_error_with_a_saved_answer_is_selected() -> None:
+    row = verify_http_error_masked()
+
+    assert row["failure_kind"] == "judge_failed" and row["mask_sample"] is True
+    assert reverification_cause(saved_row_evidence(row)) == "judge"
 
 
 def test_a_saved_grading_record_artifact_or_settlement_is_recorded_grading() -> None:
@@ -327,6 +346,17 @@ async def test_a_verify_transport_masked_result_is_reverified_and_settled_at_com
     assert store.manifest.pending_rejudge == {} and store.coverage()["masked"] == 0
     assert due_judge_failures(output) == []  # settled once; the pass judges nothing again
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+
+
+async def test_a_masked_verify_http_error_is_settled_by_verify_alone(tmp_path, verifier) -> None:
+    output = _run(tmp_path, [verify_http_error_masked()])
+    (identity,) = due_judge_failures(output)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    assert verifier["posted"] == [("rs", "/verify")]  # the saved answer graded again; no policy call
+    settled = _selected(output)[0][identity]
+    assert settled["reward"] == 1.0 and not settled.get("mask_sample") and settled["response"] == ANSWER
 
 
 async def test_an_ungraded_result_is_reverified_and_one_with_a_grading_artifact_is_not(tmp_path, verifier) -> None:
