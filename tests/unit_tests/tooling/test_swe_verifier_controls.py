@@ -117,6 +117,30 @@ def test_redaction_preserves_json_and_numeric_token_evidence(tmp_path, monkeypat
     }
 
 
+def test_redaction_preserves_false_test_names_and_tokenizer_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("TOKENIZERS_PARALLELISM", "false")
+    monkeypatch.setenv("MAX_NEW_TOKENS", "1024")
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-credential-do-not-retain")
+    path = tmp_path / "receipt.json"
+    runner.write_json(
+        path,
+        {
+            "test_results": {"test_agent_enabled_false": "PASSED", "test_keep_false": "FAILED"},
+            "test_ids": ["test_agent_enabled_false", "test_keep_false"],
+            "tokenizers_parallelism": "false",
+            "output_limit": "1024",
+            "error": "SDK echoed test-credential-do-not-retain",
+        },
+    )
+    assert json.loads(path.read_text()) == {
+        "test_results": {"test_agent_enabled_false": "PASSED", "test_keep_false": "FAILED"},
+        "test_ids": ["test_agent_enabled_false", "test_keep_false"],
+        "tokenizers_parallelism": "false",
+        "output_limit": "1024",
+        "error": "SDK echoed [REDACTED]",
+    }
+
+
 def timeout_result(root, *, source=False):
     attempts = []
     for number in (1, 2):
@@ -227,7 +251,7 @@ def test_source_runner_uses_real_http_routes_with_offline_sandboxes(tmp_path, mo
     assert len(sandboxes) == 2
     assert all(sandbox.stop.await_count == 1 for sandbox in sandboxes)
     assert (
-        json.loads((output / "verifier" / _VERIFY["instance_id"] / "attempt-1" / "verification.json").read_text())[
+        json.loads((Path(receipt["result"]["verification_logs_dir"]) / "attempt-1" / "verification.json").read_text())[
             "completed"
         ]
         is True
@@ -260,6 +284,7 @@ def test_full_matrix_keeps_denominator_and_requires_cleanup(prepared, tmp_path, 
             }
         )
         if source:
+            result["verification_logs_dir"] = str(root)
             runner.write_json(
                 output / "result.json",
                 {

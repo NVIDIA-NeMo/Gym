@@ -14,20 +14,26 @@
 # limitations under the License.
 """Episode sessions and the agent-run seed, through the server's HTTP routes with a fake sandbox."""
 
+import asyncio
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.client import ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
 from resources_servers.swe_rebench import app as swe_rebench_app
-from resources_servers.swe_rebench.app import SWERebenchResourcesServer, SWERebenchResourcesServerConfig
+from resources_servers.swe_rebench.app import (
+    SWERebenchResourcesServer,
+    SWERebenchResourcesServerConfig,
+    SWERebenchVerifyRequest,
+)
 from resources_servers.swe_rebench.verification import TEST_OUTPUT_BEGIN, VerificationResult, run_verification
 from resources_servers.swebench.patch_capture import CaptureCommandError, PatchCapture
 
@@ -138,7 +144,7 @@ def test_agent_run_seed_still_returns_the_sandbox_handle(monkeypatch: MonkeyPatc
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=_ROW)
         assert seeded.status_code == 200, seeded.text
-        assert seeded.json() == {"sandbox_handle": "sb-1"}
+        assert seeded.json() == {"sandbox_handle": "sb-1", "workdir": "/moto"}
         verified = client.post("/verify", json=_VERIFY)
         assert verified.status_code == 200, verified.text
         assert verified.json()["reward"] == 1.0
@@ -249,9 +255,57 @@ def test_signal_cutoff_retries_and_masks_through_real_verifier(
         for sandbox in sandboxes:
             sandbox.stop.assert_awaited_once()
     for attempt in (1, 2):
-        logs = tmp_path / _ROW["instance_id"] / f"attempt-{attempt}"
+        logs = Path(result["verification_logs_dir"]) / f"attempt-{attempt}"
         assert json.loads((logs / "verification.json").read_text())["sandbox_id"] == f"sb-{attempt + 1}"
         assert json.loads((logs / "exec_result.json").read_text())["return_code"] == -1
+
+
+async def test_concurrent_verifications_retain_separate_attempts(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    server, sandboxes = _server(monkeypatch)
+    server.config.verification_log_dir = tmp_path
+    server.config.is_verifying_golden_patch = True
+    create = SWERebenchResourcesServer._create_sandbox
+
+    async def interrupted(*args, **kwargs):
+        sandbox = await create(*args, **kwargs)
+        session_id = kwargs["verifier_session_id"]
+
+        async def execute(*args, **kwargs):
+            await asyncio.sleep(0.01)
+            return SandboxExecResult(
+                stdout=f"{TEST_OUTPUT_BEGIN}\n{session_id}\n", stderr="signal: killed", return_code=-1
+            )
+
+        sandbox.exec.side_effect = execute
+        return sandbox
+
+    monkeypatch.setattr(SWERebenchResourcesServer, "_create_sandbox", interrupted)
+    monkeypatch.setattr(swe_rebench_app, "run_verification", run_verification)
+    responses = await asyncio.gather(
+        *(
+            server._verify(
+                Request({"type": "http", "session": {SESSION_ID_KEY: session_id}}),
+                SWERebenchVerifyRequest.model_validate(_VERIFY),
+            )
+            for session_id in ("generation-1", "generation-2")
+        )
+    )
+    assert len({response.verification_logs_dir for response in responses}) == 2
+    ids = []
+    for response in responses:
+        assert response.evaluation_completed is False and response.verification_attempts == 2
+        for attempt in (1, 2):
+            logs = Path(response.verification_logs_dir) / f"attempt-{attempt}"
+            record = json.loads((logs / "verification.json").read_text())
+            assert record["resources_session_id"] == response.verification_session_id
+            assert record["instance_id"] == _ROW["instance_id"]
+            assert (logs / "test_output.log").read_text().splitlines()[1] == response.verification_session_id
+            assert json.loads((logs / "exec_result.json").read_text())["return_code"] == -1
+            ids.append(record["sandbox_id"])
+        await server._stop_verifier_sandbox(response.verification_session_id)
+    assert len(set(ids)) == 4
+    for sandbox in sandboxes:
+        sandbox.stop.assert_awaited_once()
 
 
 def test_retry_after_task_stop_failure_reuses_capture(monkeypatch: MonkeyPatch) -> None:

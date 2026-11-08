@@ -46,8 +46,13 @@ def write_json(path: Path, value: object) -> None:
 
 
 def redact(text: str) -> str:
+    """Match credential field names, not settings such as TOKENIZERS_PARALLELISM."""
     for name, value in os.environ.items():
-        if value and re.search(r"KEY|TOKEN|PASSWORD|SECRET", name, re.IGNORECASE):
+        if value and re.search(
+            r"(?:^|_)(?:API_KEY|PRIVATE_KEY|SECRET_KEY|SECRET_ACCESS_KEY|TOKEN|PASSWORD|SECRET)$",
+            name,
+            re.IGNORECASE,
+        ):
             text = text.replace(value, "[REDACTED]")
     return text
 
@@ -411,9 +416,9 @@ def run_controls(prepared: Path, provider: Path, output: Path, *, concurrency: i
             code, receipt = -1, {"error": f"{type(exc).__name__}: {exc}"}
             write_json(target / "runner-error.json", receipt)
         cleanup = receipt.get("cleanup", {})
-        assessment = assess_control(
-            receipt.get("result", {}), case, source_logs=target / "verifier" / tasks[index]["instance_id"]
-        )
+        result = receipt.get("result", {})
+        logs = result.get("verification_logs_dir")
+        assessment = assess_control(result, case, source_logs=Path(logs) if logs else None)
         passed = (
             code == 0
             and assessment["passed"]

@@ -33,6 +33,7 @@ from shlex import quote
 from time import time
 from traceback import format_exc
 from typing import Any
+from uuid import uuid4
 
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
@@ -143,6 +144,7 @@ class SWERebenchSeedSessionRequest(SWERebenchInstanceRequest, BaseSeedSessionReq
 
 class SWERebenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
+    workdir: str
 
 
 class SWERebenchVerifyRequest(SWERebenchInstanceRequest, BaseVerifyRequest):
@@ -152,6 +154,8 @@ class SWERebenchVerifyRequest(SWERebenchInstanceRequest, BaseVerifyRequest):
 class SWERebenchVerifyResponse(BaseVerifyResponse):
     evaluation_completed: bool
     verification_attempts: int = 0
+    verification_logs_dir: str | None = None
+    verification_session_id: str | None = None
     resolved: bool
     patch_applied: bool
     instance_id: str
@@ -293,7 +297,8 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 await self._stop_failed_seed_sandbox(session_id)
                 raise
             return SWERebenchSeedSessionResponse(
-                sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id)
+                sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id),
+                workdir=repo_directory(body.repo),
             )
 
     async def _start_task_sandbox(self, session_id: str, body: SWERebenchInstanceRequest) -> str:
@@ -378,6 +383,9 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
 
         inputs = self._inputs(body, patch)
         log_dir = (self.config.verification_log_dir or (Path(__file__).parent / "logs")) / body.instance_id
+        if self.config.verification_log_dir:
+            # Repeated visits and concurrent generations share the instance ID, but never their evidence.
+            log_dir = self.config.verification_log_dir / uuid4().hex
 
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the
@@ -439,7 +447,12 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                     await self._stop_verifier_sandbox(session_id)
                 if self.config.verification_log_dir:
                     await asyncio.to_thread(
-                        self._write_attempt_result, log_dir / f"attempt-{attempt}", result, sandbox
+                        self._write_attempt_result,
+                        log_dir / f"attempt-{attempt}",
+                        result,
+                        sandbox,
+                        session_id=session_id,
+                        instance_id=body.instance_id,
                     )
             if result.completed:
                 break
@@ -458,6 +471,8 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
                 "verification_attempts": attempt,
+                "verification_logs_dir": str(log_dir) if self.config.verification_log_dir else None,
+                "verification_session_id": session_id if self.config.verification_log_dir else None,
                 "resolved": result.resolved,
                 "patch_applied": result.patch_applied,
                 "instance_id": body.instance_id,
@@ -478,12 +493,19 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         )
 
     @staticmethod
-    def _write_attempt_result(log_dir: Path, result: VerificationResult, sandbox: AsyncSandbox | None) -> None:
+    def _write_attempt_result(
+        log_dir: Path, result: VerificationResult, sandbox: AsyncSandbox | None, *, session_id: str, instance_id: str
+    ) -> None:
         """Retain each retry's outcome next to its raw test output when logging is requested."""
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
             sandbox_id = getattr(getattr(sandbox, "_handle", None), "sandbox_id", None)
-            (log_dir / "verification.json").write_text(json.dumps(asdict(result) | {"sandbox_id": sandbox_id}) + "\n")
+            record = asdict(result) | {
+                "sandbox_id": sandbox_id,
+                "resources_session_id": session_id,
+                "instance_id": instance_id,
+            }
+            (log_dir / "verification.json").write_text(json.dumps(record) + "\n")
         except OSError:
             LOGGER.exception("Could not record verification outcome under %s", log_dir)
 
