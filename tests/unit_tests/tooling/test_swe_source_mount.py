@@ -247,7 +247,7 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     (binary / "uv").chmod(0o755)
     (binary / "sbatch").write_text(
         '#!/bin/sh\nprintf "%s\\n" "$MOUNTS" "$UV_PROJECT_ENVIRONMENT" "$NEMO_RL_VENV_DIR" '
-        '"$NEMO_GYM_VENV_DIR" "$UV_NO_SYNC" "$COMMAND" > "$SUBMISSION_RECEIPT"\n'
+        '"$NEMO_GYM_VENV_DIR" "$UV_NO_SYNC" "$COMMAND" > "$SUBMISSION_RECEIPT"\nprintf "%s\\n" "$@" >> "$SUBMISSION_RECEIPT"\n'
     )
     (binary / "sbatch").chmod(0o755)
     receipt = tmp_path / "receipt"
@@ -276,3 +276,7 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     ]
     assert "uv run --no-sync" in lines[5] and "--runtime" in lines[5]
     assert "test-key" not in result.stdout
+    assert f"--chdir={tmp_path}" in lines[6:]
+    assert f"--output={tmp_path}/slurm/slurm-%j.out" in lines[6:]
+    assert f"--error={tmp_path}/slurm/slurm-%j.err" in lines[6:]
+    assert (tmp_path / "slurm").is_dir()
