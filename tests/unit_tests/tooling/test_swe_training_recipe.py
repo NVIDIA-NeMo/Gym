@@ -40,6 +40,7 @@ def test_disabled_wandb_passes_actual_rl_schema(tmp_path, monkeypatch, route, mo
     config = recipe.load_rl_config(Path(rl.__file__).resolve().parent.parent)
     config.policy.model_name = str(tmp_path / recipe.MODELS[model][1])
     config.policy.megatron_cfg.expert_model_parallel_size = recipe.MODELS[model][2]
+    assert config.policy.megatron_cfg.bias_activation_fusion is False
     recipe.configure_gym(
         config,
         harnesses=["opencode"],
@@ -480,6 +481,56 @@ def test_preflight_checks_source_helpers_and_actual_model_bytes(assets, mutation
     else:
         with pytest.raises(ValueError):
             check.check_files(prepared, {"gym": root}, manifest)
+
+
+@pytest.mark.parametrize("fused", [False, True])
+def test_preflight_rejects_nemotron_fusion_before_worker_start(hardware_assets, monkeypatch, fused):
+    prepared, root, manifest = hardware_assets
+    model = Path(manifest["model"]["path"])
+    model_config = model / "config.json"
+    model_config.write_text(json.dumps({"model_type": "nemotron_h", "mlp_hidden_act": "relu2"}))
+    manifest["model"]["files"]["config.json"] = {
+        "algorithm": "sha256",
+        "digest": check.file_sha256(model_config),
+    }
+    config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
+    assert config.policy.megatron_cfg.bias_activation_fusion is False
+    config.policy.megatron_cfg.bias_activation_fusion = fused
+    OmegaConf.save(config, prepared / "config.yaml")
+    manifest["files_sha256"]["config.yaml"] = check.file_sha256(prepared / "config.yaml")
+    (prepared / "provenance.json").write_text(json.dumps(manifest))
+    container = prepared / "image.sqsh"
+    container.write_bytes(b"test container bytes")
+    image = {key: manifest[key] for key in ("gym_commit", "rl_commit", "gym_lock_sha256", "rl_lock_sha256")}
+    image.update(
+        platform="linux/arm64", image="example/image@sha256:" + "b" * 64, squashfs_sha256=check.file_sha256(container)
+    )
+    image_path = prepared / "image.json"
+    image_path.write_text(json.dumps(image))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check",
+            "--prepared",
+            str(prepared),
+            "--rl-root",
+            str(root),
+            "--gym-root",
+            str(root),
+            "--container",
+            str(container),
+            "--container-provenance",
+            str(image_path),
+        ],
+    )
+    # Exact asset hashes alone cannot detect this semantic conflict. The normal
+    # host preflight must reject it, before importing any GPU worker libraries.
+    if fused:
+        with pytest.raises(ValueError, match="bias_activation_fusion=false"):
+            check.main()
+    else:
+        check.main()
 
 
 def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tmp_path):

@@ -11,7 +11,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 
 @dataclass(frozen=True)
@@ -99,6 +99,25 @@ def check_files(prepared: Path, roots: dict[str, Path], manifest: dict) -> None:
         raise ValueError("Verifier parser source changed")
 
 
+def check_megatron_activation(config: DictConfig, *, model_path: Path) -> None:
+    """Reject Nemotron-H's unsupported bias/activation fusion before submitting workers.
+
+    Bridge selects squared ReLU for this architecture. RL then applies the recipe's
+    fusion flag, so the generic RL default can invalidate an otherwise valid provider.
+    This checks that specific conflict without importing GPU libraries or loading weights.
+    """
+    model = json.loads((model_path / "config.json").read_text())
+    if (
+        model.get("model_type") == "nemotron_h"
+        and config.policy.megatron_cfg.enabled
+        and config.policy.megatron_cfg.bias_activation_fusion
+    ):
+        raise ValueError(
+            "Nemotron-H uses squared ReLU; set policy.megatron_cfg.bias_activation_fusion=false. "
+            "The fused bias/activation kernel does not support this activation."
+        )
+
+
 def check_rl_config(prepared: Path) -> None:
     """Validate the complete controller schema in the selected RL driver environment.
 
@@ -149,6 +168,7 @@ def main() -> None:
                 raise ValueError(f"Runtime asset lies outside the shared mount: {path}")
     check_files(args.prepared, roots, manifest)
     config = OmegaConf.load(args.prepared / "config.yaml")
+    check_megatron_activation(config, model_path=Path(manifest["model"]["path"]))
     generation = config.policy.generation.colocated
     if (
         config.cluster.num_nodes != 1

@@ -57,6 +57,8 @@ policy:
   megatron_cfg:
     enabled: true
     activation_checkpointing: true
+    # Nemotron-H uses squared ReLU, which bias_activation_fusion does not support.
+    bias_activation_fusion: false
     tensor_model_parallel_size: 2
     pipeline_model_parallel_size: 1
     context_parallel_size: 1
