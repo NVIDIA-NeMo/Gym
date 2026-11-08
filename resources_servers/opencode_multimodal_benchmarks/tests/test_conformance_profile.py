@@ -33,7 +33,9 @@ def test_conformance_uses_eval_profile_and_explicit_sandbox(tmp_path, monkeypatc
     )
     assert HARNESSES["opencode_multimodal"] == "OpenCodeMultimodalEvalAgent"
     assert agent.entrypoint == "eval.py" and agent.command == "/installed/opencode"
-    assert agent.max_turns == 65 and agent.turn_budget.regular_turns == 55
+    assert agent.max_turns == 65
+    # The controlled probe model cannot enforce the production visual gateway budget.
+    assert agent.turn_budget is None
     assert agent.final_answer_reserve is None and agent.system_prompt is None
     assert agent.max_images is None and not agent.compaction_auto
     assert agent.resources_server.name == "probe_resources"
