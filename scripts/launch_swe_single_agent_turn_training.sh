@@ -58,9 +58,10 @@ export NRL_VLLM_ASYNC_TIMEOUT_SECONDS=1800
 driver=(uv run --no-sync examples/run_grpo_single_controller.py --config "$CONFIG_PATH")
 printf -v driver_command '%q ' "${driver[@]}"
 export COMMAND="cd /opt/nemo-rl && exec $driver_command"
+# Exclusivity alone does not reserve node memory; checkpoint staging needs more than a fixed 128 GiB cap.
 submit=(sbatch --nodes=1 --exclusive --gres="gpu:$GPUS_PER_NODE" --account="$SLURM_ACCOUNT" --partition="$SLURM_PARTITION"
     --time="${WALLTIME:-4:00:00}" --job-name="${EXP_NAME:-swe-env-server}" --dependency=
-    --cpus-per-task=32 --mem=128G --chdir="$output_dir"
+    --cpus-per-task=32 --mem=0 --chdir="$output_dir"
     --output="$BASE_LOG_DIR/slurm-%j.out" --error="$BASE_LOG_DIR/slurm-%j.err")
 if [[ -n "$excluded_nodes" ]]; then submit+=(--exclude="$excluded_nodes"); fi
 if [[ -n "${SLURM_QOS:-}" ]]; then submit+=(--qos="$SLURM_QOS"); fi

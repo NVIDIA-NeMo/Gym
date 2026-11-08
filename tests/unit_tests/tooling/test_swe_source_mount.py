@@ -297,6 +297,8 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     assert "test-key" not in result.stdout
     assert "--exclude=unhealthy-node" in lines[6:]
     assert "--time=02:00:00" in lines[6:]
+    assert "--exclusive" in lines[6:] and "--mem=0" in lines[6:]
+    assert "--mem=128G" not in lines[6:]
     assert f"--chdir={tmp_path}" in lines[6:]
     assert f"--output={tmp_path}/slurm/slurm-%j.out" in lines[6:]
     assert f"--error={tmp_path}/slurm/slurm-%j.err" in lines[6:]
