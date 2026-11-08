@@ -337,7 +337,10 @@ async def test_native_events_outcome_and_shared_command_options(monkeypatch, tim
     assert response.output[0].content[0].text == "partial"
     assert response.status == status
     assert response.usage.total_tokens == 12
-    assert response.metadata is None  # no adapter-specific runtime policy fields
+    if status == "failed":
+        assert json.loads(response.metadata["ng_agent_outcome"]) == {"failure_kind": "unknown"}
+    else:
+        assert response.metadata is None
     assert "model_call_ownership_unavailable" in [gap.code for gap in state.observations.gaps]
     [sandbox] = [record for record in state.observations.records if record.kind == "sandbox"]
     assert sandbox.sandbox_id == "actual-sandbox-id"

@@ -180,7 +180,10 @@ def inspect_behavior(
     """Check saved evidence and observations against explicit test expectations."""
     results = Results()
     attempts = (witness or {}).get("attempts", [])
-    statuses = [a["status_code"] for a in attempts]
+    # Older witnesses had no purpose; keep every such attempt in the policy
+    # sequence rather than inferring an exemption from its tools or response.
+    policy_attempts = [a for a in attempts if a.get("purpose", "policy") == "policy"]
+    statuses = [a["status_code"] for a in policy_attempts]
     agent_responses = (witness or {}).get("agent_responses", [])
     tools = (witness or {}).get("tool_calls", [])
     available = witness is not None
@@ -220,27 +223,46 @@ def inspect_behavior(
     )
     results.run(
         BehavioralCheck(
+            id="model.attempt_purpose",
+            tier="P0",
+            evidence=("TE-1",),
+            location="witness.json",
+            reason="attempt purpose must identify policy, session-title or context-compaction traffic",
+            predicate=lambda: all(
+                a.get("purpose", "policy") in ("policy", "session_title", "context_compaction") for a in attempts
+            ),
+            available=available,
+        )
+    )
+    results.run(
+        BehavioralCheck(
             id="model.error_sequence",
             tier="P0",
             evidence=("TE-1",),
             location="witness.json",
-            reason="not all prescribed model failures were observed",
+            reason="not all prescribed policy model failures were observed",
             predicate=lambda: statuses[: len(http_errors)] == list(http_errors),
             available=available,
             applies=bool(http_errors),
         )
     )
-    # Preserve the original probe's comparison scope: repeated error attempts, not recovery requests.
     results.run(
         BehavioralCheck(
             id="model.retry_request",
             tier="P0",
             evidence=("TE-1",),
             location="witness.json",
-            reason="retry scenario did not repeat the same request body",
-            predicate=lambda: all((a["request"] == attempts[0]["request"] for a in attempts[1 : len(http_errors)])),
-            available=len(attempts) >= len(http_errors),
-            applies=len(http_errors) > 1,
+            reason="policy failures must be followed by a successful retry of the same request body",
+            predicate=lambda: (
+                len(policy_attempts) > len(http_errors)
+                and statuses[: len(http_errors)] == list(http_errors)
+                and statuses[len(http_errors)] == 200
+                and all(
+                    a["request"] == policy_attempts[0]["request"] for a in policy_attempts[1 : len(http_errors) + 1]
+                )
+            ),
+            available=available,
+            applies=bool(http_errors) and not terminal_error,
         )
     )
     results.run(
@@ -252,7 +274,7 @@ def inspect_behavior(
             reason="the EnvironmentServer must receive a failed response retaining the model error and "
             "ng_agent_outcome with model_request_error and the witnessed HTTP status",
             predicate=lambda: (
-                _terminal_error_reported(attempts, agent_responses, http_errors[-1]) if terminal_error else True
+                _terminal_error_reported(policy_attempts, agent_responses, http_errors[-1]) if terminal_error else True
             ),
             available=available,
             applies=terminal_error,

@@ -500,6 +500,12 @@ class SessionTitleObservation(ObservationModel):
     kind: Literal["session_title"] = "session_title"
     invocation_id: str = Field(min_length=1)
     model_calls: list[ModelCallRef] = Field(min_length=1)
+    included_in_response_usage: bool | None = Field(
+        default=None,
+        strict=True,
+        description="Whether the harness's returned response usage includes these title calls; None means unknown. "
+        "This does not change their captured usage or invocation ownership.",
+    )
 
 
 class ObservationGap(ObservationModel):

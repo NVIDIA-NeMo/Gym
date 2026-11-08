@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -434,7 +435,11 @@ def extract_claude_code_observations(
             if role == "assistant":
                 response_id = message.get("id")
                 model_call = None
-                if not isinstance(response_id, str) or not response_id:
+                if message.get("model") == "<synthetic>":
+                    # Native local errors retain their text below, but their UUID
+                    # is not a model-server response and must never become a ref.
+                    pass
+                elif not isinstance(response_id, str) or not response_id:
                     add_gap("model_response_id_missing")
                 elif model_ref is not None and response_id not in seen_response_ids:
                     model_call = ModelCallRef(model_ref=model_ref, response_id=response_id)
@@ -728,6 +733,7 @@ def associate_claude_code_title_calls(
     orphan_children = {gap.invocation_id for gap in bundle.gaps if gap.code == "subagent_parent_unavailable"}
     call_counts = Counter(call.model_call_id for call in calls)
     call_indices = {call.model_call_id: call.call_index for call in calls}
+    validated_titles: set[tuple[str, str]] = set()
 
     def matches(reference: ModelCallRef, call: ModelCallRecord) -> bool:
         if reference.model_call_id:
@@ -786,7 +792,7 @@ def associate_claude_code_title_calls(
             for record in result.records
             if isinstance(record, SessionTitleObservation) and record.invocation_id == owner.invocation_id
         ]
-        if len(titles) > 1:
+        if len(titles) > 1 or (titles and titles[0].included_in_response_usage is True):
             continue
         reference = ModelCallRef(
             model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id
@@ -797,8 +803,189 @@ def associate_claude_code_title_calls(
                 title.model_calls.append(reference)
             title.model_calls.sort(key=lambda ref: call_indices.get(ref.model_call_id, math.inf))
         else:
-            result.records.append(SessionTitleObservation(invocation_id=owner.invocation_id, model_calls=[reference]))
+            result.records.append(
+                SessionTitleObservation(
+                    invocation_id=owner.invocation_id, model_calls=[reference], included_in_response_usage=False
+                )
+            )
+        validated_titles.add((owner.invocation_id, call.model_call_id))
         if not any(matches(existing, call) for existing in owner.model_calls):
+            owner.model_calls.append(reference)
+    for title in result.records:
+        if (
+            isinstance(title, SessionTitleObservation)
+            and title.included_in_response_usage is None
+            and all((title.invocation_id, ref.model_call_id) in validated_titles for ref in title.model_calls)
+        ):
+            title.included_in_response_usage = False
+    return result
+
+
+def _failed_call_session(call: ModelCallRecord) -> str | None:
+    metadata = (call.request or {}).get("metadata")
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("user_id"), str):
+        return None
+    try:
+        identity = json.loads(metadata["user_id"])
+    except ValueError:
+        return None
+    if not isinstance(identity, dict):
+        return None
+    session = identity.get("session_id")
+    if (
+        not isinstance(session, str)
+        or not session
+        or (call.client_session_id is not None and call.client_session_id != session)
+        or any(key in data for data in (identity, metadata, call.request) for key in ("agentId", "agent_id"))
+    ):
+        return None
+    return session
+
+
+def _matches_initial_error(owner: AgentInvocation, call: ModelCallRecord) -> bool:
+    """Match an explicitly observed terminal API error to its first user request."""
+    if owner.status != "failed" or owner.error_type != MODEL_REQUEST_ERROR or len(owner.conversation) != 2:
+        return False
+    user, error = [item.model_dump(mode="json") for item in owner.conversation]
+    if user.get("role") != "user" or error.get("role") != "assistant" or not isinstance(user.get("content"), str):
+        return False
+    content = error.get("content")
+    if not isinstance(content, list) or len(content) != 1 or content[0].get("type") != "output_text":
+        return False
+    match = re.fullmatch(r"API Error: ([45]\d{2}) (.+)", content[0].get("text", ""), re.DOTALL)
+    if match is None or int(match[1]) != call.status_code:
+        return False
+    try:
+        error_body = json.loads(match[2])
+    except ValueError:
+        return False
+    if not isinstance(error_body, dict) or "error" not in error_body or error_body != call.response:
+        return False
+    messages = (call.request or {}).get("messages")
+    if (
+        not isinstance(messages, list)
+        or len(messages) != 1
+        or not isinstance(messages[0], dict)
+        or messages[0].get("role") != "user"
+    ):
+        return False
+    blocks = messages[0].get("content")
+    if isinstance(blocks, str):
+        return blocks == user["content"]
+    if not isinstance(blocks, list) or not blocks or any(not isinstance(block, dict) for block in blocks):
+        return False
+    # Claude prepends its system-context reminder to the original user text.
+    return (
+        blocks[-1].get("type") == "text"
+        and blocks[-1].get("text") == user["content"]
+        and all(
+            block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            and block["text"].startswith("<system-reminder>\n")
+            and block["text"].endswith("</system-reminder>\n\n")
+            for block in blocks[:-1]
+        )
+    )
+
+
+def associate_claude_code_failed_calls(
+    bundle: AgentObservationBundle, calls: list[ModelCallRecord], *, model_ref: ModelServerRef
+) -> AgentObservationBundle:
+    """Join failed attempts only through an exact owned retry or a bounded first-call API error."""
+    if bundle.source != SOURCE:
+        return bundle
+    result = bundle.model_copy(deep=True)
+    owners = [record for record in result.records if isinstance(record, AgentInvocation)]
+    if len({owner.invocation_id for owner in owners}) != len(owners):
+        return bundle
+
+    def matches(ref: ModelCallRef, call: ModelCallRecord) -> bool:
+        if ref.model_call_id:
+            return ref.model_call_id == call.model_call_id
+        return ref.model_ref == call.model_ref and ref.response_id is not None and ref.response_id == call.response_id
+
+    purpose_records = [
+        record
+        for record in result.records
+        if isinstance(record, (SessionTitleObservation, ContextCompactionObservation))
+    ]
+    counts = Counter(call.model_call_id for call in calls)
+    failed = [
+        call
+        for call in calls
+        if call.model_ref == model_ref
+        and call.dialect == "messages"
+        and call.model_call_id
+        and counts[call.model_call_id] == 1
+        and call.status_code is not None
+        and 400 <= call.status_code <= 599
+        and call.request is not None
+        and not _is_title_request(call.request)
+        and not _is_compaction_request(call.request)
+        and not any(matches(ref, call) for record in [*owners, *purpose_records] for ref in record.model_calls)
+    ]
+    for call in sorted(failed, key=lambda item: item.call_index):
+        session = _failed_call_session(call)
+        candidates = [
+            owner
+            for owner in owners
+            if owner.invocation_id == session
+            and owner.parent_invocation_id is None
+            and owner.spawned_by_tool_call_id is None
+        ]
+        if len(candidates) != 1 or any(
+            gap.code == "subagent_parent_unavailable" and gap.invocation_id == session for gap in bundle.gaps
+        ):
+            continue
+        owner = candidates[0]
+        anchors = [
+            (candidate, ref)
+            for candidate in owners
+            for ref in candidate.model_calls
+            for success in calls
+            if matches(ref, success)
+            and success.model_ref == model_ref
+            and success.status_code is not None
+            and 200 <= success.status_code < 300
+            and success.error_category is None
+            and (ref.model_ref is None or ref.model_ref == success.model_ref)
+            and (ref.response_id is None or ref.response_id == success.response_id)
+            and _failed_call_session(success) == session
+            and success.call_index > call.call_index
+            and success.request == call.request
+            and not any(
+                matches(helper_ref, success) for record in purpose_records for helper_ref in record.model_calls
+            )
+        ]
+        anchor = anchors[0][1] if len(anchors) == 1 and anchors[0][0] is owner else None
+        if anchor is None:
+            title_refs = [
+                ref
+                for record in purpose_records
+                if isinstance(record, SessionTitleObservation)
+                for ref in record.model_calls
+            ]
+            if (
+                len(owners) != 1
+                or bundle.gaps
+                or any(
+                    isinstance(record, (ToolCallObservation, ContextCompactionObservation))
+                    for record in bundle.records
+                )
+                or any(ref not in title_refs for ref in owner.model_calls)
+                or not _matches_initial_error(owner, call)
+                or sum(
+                    _failed_call_session(other) == session and _matches_initial_error(owner, other) for other in failed
+                )
+                != 1
+            ):
+                continue
+        reference = ModelCallRef(
+            model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id
+        )
+        if anchor is not None:
+            owner.model_calls.insert(owner.model_calls.index(anchor), reference)
+        else:
             owner.model_calls.append(reference)
     return result
 

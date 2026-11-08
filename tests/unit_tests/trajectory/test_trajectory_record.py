@@ -371,7 +371,10 @@ def test_join_model_calls_resolves_compaction_boundaries() -> None:
 
 
 @pytest.mark.parametrize("version", ["1.0", "2.0"])
-def test_title_calls_keep_identity_and_unknown_usage_through_join_and_serialization(version: str) -> None:
+@pytest.mark.parametrize("scope", [False, True, None])
+def test_title_calls_keep_identity_and_unknown_usage_through_join_and_serialization(
+    version: str, scope: bool | None
+) -> None:
     model_ref = ModelServerRef(name="policy", type="responses_api_models")
     reference = ModelCallRef(model_ref=model_ref, response_id="title-response")
     bundle = AgentObservationBundle(
@@ -379,7 +382,7 @@ def test_title_calls_keep_identity_and_unknown_usage_through_join_and_serializat
         source="claude_code",
         records=[
             AgentInvocation(invocation_id="root", model_calls=[reference]),
-            SessionTitleObservation(invocation_id="root", model_calls=[reference]),
+            SessionTitleObservation(invocation_id="root", model_calls=[reference], included_in_response_usage=scope),
         ],
     )
     call = ModelCallRecord(model_call_id="title-call", model_ref=model_ref, response_id="title-response", call_index=0)
@@ -387,9 +390,18 @@ def test_title_calls_keep_identity_and_unknown_usage_through_join_and_serializat
     restored = AgentObservationBundle.model_validate(joined.model_dump(mode="json"))
     assert restored.records[0].model_calls == restored.records[1].model_calls
     assert restored.records[1].model_calls[0].model_call_id == "title-call"
+    assert restored.records[1].included_in_response_usage is scope
     assert restored.gaps == []
     assert bundle.records[1].model_calls[0].model_call_id is None
     assert call.tokens_in is None and call.tokens_out is None
+
+
+@pytest.mark.parametrize("scope", [0, 1, "false", "true", "0", "1", [], {}])
+def test_title_usage_scope_requires_explicit_boolean(scope: object) -> None:
+    with pytest.raises(ValueError):
+        SessionTitleObservation.model_validate(
+            {"invocation_id": "root", "model_calls": [{"model_call_id": "title"}], "included_in_response_usage": scope}
+        )
 
 
 @pytest.mark.parametrize("owner", [None, "other"])

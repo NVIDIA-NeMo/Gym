@@ -119,13 +119,31 @@ def test_claude_title_detection_requires_observed_contract(tmp_path, mismatch):
         assert probe.violations == ["harness did not advertise a supported shell tool"]
 
 
-def test_title_helper_keeps_existing_http_error_schedule(tmp_path):
-    probe = Probe(next(s for s in SCENARIOS if s.name == "retry_429"), tmp_path)
+@pytest.mark.parametrize("scenario_name", ["retry_429", "retry_500", "model_error"])
+def test_title_helpers_do_not_consume_policy_error_schedule(tmp_path, scenario_name):
+    scenario = next(s for s in SCENARIOS if s.name == scenario_name)
+    probe = Probe(scenario, tmp_path)
+    statuses = (*scenario.http_errors, 400 if scenario.terminal_error else 200)
     with TestClient(probe.model_app()) as client:
-        for status in (429, 429, 200):
-            assert client.post("/v1/messages", json=title_body(False)).status_code == status
-    assert [attempt["status_code"] for attempt in probe.attempts] == [429, 429, 200]
-    assert not probe.finished and not probe.tool_calls
+        for status in statuses:
+            assert client.post("/ng-rollout/0-0/v1/messages", json=title_body(False)).status_code == 200
+            assert client.post("/ng-rollout/0-0/v1/messages", json=messages_body(False)).status_code == status
+        assert client.post("/ng-rollout/0-0/v1/messages", json=title_body(False)).status_code == 200
+    assert [attempt["purpose"] for attempt in probe.attempts] == [
+        *[purpose for _ in statuses for purpose in ("session_title", "policy")],
+        "session_title",
+    ]
+    assert [a["status_code"] for a in probe.attempts if a["purpose"] == "policy"] == list(statuses)
+    assert not probe.finished and len(probe.tool_calls) == int(not scenario.terminal_error)
+    captures = [row for _, row in json_rows(tmp_path / "capture/0-0.capture.jsonl")]
+    assert len(captures) == len(probe.attempts)
+    assert [row["request"] for row in captures] == [attempt["request"] for attempt in probe.attempts]
+    for index, capture in enumerate(captures):
+        call = build_model_call_record(capture, call_index=index)
+        if call.status_code >= 400:
+            assert call.tokens_in is call.tokens_out is None
+        else:
+            assert call.tokens_in == 20 + index and call.tokens_out == 8
 
 
 def test_title_helper_does_not_allow_task_requests_after_final_answer(tmp_path):
@@ -140,16 +158,21 @@ def test_title_helper_does_not_allow_task_requests_after_final_answer(tmp_path):
 
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "retry_429", "retry_500", "usage_omitted"])
-def test_messages_tools_retries_and_usage_match_raw_capture(tmp_path, stream, scenario_name):
+@pytest.mark.parametrize("interleave_titles", [False, True])
+def test_messages_tools_retries_and_usage_match_raw_capture(tmp_path, stream, scenario_name, interleave_titles):
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
     probe = Probe(scenario, tmp_path)
     body = messages_body(stream)
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
+            if interleave_titles:
+                assert client.post("/ng-rollout/0-0/v1/messages", json=title_body(stream)).status_code == 200
             reply = client.post("/ng-rollout/0-0/v1/messages", json=body)
             assert reply.status_code == status
             assert reply.json()["error"]["type"] == "conformance_error"
         for step in range(scenario.tool_steps + 1):
+            if interleave_titles:
+                assert client.post("/ng-rollout/0-0/v1/messages", json=title_body(stream)).status_code == 200
             reply = client.post("/ng-rollout/0-0/v1/messages", json=body)
             assert reply.status_code == 200
             payload = probe.attempts[-1]["response"]
@@ -191,6 +214,8 @@ def test_messages_tools_retries_and_usage_match_raw_capture(tmp_path, stream, sc
                     },
                 ]
             )
+        if interleave_titles:
+            assert client.post("/ng-rollout/0-0/v1/messages", json=title_body(stream)).status_code == 200
     assert probe.finished and not probe.violations
     assert all(call["executed"] and call["result_seen"] for call in probe.tool_calls)
     captures = [row for _, row in json_rows(tmp_path / "capture/0-0.capture.jsonl")]
@@ -238,6 +263,8 @@ def test_messages_tools_retries_and_usage_match_raw_capture(tmp_path, stream, sc
         fingerprint=_fingerprint,
     )
     expected = {"model.saved_exchanges": "pass", "model.response_metadata": "pass", "model.token_counts": "pass"}
+    if scenario.http_errors:
+        expected.update({"model.error_sequence": "pass", "model.retry_request": "pass"})
     assert {check["id"]: check["status"] for check in checks if check["id"] in expected} == expected
 
 

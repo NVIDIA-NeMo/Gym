@@ -92,12 +92,34 @@ def test_title_attempts_preserve_failure_identity_and_capture_order_without_muta
     assert [ref.model_call_id for ref in title.model_calls] == ["title-0", "title-1"]
     assert [ref.response_id for ref in title.model_calls] == [None, "title-response-1"]
     assert owner.model_calls == title.model_calls
+    assert title.included_in_response_usage is False
     assert owner.conversation == []
     assert associated.gaps == bundle.gaps
     assert bundle.model_dump() == original
     assert _associate(associated, [successful, failed]) == associated
     assert failed.status_code == 429 and failed.error_category == "http_error"
     assert successful.tokens_in is None and successful.tokens_out is None
+
+
+@pytest.mark.parametrize("scope", [None, True, False])
+def test_title_usage_scope_requires_revalidation_and_preserves_conflicts(scope: bool | None) -> None:
+    call = _title_call()
+    bundle = _associate(_bundle(), [call])
+    [title] = _records(bundle, SessionTitleObservation)
+    title.included_in_response_usage = scope
+    joined = _associate(bundle, [call])
+    assert _records(joined, SessionTitleObservation)[0].included_in_response_usage is (
+        True if scope is True else False
+    )
+    assert title.included_in_response_usage is scope
+
+
+def test_title_usage_scope_stays_unknown_when_a_reference_cannot_be_revalidated() -> None:
+    bundle = _associate(_bundle(), [_title_call(), _title_call(1)])
+    [title] = _records(bundle, SessionTitleObservation)
+    title.included_in_response_usage = None
+    joined = _associate(bundle, [_title_call()])
+    assert _records(joined, SessionTitleObservation)[0].included_in_response_usage is None
 
 
 @pytest.mark.parametrize(

@@ -39,6 +39,7 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
@@ -55,6 +56,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -88,6 +90,7 @@ from nemo_gym.trajectory import (
 )
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
+    associate_claude_code_failed_calls,
     associate_claude_code_title_calls,
     extract_claude_code_observations,
 )
@@ -569,7 +572,8 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if self._token_id_capture_enabled() and isinstance(terminal_response_id, str) and terminal_response_id
             else f"resp_{uuid4().hex}"
         )
-        return NeMoGymResponse(
+        status = status or run_metadata.get("status")
+        response = NeMoGymResponse(
             **({"status": status} if status is not None else {}),
             id=response_id,
             created_at=int(time()),
@@ -587,6 +591,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 total_tokens=input_tokens + output_tokens,
             ),
         )
+        return self.report_outcome(response, run_metadata)
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Classify only the terminal root API error corroborated by Claude's result event."""
+        status = native_result.get("model_request_error_status")
+        if native_result.get("is_error") is True and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ClaudeCodeSandboxSession:
         """Install/reuse the harness runtime before the first activation."""
@@ -913,12 +925,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
             )
             calls = [call for call in calls if call.model_ref == self.config.model_server]
-            return associate_claude_code_title_calls(
+            observations = associate_claude_code_title_calls(
                 associate_claude_code_compaction_calls(observations, calls), calls, model_ref=self.config.model_server
             )
+            return associate_claude_code_failed_calls(observations, calls, model_ref=self.config.model_server)
         except Exception:
             LOG.warning("Could not associate Claude Code helper calls for rollout %s.", rollout_id, exc_info=True)
             observations.gaps.append(ObservationGap(code="session_title_model_call_join_failed"))
+            observations.gaps.append(ObservationGap(code="failed_model_call_join_failed"))
             if any(isinstance(record, ContextCompactionObservation) for record in observations.records):
                 observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             return observations

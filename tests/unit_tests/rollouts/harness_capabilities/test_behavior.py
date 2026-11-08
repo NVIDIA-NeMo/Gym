@@ -26,6 +26,100 @@ def failed_model_checks(record: dict, attempts: list[dict]) -> set[str]:
     return {c["id"] for c in model_checks(record, attempts, fingerprint=fingerprint) if c["status"] == "fail"}
 
 
+def retry_checks(attempts: list[dict], errors: tuple[int, ...]) -> dict:
+    return {
+        check["id"]: check
+        for check in inspect_behavior(
+            {"attempts": attempts},
+            None,
+            http_errors=errors,
+            terminal_error=False,
+            tool_steps=0,
+            expected_reward=1.0,
+            fingerprint=fingerprint,
+        )
+    }
+
+
+def attempt(status: int, *, purpose: str = "policy", request: str = "task") -> dict:
+    return {"purpose": purpose, "status_code": status, "request": {"input": request}, "response": {}}
+
+
+@pytest.mark.parametrize("errors", [(429, 429), (500,)])
+def test_policy_retry_requires_errors_and_recovery_despite_interleaved_helpers(errors):
+    attempts = [attempt(500, purpose="session_title", request="title")]
+    for status in (*errors, 200):
+        attempts.extend([attempt(status), attempt(200, purpose="session_title", request="title")])
+    checks = retry_checks(attempts, errors)
+    assert checks["model.attempt_purpose"]["status"] == "pass"
+    assert checks["model.error_sequence"]["status"] == "pass"
+    assert checks["model.retry_request"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("errors", [(429, 429), (500,)])
+@pytest.mark.parametrize("defect", ["no_policy_error", "no_recovery", "changed_recovery", "changed_error"])
+def test_retry_proof_rejects_missing_policy_chain_or_changed_requests(errors, defect):
+    attempts = [attempt(status) for status in (*errors, 200)]
+    if defect == "no_policy_error":
+        for item in attempts[:-1]:
+            item.update(purpose="session_title", request={"input": "title"})
+    elif defect == "no_recovery":
+        attempts.pop()
+    elif defect == "changed_recovery":
+        attempts[-1]["request"] = {"input": "different task"}
+    else:
+        attempts[0]["request"] = {"input": "different task"}
+    assert retry_checks(attempts, errors)["model.retry_request"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("purpose", [None, "auxiliary", "", []])
+def test_unknown_attempt_purpose_is_not_an_error_exemption(purpose):
+    attempts = [attempt(500), attempt(200), attempt(500, purpose=purpose)]
+    assert retry_checks(attempts, (500,))["model.attempt_purpose"]["status"] == "fail"
+
+
+def test_legacy_witness_requires_same_policy_request_through_recovery():
+    attempts = [attempt(500), attempt(200)]
+    for item in attempts:
+        item.pop("purpose")
+    assert retry_checks(attempts, (500,))["model.retry_request"]["status"] == "pass"
+    # The previously passing native artifact had only a title 500, then a
+    # different successful main request. Missing purpose cannot exempt it.
+    attempts[0]["request"] = {"input": "title"}
+    assert retry_checks(attempts, (500,))["model.retry_request"]["status"] == "fail"
+
+
+@pytest.mark.parametrize("policy_error", [False, True])
+def test_terminal_policy_error_is_independent_of_title_success(policy_error):
+    error = attempt(400, purpose="policy" if policy_error else "session_title")
+    error["response"] = {"error": {"message": "controlled model failure"}}
+    witness = {
+        "attempts": [attempt(200, purpose="session_title"), error, attempt(200, purpose="session_title")],
+        "agent_responses": [
+            {
+                "status": "failed",
+                "error": {"message": "HTTP 400: controlled model failure"},
+                "metadata": {
+                    "ng_agent_outcome": json.dumps({"failure_kind": "model_request_error", "status_code": 400})
+                },
+            }
+        ],
+    }
+    checks = {
+        check["id"]: check
+        for check in inspect_behavior(
+            witness,
+            None,
+            http_errors=(400,),
+            terminal_error=True,
+            tool_steps=0,
+            expected_reward=0.0,
+            fingerprint=fingerprint,
+        )
+    }
+    assert checks["model.terminal_error"]["status"] == ("pass" if policy_error else "fail")
+
+
 @pytest.mark.parametrize(
     "mutation", ["missing_calls", "response_id", "finish_reason", "prompt_tokens", "missing_tokens", "request_order"]
 )

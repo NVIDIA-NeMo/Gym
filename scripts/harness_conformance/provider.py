@@ -294,14 +294,19 @@ class Probe:
         )
         self._observe_tool_results(body)
         index = len(self.attempts)
+        compacting = self.scenario.compaction is not None and is_compaction_request(body)
+        purpose = "session_title" if title_helper else "context_compaction" if compacting else "policy"
+        # Background helpers can race with the task. Only policy requests consume
+        # the prescribed failures, so every retry scenario exercises the task chain.
+        policy_attempt_index = sum(attempt.get("purpose", "policy") == "policy" for attempt in self.attempts)
         status = 200
-        if index < len(self.scenario.http_errors):
-            status = self.scenario.http_errors[index]
-        elif self.scenario.terminal_error:
-            status = self.scenario.http_errors[-1]
+        if purpose == "policy":
+            if policy_attempt_index < len(self.scenario.http_errors):
+                status = self.scenario.http_errors[policy_attempt_index]
+            elif self.scenario.terminal_error:
+                status = self.scenario.http_errors[-1]
         response_id = f"resp_{uuid4().hex}"
         namespaces = {}
-        compacting = self.scenario.compaction is not None and is_compaction_request(body)
         if status != 200:
             payload = {
                 "error": {"message": "controlled model failure", "type": "conformance_error", "code": str(status)}
@@ -465,7 +470,13 @@ class Probe:
                 self.violations.append(str(exc))
                 payload = {"error": {"message": str(exc), "type": "probe_protocol_error"}}
         self.attempts.append(
-            {"attempt_id": f"attempt-{index}", "request": wire_body, "response": payload, "status_code": status}
+            {
+                "attempt_id": f"attempt-{index}",
+                "purpose": purpose,
+                "request": wire_body,
+                "response": payload,
+                "status_code": status,
+            }
         )
         self.save()
         if status != 200 or not wire_body.get("stream"):

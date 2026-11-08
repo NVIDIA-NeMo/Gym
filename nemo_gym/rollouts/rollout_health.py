@@ -19,7 +19,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +48,7 @@ from nemo_gym.rollouts.health.checks import (
     _normalized_trajectory_calls,
     _replay_identity,
     _response_has_usable_output,
+    _response_usage_calls,
     _subject,
     _token_count,
     _trajectory_has_any_gap,
@@ -232,27 +233,33 @@ def evaluate_record(
             if not has_required_bindings:
                 unobserved.append(spec.id)
                 continue
-        if spec.id == "rollout_token_count_mismatch" and (
-            not turn_call_scope_complete
-            or not bindings.complete
-            or not bindings.matched_calls
-            or not _transcript_tokens(record)[2]
-            or any(
-                not _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
-                for call in bindings.matched_calls
-            )
-        ):
-            unobserved.append(spec.id)
-            continue
-        if spec.id == "model_call_runaway_generation" and any(
-            not _is_length_refusal(call)
-            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
-            and call.get("response") is None
-            for call in bindings.matched_calls
-        ):
-            unobserved.append(spec.id)
-            continue
         try:
+            if spec.id == "rollout_token_count_mismatch":
+                usage_calls = _response_usage_calls(record, trajectory, bindings)
+                if usage_calls is None:
+                    unobserved.append(spec.id)
+                    continue
+                bindings = replace(bindings, matched_calls=usage_calls)
+            if spec.id == "rollout_token_count_mismatch" and (
+                not turn_call_scope_complete
+                or not bindings.complete
+                or not bindings.matched_calls
+                or not _transcript_tokens(record)[2]
+                or any(
+                    not _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
+                    for call in bindings.matched_calls
+                )
+            ):
+                unobserved.append(spec.id)
+                continue
+            if spec.id == "model_call_runaway_generation" and any(
+                not _is_length_refusal(call)
+                and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+                and call.get("response") is None
+                for call in bindings.matched_calls
+            ):
+                unobserved.append(spec.id)
+                continue
             findings.extend(_ROLLOUT_CHECKS[spec.id](record, trajectory, bindings, subject))
         except Exception as exc:
             unobserved.append(spec.id)
