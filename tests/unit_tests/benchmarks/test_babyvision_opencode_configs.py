@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""BabyVision's sandbox-session configs start opencode_agent behind an Environment Server, with the same rows."""
+"""BabyVision's configs start opencode_agent in a sandbox session behind an Environment Server, with the manifest's rows."""
 
 from pathlib import Path
 
 import pytest
+import yaml
 from omegaconf import OmegaConf
 
 from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
@@ -30,31 +31,29 @@ def resolve(config_path: str) -> tuple[GlobalConfigDictParser, dict]:
 
 
 @pytest.mark.parametrize("benchmark", ["babyvision_opencode", "babyvision_opencode_question_only"])
-def test_sandbox_sessions_config_routes_the_benchmark_rows_through_an_agent_session(benchmark):
-    parser, config = resolve(f"benchmarks/{benchmark}/sandbox_sessions.yaml")
+def test_benchmark_config_routes_the_rows_through_an_agent_session(benchmark):
+    parser, config = resolve(f"benchmarks/{benchmark}/config.yaml")
     started = {instance.name for instance in parser.filter_for_server_instance_configs(config)}
-    # The agent that runs the OpenCode CLI on its own host, and its Environment Server, are not started.
     assert started == {
         "policy_model",
         "visual_coding_opencode",
         "visual_coding_opencode_judge_model",
-        "visual_coding_opencode_session_agent",
-        "visual_coding_opencode_session_environment_server",
+        "visual_coding_opencode_agent",
+        "visual_coding_opencode_environment_server",
     }
 
-    environment = config["visual_coding_opencode_session_environment_server"]["environment_servers"]
+    environment = config["visual_coding_opencode_environment_server"]["environment_servers"]
     pairing = environment["single_agent_turn_legacy"]
     assert pairing["resources_server"]["name"] == "visual_coding_opencode"
-    assert pairing["agent_server"]["name"] == "visual_coding_opencode_session_agent"
+    assert pairing["agent_server"]["name"] == "visual_coding_opencode_agent"
 
-    agent = config["visual_coding_opencode_session_agent"]["responses_api_agents"]["opencode_agent"]
+    agent = config["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_agent"]
     assert agent["sandbox_provider"] in config
     assert agent["network_access"] == "model_only"
-    # The same rows as the benchmark's config.yaml, which runs the OpenCode CLI on the agent's host.
-    _, host_run = resolve(f"benchmarks/{benchmark}/config.yaml")
-    [host_run_dataset] = host_run["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_vision_agent"][
-        "datasets"
-    ]
-    assert [OmegaConf.to_container(dataset) for dataset in agent["datasets"]] == [
-        OmegaConf.to_container(host_run_dataset)
-    ]
+    assert agent["opencode_config"]["compaction"]["auto"] is False
+    assert "agent" not in agent["opencode_config"]  # no step limit, so token capture can join every call
+
+    # The benchmark's rows replace the example rows, and match its manifest.
+    manifest = yaml.safe_load((ROOT / "benchmarks" / benchmark / "manifest.yaml").read_text())
+    assert manifest["agent_server"] == "opencode_agent"
+    assert [OmegaConf.to_container(dataset) for dataset in agent["datasets"]] == manifest["datasets"]

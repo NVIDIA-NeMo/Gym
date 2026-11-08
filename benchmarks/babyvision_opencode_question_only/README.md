@@ -27,7 +27,6 @@ gym eval run \
     ++policy_model_name=<>
 ```
 
-To run in a sandbox session, use `"+config_paths=[benchmarks/babyvision_opencode_question_only/sandbox_sessions.yaml]"`
-in place of `--benchmark` (see [`babyvision_opencode`](../babyvision_opencode/README.md#run-in-a-sandbox-session)).
+Each task runs OpenCode in its own sandbox session, as in [`babyvision_opencode`](../babyvision_opencode/README.md#run).
 
 Tests for both prepare scripts live in `benchmarks/babyvision_opencode/tests`.

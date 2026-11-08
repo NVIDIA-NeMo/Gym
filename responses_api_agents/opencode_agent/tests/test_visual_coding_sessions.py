@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Visual-coding rows (BabyVision's format) under the OpenCode settings of the visual_coding_opencode session config."""
+"""Visual-coding rows (BabyVision's format) under the OpenCode settings of the visual_coding_opencode config."""
 
 import base64
 import json
@@ -18,7 +18,7 @@ from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import Sand
 
 
 ROOT = Path(__file__).resolve().parents[3]
-SESSION_CONFIG = ROOT / "resources_servers" / "visual_coding_opencode" / "configs" / "sandbox_sessions.yaml"
+SESSION_CONFIG = ROOT / "resources_servers" / "visual_coding_opencode" / "configs" / "visual_coding_opencode.yaml"
 EXAMPLE_ROWS = ROOT / "resources_servers" / "visual_coding_opencode" / "data" / "example.jsonl"
 # The settings OpenCode runs with inside the sandbox. The provider, image and model name come from the run.
 SESSION_KEYS = ("opencode_version", "thinking", "timeout", "context_window", "max_output_tokens", "opencode_config")
@@ -26,7 +26,7 @@ SESSION_KEYS = ("opencode_version", "thinking", "timeout", "context_window", "ma
 
 def session_agent_config() -> dict:
     config = yaml.safe_load(SESSION_CONFIG.read_text())
-    return config["visual_coding_opencode_session_agent"]["responses_api_agents"]["opencode_agent"]
+    return config["visual_coding_opencode_agent"]["responses_api_agents"]["opencode_agent"]
 
 
 def example_rows() -> list[dict]:
@@ -43,7 +43,7 @@ def setup():
     client._build_server_base_url.return_value = "http://model.example:9000"
     settings = session_agent_config()
     config = OpenCodeAgentConfig(
-        name="visual_coding_opencode_session_agent",
+        name="visual_coding_opencode_agent",
         host="localhost",
         port=8001,
         entrypoint="app.py",
