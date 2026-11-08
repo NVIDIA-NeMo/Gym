@@ -30,7 +30,7 @@ opencode_agent:
       network_access: model_only
       # The image ships the pinned OpenCode binary (offline_science_image/Dockerfile checks this digest).
       sandbox_executable_path: /usr/local/bin/opencode
-      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
       system_prompt: |
         Internet access is disabled on this machine.
         Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
