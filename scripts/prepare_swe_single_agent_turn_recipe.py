@@ -106,7 +106,20 @@ def configure_gym(
                 "sandbox_timeout": 480,
                 "sandbox_provider": "sandbox",
                 "sandbox_config": {},
-                "opencode_config": {"compaction": {"auto": False, "prune": False}},
+                "opencode_env": {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "1024"},
+                "opencode_config": {
+                    "compaction": {"auto": False, "prune": False},
+                    "provider": {
+                        "nemo_gym": {
+                            "models": {
+                                "dummy_model": {
+                                    "limit": {"output": 1024},
+                                    "interleaved": {"field": "reasoning_content"},
+                                }
+                            }
+                        }
+                    },
+                },
             }
         settings.update(token_id_capture=True, num_workers=1, datasets=[])
         settings["resources_server"] = (
