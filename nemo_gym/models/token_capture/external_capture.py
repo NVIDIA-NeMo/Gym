@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Protocol
 
@@ -18,7 +19,7 @@ from nemo_gym.models.token_capture.completion import (
 )
 from nemo_gym.models.token_capture.config import ExternalStagingBackend
 from nemo_gym.models.token_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
-from nemo_gym.models.token_capture.protocols import CaptureLedger
+from nemo_gym.models.token_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureLedger
 from nemo_gym.models.token_capture.records import (
     TOKEN_FIELDS,
     response_finish_reason,
@@ -68,6 +69,9 @@ DYNAMO_GYM_EXTRAS_ANNOTATION_PREFIX = "nemo_rl:gym:"
 _DYNAMO_CALL_RESULT_FIELD = "nemo_rl"
 # Dynamo's router reads session affinity only from this header.
 DYNAMO_SESSION_ID_HEADER = "x-dynamo-session-id"
+# Dynamo's frontend forwards only an error's status and message, so the engine acknowledges a refused capture
+# call (natively ``CAPTURE_REFUSAL_HEADER``) at the end of the message.
+_DYNAMO_CAPTURE_REFUSAL = re.compile(rf" \[{re.escape(CAPTURE_REFUSAL_HEADER)}: ([^\]]+)\]\Z")
 
 
 def add_dynamo_gym_extras(request_payload: dict[str, Any], extras: dict[str, Any]) -> None:
@@ -100,6 +104,19 @@ def pop_dynamo_call_result(response_payload: dict[str, Any]) -> dict[str, Any] |
     nvext = response_payload.pop("nvext", None)
     result = nvext.get(_DYNAMO_CALL_RESULT_FIELD) if isinstance(nvext, dict) else None
     return result if isinstance(result, dict) else None
+
+
+def dynamo_capture_refusal_suffix(model_call_id: str) -> str:
+    """What the engine behind Dynamo's frontend appends to the error message of a capture call it refused."""
+    return f" [{CAPTURE_REFUSAL_HEADER}: {model_call_id}]"
+
+
+def split_dynamo_capture_refusal(message: str) -> tuple[str, str | None]:
+    """Split ``dynamo_capture_refusal_suffix`` off an error message: the engine's message, and the refused call."""
+    match = _DYNAMO_CAPTURE_REFUSAL.search(message)
+    if match is None:
+        return message, None
+    return message[: match.start()], match.group(1)
 
 
 class ExternalCaptureHandler(Protocol):
