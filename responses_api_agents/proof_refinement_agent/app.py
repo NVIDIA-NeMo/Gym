@@ -122,16 +122,20 @@ class ProofRefinementSessionState(AgentSessionState):
     # The resources server's direct HTTP grant, through which the loop calls /check_proof; None without corrections.
     check_access: Optional[DirectHTTPToolAccess]
     operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
+    # The first activation's path; a retry through another path (another capture segment) is refused.
+    activation_path: Optional[str] = None
 
 
 def generation_text(model_response_json: Dict[str, Any]) -> str:
-    """The first output text of the response's messages, as an attempt record keeps it."""
+    """The text an attempt record keeps: the first output text of the response's last message that has one."""
+    text = ""
     for output in model_response_json.get("output") or []:
         if output.get("type") == "message" and output.get("content"):
             for content in output["content"]:
                 if content.get("type") == "output_text":
-                    return content.get("text", "")
-    return ""
+                    text = content.get("text", "")
+                    break
+    return text
 
 
 def correction_input(params: NeMoGymResponseCreateParamsNonStreaming, correction_prompt: str) -> Dict[str, Any]:
@@ -240,6 +244,10 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             raise TypeError("Expected proof refinement session state")
         if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
             raise HTTPException(409, "Activation requires the seeded session's rollout path")
+        if state.activation_path is None:
+            state.activation_path = request.url.path
+        elif state.activation_path != request.url.path:
+            raise HTTPException(409, "Activation path does not match the session's first activation")
         model_url_path = self.url_path_for_request("/v1/responses", request)
         try:
             return await state.operations.execute(

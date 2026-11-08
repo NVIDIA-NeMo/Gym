@@ -691,3 +691,38 @@ class TestEpisodeSessions:
         )
         dumped = result.model_dump(mode="json")
         assert "total_turns" not in dumped and "all_attempts" not in dumped
+
+    def test_verify_reuses_a_pass_that_check_proof_compiled(self, server) -> None:
+        client = TestClient(server.setup_webserver())
+        assert client.post("/seed_session", json=_episode_seed()).status_code == 200
+        server._sandbox_client.execute_lean4 = AsyncMock(
+            return_value={"process_status": "completed", "stdout": "", "stderr": ""}
+        )
+        passing = "```lean4\ntheorem test : True := by\n  trivial\n```"
+
+        assert client.post("/check_proof", json={"proof": passing}).json()["proof_status"] == "completed"
+        verified = client.post("/verify", json=_verify_body(passing)).json()
+
+        assert verified["reward"] == 1.0
+        # A sandbox failure on a second compile could fail a proof that passed, so there is none.
+        assert server._sandbox_client.execute_lean4.await_count == 1
+        # Another file is compiled.
+        assert client.post("/verify", json=_verify_body("```lean4\nsimp\n```")).json()["reward"] == 1.0
+        assert server._sandbox_client.execute_lean4.await_count == 2
+
+    async def test_retire_releases_the_episode_records(self, server) -> None:
+        client = TestClient(server.setup_webserver())
+        seed = _episode_seed()
+        assert client.post("/seed_session", json=seed).status_code == 200
+        server._sandbox_client.execute_lean4 = AsyncMock(
+            return_value={"process_status": "completed", "stdout": "", "stderr": ""}
+        )
+        assert client.post("/check_proof", json={"proof": "trivial"}).status_code == 200
+        sid = seed["resources_session_id"]
+        assert sid in server._episode_tasks and sid in server._passed_checks
+
+        await server.retire_session_state(sid)
+
+        assert sid not in server._episode_tasks and sid not in server._passed_checks
+        # Retiring does not fence the ID: a restore may seed it again.
+        assert client.post("/seed_session", json=seed).status_code == 200

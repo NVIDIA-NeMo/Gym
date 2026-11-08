@@ -429,6 +429,9 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
     config: MathFormalLeanResourcesServerConfig
     # The Lean task of each open episode session, so /check_proof builds the file /verify builds from the request.
     _episode_tasks: dict[str, tuple[EpisodeId, TaskId, TaskData]] = PrivateAttr(default_factory=dict)
+    # The last attempt /check_proof passed in each open episode session. /verify reuses it for the same Lean file
+    # instead of compiling it again, so a sandbox failure on a second compile cannot fail a proof that passed.
+    _passed_checks: dict[str, ProofCheck] = PrivateAttr(default_factory=dict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
     _fences: ResourcesSessionFences[EpisodeId] = PrivateAttr()
 
@@ -492,8 +495,15 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             if held is not None and held[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._episode_tasks.pop(sid, None)
+            self._passed_checks.pop(sid, None)
             self._fences.fence(sid, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=sid)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        # A checkpoint discarded the attempt; release its records without fencing the ID for a restore.
+        async with self._locks.locked(session_id):
+            self._episode_tasks.pop(session_id, None)
+            self._passed_checks.pop(session_id, None)
 
     async def check_proof(self, request: Request, body: CheckProofRequest) -> ProofCheck:
         """Compile a proof attempt for the session's theorem, as /verify does, and return its feedback.
@@ -506,9 +516,15 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
         if held is None:
             raise ResourcesSessionLostError(f"Resources session {sid} is not an open episode session")
         task = held[2]
-        return await self._check(body.proof, header=task.header, formal_statement=task.formal_statement)
+        check = await self._check(body.proof, header=task.header, formal_statement=task.formal_statement)
+        if check.proof_status == "completed" and sid in self._episode_tasks:
+            self._passed_checks[sid] = check
+        return check
 
-    async def _check(self, generation: str, *, header: str, formal_statement: str) -> ProofCheck:
+    async def _check(
+        self, generation: str, *, header: str, formal_statement: str, passed: Optional[ProofCheck] = None
+    ) -> ProofCheck:
+        """Build the Lean file for an attempt and compile it, unless ``passed`` already compiled that same file."""
         if not generation or not generation.strip():
             error_msg = "Empty generation received. Please provide a valid Lean 4 proof."
             return ProofCheck(
@@ -528,6 +544,8 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             data_point={"header": header, "formal_statement": formal_statement},
             config=self._proof_build_config,
         )
+        if passed is not None and passed.predicted_proof == predicted_proof:
+            return passed
 
         compiler_output = await self._sandbox_client.execute_lean4(
             code=predicted_proof,
@@ -562,7 +580,9 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: MathFormalLeanVerifyRequest) -> MathFormalLeanVerifyResponse:
         """Verify a proof attempt with multi-turn self-correction support.
 
-        Scoring reads only the request. The agent is responsible for controlling the retry loop and turn counting.
+        Scoring reads the request. When /check_proof already passed the same Lean file in this open episode session,
+        that compilation is reused rather than repeated. The agent is responsible for controlling the retry loop and
+        turn counting.
 
         Returns:
         - If proof succeeds: reward=1.0, needs_correction=False
@@ -581,7 +601,7 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
 
         sid = request.session.get(SESSION_ID_KEY)
         if sid is not None and self._fences.get(sid) is not None:
-            # Masked although the score reads only the request, so every server under the resources session contract
+            # Masked although the score reads the request, so every server under the resources session contract
             # treats a closed session alike. single_agent_turn verifies before it closes, so only an out-of-order
             # verify lands here. An agent's /run never closes its session and is graded as usual.
             lost = lost_session_verification("This math_formal_lean session is already closed")
@@ -590,7 +610,10 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             )
 
         check = await self._check(
-            body.response.output_text, header=body.header, formal_statement=body.formal_statement
+            body.response.output_text,
+            header=body.header,
+            formal_statement=body.formal_statement,
+            passed=self._passed_checks.get(sid) if sid is not None else None,
         )
         if check.proof_status == "empty_generation":
             LOG.warning("Empty generation received at turn %d", turn_index)

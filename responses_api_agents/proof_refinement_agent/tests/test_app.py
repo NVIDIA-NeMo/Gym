@@ -313,6 +313,8 @@ class TestAgentSessions:
             assert result.status_code == 200, result.text
             # The same activation again joins the first: nothing runs twice.
             assert client.post(path, json=body).json() == result.json()
+            capture_path = path.replace("/v1/responses", "/training-token-capture/v1/responses")
+            assert client.post(capture_path, json=body).status_code == 409
             assert client.post(path, json={"input": "different"}).status_code == 409
             close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
             closed = client.post("/v1/agent_sessions/close", json=close)
@@ -491,6 +493,16 @@ class TestRewardParity:
         assert session_result == run_result
         # The policy saw the same requests, correction prompts included.
         assert session.model_requests == legacy.model_requests
-        # /verify compiles the final attempt again only when an earlier check already passed it.
-        extra = 1 if reward == 1.0 and total_turns < 3 else 0
-        assert len(session.compiled) == len(legacy.compiled) + extra
+        # Lean compiled the same files: /verify reuses a pass that /check_proof compiled instead of compiling it again.
+        assert session.compiled == legacy.compiled
+
+
+def test_attempt_records_keep_the_last_messages_text_as_run_always_did() -> None:
+    from responses_api_agents.proof_refinement_agent.app import generation_text
+
+    response = _model_response("resp", "first", _usage(1, 1))
+    second = json.loads(json.dumps(response["output"][0]))
+    second["content"][0]["text"] = "second"
+    response["output"].append(second)
+    assert generation_text(response) == "second"
+    assert generation_text({"output": []}) == ""
