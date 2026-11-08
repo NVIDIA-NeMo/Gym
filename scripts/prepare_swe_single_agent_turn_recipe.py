@@ -19,8 +19,8 @@ from omegaconf import DictConfig, OmegaConf
 from scripts.prepare_swe_verifier_controls import ROOT, clean_revision, digest, select_rows
 from scripts.swe_rows_to_harbor.convert import convert, server_config, task_folder_name
 
-from nemo_gym.data.task_materialization import materialize_task
-from nemo_gym.data.tasks.harbor.materialize import materialize_task as materialize_harbor_task
+from nemo_gym.data import materialize_task
+from nemo_gym.data.tasks.harbor import materialize_task as materialize_harbor_task
 from nemo_gym.data.tasks.harbor.materialize import taskset_mapping
 from nemo_gym.data.tasks.harbor.prepare import PreparedTaskset, prepare_target
 
