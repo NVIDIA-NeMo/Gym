@@ -1,0 +1,5 @@
+data/terminal-bench-tasks/
+data/.terminal-bench-tasks-*/
+data/.agentic_if_benchmark-*/
+data/opencode-runtime/
+data/.opencode-runtime-*/

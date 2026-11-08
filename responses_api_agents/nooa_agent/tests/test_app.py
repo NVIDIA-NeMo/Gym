@@ -9,20 +9,16 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.base_responses_api_agent import (
-    AGENT_SESSION_COOKIE_KEY,
-    AgentCloseSessionRequest,
-    AgentSeedSessionRequest,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    current_rollout_id,
 )
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle, TrajectoryRecord
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunFailure, NOOARunResult
@@ -249,6 +245,7 @@ async def test_failed_activation_replays_error_and_returns_evidence_on_close(
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
         NOOATerminationReason.INVALID_POLICY_OUTPUT,
     ],
 )
@@ -267,12 +264,8 @@ async def test_policy_termination_remains_a_gradable_response(
     runner_run.return_value = partial
     req = await open_session(instance)
     response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    if reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
-        assert response.status == "failed"
-        assert reason in response.error.message
-    else:
-        assert response.status == "incomplete"
-        assert response.error is None
+    assert response.status == "incomplete"
+    assert response.error is None
     assert response.output == partial.episode.response.output
     assert "_ng_failure_class" not in response.model_dump(mode="json")
     assert reason in {gap.code for gap in (await close(instance)).agent_observations.gaps}

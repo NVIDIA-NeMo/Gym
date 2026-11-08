@@ -16,13 +16,14 @@ import asyncio
 import inspect
 import json
 import signal
+import sys
 import tarfile
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.vibench.app import (
     PlanResult,
     VibenchResourcesServer,
@@ -94,6 +95,26 @@ class TestPathResolution:
         # Dataset rows are untrusted input; they must not be able to read arbitrary host files.
         with pytest.raises(ValueError):
             server._resolve("../../etc/passwd")
+
+
+class TestVibenchPython:
+    def _venv_python(self, root: Path) -> Path:
+        python = root / ".venv" / "bin" / "python"
+        python.parent.mkdir(parents=True)
+        python.touch()
+        return python
+
+    def test_prefers_the_v1_venv(self, tmp_path):
+        self._venv_python(tmp_path)
+        v1_python = self._venv_python(tmp_path / "v1")
+        assert make_server(tmp_path)._vibench_python == str(v1_python)
+
+    def test_falls_back_to_the_root_venv(self, tmp_path):
+        python = self._venv_python(tmp_path)
+        assert make_server(tmp_path)._vibench_python == str(python)
+
+    def test_falls_back_to_the_gym_interpreter(self, tmp_path):
+        assert make_server(tmp_path)._vibench_python == sys.executable
 
 
 class TestArtifactUnpacking:
@@ -350,7 +371,7 @@ class TestAggregateMetrics:
     def test_signatures_match_the_framework_contract(self, tmp_path):
         """The bug this replaces was a signature mismatch that unit tests missed because they
         called these the way the code expected, not the way the framework does."""
-        from nemo_gym.reward_profile import AggregateMetricsMixin
+        from nemo_gym.metrics import AggregateMetricsMixin
 
         server = make_server(tmp_path)
         for name in ("compute_metrics", "get_key_metrics"):

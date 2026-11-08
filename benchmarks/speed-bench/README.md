@@ -14,7 +14,7 @@ This benchmark is governed by the
 Gym supports preparing and running all six configs:
 
 - `qualitative` — single fixed mixture of qualitative prompts.
-- `throughput_{1k,2k,8k,16k,32k}` — token-budgeted mixtures used to
+- `throughput_{1k,2k,8k,16k,32k,100k}` — token-budgeted mixtures used to
   measure SD throughput at varying prompt lengths.
 
 Select `--benchmark speed-bench/config_<name>` for any of these configs.
@@ -22,7 +22,7 @@ Each has its own dataset, agent, resources server, and environment server.
 Each selects a small preparation wrapper that delegates to shared Speed Bench
 logic. All splits can share one policy model.
 
-The default Hugging Face source is `nvidia/SPEED-Bench`. Override it for preparation:
+The default Hugging Face source is `nvidia/SPEED-Bench` in v1.1. Override it for preparation:
 
 ```bash
 gym eval prepare \
