@@ -10,10 +10,41 @@ used independently of OpenCode:
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
-to `simple_agent` with no external task tools. Compose [`opencode_sessions.yaml`](opencode_sessions.yaml) after a catalog config
-to use the OpenCode multimodal session adapter. Configure the sandbox provider and
-model separately. Existing compatibility configurations remain available in
-[ONBOARDING.md](ONBOARDING.md).
+to `simple_agent` with no external task tools. For OpenCode evaluation, use the
+provider-backed recipes below and configure the model and sandbox provider
+separately. Each recipe composes its catalog with
+[`opencode_sessions.yaml`](opencode_sessions.yaml); OpenCode runs inside the
+sandbox through Gym's shared agent-session lifecycle.
+
+| Recipe | Network policy | WebFetch / WebSearch |
+| --- | --- | --- |
+| [VStar](vstar/opencode.yaml) | `model_only` | Disabled |
+| [HRBench8K](hrbench8k/opencode.yaml) | `model_only` | Disabled |
+| [VTCBench](vtcbench/opencode.yaml) | `model_only` | Disabled |
+| [Agent-X](agentx/opencode.yaml) | `inherit` | Enabled |
+| [ZeroBench](zerobench/opencode.yaml) | `model_only` | Disabled |
+
+This uses the same provider execution boundary as BrowseComp's OpenCode pairing.
+The deployment chooses the provider, task image and network separation. It does
+not replace the benchmark's tools with BrowseComp's Exa wrappers. Prompts,
+sampling, 55+10 turn budgets and scorers are preserved; ZeroBench still uses five
+repeats and primary pass@5.
+
+For restricted OpenSandbox runs, compose
+[`opencode_sessions_opensandbox.yaml`](opencode_sessions_opensandbox.yaml) after
+the recipe and provide the six offline-runtime pins and task image. For Agent-X
+with `inherit`, compose the standard
+[OpenSandbox provider](../../nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml)
+instead; no nested network helper is installed. Supply provider credentials in
+the runtime environment and an image with the task's required libraries. See
+the [agent session setup](../../responses_api_agents/opencode_multimodal_agent/README.md#agent-sessions)
+and [network boundary](../../responses_api_agents/opencode_multimodal_agent/network-policy.md#provider-execution-and-host-service-isolation)
+for runtime requirements and deployment checks.
+
+The `opencode_relay.yaml` configurations in [ONBOARDING.md](ONBOARDING.md) retain
+the local Bubblewrap compatibility path for existing runs and training. They do
+not acquire provider isolation from these new recipes. Resume existing results
+with their recorded configuration; choose the provider recipe for a new run.
 
 ## Run configuration
 

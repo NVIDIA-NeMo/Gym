@@ -92,12 +92,6 @@ class MultimodalSessionMixin:
             raise AgentSeedRejectedError("Multimodal sessions accept one initial task, not continuation inputs")
         state = await super()._seed_agent_session_state(body)
         try:
-            # Owned sessions can narrow an inherit ceiling per request. Install
-            # before activation even when this task ultimately inherits networking.
-            if state.session.owns_sandbox and not await _NETWORK_RUNTIME.is_installed(state.session.sandbox):
-                await _NETWORK_RUNTIME.install(
-                    state.session.sandbox, timeout_s=self.config.sandbox_install_timeout_seconds
-                )
             if self.config.network_access != "inherit":
                 await self._check_session_network(state)
         except BaseException as error:
@@ -112,6 +106,12 @@ class MultimodalSessionMixin:
     async def _check_session_network(self, state: MultimodalSandboxSession) -> None:
         if state.network_checked:
             return
+        # Inherit uses the provider's existing execution boundary. Only install
+        # this helper when enforcing a restriction, including request narrowing.
+        if not await _NETWORK_RUNTIME.is_installed(state.session.sandbox):
+            await _NETWORK_RUNTIME.install(
+                state.session.sandbox, timeout_s=self.config.sandbox_install_timeout_seconds
+            )
         runner = f"{state.session.session_dir}/network_runner.py"
         await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), runner)
         # Run the actual wrapper: this exercises util-linux, all four namespaces,

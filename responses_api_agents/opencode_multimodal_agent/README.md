@@ -14,8 +14,9 @@ and trajectory records before the workspace is cleaned up.
 
 For session-based evaluation, use a Gym sandbox provider and a Linux sandbox
 image containing Bash. Install Python, Pillow, numpy, scipy and OpenCV in the
-image when tasks need those tools. Gym installs the pinned OpenCode runtime and
-an adapter-owned Python interpreter for its network wrapper during session seed.
+image when tasks need those tools. Gym installs the pinned OpenCode runtime during
+session seed. Restricted sessions also install an adapter-owned Python interpreter
+for the network wrapper; `inherit` sessions use the provider boundary directly.
 The wrapper never uses the task image's interpreter or Python environment. No host OpenCode installation
 or Bubblewrap is required for this path.
 
@@ -326,7 +327,7 @@ the [conformance instructions](../../scripts/harness_conformance/README.md).
 
 ## Private runtime installation
 
-Owned sessions seed the network wrapper's stdlib-only Python runtime using
+Restricted owned sessions seed the network wrapper's stdlib-only Python runtime using
 Gym's `SandboxPythonRuntime`. Installation probes the sandbox platform, verifies
 the pinned interpreter archive, and reuses an installed runtime only after its
 health check passes. The agent host needs access to the pinned Python release or
@@ -336,6 +337,8 @@ The interpreter is launched by absolute path with `-I`; task Python libraries an
 environment variables remain available to the tools. Session close leaves the
 shared runtime intact. Failed installation closes the session, retaining the
 handle if cleanup must be retried.
+An `inherit` session does not install or probe this helper unless its request
+narrows network access; that setup then completes before restricted execution.
 
 
 ### Shared-code compatibility

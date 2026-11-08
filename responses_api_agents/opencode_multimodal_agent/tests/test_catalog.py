@@ -15,18 +15,24 @@ from responses_api_agents.opencode_multimodal_agent.eval import OpenCodeMultimod
 ROOT = Path(__file__).resolve().parents[3]
 
 
-@pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "agentx", "zerobench"])
-@pytest.mark.parametrize("sessions", [False, True, "opensandbox"])
+@pytest.mark.parametrize(
+    "benchmark,sessions",
+    [
+        (benchmark, sessions)
+        for benchmark in ["vstar", "hrbench8k", "vtcbench", "agentx", "zerobench"]
+        for sessions in [False, True, "opensandbox"]
+    ]
+    + [("agentx", "opensandbox-provider")],
+)
 def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     monkeypatch.chdir(ROOT)
     prefix = "benchmarks/opencode_multimodal_benchmarks"
-    suffix = f"{benchmark}/config.yaml" if sessions else f"{benchmark}/opencode_relay.yaml"
+    suffix = f"{benchmark}/opencode.yaml" if sessions else f"{benchmark}/opencode_relay.yaml"
     profile = "opencode_sessions.yaml" if sessions else "opencode_eval_agent.yaml"
     if sessions == "opensandbox":
         profile = "opencode_sessions_opensandbox.yaml"
+    if sessions in ("opensandbox", "opensandbox-provider"):
         monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-placeholder")
-    if benchmark == "agentx" and sessions:
-        suffix = "agentx/opencode.yaml"
     initial = OmegaConf.create(
         {
             "config_paths": [
@@ -58,6 +64,8 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     initial["opencode_multimodal_benchmarks"] = {
         "resources_servers": {"opencode_multimodal_benchmarks": {"judge_model": "test-judge"}}
     }
+    if sessions == "opensandbox-provider":
+        initial.config_paths.append("nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml")
     if sessions == "opensandbox":
         settings = initial.visual_agent.responses_api_agents.opencode_multimodal_agent
         for asset in ("executable", "plugin_dependencies", "ripgrep"):
@@ -96,6 +104,10 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
         cfg.policy_model.responses_api_models.vllm_model.turn_budget
     )
     if sessions:
+        if sessions == "opensandbox-provider":
+            assert "opensandbox" in cfg.sandbox
+            assert agent.sandbox_executable_path is None
+            assert agent.sandbox_plugin_dependencies_path is None
         if sessions == "opensandbox":
             assert agent.host == cfg.head_server.host == "127.0.0.1"
             assert cfg.use_absolute_ip
@@ -105,6 +117,9 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
         assert "single_agent_turn" in cfg.visual_environment.environment_servers
         dataset = cfg.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.datasets[0]
         assert dataset.taskset == "visual_tasks" and "agent" not in dataset
+        catalog = yaml.safe_load((ROOT / prefix / benchmark / "config.yaml").read_text())
+        expected = catalog["opencode_multimodal_benchmarks"]["resources_servers"]["opencode_multimodal_benchmarks"]
+        assert OmegaConf.to_container(dataset) == expected["datasets"][0]
         assert agent.command == "opencode" and not any(agent.env.values())
         assert agent.sandbox is None and agent.sandbox_provider == "sandbox"
         assert agent.tool_rewards is None and not agent.token_id_capture

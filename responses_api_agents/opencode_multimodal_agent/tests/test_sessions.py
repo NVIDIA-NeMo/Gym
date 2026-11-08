@@ -361,9 +361,15 @@ def test_visual_session_releases_only_its_owned_sandbox(visual_setup, owned):
 
 @pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
 @pytest.mark.parametrize("websearch", [False, True])
-def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearch):
+def test_owned_session_network_and_websearch_policy(visual_setup, monkeypatch, mode, websearch):
     from unittest.mock import AsyncMock, patch
 
+    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
+
+    installed = AsyncMock(return_value=False)
+    install = AsyncMock()
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", installed)
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
     original, sandbox = visual_setup
     agent = OpenCodeMultimodalEvalAgent(
         config=OpenCodeMultimodalEvalConfig.model_validate(
@@ -396,13 +402,17 @@ def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearc
         assert policy["tools"]["websearch"] is enabled
         assert policy["permission"]["websearch"] == ("allow" if enabled else "deny")
         if mode != "inherit":
-            from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
-
+            install.assert_awaited_once()
             assert payload["command"][:2] == [_NETWORK_RUNTIME.python, "-I"]
             assert payload["command"][3:5] == ["--mode", mode]
             probes = [c for c in sandbox.exec.call_args_list if "--model-url" in c.args[0]]
             assert len(probes) == 1
             assert probes[0].kwargs["timeout_s"] == 30
+        else:
+            installed.assert_not_awaited()
+            install.assert_not_awaited()
+            assert all("network_runner.py" not in c.args[0] for c in sandbox.exec.call_args_list)
+            assert all("network_runner.py" not in arg for arg in payload["command"])
         assert (
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
@@ -410,12 +420,14 @@ def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearc
 
 
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch, cleanup_fails):
+@pytest.mark.parametrize("narrow_at_activation", [False, True])
+def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch, cleanup_fails, narrow_at_activation):
     from unittest.mock import AsyncMock, patch
 
     from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
 
     agent, sandbox = visual_setup
+    agent.config.network_access = "inherit" if narrow_at_activation else "model_only"
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
     sandbox.expected_workdir = "/agent-workspace"
@@ -434,7 +446,17 @@ def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch
         TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
     ):
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
-        assert created.status_code >= 400
+        if narrow_at_activation:
+            assert created.status_code == 200, created.text
+            install.assert_not_awaited()
+            result = client.post(
+                "/ng-rollout/opencode-smoke-a2/v1/responses",
+                json=request_body() | {"metadata": {"network_access": "model_only"}},
+            )
+            assert result.status_code >= 400
+            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        else:
+            assert created.status_code >= 400
         install.assert_awaited_once()
         sandbox.launch.assert_not_awaited()
         sandbox.stop.assert_awaited()
@@ -443,11 +465,15 @@ def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch
 
 
 @pytest.mark.parametrize("mode", ["model_only", "model_and_tools"])
-def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, mode):
+def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, monkeypatch, mode):
     from unittest.mock import AsyncMock, patch
 
     from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import owned_seed_with_several_grants
+    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
 
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=False))
+    install = AsyncMock()
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
     agent, sandbox = visual_setup
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
@@ -461,9 +487,11 @@ def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, mode):
     ):
         created = client.post("/v1/agent_sessions", json=request)
         assert created.status_code == 200, created.text
+        install.assert_not_awaited()
         body = request_body() | {"metadata": {"network_access": mode}}
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
         assert response.status_code == 200, response.text
+        install.assert_awaited_once()
         command = sandbox.params()["command"]
         assert sum("--model-url" in c.args[0] for c in sandbox.exec.call_args_list) == 1
         urls = [command[index + 1] for index, arg in enumerate(command) if arg == "--tool-url"]

@@ -93,11 +93,13 @@ tool that introduced it. OpenSandbox's outer host policy may allow more ports;
 the wrapper still enforces the configured ports. The model endpoint must not
 provide an unrestricted forwarding service.
 
-Owned Linux sessions need Bash, tar/gzip and util-linux `unshare`. The private,
+Restricted owned Linux sessions need Bash, tar/gzip and util-linux `unshare`. The private,
 checksum-verified stdlib Python runtime is prepared on the host and uploaded at
 seed. Restricted seed runs the actual wrapper, checking user, network, mount and
 PID namespaces, private procfs, loopback and proxy listeners. Per-request narrowing
 of an `inherit` session checks these before its first restricted activation.
+An unchanged `inherit` session does not install this helper or require nested
+namespaces; execution and isolation use the configured provider directly.
 The local training path uses its Bubblewrap filesystem sandbox. Restricted
 borrowed sessions and unsupported providers fail closed.
 
@@ -113,7 +115,16 @@ Filesystem isolation remains necessary: do not mount host service sockets or
 credentials into the task sandbox. Outer provider restrictions always remain in
 force. Other Gym agents and their sandbox policies are unchanged.
 
-## Agent-X and host service isolation
+## Provider execution and host service isolation
+
+The recommended `<benchmark>/opencode.yaml` recipes execute OpenCode inside a
+Gym provider-managed sandbox. This follows the execution model of the merged
+[BrowseComp OpenCode pairing](../../benchmarks/browsecomp/configs/browsecomp_opencode.yaml):
+the provider supplies the process/filesystem boundary, and `inherit` retains its
+network policy. The multimodal adapter uses the shared agent's session lifecycle;
+it does not copy BrowseComp's Exa tools or change benchmark network settings.
+Provider selection alone does not prove a deployment's network separation. The
+following checks apply to any `inherit` benchmark, including Agent-X.
 
 Agent-X needs public web access. Its `inherit` pairing must run inside a provider
 boundary that isolates task processes from the Gym host. The local compatibility
@@ -131,8 +142,8 @@ Do not expose the head's unauthenticated `/global_config_dict_yaml` endpoint on
 the sandbox-facing address. Do not mount host procfs, service sockets, runtime
 configurations or credentials into the task image.
 
-This arrangement preserves Agent-X's web tools and `inherit` policy. It still
-needs deployment qualification: use synthetic sentinels to check process/file
+This arrangement preserves web tools and `inherit` policy. To qualify an
+isolation claim for a deployment, use synthetic sentinels to check process/file
 isolation, confirm public web and model access, and confirm head/judge/control
 services are unreachable by hostname and IP. Local Enroot or Bubblewrap with
 inherited host networking does not establish that separation. No remote

@@ -1,4 +1,10 @@
-# Visual benchmarks with OpenCode
+# Local compatibility runs with OpenCode
+
+For new evaluations, use the provider-backed `<benchmark>/opencode.yaml` recipes
+in the [catalog guide](README.md). This page documents the existing local
+Bubblewrap relay path for historical runs and training. Its shared host procfs
+and networking remain unchanged; it does not provide the same boundary as a
+separate provider sandbox. Do not change an existing run's runtime while resuming it.
 
 Evaluate visual tasks with `opencode_multimodal_agent`. The benchmark configurations
 prepare Gym task rows, run the agent, and score its answers through the
