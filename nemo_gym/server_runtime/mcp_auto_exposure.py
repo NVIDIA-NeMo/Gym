@@ -168,6 +168,17 @@ class BindResult:
     body_model: Optional[type[BaseModel]]
 
 
+def _resolve_annotation(name: str, annotation: Any, hints: dict[str, Any]) -> Any:
+    """Resolve deferred hints while honoring concrete annotations on a factory-set signature."""
+    return hints.get(name, annotation) if isinstance(annotation, str) else annotation
+
+
+def _is_request(annotation: Any) -> bool:
+    """Recognize the Request annotations for which FastAPI injects the live request."""
+    base = get_args(annotation)[0] if get_origin(annotation) is Annotated else annotation
+    return isinstance(base, type) and issubclass(base, Request)
+
+
 def bind_route(route: APIRoute) -> BindResult:
     """Classify one route's handler signature for direct dispatch (see :class:`BindResult`).
     Public introspection only.
@@ -187,16 +198,11 @@ def bind_route(route: APIRoute) -> BindResult:
     endpoint = route.endpoint
     reasons: list[str] = []
     try:
-        hints = get_type_hints(endpoint)
+        hints = get_type_hints(endpoint, include_extras=True)
     except Exception:  # unresolvable forward refs; only fatal if a needed annotation is a string
         hints = {}
     signature = inspect.signature(endpoint)
     path_params = set(_PATH_PARAM_RE.findall(route.path))
-
-    def resolve(name: str, raw: Any) -> Any:
-        if isinstance(raw, str):  # deferred annotation — get_type_hints is the resolver
-            return hints.get(name, raw)
-        return raw  # concrete object on the signature wins (FastAPI reads the signature too)
 
     request_params: list[str] = []
     body_param: Optional[str] = None
@@ -205,14 +211,14 @@ def bind_route(route: APIRoute) -> BindResult:
     path_param: Optional[str] = None
 
     for name, param in signature.parameters.items():
-        annotation = resolve(name, param.annotation)
+        annotation = _resolve_annotation(name, param.annotation, hints)
         if isinstance(annotation, str):
             reasons.append(f"unresolvable string annotation on {name!r}: {annotation!r}")
             continue
         if param.kind in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD):
             reasons.append(f"*args/**kwargs parameter {name!r}")
             continue
-        if annotation is Request:
+        if _is_request(annotation):
             request_params.append(name)
             continue
         if isinstance(annotation, type) and issubclass(annotation, BaseModel):
@@ -256,8 +262,10 @@ def bind_route(route: APIRoute) -> BindResult:
     if isinstance(route.response_model, type) and issubclass(route.response_model, BaseModel):
         return_model = route.response_model
     else:
-        ret = resolve("return", signature.return_annotation)
+        ret = _resolve_annotation("return", signature.return_annotation, hints)
         return_model = ret if isinstance(ret, type) and issubclass(ret, BaseModel) else None
+        if get_origin(route.response_model) is Annotated or get_origin(ret) is Annotated:
+            reasons.append("Annotated response models are not supported over MCP")
 
     if reasons:
         return BindResult(binding=None, reasons=reasons, body_model=body_model)
@@ -579,11 +587,6 @@ async def _seed_body(request: Request) -> dict:
     return seed_body if isinstance(seed_body, dict) else {}
 
 
-def _strip_annotated(annotation: Any) -> Any:
-    """Return the type an ``Annotated[...]`` hint wraps, or the hint itself."""
-    return get_args(annotation)[0] if get_origin(annotation) is Annotated else annotation
-
-
 def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], dict]) -> None:
     """Replace the /seed_session route with a wrapper that appends the MCP session token to its response.
 
@@ -599,17 +602,19 @@ def _wrap_seed_session(app: FastAPI, mint_metadata: Callable[[Request, dict], di
     idx, route = _take_route(app, "/seed_session", "its response carries the MCP session token to the agent")
     method = route.endpoint
     signature = inspect.signature(method)
-    # Preserve Annotated metadata, including the BeforeValidator that prevents malformed typed seeds
-    # from falling back to the permissive cookie-seed model instead of returning 422.
+    # FastAPI reads validators and Body/Header/Depends markers from Annotated metadata;
+    # preserving it keeps the wrapped route's validation and dependency injection intact.
     hints = get_type_hints(method, include_extras=True)
     # Does the original handler already declare a Request param? If so, reuse it; the wrapper reads
     # the Request out of that same name instead of injecting a second one.
     request_param_name = next(
-        (n for n, p in signature.parameters.items() if _strip_annotated(hints.get(n, p.annotation)) is Request),
+        (n for n, p in signature.parameters.items() if _is_request(_resolve_annotation(n, p.annotation, hints))),
         None,
     )
     # The handler's own params, with deferred string annotations resolved so FastAPI sees real types.
-    params = [p.replace(annotation=hints.get(n, p.annotation)) for n, p in signature.parameters.items()]
+    params = [
+        p.replace(annotation=_resolve_annotation(n, p.annotation, hints)) for n, p in signature.parameters.items()
+    ]
     passthrough = tuple(signature.parameters)  # names to forward verbatim to the original handler
     if request_param_name is None:
         # No Request declared: prepend one, under a name no real handler param can collide with.
