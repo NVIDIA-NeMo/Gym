@@ -455,6 +455,34 @@ class TestApp:
         assert result["step_usage"] == request_json["step_usage"]
         assert result["reward"] == float(has_solution)
 
+    @pytest.mark.asyncio
+    async def test_verify_reads_an_agent_session_response_as_the_run_body(self):
+        # scicode_agent's /run sends these as top-level fields; its agent session puts them on the response.
+        accounting = {
+            "solutions": {"1.1": "a", "1.2": app._OUT_OF_CONTEXT},
+            "token_usage_version": 1,
+            "step_usage": [
+                {"step_number": "1.1", "status": "generated", "usage": None},
+                {"step_number": "1.2", "status": "context_window_exceeded", "usage": None},
+            ],
+        }
+        run_body = _request(solutions=None).model_dump() | accounting
+        session_body = _request(solutions=None).model_dump()
+        session_body["response"][app.SCICODE_RESPONSE_KEY] = accounting
+        with tempfile.NamedTemporaryFile(suffix=".h5") as h5, _mock_substep(passed=True):
+            server = _server(h5.name)
+            from_run = (await server.verify(ScicodeVerifyRequest.model_validate(run_body))).model_dump()
+            from_session = (await server.verify(ScicodeVerifyRequest.model_validate(session_body))).model_dump()
+        assert from_session == from_run
+        assert (from_session["reward"], from_session["num_steps_passed"], from_session["num_steps_total"]) == (
+            0.0,
+            1,
+            2,
+        )
+        assert from_session["step_usage"] == accounting["step_usage"]
+        # The rollout row keeps one copy of the agent's accounting.
+        assert app.SCICODE_RESPONSE_KEY not in from_session["response"]
+
     def test_sanity(self):
         _server()
 

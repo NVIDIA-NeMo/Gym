@@ -24,6 +24,17 @@ SciCode uses a **custom multi-step agent** — `simple_agent` will not work:
 The full wiring lives in `benchmarks/scicode/config.yaml`, which chains all three plus the dataset.
 The agent + its `example` dataset are defined in this server's own `configs/scicode.yaml`.
 
+Two configs run the same pairing:
+
+- `configs/scicode.yaml` (and the benchmark configs) put the agent's `/run` behind a `legacy_agent` relay. The
+  agent reads the problem from the row and sends `solutions`, `step_usage` and `token_usage_version` to `/verify`.
+- `configs/scicode_single_agent_turn.yaml` runs the agent as an agent session under `single_agent_turn_legacy`.
+  The agent reads the problem's prompt material from the row's `agent_context` and runs the whole sub-step loop in
+  one `/v1/responses` activation. Its response carries the same three fields under `scicode`, and `/verify` reads them
+  from there. Rows need `agent_context`, which `benchmarks/scicode/prepare.py` writes and the example rows carry.
+
+Both send the model the same requests, so the reward and the metrics are the same.
+
 ## Execution (no Docker sandbox)
 
 The agent sends a `solutions` dict — `{"<problem_id>.<step>": accumulated_code}` — to `/verify`. For
@@ -41,8 +52,10 @@ and `networkx`); `uv.lock` records the exact versions installed by `uv sync --lo
 - Sub-steps absent from `solutions` (prefilled reference steps) are excluded from the denominator.
 - Out-of-context sentinels (`_ran_out_of_context_`) are counted as failed sub-steps.
 - `verify()` returns `reward` + `step_results`, `num_steps_passed`, `num_steps_total`,
-  `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
-  computed on the **agent** (`/aggregate_metrics` runs there), not this server.
+  `problem_accuracy`. This server's `compute_metrics` / `get_key_metrics` add the headline `subtask_accuracy`
+  (total passed / total over all rollouts), its across-run variability, and the whole-problem token metrics built
+  from `step_usage` (see the agent's README). An Environment Server forwards `/aggregate_metrics` here, and so does
+  the agent's own `/aggregate_metrics`, so both configs report the same metrics.
 
 **How each sub-step's grading process ended (always recorded).** `step_exits` holds one record per
 scored sub-step, aligned with `step_results`: `returncode` (`null` when no process exit code exists),
@@ -93,7 +106,9 @@ fails fast with a clear error rather than scoring everything as wrong.
 Two JSONL files coexist with different shapes:
 
 - **`benchmarks/scicode/data/scicode_benchmark.jsonl`** (65-row test split, gitignored; produced by
-  `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`.
+  `prepare.py`). Flat-field: each row has `problem_id`, `sub_steps`, `required_dependencies`, `uuid`, and
+  `agent_context`: the same problem's prompt material (each sub-step's number, description, background, function
+  header and return line) for an agent session. Test cases and reference code stay out of it.
 - **`resources_servers/scicode/data/example.jsonl`** (5-row fixture, committed).
 
 Unlike most benchmarks, SciCode's prompts are **not** materialized at rollout time — the agent builds
