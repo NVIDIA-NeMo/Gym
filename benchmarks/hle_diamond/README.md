@@ -47,6 +47,18 @@ covers the image rows. The search presets and `opencode_search_full` are selecta
 `gym list benchmarks` because they extend another preset without redeclaring the dataset;
 `hle_diamond/opencode_reference` restates it (its header says why) and is listed.
 
+**Pi presets on agent sessions.** `pi` and `pi_search` run `pi_agent` through this benchmark's
+`single_agent_turn_legacy` Environment Server, as `benchmarks/hle`'s Pi presets do: each session creates its own
+sandbox from `PI_SANDBOX_IMAGE` with the shared settings in
+[`offline_science.yaml`](../../responses_api_agents/pi_agent/configs/profiles/offline_science.yaml), and the search
+preset gets Tavily through the agent's `tool_servers`. `pi_legacy_agent` and `pi_search_legacy_agent` keep the
+deprecated `pi_sandboxed_agent` on the `legacy_agent` relay (`sandbox_docker_local.yaml` does not cover them). What
+differs from that relay is listed in [`benchmarks/hle`'s README](../hle/README.md#sandboxed-agents); in short, a
+harness crash is retried and then reported as a failed rollout instead of scoring 0, there is no `PI_ARTIFACTS_DIR`,
+and rows carry `ng_agent_observations` instead of the `pi_*` fields. The OpenCode presets stay on
+`opencode_sandboxed_agent` for now: `opencode_agent` sessions accept text input only (the `_full` presets attach
+images) and have no setting for OpenCode's per-model `reasoningEffort` (Prompting > Reasoning effort).
+
 Dropped at prepare time: `rationale`, `author_name`, `canary`, `image_preview`, `rationale_image`.
 The `image` data URI appears only inside the materialized `input_image` block of the default set and
 of the OpenCode full set (`prepare_opencode.py`).
@@ -421,7 +433,7 @@ Commands that were run from the repository root with `hf_token`, `policy_base_ur
 gym eval prepare --benchmark hle_diamond        # Wrote 1000 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark.jsonl (272 with an image)
 gym eval prepare --benchmark hle_diamond/text   # Wrote 728 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl (skipped 272 image questions)
 gym eval prepare --benchmark hle_diamond/opencode_full  # Wrote 1000 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl (272 with an image)
-gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text, hle_diamond/opencode, hle_diamond/opencode_full, hle_diamond/pi, hle_diamond/opencode_reference
+gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text, hle_diamond/opencode, hle_diamond/opencode_full, hle_diamond/pi, hle_diamond/pi_legacy_agent, hle_diamond/opencode_reference
 ```
 
 `cais/hle-diamond` is gated: request access on the dataset page and put the token in `env.yaml` as
@@ -550,7 +562,7 @@ infrastructure only") and say nothing about the score.
 export OPENSANDBOX_API_KEY=unused-local-docker
 export OPENSANDBOX_DOMAIN=unused.invalid
 export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local      # PI_SANDBOX_IMAGE=gym-pi-science:local for the pi presets
-export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # PI_ARTIFACTS_DIR for pi: the harness's native transcripts
+export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # the harness's native transcripts (the pi session presets keep none)
 mkdir -p /abs/path/model-calls
 
 gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type litellm_model \
@@ -616,8 +628,9 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   output limit was hit, when the adapter sets `incomplete` with
   `incomplete_details.reason = max_output_tokens`. Read success or failure from
   `opencode_finished`, `opencode_failed`, `opencode_exit_code` and
-  `opencode_export_found` (OpenCode) or `finished_naturally`, `pi_failed`, `pi_exit_code` and
-  `pi_error_type` (Pi); the aggregate metrics carry `mean/opencode_failed` and `mean/opencode_finished`.
+  `opencode_export_found` (OpenCode) or, on `pi_legacy_agent` rows, `finished_naturally`, `pi_failed`,
+  `pi_exit_code` and `pi_error_type`; the aggregate metrics carry `mean/opencode_failed` and
+  `mean/opencode_finished`. Rows of the Pi session presets carry `ng_agent_observations` instead.
 - The aggregate of a sandboxed run carries neither `slices/partition/...` nor
   `judgement_parsing_issue_rate`, although every rollout row carries `partition` and
   `judge_evaluations`: the collector posts `/aggregate_metrics` to the agent server, and the

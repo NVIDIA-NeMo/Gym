@@ -392,6 +392,12 @@ LISTED_BENCHMARKS = {
         "benchmarks/hle_diamond/prompts/opencode.yaml",
     ),
     "hle_diamond/pi": ("hle_diamond_text", "hle_diamond_pi_agent", "benchmarks/hle_diamond/prompts/opencode.yaml"),
+    # The deprecated relay preset of pi.yaml, kept for comparison; it restates the dataset, so it is listed.
+    "hle_diamond/pi_legacy_agent": (
+        "hle_diamond_text",
+        "hle_diamond_pi_agent",
+        "benchmarks/hle_diamond/prompts/opencode.yaml",
+    ),
     "hle_diamond/opencode_full": ("hle_diamond_opencode_full", "hle_diamond_opencode_agent", None),
     # Restates the dataset (Gym's _inherit_from is a single-step rename), so it is listed unlike opencode_search.
     "hle_diamond/opencode_reference": (
@@ -651,6 +657,7 @@ class TestLocalDockerOverride:
             "opencode.yaml",
             "opencode_full.yaml",
             "pi.yaml",
+            "pi_legacy_agent.yaml",
             "opencode_reference.yaml",
         }
 
