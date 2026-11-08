@@ -143,11 +143,8 @@ env:
           chat_template_kwargs:
             enable_thinking: true
             truncate_history_thinking: false
-    sandbox:
-      opensandbox:
-        connection:
-          domain: ${oc.env:OPENSANDBOX_DOMAIN}
-          api_key: ${oc.env:OPENSANDBOX_API_KEY}
+    # The preparer adds Gym's OpenSandbox provider config path. Resolve credentials
+    # there: RL resolves and prints this outer config before Gym starts.
 async_rl:
   sampler:
     name: in_order

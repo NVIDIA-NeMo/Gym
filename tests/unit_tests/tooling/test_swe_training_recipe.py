@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import os
+import pprint
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -201,6 +202,38 @@ def test_old_run_uses_the_original_flat_agent_contract():
         }
     ]
     assert "task_input" not in records[0]
+
+
+@pytest.mark.parametrize("route", ["old-run", "single-agent-turn", "harbor"])
+def test_sandbox_credentials_resolve_only_inside_gym(monkeypatch, tmp_path, route):
+    sandbox_key = "synthetic-swe-sandbox-key"
+    sandbox_domain = "https://sandbox.example.invalid"
+    monkeypatch.setenv("OPENSANDBOX_API_KEY", sandbox_key)
+    monkeypatch.setenv("OPENSANDBOX_DOMAIN", sandbox_domain)
+    config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
+    recipe.configure_gym(
+        config,
+        harnesses=["opencode"],
+        route=route,
+        output=tmp_path,
+        parser_cache=tmp_path / "parsers",
+        prepared=SimpleNamespace(tasks=[], folder=tmp_path / "tasks"),
+    )
+    # RL resolves and prints this mapping before Gym loads its provider config.
+    rl_env = OmegaConf.to_container(config.env, resolve=True)
+    assert sandbox_key not in pprint.pformat(rl_env)
+    assert sandbox_domain not in pprint.pformat(rl_env)
+    gym = OmegaConf.merge(
+        rl_env["nemo_gym"],
+        {"policy_model_name": "test-model", "policy_base_url": "http://127.0.0.1:9000/v1", "policy_api_key": "unused"},
+    )
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=gym, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+        )
+    )
+    assert resolved.sandbox.opensandbox.connection.api_key == sandbox_key
+    assert resolved.sandbox.opensandbox.connection.domain == sandbox_domain
 
 
 @pytest.mark.parametrize(
