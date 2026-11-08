@@ -1,0 +1,14 @@
+# Exa web search served to session agents as an MCP tool. Grant it to an episode by listing this instance in the
+# Environment Server's (or the agent's) tool_servers; the sandbox must reach this server, so run with use_absolute_ip.
+exa_search:
+  resources_servers:
+    exa_search:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Exa web search served to session agents as an MCP tool
+      value: Give any MCP-capable harness Exa search through a tool grant
+      expose_tools_over_mcp: true
+      exa_api_key: ${oc.env:EXA_API_KEY}
+      num_results: 5
+      max_characters: 4000
