@@ -159,6 +159,13 @@ def prepare(source: Path, roster: Path, image_pins: Path, parser_cache: Path, ou
                     "mask_sample": case == "timeout",
                     "evaluation_completed": case != "timeout",
                 },
+                "failure_cause_contract": (
+                    "Injected deadline; source signal deaths may have an unknown cause. "
+                    "Require incomplete masked results, two distinct verifier sandboxes, raw exec evidence, "
+                    "and the injected test marker on both attempts. Harbor must report a typed timeout."
+                    if case == "timeout"
+                    else None
+                ),
             }
         )
     manifest = {

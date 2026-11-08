@@ -255,8 +255,9 @@ def run_command(command: list[str], output: Path, *, run_id: str, timeout_s: flo
     return code
 
 
-def control_matches(result: dict, case: str, *, source_logs: Path | None = None) -> bool:
-    """An infrastructure control passes only when it actually reaches incomplete verification."""
+def assess_control(result: dict, case: str, *, source_logs: Path | None = None) -> dict:
+    """Keep the injected deadline separate from the cause the runtime can establish."""
+    assessment = {"passed": False, "fixture_intent": case, "attempt_evidence": []}
     if case == "timeout":
         masked = (
             result.get("reward") == 0
@@ -264,29 +265,72 @@ def control_matches(result: dict, case: str, *, source_logs: Path | None = None)
             and result.get("evaluation_completed") is False
         )
         if not masked:
-            return False
+            return assessment
         attempts = result.get("verification_attempts")
         if isinstance(attempts, int):
             if attempts != 2 or source_logs is None:
-                return False
+                return assessment
             attempts = [{"verifier_logs_dir": str(source_logs / f"attempt-{number}")} for number in (1, 2)]
         if not isinstance(attempts, list) or len(attempts) != 2:
-            return False
+            return assessment
+        sandbox_ids = []
         for attempt in attempts:
             logs = Path(attempt["verifier_logs_dir"])
             try:
                 grading = json.loads((logs / ("verification.json" if source_logs else "grading.json")).read_text())
+                execution = json.loads((logs / "exec_result.json").read_text())
                 output = (logs / "test_output.log").read_text()
+                sandbox_id = (
+                    grading.get("sandbox_id")
+                    if source_logs
+                    else json.loads((logs / "verifier-cleanup.json").read_text()).get("sandbox_id")
+                )
             except (OSError, ValueError):
-                return False
-            if grading.get("error") != "evaluation timed out" or FORCED_TIMEOUT_MARKER not in output:
-                return False
-        return True
-    return (
+                return assessment
+            typed_timeout = execution.get("error_type") == "timeout" and grading.get("error") == "evaluation timed out"
+            interrupted = (
+                source_logs is not None
+                and execution.get("return_code") == -1
+                and execution.get("error_type") is None
+                and execution.get("stderr") == "signal: killed"
+                and grading.get("error") == "evaluation ended without complete test output (exit -1; cause unknown)"
+            )
+            assessment["attempt_evidence"].append(
+                {
+                    "sandbox_id": sandbox_id,
+                    "observed_classification": (
+                        "typed_timeout"
+                        if typed_timeout
+                        else "interrupted_test_output"
+                        if interrupted
+                        else "unclassified"
+                    ),
+                    "deadline_cause": "confirmed" if typed_timeout else "unavailable",
+                    "error": grading.get("error"),
+                    "execution": execution,
+                }
+            )
+            if (
+                not (typed_timeout or interrupted)
+                or not isinstance(sandbox_id, str)
+                or not sandbox_id
+                or execution.get("timeout_s") != 30
+                or execution.get("test_started") is not True
+                or execution.get("test_completed") is not False
+                or not isinstance(execution.get("exec_elapsed_s"), (int, float))
+                or not 0 <= execution["exec_elapsed_s"] < float("inf")
+                or FORCED_TIMEOUT_MARKER not in output
+            ):
+                return assessment
+            sandbox_ids.append(sandbox_id)
+        assessment["passed"] = len(set(sandbox_ids)) == 2
+        return assessment
+    assessment["passed"] = (
         result.get("reward") == (1 if case == "gold" else 0)
         and not result.get("mask_sample", False)
         and result.get("evaluation_completed") is True
     )
+    return assessment
 
 
 def harbor_command(
@@ -367,11 +411,12 @@ def run_controls(prepared: Path, provider: Path, output: Path, *, concurrency: i
             code, receipt = -1, {"error": f"{type(exc).__name__}: {exc}"}
             write_json(target / "runner-error.json", receipt)
         cleanup = receipt.get("cleanup", {})
+        assessment = assess_control(
+            receipt.get("result", {}), case, source_logs=target / "verifier" / tasks[index]["instance_id"]
+        )
         passed = (
             code == 0
-            and control_matches(
-                receipt.get("result", {}), case, source_logs=target / "verifier" / tasks[index]["instance_id"]
-            )
+            and assessment["passed"]
             and cleanup.get("task_teardown_confirmed") is True
             and cleanup.get("owned_task_sandboxes") == 0
             and cleanup.get("owned_verifier_sandboxes") == 0
@@ -379,6 +424,7 @@ def run_controls(prepared: Path, provider: Path, output: Path, *, concurrency: i
             and "error" not in receipt
         )
         return {
+            **assessment,
             "arm": f"source-{route}",
             "case": case,
             "instance_id": tasks[index]["instance_id"],
@@ -435,12 +481,13 @@ def run_controls(prepared: Path, provider: Path, output: Path, *, concurrency: i
                     cleanup.append({"teardown_confirmed": None, "path": str(path)})
             summary["controls"].append(
                 {
+                    **(assessment := assess_control(row, case)),
                     "arm": "harbor",
                     "case": case,
                     "instance_id": task["instance_id"],
                     "passed": code in (0, 1)
                     and valid_population
-                    and control_matches(row, case)
+                    and assessment["passed"]
                     and bool(cleanup)
                     and all(item.get("teardown_confirmed") is True for item in cleanup),
                     "cleanup": cleanup,
@@ -452,7 +499,14 @@ def run_controls(prepared: Path, provider: Path, output: Path, *, concurrency: i
             )
         write_json(output / "summary.json", summary)
     summary["passed"] = sum(item["passed"] for item in summary["controls"])
+    summary["unconfirmed_deadline_causes"] = sum(
+        attempt["deadline_cause"] == "unavailable"
+        for item in summary["controls"]
+        for attempt in item.get("attempt_evidence", [])
+    )
     summary["verdict"] = "PASS" if summary["passed"] == summary["expected_controls"] else "FAIL_OR_INCOMPLETE"
+    if summary["verdict"] == "PASS" and summary["unconfirmed_deadline_causes"]:
+        summary["verdict"] = "PASS_WITH_UNCONFIRMED_DEADLINE_CAUSE"
     write_json(output / "summary.json", summary)
     return summary
 
@@ -480,7 +534,7 @@ def main() -> None:
                 {"verdict": summary["verdict"], "passed": summary["passed"], "expected": summary["expected_controls"]}
             )
         )
-        if summary["verdict"] != "PASS":
+        if summary["passed"] != summary["expected_controls"]:
             raise SystemExit(1)
     else:
         parser.error("--prepared is required")

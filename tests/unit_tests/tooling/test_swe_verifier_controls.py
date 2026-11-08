@@ -124,7 +124,32 @@ def timeout_result(root, *, source=False):
         logs.mkdir(parents=True)
         (logs / "test_output.log").write_text(prepare.FORCED_TIMEOUT_MARKER)
         (logs / ("verification.json" if source else "grading.json")).write_text(
-            json.dumps({"error": "evaluation timed out"})
+            json.dumps(
+                {
+                    "error": (
+                        "evaluation ended without complete test output (exit -1; cause unknown)"
+                        if source
+                        else "evaluation timed out"
+                    ),
+                    "sandbox_id": f"verifier-{number}",
+                }
+            )
+        )
+        (logs / "exec_result.json").write_text(
+            json.dumps(
+                {
+                    "return_code": -1 if source else 124,
+                    "error_type": None if source else "timeout",
+                    "stderr": "signal: killed" if source else "",
+                    "timeout_s": 30,
+                    "exec_elapsed_s": 30.1,
+                    "test_started": True,
+                    "test_completed": False,
+                }
+            )
+        )
+        (logs / "verifier-cleanup.json").write_text(
+            json.dumps({"sandbox_id": f"verifier-{number}", "teardown_confirmed": True})
         )
         attempts.append({"verifier_logs_dir": str(logs)})
     return {
@@ -136,7 +161,10 @@ def timeout_result(root, *, source=False):
 
 
 @pytest.mark.parametrize("source", [True, False])
-@pytest.mark.parametrize("fault", [None, "first-marker-missing", "wrong-cause", "one-attempt", "measured-zero"])
+@pytest.mark.parametrize(
+    "fault",
+    [None, "first-marker-missing", "wrong-cause", "one-attempt", "measured-zero", "missing-exec", "same-sandbox"],
+)
 def test_timeout_requires_both_real_test_attempts(tmp_path, source, fault):
     result = timeout_result(tmp_path, source=source)
     if fault == "first-marker-missing":
@@ -149,7 +177,21 @@ def test_timeout_requires_both_real_test_attempts(tmp_path, source, fault):
         result["verification_attempts"] = 1 if source else result["verification_attempts"][:1]
     elif fault == "measured-zero":
         result["evaluation_completed"] = True
-    assert runner.control_matches(result, "timeout", source_logs=tmp_path if source else None) == (fault is None)
+    elif fault == "missing-exec":
+        (tmp_path / "attempt-1" / "exec_result.json").unlink()
+    elif fault == "same-sandbox":
+        path = tmp_path / "attempt-2" / ("verification.json" if source else "verifier-cleanup.json")
+        value = json.loads(path.read_text())
+        value["sandbox_id"] = "verifier-1"
+        path.write_text(json.dumps(value))
+    assessment = runner.assess_control(result, "timeout", source_logs=tmp_path if source else None)
+    assert assessment["passed"] == (fault is None)
+    if fault is None:
+        assert all(
+            item["deadline_cause"] == ("unavailable" if source else "confirmed")
+            and item["observed_classification"] == ("interrupted_test_output" if source else "typed_timeout")
+            for item in assessment["attempt_evidence"]
+        )
 
 
 @pytest.mark.parametrize("route", ["flat", "typed"])
@@ -230,11 +272,11 @@ def test_full_matrix_keeps_denominator_and_requires_cleanup(prepared, tmp_path, 
                 },
             )
             return 0
-        for attempt in result["verification_attempts"]:
+        for number, attempt in enumerate(result["verification_attempts"], 1):
             for role in ("agent", "verifier"):
                 runner.write_json(
                     Path(attempt["verifier_logs_dir"]) / f"{role}-cleanup.json",
-                    {"teardown_confirmed": fault != "cleanup"},
+                    {"teardown_confirmed": fault != "cleanup", "sandbox_id": f"{role}-{number}"},
                 )
         rows = [result | {"_ng_task_id": {"taskset": "controls", "task_id": task}}]
         if fault == "duplicate":
@@ -251,7 +293,9 @@ def test_full_matrix_keeps_denominator_and_requires_cleanup(prepared, tmp_path, 
     provider.write_text("sandbox:\n  opensandbox: {}\n")
     summary = runner.run_controls(prepared, provider, tmp_path / "runs", concurrency=2)
     assert summary["expected_controls"] == len(summary["controls"]) == 9
-    assert (summary["verdict"] == "PASS") == (fault is None)
+    assert (summary["verdict"] == "PASS_WITH_UNCONFIRMED_DEADLINE_CAUSE") == (fault is None)
+    if fault is None:
+        assert summary["unconfirmed_deadline_causes"] == 4
     assert len(commands) == 9
     harbor_commands = [command for command in commands if "--source-case" not in command]
     assert all(command[1:3] == ["dataset", "validate"] for command in harbor_commands)

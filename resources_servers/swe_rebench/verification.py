@@ -22,8 +22,10 @@ repo, apply the test patch and the candidate patch, install, test, parse, grade.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shlex
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -281,8 +283,13 @@ async def run_verification(
     log_dir: Path | None = None,
 ) -> VerificationResult:
     """Run the eval script in a sandbox already seeded with ``verification_files``."""
+    started = time.monotonic()
     result = await sandbox.exec("bash /tmp/nemo_gym_eval.sh", timeout_s=timeout_s)
+    elapsed_s = time.monotonic() - started
     output = (result.stdout or "") + (("\n" + result.stderr) if result.stderr else "")
+    error_type = getattr(result, "error_type", None)
+    test_started = TEST_OUTPUT_BEGIN in output
+    test_completed = test_started and TEST_OUTPUT_END in output.partition(TEST_OUTPUT_BEGIN)[2]
 
     if log_dir is not None:
         # Off the loop: this is a shared-filesystem write, and at high concurrency a few ms per
@@ -291,12 +298,26 @@ async def run_verification(
             try:
                 log_dir.mkdir(parents=True, exist_ok=True)
                 (log_dir / "test_output.log").write_text(output, errors="replace")
+                (log_dir / "exec_result.json").write_text(
+                    json.dumps(
+                        {
+                            "return_code": result.return_code,
+                            "error_type": error_type,
+                            "stderr": result.stderr,
+                            "timeout_s": timeout_s,
+                            "exec_elapsed_s": elapsed_s,
+                            "test_started": test_started,
+                            "test_completed": test_completed,
+                        },
+                        indent=2,
+                    )
+                    + "\n"
+                )
             except OSError:
                 pass
 
         await asyncio.to_thread(_persist_log)
 
-    error_type = getattr(result, "error_type", None)
     if error_type is not None:
         return VerificationResult(
             completed=False,
@@ -307,7 +328,7 @@ async def run_verification(
             error="evaluation timed out" if error_type == "timeout" else f"evaluation exec failed: {error_type}",
         )
 
-    if result.return_code == 97:
+    if result.return_code == 97 and not test_started:
         return VerificationResult(
             completed=False,
             resolved=False,
@@ -317,7 +338,7 @@ async def run_verification(
             error=f"repo directory {repo_directory(inputs.repo)} not present in the image",
         )
     # 124/137 can also be the test's own exit code; treat them as a kill only when output is cut off.
-    cut_off = TEST_OUTPUT_END not in output
+    cut_off = not test_completed
     timed_out = result.return_code == 124 and cut_off
     if timed_out or (result.return_code == 137 and cut_off):
         return VerificationResult(
@@ -327,6 +348,20 @@ async def run_verification(
             test_results=None,
             test_output=output,
             error=("evaluation timed out" if timed_out else "evaluation was killed (exit 137, likely OOM)"),
+        )
+
+    # The parent shell prints the end marker even when a test exits nonzero. Without
+    # both markers, the provider's exit status cannot establish a completed test run.
+    # In particular, OpenSandbox reports signal deaths as -1 without identifying
+    # whether a timeout, OOM or another signal killed the command.
+    if cut_off:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=test_started,
+            test_results=None,
+            test_output=output,
+            error=f"evaluation ended without complete test output (exit {result.return_code}; cause unknown)",
         )
 
     try:

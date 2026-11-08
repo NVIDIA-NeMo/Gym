@@ -18,9 +18,11 @@ These cover the parts that decide whether a task counts as resolved. The sandbox
 itself is exercised by the golden-patch run, which needs a live OpenSandbox endpoint.
 """
 
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -319,8 +321,8 @@ class TestRunVerification:
         assert message in result.error
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("return_code", [124, 137])
-    async def test_a_test_command_exiting_124_or_137_is_still_graded(self, return_code: int) -> None:
+    @pytest.mark.parametrize("return_code", [0, 1, 97, 124, 137, 255])
+    async def test_a_completed_test_command_is_still_graded(self, return_code: int) -> None:
         """The script passes the test command's exit code through; a complete run is graded."""
         log = f"{TEST_OUTPUT_BEGIN}\nreal output\n{TEST_OUTPUT_END}"
         result = await run_verification(
@@ -331,12 +333,58 @@ class TestRunVerification:
         assert result.completed is True
         assert result.resolved is True
 
+    @pytest.mark.parametrize("return_code", [-1, 0, 1, 255])
+    @pytest.mark.parametrize(
+        "log",
+        ["setup interrupted", f"{TEST_OUTPUT_BEGIN}\na PASSED\n", f"{TEST_OUTPUT_END}\n{TEST_OUTPUT_BEGIN}"],
+    )
+    async def test_incomplete_output_is_never_parsed(self, return_code: int, log: str, tmp_path: Path) -> None:
+        parser = Mock(return_value={"a": "PASSED"})
+        sandbox = _FakeSandbox(log, return_code=return_code)
+        sandbox._result.stderr = "signal: killed" if return_code == -1 else ""
+        result = await run_verification(
+            sandbox=sandbox,
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parser,
+            timeout_s=30,
+            log_dir=tmp_path,
+        )
+        assert not result.completed and not result.resolved
+        assert result.test_results is None
+        assert result.error == f"evaluation ended without complete test output (exit {return_code}; cause unknown)"
+        parser.assert_not_called()
+        evidence = json.loads((tmp_path / "exec_result.json").read_text())
+        assert evidence == {
+            "return_code": return_code,
+            "error_type": None,
+            "stderr": sandbox._result.stderr,
+            "timeout_s": 30,
+            "exec_elapsed_s": evidence["exec_elapsed_s"],
+            "test_started": TEST_OUTPUT_BEGIN in log,
+            "test_completed": False,
+        }
+        assert evidence["exec_elapsed_s"] >= 0
+        assert (tmp_path / "test_output.log").read_text() == result.test_output
+
+    async def test_failure_text_in_a_complete_test_log_is_still_graded(self) -> None:
+        log = f"{TEST_OUTPUT_BEGIN}\nsignal: killed\n{TEST_OUTPUT_END}"
+        parser = Mock(return_value={"a": "FAILED"})
+        result = await run_verification(
+            sandbox=_FakeSandbox(log, return_code=1),
+            inputs=_inputs(fail_to_pass=["a"], pass_to_pass=[]),
+            parser=parser,
+        )
+        assert result.completed and not result.resolved
+        assert result.test_results["tests_observed"] == 1
+        parser.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_a_parser_crash_is_reported_rather_than_scored_zero(self) -> None:
         def boom(_log: str) -> dict[str, str]:
             raise ValueError("bad log")
 
-        result = await run_verification(sandbox=_FakeSandbox("x"), inputs=_inputs(), parser=boom)
+        log = f"{TEST_OUTPUT_BEGIN}\nx\n{TEST_OUTPUT_END}"
+        result = await run_verification(sandbox=_FakeSandbox(log), inputs=_inputs(), parser=boom)
         assert result.completed is False
         assert "raised" in result.error
 

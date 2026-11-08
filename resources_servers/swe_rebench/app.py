@@ -438,7 +438,9 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 if not result.completed and attempt < attempts:
                     await self._stop_verifier_sandbox(session_id)
                 if self.config.verification_log_dir:
-                    await asyncio.to_thread(self._write_attempt_result, log_dir / f"attempt-{attempt}", result)
+                    await asyncio.to_thread(
+                        self._write_attempt_result, log_dir / f"attempt-{attempt}", result, sandbox
+                    )
             if result.completed:
                 break
             if attempt < attempts:
@@ -476,11 +478,12 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         )
 
     @staticmethod
-    def _write_attempt_result(log_dir: Path, result: VerificationResult) -> None:
+    def _write_attempt_result(log_dir: Path, result: VerificationResult, sandbox: AsyncSandbox | None) -> None:
         """Retain each retry's outcome next to its raw test output when logging is requested."""
         try:
             log_dir.mkdir(parents=True, exist_ok=True)
-            (log_dir / "verification.json").write_text(json.dumps(asdict(result)) + "\n")
+            sandbox_id = getattr(getattr(sandbox, "_handle", None), "sandbox_id", None)
+            (log_dir / "verification.json").write_text(json.dumps(asdict(result) | {"sandbox_id": sandbox_id}) + "\n")
         except OSError:
             LOGGER.exception("Could not record verification outcome under %s", log_dir)
 

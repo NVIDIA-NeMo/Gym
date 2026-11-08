@@ -14,6 +14,8 @@
 # limitations under the License.
 """Episode sessions and the agent-run seed, through the server's HTTP routes with a fake sandbox."""
 
+import json
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -26,7 +28,7 @@ from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest, check_resources_session_contract
 from resources_servers.swe_rebench import app as swe_rebench_app
 from resources_servers.swe_rebench.app import SWERebenchResourcesServer, SWERebenchResourcesServerConfig
-from resources_servers.swe_rebench.verification import VerificationResult
+from resources_servers.swe_rebench.verification import TEST_OUTPUT_BEGIN, VerificationResult, run_verification
 from resources_servers.swebench.patch_capture import CaptureCommandError, PatchCapture
 
 
@@ -213,6 +215,43 @@ def test_inconclusive_verification_retries_fresh_sandbox_with_same_patch(
         assert verify.await_args_list[1].kwargs["sandbox"] is sandboxes[2]
         for sandbox in sandboxes:
             sandbox.stop.assert_awaited_once()
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_signal_cutoff_retries_and_masks_through_real_verifier(
+    monkeypatch: MonkeyPatch, tmp_path: Path, typed: bool
+) -> None:
+    server, sandboxes = _server(monkeypatch)
+    server.config.verification_log_dir = tmp_path
+    create = SWERebenchResourcesServer._create_sandbox
+
+    async def interrupted(*args, **kwargs):
+        sandbox = await create(*args, **kwargs)
+        sandbox.exec.return_value = SandboxExecResult(
+            stdout=f"{TEST_OUTPUT_BEGIN}\npartial test output\n", stderr="signal: killed", return_code=-1
+        )
+        return sandbox
+
+    monkeypatch.setattr(SWERebenchResourcesServer, "_create_sandbox", interrupted)
+    monkeypatch.setattr(swe_rebench_app, "run_verification", run_verification)
+    with TestClient(server.setup_webserver()) as client:
+        seed = _seed().model_dump(mode="json") if typed else _ROW
+        assert client.post("/seed_session", json=seed).status_code == 200
+        response = client.post("/verify", json=_VERIFY)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["reward"] == 0.0 and result["mask_sample"] is True
+        assert result["evaluation_completed"] is False and result["verification_attempts"] == 2
+        assert result["error"] == "evaluation ended without complete test output (exit -1; cause unknown)"
+        assert len(sandboxes) == 3
+        assert sandboxes[1].initial_files == sandboxes[2].initial_files
+        assert not server._session_id_to_sandbox and not server._verifier_sandboxes
+        for sandbox in sandboxes:
+            sandbox.stop.assert_awaited_once()
+    for attempt in (1, 2):
+        logs = tmp_path / _ROW["instance_id"] / f"attempt-{attempt}"
+        assert json.loads((logs / "verification.json").read_text())["sandbox_id"] == f"sb-{attempt + 1}"
+        assert json.loads((logs / "exec_result.json").read_text())["return_code"] == -1
 
 
 def test_retry_after_task_stop_failure_reuses_capture(monkeypatch: MonkeyPatch) -> None:
