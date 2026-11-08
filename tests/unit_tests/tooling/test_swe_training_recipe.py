@@ -170,6 +170,64 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
     assert not list(tmp_path.iterdir())
 
 
+@pytest.mark.parametrize("model,expert_parallel_size", [("4b", 1), ("30b", 2)])
+@pytest.mark.parametrize("steps", [1, 5, 20])
+def test_preparation_materializes_the_requested_update_budget(
+    monkeypatch, tmp_path, model, expert_parallel_size, steps
+):
+    rl_root = tmp_path / "rl"
+    rl_root.mkdir()
+    (rl_root / "uv.lock").write_text("# test lock\n")
+    roster = tmp_path / "roster.json"
+    roster.write_text(json.dumps({"source_uncompressed_sha256": "source-fixture"}))
+    rows = [copy.deepcopy(REBENCH_ROW) | {"instance_id": f"task-{index}"} for index in range(8)]
+    revision = "a" * 40
+    # Stub provenance/network reads; exercise the real materializer, route configuration and budget calculation.
+    monkeypatch.setattr(
+        recipe, "clean_revision", lambda path: recipe.PARSER_REVISION if path.name == "SWE-rebench-V2" else revision
+    )
+    monkeypatch.setattr(
+        recipe.subprocess, "check_output", lambda command, **kwargs: "" if "ls-files" in command else revision
+    )
+    monkeypatch.setattr(recipe, "select_rows", lambda *args, **kwargs: (rows, [row["instance_id"] for row in rows]))
+    monkeypatch.setattr(recipe, "model_manifest", lambda repo, commit, path: {"revision": commit, "files": {}})
+    monkeypatch.setattr(
+        recipe,
+        "load_rl_config",
+        lambda root: OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml"),
+    )
+    args = SimpleNamespace(
+        rl_root=rl_root,
+        rl_revision=revision,
+        parser_cache=tmp_path / "parsers",
+        source=tmp_path / "source",
+        roster=roster,
+        image_pins=roster,
+        route="single-agent-turn",
+        harnesses=["opencode"],
+        model=model,
+        model_path=tmp_path / recipe.MODELS[model][1],
+        output_dir=tmp_path / "prepared",
+        count=8,
+        steps=steps,
+        wandb_project=None,
+    )
+    manifest = recipe.prepare(args)
+    config = OmegaConf.load(args.output_dir / "config.yaml")
+    train = [json.loads(line) for line in (args.output_dir / "train.jsonl").read_text().splitlines()]
+    assert len(train) == 8 and manifest["episodes"] == steps * 32
+    assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps
+    assert config.grpo.num_prompts_per_step == 8 and config.grpo.num_generations_per_prompt == 4
+    assert config.policy.train_global_batch_size == 32
+    assert config.async_rl.max_inflight_prompts == (4 if steps in (1, 5) else 8)
+    assert config.checkpointing.save_period == (1 if steps == 1 else 10)
+    assert (
+        config.checkpointing.save_optimizer
+        and config.policy.megatron_cfg.expert_model_parallel_size == expert_parallel_size
+    )
+    assert not config.grpo.val_at_start and not config.grpo.val_at_end and config.grpo.val_period == 0
+
+
 def test_launcher_dry_run_builds_one_node_submission_without_calling_slurm(tmp_path):
     # Bypass preflight only in this command-construction test; real launches always run it.
     bin_dir = tmp_path / "bin"

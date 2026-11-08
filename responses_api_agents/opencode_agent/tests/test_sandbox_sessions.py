@@ -806,6 +806,23 @@ def test_instructions_and_text_parts_reach_opencode(setup, mode):
         assert config["enabled_providers"] == ["nemo_gym"]
 
 
+def test_training_compaction_settings_pass_seed_and_reach_the_sandbox(setup):
+    agent, sandbox = setup
+    agent.config.context_window = 32768
+    agent.config.max_output_tokens = 1024
+    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}}
+    with TestClient(agent.setup_webserver()) as client:
+        seeded = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert seeded.status_code == 200, seeded.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["compaction"] == {"auto": False, "prune": False}
+        model = config["provider"]["nemo_gym"]["models"][agent.config.sandbox_model_id]
+        assert model["limit"] == {"context": 32768, "input": 32768, "output": 1024}
+        assert config["enabled_providers"] == ["nemo_gym"]
+
+
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
     agent, sandbox = setup
     monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: 100.0)

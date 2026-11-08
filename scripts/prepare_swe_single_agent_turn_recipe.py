@@ -226,8 +226,8 @@ def prepare(args: argparse.Namespace) -> dict:
         raise ValueError("Each harness must occur once in the requested blend")
     if args.route == "old-run" and args.harnesses != ["opencode"]:
         raise ValueError("Only OpenCode's independent old /run pairing is wired in this recipe so far")
-    if args.steps == 5 and (args.count != 8 or args.harnesses != ["opencode"]):
-        raise ValueError("The five-update qualification uses OpenCode and the first eight tasks")
+    if args.steps in (1, 5) and (args.count != 8 or args.harnesses != ["opencode"]):
+        raise ValueError("The one/five-update qualification uses OpenCode and the first eight tasks")
     rows, tasks = select_rows(args.source, args.roster, args.image_pins, count=args.count)
     model, revision, ep = MODELS[args.model]
     model_path = args.model_path.resolve()
@@ -266,9 +266,11 @@ def prepare(args: argparse.Namespace) -> dict:
     config.policy.train_global_batch_size = 4 * config.grpo.num_prompts_per_step
     config.grpo.max_num_steps = args.steps
     config.grpo.max_num_epochs = math.ceil(args.steps * 8 / args.count)
-    config.async_rl.max_inflight_prompts = 4 if args.steps == 5 else 8 if len(args.harnesses) == 1 else 16
+    config.async_rl.max_inflight_prompts = 4 if args.steps in (1, 5) else 8 if len(args.harnesses) == 1 else 16
     config.data.train.data_path = str(train)
     config.checkpointing.checkpoint_dir = str(output / "checkpoints")
+    if args.steps == 1:
+        config.checkpointing.save_period = 1
     config.logger.log_dir = str(output / "logs")
     config.logger.wandb_enabled = args.wandb_project is not None
     if args.wandb_project:
@@ -322,7 +324,7 @@ def main() -> None:
     parser.add_argument("--harnesses", choices=HARNESSES, nargs="+", default=["opencode"])
     parser.add_argument("--model", choices=MODELS, default="4b")
     parser.add_argument("--count", choices=(8, 16, 32, 64), type=int, default=32)
-    parser.add_argument("--steps", choices=(5, 20), type=int, default=20)
+    parser.add_argument("--steps", choices=(1, 5, 20), type=int, default=20)
     parser.add_argument("--wandb-project")
     manifest = prepare(parser.parse_args())
     print(
