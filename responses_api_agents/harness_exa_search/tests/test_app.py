@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import json
+import logging
 import sys
 import tarfile
 from pathlib import Path
@@ -15,6 +16,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxEndpoint
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.harness_exa_search.agent_runner import start_model_relay
 from responses_api_agents.harness_exa_search.app import (
     HarnessExaSearchAgent,
@@ -207,3 +209,40 @@ def test_upstream_model_url_carries_the_rollout_prefix_and_the_current_span(monk
     assert agent(sandbox_model_base_url="http://gateway:9000/")._upstream_model_url(prefixed) == (
         f"http://gateway:9000/ng-rollout/3-0{segment}"
     )
+
+
+@mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(monkeypatch, caplog, worker: bool) -> None:
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    from responses_api_agents.harness_exa_search import app
+
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"policy_model": {"responses_api_models": {"model": {}}}}
+    client._build_server_base_url.return_value = "http://model"
+    config = HarnessExaSearchConfig(
+        host="0.0.0.0",
+        port=0,
+        entrypoint="app.py",
+        name="test",
+        model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+        resources_server=ResourcesServerRef(type="resources_servers", name="verifier"),
+        agent="codex",
+        image="unused",
+        sandbox_provider={"local": {}},
+    )
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            HarnessExaSearchAgent(config=config, server_client=client)
+
+    warnings = [record.getMessage() for record in caplog.records if record.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in (
+        "harness_exa_search",
+        "legacy /run",
+        "exa_search tool server",
+        "Claude Code",
+        "exa_search/README.md",
+    ):
+        assert phrase in app.DEPRECATION_WARNING
