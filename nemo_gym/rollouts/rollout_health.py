@@ -978,6 +978,7 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
 
     listings = []
     for directory in capture_dirs:
+        store = CaptureStore(directory, create=False)
         try:
             names = set(os.listdir(directory))
         except OSError as exc:
@@ -987,11 +988,25 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
                 stacklevel=2,
             )
             continue
+        try:
+            pending_names = os.listdir(store.pending_dir)
+        except FileNotFoundError:
+            pending_names = []  # No call was ever claimed.
+        except OSError as exc:
+            warnings.warn(
+                f"Cannot list the model-call capture claims in {store.pending_dir} ({exc}); "
+                "failed rollouts stay unmeasured.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            continue
         # A claimed write is named `<rollout id>.<call token>.capture.pending`; the token has no dot.
         pending = {
-            name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0] for name in names if name.endswith(_PENDING_SUFFIX)
+            name.removesuffix(_PENDING_SUFFIX).rsplit(".", 1)[0]
+            for name in pending_names
+            if name.endswith(_PENDING_SUFFIX)
         }
-        listings.append((CaptureStore(directory, create=False), names, pending))
+        listings.append((store, names, pending))
     for row in rows:
         calls = None
         if "ng_model_call_capture" not in row:

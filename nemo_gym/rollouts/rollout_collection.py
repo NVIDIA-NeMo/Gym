@@ -950,7 +950,11 @@ async def enrich_run_result(
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
         payloads_kept = include_payloads and not _has_observation_gap(result, "multimodal_history_redacted")
-        merge_model_call_capture_into_record(result, capture_dirs, include_payloads=payloads_kept)
+        # Reads the capture file and lists claims, so it runs off the event loop. This coroutine waits on it,
+        # so nothing else touches `result` meanwhile.
+        await asyncio.to_thread(
+            merge_model_call_capture_into_record, result, capture_dirs, include_payloads=payloads_kept
+        )
         capture = result.get("ng_model_call_capture")
         safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
 
@@ -966,7 +970,7 @@ async def enrich_run_result(
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
     if delete_capture and safe_to_delete:
-        clear_model_call_captures_for_rollouts([result], capture_dirs)
+        await asyncio.to_thread(clear_model_call_captures_for_rollouts, [result], capture_dirs)
     return result
 
 
@@ -4134,7 +4138,7 @@ executions → not run again (left to recovery)
         # attempt index even when an earlier attempt died without a result.
         if capture_dirs:
             print("Clearing existing model-call captures for rollouts being dispatched")
-            clear_model_call_captures_for_rollouts(input_rows, capture_dirs)
+            await asyncio.to_thread(clear_model_call_captures_for_rollouts, input_rows, capture_dirs)
         # Participation depends only on the agent name and the static global config.
         # Decide it once per agent, so the per-row and per-rollout checks below do not revalidate the global config.
         token_capture_enabled_by_agent: dict[str | None, bool] = {}
