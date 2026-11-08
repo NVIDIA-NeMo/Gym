@@ -46,7 +46,7 @@ def codex_catalog(tmp_path):
     return directory / "models.json"
 
 
-@pytest.mark.parametrize("harnesses", [["atom"], [], ["pi", "pi"], ["pi", "hermes"]])
+@pytest.mark.parametrize("harnesses", [["atom"], [], ["pi", "pi"], ["pi", "hermes"], ["nooa", "codex"]])
 def test_unsupported_or_reordered_blends_fail_before_preparation(harnesses):
     with pytest.raises(ValueError):
         recipe.harness_assets(harnesses, codex_catalog=None)
@@ -102,6 +102,76 @@ def test_codex_export_is_required_only_when_selected(codex_catalog):
         recipe.harness_assets(["opencode"], codex_catalog=codex_catalog)
 
 
+def test_atom_rejects_old_run_before_reading_sources_or_preparing_assets(tmp_path, monkeypatch):
+    monkeypatch.setattr(recipe, "clean_revision", lambda _: pytest.fail("source read before route validation"))
+    output = tmp_path / "prepared"
+    with pytest.raises(ValueError, match="Atom .* has no old-run route"):
+        recipe.prepare(
+            SimpleNamespace(rl_root=tmp_path, output_dir=output, harnesses=list(recipe.HARNESSES), route="old-run")
+        )
+    assert not output.exists()
+    with pytest.raises(ValueError, match="has no old-run route"):
+        recipe.materialize_training_rows([REBENCH_ROW], harnesses=["nooa"], route="old-run")
+
+
+def test_atom_settings_are_staged_only_when_selected():
+    import yaml
+
+    assets = recipe.harness_assets(["nooa"], codex_catalog=None)
+    assert set(assets) == {"atom-settings.yaml"}
+    assert yaml.safe_load(assets["atom-settings.yaml"]) == {
+        "atom": {"summarization": {"policy": "none"}, "context_error_policy": "raise"}
+    }
+    assert recipe.harness_assets(["opencode", "hermes", "pi"], codex_catalog=None) == {}
+
+
+@pytest.mark.parametrize("route", ["single-agent-turn", "harbor"])
+def test_atom_recipe_uses_the_actual_config_and_harness_without_ignored_controls(tmp_path, monkeypatch, route):
+    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+    pytest.importorskip("nooa", reason="NOOA server dependencies are not installed in the core environment")
+    import yaml
+    from nooa_atom.gym import AtomHarness
+    from nooa_atom.workspace.options import AtomOptions
+
+    from responses_api_agents.nooa_agent.config import NOOAAgentConfig, validate_invocation
+
+    config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
+    recipe.configure_gym(
+        config,
+        harnesses=["nooa"],
+        route=route,
+        output=tmp_path,
+        parser_cache=tmp_path / "parsers",
+        prepared=SimpleNamespace(tasks=[], folder=tmp_path / "tasks"),
+    )
+    gym = OmegaConf.merge(
+        config.env.nemo_gym,
+        {
+            "policy_model_name": "test-model",
+            "policy_base_url": "http://127.0.0.1:9000/v1",
+            "policy_api_key": "unused",
+            "sandbox": {"opensandbox": {"connection": {"domain": "https://example.invalid", "api_key": "unused"}}},
+        },
+    )
+    resolved = GlobalConfigDictParser().parse(
+        GlobalConfigDictParserConfig(
+            initial_global_config_dict=gym, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+        )
+    )
+    data = OmegaConf.to_container(resolved.nooa_agent.responses_api_agents.nooa_agent, resolve=True)
+    # Startup adds the registered name. Keep every emitted adapter field for strict validation.
+    parsed = NOOAAgentConfig.model_validate(data | {"name": "nooa_agent"})
+    agent_class, adapter = validate_invocation(parsed.nooa)
+    assert agent_class is AtomHarness and adapter.__name__ == "invoke_atom"
+    assert parsed.context_window == 32768 and parsed.sandbox_runner_timeout_seconds == 480
+    assert parsed.settings_file == tmp_path / "atom-settings.yaml"
+    assert parsed.max_policy_calls is None and parsed.nooa.execution_mode == "sandboxed"
+    assert config.policy.generation.max_new_tokens == 1024
+    settings = yaml.safe_load(recipe.harness_assets(["nooa"], codex_catalog=None)["atom-settings.yaml"])
+    options = AtomOptions.model_validate(settings["atom"])
+    assert options.summarization.policy == "none" and options.context_error_policy == "raise"
+
+
 def test_task_order_and_verifier_payload_are_preserved_without_prompt_leakage():
     rows = [copy.deepcopy(REBENCH_ROW) | {"instance_id": f"task-{index}"} for index in range(16)]
     original = copy.deepcopy(rows)
@@ -132,11 +202,14 @@ def test_old_run_uses_the_original_flat_agent_contract():
     assert "task_input" not in records[0]
 
 
-@pytest.mark.parametrize("route", ["old-run", "single-agent-turn", "harbor"])
-def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, route):
+@pytest.mark.parametrize(
+    "route,harnesses",
+    [(route, list(recipe.OLD_AGENTS)) for route in ("old-run", "single-agent-turn", "harbor")]
+    + [(route, list(recipe.HARNESSES)) for route in ("single-agent-turn", "harbor")],
+)
+def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, route, harnesses):
     monkeypatch.delenv(ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, raising=False)
     config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
-    harnesses = list(recipe.HARNESSES)
     recipe.configure_gym(
         config,
         harnesses=harnesses,
@@ -182,7 +255,8 @@ def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, rou
         agent_name = recipe.OLD_AGENTS[harness] if route == "old-run" else f"{harness}_agent"
         assert env.agent_server.name == agent_name
         agent = resolved[agent_name].responses_api_agents[agent_name]
-        assert agent.token_id_capture and agent.num_workers == 1 and agent.datasets == []
+        assert agent.token_id_capture and agent.num_workers == 1
+        assert agent.get("datasets") == (None if harness == "nooa" else [])
         assert agent.resources_server == (
             {"type": "resources_servers", "name": "swe_resources"} if route == "old-run" else None
         )
@@ -219,6 +293,18 @@ def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, rou
                 assert not agent.execution_failure_reward_zero and agent.network_access == "inherit"
                 assert agent.model_server.name == "policy_model" and agent.model == "test-model"
                 assert not any("pi_sandboxed_agent/configs" in path for path in resolved.config_paths)
+        elif harness == "nooa":
+            assert agent.nooa == {
+                "agent_class": "nooa_atom.gym:AtomHarness",
+                "invocation_adapter": "responses_api_agents.nooa_agent.atom_adapter:invoke_atom",
+                "execution_mode": "sandboxed",
+                "init_kwargs": {"turn_method": "handle_batch"},
+            }
+            assert agent.context_window == 32768 and agent.sandbox_runner_timeout_seconds == 480
+            assert agent.max_policy_calls is None and agent.settings_file == str(tmp_path / "atom-settings.yaml")
+            assert agent.model_server.name == "policy_model"
+            assert "nooa_environment_server" not in resolved and "nooa_atom_agent" not in resolved
+            assert not any(key in agent for key in ("model", "concurrency", "max_output_tokens"))
         if route == "harbor":
             assert env.verifier_completion_key == "evaluation_completed"
             assert env.inconclusive_verification_retries == 1
@@ -354,7 +440,9 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
         (1, 8, ["opencode"], "single-agent-turn"),
         (5, 8, ["opencode"], "single-agent-turn"),
         (20, 8, ["opencode"], "single-agent-turn"),
-        (20, 32, list(recipe.HARNESSES), "old-run"),
+        (20, 32, list(recipe.OLD_AGENTS), "old-run"),
+        (20, 32, list(recipe.OLD_AGENTS), "single-agent-turn"),
+        (20, 32, list(recipe.OLD_AGENTS), "harbor"),
         (20, 32, list(recipe.HARNESSES), "single-agent-turn"),
         (20, 32, list(recipe.HARNESSES), "harbor"),
     ],
@@ -436,11 +524,11 @@ def test_preparation_materializes_the_requested_update_budget(
         assert [
             (row["task_input"]["task_data"]["instance_id"], row["task_id"]["taskset"]) for row in train
         ] == expected_ids
-    if width == 5:
+    if width in (5, 6):
         assert count == 32 and steps == 20 and config.grpo.max_num_epochs == 5
-        assert len(train) == 160 and config.policy.train_global_batch_size == 160
-        for offset in range(0, len(train), 40):
-            assert expected_ids[offset : offset + 40] == [
+        assert len(train) == 32 * width and config.policy.train_global_batch_size == 32 * width
+        for offset in range(0, len(train), 8 * width):
+            assert expected_ids[offset : offset + 8 * width] == [
                 (f"task-{task}", f"swe_rebench_{harness}")
                 for task in range(offset // width, offset // width + 8)
                 for harness in harnesses
@@ -458,6 +546,12 @@ def test_preparation_materializes_the_requested_update_budget(
             }
         }
         assert manifest["files_sha256"][settings.name] == check.file_sha256(settings)
+        if width == 6:
+            assert config.grpo.num_prompts_per_step == 48 and manifest["episodes"] == 3840
+            assert config.async_rl.max_inflight_prompts == 16
+            atom = args.output_dir / "atom-settings.yaml"
+            assert OmegaConf.load(atom).atom == {"summarization": {"policy": "none"}, "context_error_policy": "raise"}
+            assert manifest["files_sha256"][atom.name] == check.file_sha256(atom)
     assert config.checkpointing.save_period == (1 if steps == 1 else 10)
     assert (
         config.checkpointing.save_optimizer
@@ -482,7 +576,14 @@ def test_preparation_materializes_the_requested_update_budget(
 
 
 @pytest.mark.parametrize(
-    "name", ["claude-settings.json", "codex/models.json", "codex/fallback.json", "codex/provenance.json"]
+    "name",
+    [
+        "claude-settings.json",
+        "codex/models.json",
+        "codex/fallback.json",
+        "codex/provenance.json",
+        "atom-settings.yaml",
+    ],
 )
 def test_preflight_covers_staged_harness_assets(assets, codex_catalog, name):
     prepared, root, _, manifest = assets

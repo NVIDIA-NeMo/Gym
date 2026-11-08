@@ -171,6 +171,16 @@ class Probe:
     async def close_sandbox(self) -> None:
         """Release a task sandbox, when the probe owns one."""
 
+    def _python_run(self, command: str) -> str:
+        return f"result = await self.shell.run({command!r})\n"
+
+    def _python_finish(self) -> str:
+        return (
+            "from nooa_bench.bench_agent import TaskResult\n"
+            f"return_result(TaskResult(solution_description={ANSWER!r}, "
+            f"evidence={ANSWER!r}, how_to_verify={ANSWER!r}))"
+        )
+
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
         for tool in tools:
@@ -187,8 +197,7 @@ class Probe:
                 if bare == "python_cell" and "code" in properties:
                     args = {
                         "code": (
-                            f"result = await self.shell.run({('sh -c ' + shlex.quote(command))!r})\n"
-                            "print(result.stdout, end='')\n"
+                            self._python_run("sh -c " + shlex.quote(command)) + "print(result.stdout, end='')\n"
                             "if result.returncode:\n"
                             "    raise RuntimeError(f'shell exited with code {result.returncode}')"
                         )
@@ -226,13 +235,7 @@ class Probe:
             if name.rsplit("__", 1)[-1] == "python_cell":
                 return (
                     name,
-                    {
-                        "code": (
-                            "from nooa_bench.bench_agent import TaskResult\n"
-                            f"return_result(TaskResult(solution_description={ANSWER!r}, "
-                            f"evidence={ANSWER!r}, how_to_verify={ANSWER!r}))"
-                        )
-                    },
+                    {"code": self._python_finish()},
                     namespaces,
                 )
             if name.rsplit("__", 1)[-1] not in FINISH_TOOLS:

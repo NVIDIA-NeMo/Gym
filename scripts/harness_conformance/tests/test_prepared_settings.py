@@ -18,6 +18,46 @@ from nemo_gym.rollouts.harness_capabilities import digest_file, json_rows
 PORTS = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
 
 
+async def test_prepared_atom_settings_are_preserved_and_checked_before_runtime_import(tmp_path, monkeypatch):
+    from scripts.harness_conformance.nooa import observer_module_name
+
+    runtime_settings = tmp_path / "atom-settings.yaml"
+    runtime_settings.write_text("atom:\n  summarization:\n    policy: none\n  context_error_policy: raise\n")
+    agent = {
+        "nooa": {
+            "agent_class": "nooa_atom.gym:AtomHarness",
+            "invocation_adapter": "responses_api_agents.nooa_agent.atom_adapter:invoke_atom",
+            "execution_mode": "sandboxed",
+            "init_kwargs": {"turn_method": "handle_batch"},
+        },
+        "context_window": 32768,
+        "sandbox_runner_timeout_seconds": 480,
+        "settings_file": str(tmp_path / "." / "atom-settings.yaml"),
+    }
+    source = tmp_path / "prepared.yaml"
+    source.write_text(yaml.safe_dump({"nooa_agent": {"responses_api_agents": {"nooa_agent": agent}}}))
+    settings = episode.prepared_settings(
+        harness="nooa", config_path=source, agent_name="nooa_agent", sampling_path=None
+    )
+    assert settings["referenced_files"] == {str(runtime_settings): digest_file(runtime_settings)}
+    assert settings["agent"] == agent
+    configured = episode._config(
+        "nooa", tmp_path, PORTS, 10, use_agent_sessions=True, prepared_agent=settings["agent"]
+    )["probe_agent"]["responses_api_agents"]["nooa_agent"]
+    observer = observer_module_name(agent["nooa"]["invocation_adapter"])
+    expected = agent | {"nooa": agent["nooa"] | {"invocation_adapter": f"{observer}:invoke_with_witness"}}
+    assert {key: configured[key] for key in agent} == expected
+    assert "model" not in configured and "concurrency" not in configured
+    runtime_settings.write_text("atom:\n  summarization:\n    policy: default\n")
+    monkeypatch.setattr(
+        episode.importlib, "import_module", lambda _: pytest.fail("runtime imported before settings hash check")
+    )
+    with pytest.raises(ValueError, match="Prepared behavior file changed"):
+        await episode.run_episode(
+            harness="nooa", scenario_name="tool_success", directory=tmp_path, timeout=1, settings=settings
+        )
+
+
 def test_claude_is_explicit_opt_in_and_does_not_change_default_cli_or_ci(tmp_path, monkeypatch):
     from scripts.harness_conformance.ci import select_harnesses
     from scripts.harness_conformance.registry import HARNESSES, PROBE_HARNESSES

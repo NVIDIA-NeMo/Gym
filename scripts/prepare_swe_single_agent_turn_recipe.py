@@ -76,6 +76,19 @@ HARNESSES = {
         "features": {"multi_agent": False, "code_mode": False, "token_budget": False},
         "timeout": 480,
     },
+    "nooa": {
+        "entrypoint": "app.py",
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        "nooa": {
+            "agent_class": "nooa_atom.gym:AtomHarness",
+            "invocation_adapter": "responses_api_agents.nooa_agent.atom_adapter:invoke_atom",
+            "execution_mode": "sandboxed",
+            "init_kwargs": {"turn_method": "handle_batch"},
+        },
+        "context_window": 32768,
+        "sandbox_runner_timeout_seconds": 480,
+        "max_policy_calls": None,
+    },
 }
 OLD_AGENTS = {
     "opencode": "opencode_sandboxed_agent",
@@ -94,15 +107,24 @@ CODEX_EXPORT = {
 }
 
 
-def harness_assets(harnesses: list[str], *, codex_catalog: Path | None) -> dict[str, bytes]:
-    """Validate prepared runtime inputs before creating an output directory or contacting the Hub."""
+def validate_harnesses(harnesses: list[str], *, route: str | None = None) -> None:
+    """Require the fixed mixture order and an actual implementation of the selected route."""
     if not harnesses or any(name not in HARNESSES for name in harnesses):
-        raise ValueError("Select supported harnesses; Atom awaits SDK policy and worker settings transport")
+        raise ValueError("Select supported harnesses: " + " ".join(HARNESSES))
     if len(set(harnesses)) != len(harnesses):
         raise ValueError("Each harness must occur once in the requested blend")
     if harnesses != [name for name in HARNESSES if name in harnesses]:
-        raise ValueError("Use task-major harness order: opencode claude_code hermes pi codex")
+        raise ValueError("Use task-major harness order: " + " ".join(HARNESSES))
+    if route == "old-run" and "nooa" in harnesses:
+        raise ValueError("Atom (nooa) has no old-run route; select single-agent-turn or harbor")
+
+
+def harness_assets(harnesses: list[str], *, codex_catalog: Path | None) -> dict[str, bytes]:
+    """Validate prepared runtime inputs before creating an output directory or contacting the Hub."""
+    validate_harnesses(harnesses)
     assets = {}
+    if "nooa" in harnesses:
+        assets["atom-settings.yaml"] = b"atom:\n  summarization:\n    policy: none\n  context_error_policy: raise\n"
     if "claude_code" in harnesses:
         settings = {
             "env": {
@@ -163,6 +185,7 @@ def configure_gym(
     prepared: PreparedTaskset | None = None,
 ) -> None:
     """Bind each harness to its own resources or Harbor environment instance."""
+    validate_harnesses(harnesses, route=route)
     gym = config.env.nemo_gym
     # These recipes gather pairing evidence; they do not extend the benchmark's qualified harness list.
     gym.allow_unsupported_pairing = True
@@ -185,8 +208,8 @@ def configure_gym(
         gym.swe_resources = {"resources_servers": {"swe_rebench": resources}}
     for harness in harnesses:
         agent = OLD_AGENTS[harness] if route == "old-run" else f"{harness}_agent"
-        # Pi's sandboxed adapter has benchmark configs, but no generic pairing YAML.
-        if agent != "pi_sandboxed_agent":
+        # Pi has no generic sandboxed YAML; NOOA's template also starts an unbound environment.
+        if agent not in ("pi_sandboxed_agent", "nooa_agent"):
             gym.config_paths.append(f"responses_api_agents/{agent}/configs/{agent}.yaml")
         settings = copy.deepcopy(HARNESSES[harness])
         if route == "old-run" and harness == "opencode":
@@ -238,7 +261,11 @@ def configure_gym(
             settings["settings"] = str(output / "claude-settings.json")
         elif harness == "codex":
             settings["model_catalog_json"] = str(output / "codex/models.json")
-        settings.update(token_id_capture=True, num_workers=1, datasets=[])
+        elif harness == "nooa":
+            settings["settings_file"] = str(output / "atom-settings.yaml")
+        settings.update(token_id_capture=True, num_workers=1)
+        if harness != "nooa":
+            settings["datasets"] = []
         if route == "old-run":
             settings["sandbox_provider"] = "sandbox"
         settings["resources_server"] = (
@@ -282,6 +309,7 @@ def materialize_training_rows(
     rows: list[dict], *, harnesses: list[str], route: str, prepared: PreparedTaskset | None = None
 ) -> list[dict]:
     """Keep task-major order across harnesses and preserve each route's actual request contract."""
+    validate_harnesses(harnesses, route=route)
     by_id = {task.task_id: task for task in prepared.tasks} if prepared else {}
     materialized = []
     for row in rows:
@@ -330,6 +358,7 @@ def model_manifest(repo: str, revision: str, path: Path) -> dict:
 def prepare(args: argparse.Namespace) -> dict:
     """Write a fixed cohort/task/harness order and its complete configuration provenance."""
     rl_root, output = args.rl_root.resolve(), args.output_dir.resolve()
+    validate_harnesses(args.harnesses, route=args.route)
     assets = harness_assets(args.harnesses, codex_catalog=args.codex_catalog)
     if clean_revision(rl_root) != args.rl_revision:
         raise ValueError(f"RL HEAD must match the explicit reviewed revision {args.rl_revision}")

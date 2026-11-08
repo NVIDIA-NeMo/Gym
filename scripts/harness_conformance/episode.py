@@ -116,7 +116,7 @@ def prepared_settings(
             else:
                 result["agent"][name] = _resolved_value(value)
         result["referenced_files"] = {}
-        for field in ("model_catalog_json", "settings"):
+        for field in ("model_catalog_json", "settings", "settings_file"):
             value = result["agent"].get(field)
             if isinstance(value, str) and value and not (field == "settings" and value.lstrip().startswith("{")):
                 path = Path(value).expanduser().resolve()
@@ -231,13 +231,10 @@ def _config(
     if harness == "nooa":
         agent.pop("model")
         agent.pop("concurrency")
-        from .nooa import observer_module_name
-
         agent.update(
             nooa={
                 **defaults["nooa"],
                 "execution_mode": "sandboxed",
-                "invocation_adapter": f"{observer_module_name()}:invoke_with_witness",
             }
         )
         agent["sandbox_runner_timeout_seconds"] = timeout
@@ -287,6 +284,11 @@ def _config(
         agent = deepcopy(prepared_agent) | local
         if use_agent_sessions and harness not in ("simple", "nooa"):
             agent["sandbox_config"] = (agent.get("sandbox_config") or {}) | {"workdir": str(directory / "workspace")}
+    if harness == "nooa":
+        from .nooa import observer_module_name
+
+        adapter = agent["nooa"]["invocation_adapter"]
+        agent["nooa"]["invocation_adapter"] = f"{observer_module_name(adapter)}:invoke_with_witness"
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     environment = {
         **server(ports["probe_environment"]),
@@ -347,9 +349,17 @@ async def run_episode(
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
     if harness == "nooa":
-        from .nooa import BorrowedSandboxProbe
+        from .nooa import BENCH_ADAPTER, BorrowedSandboxProbe
 
-        probe = BorrowedSandboxProbe(scenario, directory)
+        prepared = (settings or {}).get("agent", {})
+        invocation = prepared.get("nooa", {})
+        probe = BorrowedSandboxProbe(
+            scenario,
+            directory,
+            invocation_adapter=invocation.get("invocation_adapter", BENCH_ADAPTER),
+            atom=invocation.get("agent_class") == "nooa_atom.gym:AtomHarness",
+            runtime_wheelhouse=Path(prepared["runtime_wheelhouse"]) if prepared.get("runtime_wheelhouse") else None,
+        )
     else:
         probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
         probe = probe_cls(scenario, directory)
@@ -393,6 +403,11 @@ async def run_episode(
             overrides = {key: effective[key] for key in _LOCAL_AGENT_FIELDS if key in effective}
             if "sandbox_config" in effective:
                 overrides["sandbox_config.workdir"] = effective["sandbox_config"].get("workdir")
+            if harness == "nooa":
+                overrides["nooa.invocation_adapter"] = {
+                    "configured": probe.invocation_adapter,
+                    "effective": effective["nooa"]["invocation_adapter"],
+                }
             (directory / "local_overrides.json").write_text(json.dumps(overrides, indent=2) + "\n")
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")

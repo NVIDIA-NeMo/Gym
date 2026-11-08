@@ -11,7 +11,10 @@ from nooa import Agent
 from nooa.runtime.hooks import InstrumentationHooks, hooks_scope
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.nooa_agent.bench_agent_adapter import invoke_bench_agent
+from responses_api_agents.nooa_agent.invocation import load_invocation_adapter
+
+
+INVOCATION_ADAPTER = "responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent"
 
 
 class ExecutionWitness(InstrumentationHooks):
@@ -33,8 +36,8 @@ class ExecutionWitness(InstrumentationHooks):
 
 async def invoke_with_witness(agent: Agent, request: NeMoGymResponseCreateParamsNonStreaming) -> object:
     """Call the production adapter once with an additional independent observer."""
-    # The production adapter resets shell.cwd to the worker task directory.
-    # Before that reset BenchAgent may have selected an image default such as /app.
+    # The worker's task directory is stable even before the agent resets its shell.
     path = Path.cwd().parent / "native_executions.jsonl"
+    adapter = load_invocation_adapter(INVOCATION_ADAPTER)
     with hooks_scope(ExecutionWitness(path)):
-        return await invoke_bench_agent(agent, request)
+        return await adapter(agent, request)

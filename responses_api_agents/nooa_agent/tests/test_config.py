@@ -84,6 +84,21 @@ def test_agent_config_rejects_unknown_fields() -> None:
     assert error["loc"] == ("max_step",)
 
 
+def test_settings_file_is_optional_and_requires_a_sandboxed_absolute_path(tmp_path) -> None:
+    assert agent_config().settings_file is None
+    sandboxed = invocation_config(execution_mode="sandboxed")
+    path = tmp_path / ".." / tmp_path.name / "settings.yaml"
+    assert agent_config(nooa=sandboxed, settings_file=path).settings_file == path.resolve()
+    assert (
+        agent_config(nooa=sandboxed, settings_file="~/settings.yaml").settings_file
+        == Path("~/settings.yaml").expanduser().resolve()
+    )
+    with pytest.raises(ValidationError, match="settings_file must be an absolute path"):
+        agent_config(nooa=sandboxed, settings_file="relative/settings.yaml")
+    with pytest.raises(ValidationError, match="requires nooa.execution_mode: sandboxed"):
+        agent_config(settings_file=tmp_path / "settings.yaml")
+
+
 def test_agent_config_names_policy_call_budget_explicitly() -> None:
     assert agent_config().max_policy_calls is None
     assert agent_config(max_policy_calls=None).max_policy_calls is None

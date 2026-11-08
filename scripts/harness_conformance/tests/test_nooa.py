@@ -4,21 +4,24 @@
 """Exercise NOOA's typed launch and borrowed-sandbox conformance fixtures."""
 
 import ast
+import asyncio
 import io
 import json
+import sys
 from contextlib import redirect_stdout
+from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from scripts.harness_conformance.episode import _config, check_runtime
+from scripts.harness_conformance.episode import _config, _install_sampling, check_runtime
 from scripts.harness_conformance.nooa import BorrowedSandboxProbe, observer_module_name
 from scripts.harness_conformance.provider import ANSWER, Probe
 from scripts.harness_conformance.scenarios import SCENARIOS
 
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import ModelCallSampling, NeMoGymResponse, encode_model_sampling
 from nemo_gym.rollouts.harness_capabilities import digest_file
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.sandbox.providers import create_provider
@@ -31,6 +34,173 @@ PYTHON_CELL = {
     "name": "python_cell",
     "parameters": {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
 }
+ATOM_ADAPTER = "responses_api_agents.nooa_agent.atom_adapter:invoke_atom"
+
+
+def test_prepared_atom_keeps_settings_and_wraps_its_selected_adapter(tmp_path, probe_ports):
+    prepared = {
+        "nooa": {
+            "agent_class": "nooa_atom.gym:AtomHarness",
+            "invocation_adapter": ATOM_ADAPTER,
+            "execution_mode": "sandboxed",
+            "init_kwargs": {"turn_method": "handle_orchestrate"},
+        },
+        "settings_file": str(tmp_path / "settings.yaml"),
+        "context_window": 32768,
+        "max_policy_calls": None,
+        "sandbox_runner_timeout_seconds": 417,
+    }
+    original = deepcopy(prepared)
+    config = _config("nooa", tmp_path, probe_ports, 23, use_agent_sessions=True, prepared_agent=prepared)
+    effective = config["probe_agent"]["responses_api_agents"]["nooa_agent"]
+    assert effective["nooa"]["invocation_adapter"] != ATOM_ADAPTER
+    assert effective["nooa"]["invocation_adapter"] == f"{observer_module_name(ATOM_ADAPTER)}:invoke_with_witness"
+    assert effective["nooa"] | {"invocation_adapter": ATOM_ADAPTER} == original["nooa"]
+    assert all(effective[key] == value for key, value in original.items() if key != "nooa")
+    assert prepared == original
+
+
+@pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure"])
+async def test_prepared_atom_executes_scripted_probe_with_independent_witness(
+    tmp_path, monkeypatch, probe_ports, scenario_name, caplog
+):
+    atom_gym = pytest.importorskip("nooa_atom.gym")
+    from nooa.runtime.hooks import hooks_scope
+    from scripts.harness_conformance import nooa
+    from scripts.harness_conformance.nooa_observer import ExecutionWitness
+
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+    from responses_api_agents.nooa_agent import atom_adapter
+    from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
+    from responses_api_agents.nooa_agent.runner import InProcessNOOARunner, NOOARunRequest
+    from responses_api_agents.nooa_agent.tests.test_gym_llm import FakeHTTPResponse
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("NEMO_OO_USER_DIR", str(tmp_path / "user"))
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("atom:\n  summarization:\n    policy: none\n  context_error_policy: raise\n")
+    monkeypatch.setenv("NEMO_OO_SETTINGS", str(settings))
+    monkeypatch.setattr("nooa.agent._auto_tracing_attempted", True)
+    original_factory = atom_gym.create_session_agent
+    agents = []
+
+    def factory(*args, **kwargs):
+        agent = original_factory(*args, **kwargs)
+        assert agent.context_error_policy == "raise"
+        assert agent.get_summarization_status()["policy"] == "none"
+        agents.append(agent)
+        return agent
+
+    monkeypatch.setattr(atom_gym, "create_session_agent", factory)
+    production = AsyncMock(wraps=atom_adapter.invoke_atom)
+    monkeypatch.setattr(atom_adapter, "invoke_atom", production)
+    prepared = {
+        "nooa": {
+            "agent_class": "nooa_atom.gym:AtomHarness",
+            "invocation_adapter": ATOM_ADAPTER,
+            "execution_mode": "sandboxed",
+            "init_kwargs": {"turn_method": "handle_batch", "sessions_dir": str(tmp_path / "sessions")},
+        }
+    }
+    config = _config("nooa", tmp_path, probe_ports, 23, use_agent_sessions=True, prepared_agent=prepared)
+    invocation = config["probe_agent"]["responses_api_agents"]["nooa_agent"]["nooa"]
+    # Import the same immutable fixture bytes installed in the disposable worker.
+    module = ModuleType(invocation["invocation_adapter"].split(":")[0])
+    exec(nooa.observer_source(ATOM_ADAPTER), module.__dict__)
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    probe = BorrowedSandboxProbe(SCENARIO[scenario_name], tmp_path, invocation_adapter=ATOM_ADAPTER, atom=True)
+    app = probe.model_app()
+    _install_sampling(app, tmp_path, name="policy_model", required=True)
+    sampling = ModelCallSampling(max_output_tokens=1024, temperature=1.0, top_p=1.0)
+    model_path = f"/ng-rollout/atom-probe/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+    with TestClient(app) as model:
+
+        async def post(**kwargs):
+            assert kwargs["url_path"] == model_path
+            response = model.post(model_path, json=kwargs["json"].model_dump(mode="json", exclude_none=True))
+            assert response.status_code == 200, response.text
+            return FakeHTTPResponse(response.json())
+
+        runner = InProcessNOOARunner(
+            invocation=NOOAInvocationConfig.model_validate(invocation),
+            server_client=SimpleNamespace(post=post),
+            model_server_name="policy_model",
+            max_policy_calls=4,
+            context_window=32768,
+        )
+        other = ExecutionWitness(tmp_path / "other.jsonl")
+        with hooks_scope(other):
+            result = await runner.run(
+                NOOARunRequest(
+                    responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                        input="Run the shell checks then finish.", max_output_tokens=1024
+                    ),
+                    model_url_path=model_path,
+                )
+            )
+    assert result.termination_reason is None, result.termination_error
+    assert result.return_value.solution_description == ANSWER
+    production.assert_awaited_once()
+    assert len(agents) == 1
+    assert len(probe.attempts) == 3 and probe.finished and not probe.violations
+    assert all(attempt["request"]["max_output_tokens"] == 1024 for attempt in probe.attempts)
+    assert all(attempt["request"]["temperature"] == attempt["request"]["top_p"] == 1.0 for attempt in probe.attempts)
+    assert all(call["executed"] and call["result_seen"] for call in probe.tool_calls)
+    executions = [json.loads(line) for line in (tmp_path / "native_executions.jsonl").read_text().splitlines()]
+    assert executions == [json.loads(line) for line in (tmp_path / "other.jsonl").read_text().splitlines()]
+    by_id = {item["id"]: item for item in executions}
+    assert [by_id[call["id"]]["exit_code"] for call in probe.tool_calls] == [int(scenario_name == "tool_failure"), 0]
+    assert by_id[probe.finish_call["id"]]["exit_code"] == 0
+    # Gym's ordinary projection remains present alongside the independent observer.
+    assert {call.tool_name for call in result.trajectory.tool_calls} >= {"python_cell"}
+    probe.save()
+    assert json.loads((tmp_path / "witness.json").read_text())["invocation_adapter"] == ATOM_ADAPTER
+    assert not any(record.levelname == "ERROR" for record in caplog.records)
+
+
+async def test_observer_install_binds_source_to_configured_adapter_and_offline_runtime(tmp_path, monkeypatch):
+    pytest.importorskip("nooa")
+    from scripts.harness_conformance.nooa import BENCH_ADAPTER, install_observer, observer_source
+
+    runtime = AsyncMock(return_value="/private-runtime/python")
+    monkeypatch.setattr("responses_api_agents.nooa_agent.sandbox_runtime.prepare_nooa_runtime", runtime)
+    staged = {}
+
+    async def upload(source, destination):
+        staged[destination] = source.read_text()
+
+    sandbox = SimpleNamespace(
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None, stdout="/site\n", stderr="")),
+        upload=upload,
+    )
+    await install_observer(sandbox, invocation_adapter=ATOM_ADAPTER, wheelhouse_path=tmp_path)
+    runtime.assert_awaited_once_with(sandbox, wheelhouse_path=tmp_path)
+    module = observer_module_name(ATOM_ADAPTER)
+    assert staged == {f"/site/{module}.py": observer_source(ATOM_ADAPTER)}
+    assert module != observer_module_name(BENCH_ADAPTER)
+    assert f"from {module} import invoke_with_witness" in sandbox.exec.call_args.args[0]
+
+
+@pytest.mark.parametrize("error", [ValueError("production failure"), asyncio.CancelledError()])
+async def test_observer_preserves_configured_adapter_failure_and_outer_hooks(tmp_path, monkeypatch, error):
+    hooks = pytest.importorskip("nooa.runtime.hooks")
+    from scripts.harness_conformance import nooa_observer
+
+    production = AsyncMock(side_effect=error)
+    selected = ModuleType("selected_test_adapter")
+    selected.run = production
+    monkeypatch.setitem(sys.modules, selected.__name__, selected)
+    monkeypatch.setattr(nooa_observer, "INVOCATION_ADAPTER", "selected_test_adapter:run")
+    observer = nooa_observer.ExecutionWitness(tmp_path / "other.jsonl")
+    agent, params = object(), object()
+    with hooks.hooks_scope(observer):
+        with pytest.raises(type(error)) as caught:
+            await nooa_observer.invoke_with_witness(agent, params)
+        assert caught.value is error
+        assert hooks.get_hooks() is observer
+    production.assert_awaited_once_with(agent, params)
 
 
 def test_nooa_runtime_records_locked_dependencies():
@@ -198,7 +368,7 @@ async def test_observer_wraps_production_adapter_once_and_keeps_other_hooks(tmp_
         return "production-result"
 
     production.side_effect = execute
-    monkeypatch.setattr(nooa_observer, "invoke_bench_agent", production)
+    monkeypatch.setattr("responses_api_agents.nooa_agent.bench_agent_adapter.invoke_bench_agent", production)
     with hooks.hooks_scope(observer):
         assert await nooa_observer.invoke_with_witness(agent, params) == "production-result"
         assert hooks.get_hooks() is observer

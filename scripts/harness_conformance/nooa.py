@@ -13,33 +13,41 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
 
-from nemo_gym.sandbox import AsyncSandbox, LocalProvider
+from nemo_gym.sandbox import AsyncSandbox, LocalProvider, upload_text
 from nemo_gym.sandbox.providers import SandboxHandle, SandboxSpec, register_provider
 
-from .provider import Probe
+from .provider import ANSWER, Probe
 
 
 OBSERVER = Path(__file__).with_name("nooa_observer.py")
+BENCH_ADAPTER = "responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent"
 
 
-def observer_module_name() -> str:
-    """Bind the fixture module import to its exact source bytes."""
-    return "nooa_conformance_observer_" + hashlib.sha256(OBSERVER.read_bytes()).hexdigest()[:16]
+def observer_source(invocation_adapter: str = BENCH_ADAPTER) -> str:
+    """Bind the additive observer to the selected production invocation."""
+    return OBSERVER.read_text() + f"\nINVOCATION_ADAPTER = {invocation_adapter!r}\n"
 
 
-async def install_observer(sandbox: AsyncSandbox) -> None:
+def observer_module_name(invocation_adapter: str = BENCH_ADAPTER) -> str:
+    """Bind the fixture import to its exact source and production adapter."""
+    return "nooa_conformance_observer_" + hashlib.sha256(observer_source(invocation_adapter).encode()).hexdigest()[:16]
+
+
+async def install_observer(
+    sandbox: AsyncSandbox, *, invocation_adapter: str = BENCH_ADAPTER, wheelhouse_path: Path | None = None
+) -> None:
     """Stage an additive fixture module in the disposable private runtime."""
     from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 
-    python = await prepare_nooa_runtime(sandbox)
+    python = await prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse_path)
     site = await sandbox.exec(
         shlex.join([python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"]),
         timeout_s=30,
     )
     if site.return_code != 0 or site.error_type:
         raise RuntimeError(f"Cannot locate NOOA fixture runtime: {site.stderr}")
-    module = observer_module_name()
-    await sandbox.upload(OBSERVER, f"{site.stdout.strip()}/{module}.py")
+    module = observer_module_name(invocation_adapter)
+    await upload_text(sandbox, path=f"{site.stdout.strip()}/{module}.py", text=observer_source(invocation_adapter))
     checked = await sandbox.exec(
         shlex.join([python, "-I", "-c", f"from {module} import invoke_with_witness"]), timeout_s=30
     )
@@ -70,6 +78,9 @@ class BorrowableLocalProvider(LocalProvider):
 class BorrowedSandboxProbe(Probe):
     """Seed and close the sandbox through Resources; NOOA runs its ordinary borrower path."""
 
+    invocation_adapter: str = BENCH_ADAPTER
+    atom: bool = False
+    runtime_wheelhouse: Path | None = None
     sandbox: AsyncSandbox | None = field(default=None, init=False)
     native_tool_calls: list[dict] = field(default_factory=list, init=False)
 
@@ -81,7 +92,26 @@ class BorrowedSandboxProbe(Probe):
         path = self.directory / "witness.json"
         witness = json.loads(path.read_text())
         witness["native_tool_calls"] = self.native_tool_calls
+        witness["invocation_adapter"] = self.invocation_adapter
+        witness["observer"] = {
+            "module": observer_module_name(self.invocation_adapter),
+            "sha256": hashlib.sha256(observer_source(self.invocation_adapter).encode()).hexdigest(),
+        }
         path.write_text(json.dumps(witness, indent=2) + "\n")
+
+    def _python_run(self, command: str) -> str:
+        if not self.atom:
+            return super()._python_run(command)
+        return f"async with Shell() as probe_shell:\n    result = await probe_shell.run({command!r})\n"
+
+    def _python_finish(self) -> str:
+        if not self.atom:
+            return super()._python_finish()
+        return (
+            "from nooa.interactive import Done, TaskResult\n"
+            f"return_result(Done(explanation={ANSWER!r}, result=TaskResult("
+            f"solution_description={ANSWER!r}, evidence={ANSWER!r}, how_to_verify={ANSWER!r})))"
+        )
 
     def _observe_tool_results(self, body: dict) -> None:
         super()._observe_tool_results(body)
@@ -126,7 +156,9 @@ class BorrowedSandboxProbe(Probe):
                 BorrowableLocalProvider(concurrency=1), SandboxSpec(workdir=str(self.directory / "workspace"))
             )
             await self.sandbox.start()
-            await install_observer(self.sandbox)
+            await install_observer(
+                self.sandbox, invocation_adapter=self.invocation_adapter, wheelhouse_path=self.runtime_wheelhouse
+            )
         return {
             "sandbox_access": {
                 "connection": {
