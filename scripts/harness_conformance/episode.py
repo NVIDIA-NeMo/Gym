@@ -32,7 +32,8 @@ from nemo_gym.rollouts.harness_capabilities import digest_file
 from nemo_gym.server_runtime import CallerSamplingMiddleware, ModelSamplingMiddleware
 
 from .provider import OpenClawProbe, Probe
-from .registry import HARNESSES
+from .registry import HARNESSES as HARNESSES
+from .registry import PROBE_HARNESSES
 from .scenarios import SCENARIOS
 
 
@@ -52,6 +53,8 @@ _LOCAL_AGENT_FIELDS = (
     "api_key",
     "openai_api_key",
     "openai_base_url",
+    "anthropic_api_key",
+    "anthropic_base_url",
 )
 
 
@@ -275,6 +278,8 @@ def _config(
             checkpoints_enabled=False,
             api_key="conformance",
         )
+    if harness == "claude_code":
+        agent.update(anthropic_api_key="conformance", anthropic_base_url=None)
     if prepared_agent is not None:
         # Replace the preset completely: its permissions, turn limits, compaction,
         # and model settings must not leak into a prepared experiment's probe.
@@ -327,8 +332,8 @@ async def run_episode(
                 raise ValueError(f"Prepared behavior file changed before this episode: {path}")
         (directory / "prepared_settings.json").write_text(json.dumps(settings, indent=2) + "\n")
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-    agent_cls = getattr(module, HARNESSES[harness])
-    config_cls = getattr(module, HARNESSES[harness] + "Config")
+    agent_cls = getattr(module, PROBE_HARNESSES[harness])
+    config_cls = getattr(module, PROBE_HARNESSES[harness] + "Config")
     use_agent_sessions = _supports_agent_sessions(agent_cls)
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
@@ -517,7 +522,7 @@ async def run_episode(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--harness", required=True, choices=HARNESSES)
+    parser.add_argument("--harness", required=True, choices=PROBE_HARNESSES)
     parser.add_argument("--scenario", required=True, choices=[s.name for s in SCENARIOS])
     parser.add_argument("--directory", required=True, type=Path)
     parser.add_argument("--timeout", required=True, type=float)

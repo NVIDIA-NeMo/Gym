@@ -92,7 +92,8 @@ pinned runtime during session setup, using Gym's local subprocess sandbox provid
 Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
 `PATH`; Hermes must be importable in the same Python environment. Missing
 dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects all registered harnesses.
+Omitting `--harness` selects the CI matrix. Claude Code is available only through
+explicit `--harness claude_code` selection and is not added to that default matrix.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
@@ -180,6 +181,34 @@ failures. Prepared token-capture requirements that the scripted provider cannot
 satisfy also remain failures. These probes do not establish real-model thinking,
 training-token validity, remote sandbox behavior, or learning. Absence of a summary
 in a short successful scenario does not prove compaction is disabled.
+
+Claude Code can use the same prepared inputs:
+
+```bash
+python scripts/run_harness_conformance.py --harness claude_code \
+    --prepared-config prepared-rl.yaml --agent-name claude_code_agent \
+    --policy-model-name actual-served-model-alias --model-sampling sampling.json \
+    --scenario tool_success --scenario tool_failure --scenario retry_500 \
+    --output results/prepared-claude
+```
+
+The selected configuration must supply an exact `claude_code_version` (for example,
+`2.1.108`); the published null default fails session setup. Its model alias, `bare`,
+and settings file remain unchanged. For a prepared 32768-context, 1024-output,
+no-compaction experiment, supply the actual prepared settings file and sampling
+input; the runner does not insert those behavior controls. It rewires Anthropic
+authentication and routing to the local scripted Model Server, without resolving
+the original provider credentials.
+
+The Messages endpoint uses Gym's production Anthropic converter and capture
+middleware, preserves raw Messages requests/responses, and accepts the CLI's
+`Bash` tool spelling. It supplies only the converted scripted response fields:
+absent reasoning, signatures, and training tokens are not invented. Messages usage
+has no separate reasoning count; it stays unknown. `usage_omitted` also removes
+usage from streamed events, so SDK rejection of missing usage remains a measured
+failure. These protocol checks do not qualify a native Claude installation or
+prove that its runtime honors a prepared setting; that requires a Linux run and
+separate executable provenance. Default scenarios and their gates remain unchanged.
 
 ## Scenarios
 

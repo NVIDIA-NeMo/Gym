@@ -33,10 +33,23 @@ MODELS = {
 HARNESSES = {
     "opencode": {
         "opencode_version": "1.17.11",
+        "concurrency": 8,
         "context_window": 32768,
         "max_output_tokens": 1024,
         "timeout": 480,
+        "sandbox_install_timeout_seconds": 480,
+        "report_agent_sandbox_oom": True,
         "opencode_config": {"compaction": {"auto": False, "prune": False}},
+    },
+    "claude_code": {
+        "claude_code_version": "2.1.108",
+        "model": "claude-sonnet-4-6",
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        "anthropic_api_key": "",
+        "bare": True,
+        "thinking": "enabled",
+        "max_turns": 30,
+        "timeout": 480,
     },
     "hermes": {
         "context_length": 32768,
@@ -44,6 +57,8 @@ HARNESSES = {
         "sandbox_runner_timeout_seconds": 480,
         "compression_enabled": False,
         "chat_template_kwargs_enabled": True,
+        "max_turns": 30,
+        "terminal_timeout": 60,
     },
     "pi": {
         "pi_version": "0.80.2",
@@ -53,7 +68,79 @@ HARNESSES = {
         "auto_compaction": False,
         "timeout": 480,
     },
+    "codex": {
+        "codex_version": "0.144.4",
+        "model": "gym-policy-model",
+        "model_context_window": None,
+        "model_auto_compact_token_limit": None,
+        "features": {"multi_agent": False, "code_mode": False, "token_budget": False},
+        "timeout": 480,
+    },
 }
+OLD_AGENTS = {
+    "opencode": "opencode_sandboxed_agent",
+    "claude_code": "claude_code_agent",
+    "hermes": "hermes_sandboxed_agent",
+    "pi": "pi_sandboxed_agent",
+    "codex": "codex_agent",
+}
+CODEX_EXPORT = {
+    "source_url": "https://github.com/openai/codex",
+    "source_revision": "8c68d4c87dc54d38861f5114e920c3de2efa5876",
+    "codex_version": "0.144.4",
+    "model": "gym-policy-model",
+    "status": "exporter_checks_passed",
+    "exporter_sha256": "f3408007c4289c1a4908ed93298803d669d6d24c172c6a44fa1426ab4f902852",
+}
+
+
+def harness_assets(harnesses: list[str], *, codex_catalog: Path | None) -> dict[str, bytes]:
+    """Validate prepared runtime inputs before creating an output directory or contacting the Hub."""
+    if not harnesses or any(name not in HARNESSES for name in harnesses):
+        raise ValueError("Select supported harnesses; Atom awaits SDK policy and worker settings transport")
+    if len(set(harnesses)) != len(harnesses):
+        raise ValueError("Each harness must occur once in the requested blend")
+    if harnesses != [name for name in HARNESSES if name in harnesses]:
+        raise ValueError("Use task-major harness order: opencode claude_code hermes pi codex")
+    assets = {}
+    if "claude_code" in harnesses:
+        settings = {
+            "env": {
+                "DISABLE_COMPACT": "1",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "32768",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1024",
+            }
+        }
+        assets["claude-settings.json"] = (json.dumps(settings, indent=2) + "\n").encode()
+    if "codex" not in harnesses:
+        if codex_catalog is not None:
+            raise ValueError("--codex-catalog requires selecting codex")
+        return assets
+    if codex_catalog is None or codex_catalog.name != "models.json":
+        raise ValueError("Codex requires --codex-catalog models.json from the pinned exporter")
+    for name in ("models.json", "fallback.json", "provenance.json"):
+        assets[f"codex/{name}"] = (codex_catalog.parent / name).read_bytes()
+    provenance = json.loads(assets["codex/provenance.json"])
+    for key, expected in CODEX_EXPORT.items():
+        if provenance.get(key) != expected:
+            raise ValueError(f"Codex export provenance mismatch: {key}")
+    for name in ("models.json", "fallback.json"):
+        if digest(assets[f"codex/{name}"]) != provenance.get(f"{name}_sha256"):
+            raise ValueError(f"Codex export bytes changed: {name}")
+    catalog = json.loads(assets["codex/models.json"])["models"]
+    slugs = [entry["slug"] for entry in catalog]
+    alias = HARNESSES["codex"]["model"]
+    if len(set(slugs)) != len(slugs) or alias not in slugs:
+        raise ValueError("Codex catalog requires unique slugs and the exact gym-policy-model alias")
+    descriptor = catalog[slugs.index(alias)]
+    fallback = json.loads(assets["codex/fallback.json"])
+    for field in ("context_window", "max_context_window", "auto_compact_token_limit"):
+        if descriptor.pop(field, None) is not None:
+            raise ValueError(f"Codex automatic context control must be absent: {field}")
+        fallback.pop(field, None)
+    if descriptor != fallback or not isinstance(descriptor.get("base_instructions"), str):
+        raise ValueError("Codex catalog must preserve the complete resolved fallback except context fields")
+    return assets
 
 
 def load_rl_config(rl_root: Path) -> DictConfig:
@@ -77,6 +164,8 @@ def configure_gym(
 ) -> None:
     """Bind each harness to its own resources or Harbor environment instance."""
     gym = config.env.nemo_gym
+    # These recipes gather pairing evidence; they do not extend the benchmark's qualified harness list.
+    gym.allow_unsupported_pairing = True
     gym.config_paths = [
         "responses_api_models/vllm_model/configs/vllm_model_for_training.yaml",
         "nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml",
@@ -95,15 +184,19 @@ def configure_gym(
         resources["sandbox_config"]["provider_options"]["platform"] = {"os": "linux", "arch": "amd64"}
         gym.swe_resources = {"resources_servers": {"swe_rebench": resources}}
     for harness in harnesses:
-        agent = "opencode_sandboxed_agent" if route == "old-run" else f"{harness}_agent"
-        gym.config_paths.append(f"responses_api_agents/{agent}/configs/{agent}.yaml")
+        agent = OLD_AGENTS[harness] if route == "old-run" else f"{harness}_agent"
+        # Pi's sandboxed adapter has benchmark configs, but no generic pairing YAML.
+        if agent != "pi_sandboxed_agent":
+            gym.config_paths.append(f"responses_api_agents/{agent}/configs/{agent}.yaml")
         settings = copy.deepcopy(HARNESSES[harness])
-        if route == "old-run":
+        if route == "old-run" and harness == "opencode":
             settings = {
                 "opencode_version": "1.17.11",
+                "concurrency": 8,
                 "opencode_max_context_window": 32768,
                 "opencode_query_via_stdin": True,
                 "sandbox_timeout": 480,
+                "report_agent_sandbox_oom": True,
                 "sandbox_provider": "sandbox",
                 "sandbox_config": {},
                 "opencode_env": {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": "1024"},
@@ -121,7 +214,33 @@ def configure_gym(
                     },
                 },
             }
+        elif route == "old-run" and harness == "hermes":
+            settings.pop("sandbox_runner_timeout_seconds")
+            settings.pop("chat_template_kwargs_enabled")
+            settings.update(
+                runtime_python=None,
+                model="${policy_model_name}",
+                concurrency=32,
+                sandbox_timeout=480,
+                chat_template_kwargs={"truncate_history_thinking": False},
+            )
+        elif agent == "pi_sandboxed_agent":
+            settings.update(
+                entrypoint="app.py",
+                model_server={"type": "responses_api_models", "name": "policy_model"},
+                model="${policy_model_name}",
+                sandbox_provider="sandbox",
+                sandbox_config={},
+                network_access="inherit",
+                execution_failure_reward_zero=False,
+            )
+        if harness == "claude_code":
+            settings["settings"] = str(output / "claude-settings.json")
+        elif harness == "codex":
+            settings["model_catalog_json"] = str(output / "codex/models.json")
         settings.update(token_id_capture=True, num_workers=1, datasets=[])
+        if route == "old-run":
+            settings["sandbox_provider"] = "sandbox"
         settings["resources_server"] = (
             {"type": "resources_servers", "name": "swe_resources"} if route == "old-run" else None
         )
@@ -170,7 +289,7 @@ def materialize_training_rows(
             taskset = f"swe_rebench_{harness}"
             if route == "old-run":
                 record = row | {
-                    "agent_ref": {"type": "responses_api_agents", "name": "opencode_sandboxed_agent"},
+                    "agent_ref": {"type": "responses_api_agents", "name": OLD_AGENTS[harness]},
                     "task_source": taskset,
                 }
             elif prepared:
@@ -211,6 +330,7 @@ def model_manifest(repo: str, revision: str, path: Path) -> dict:
 def prepare(args: argparse.Namespace) -> dict:
     """Write a fixed cohort/task/harness order and its complete configuration provenance."""
     rl_root, output = args.rl_root.resolve(), args.output_dir.resolve()
+    assets = harness_assets(args.harnesses, codex_catalog=args.codex_catalog)
     if clean_revision(rl_root) != args.rl_revision:
         raise ValueError(f"RL HEAD must match the explicit reviewed revision {args.rl_revision}")
     parser_cache = args.parser_cache.resolve()
@@ -222,10 +342,6 @@ def prepare(args: argparse.Namespace) -> dict:
     ).strip()
     if gym_pin != gym_revision:
         raise ValueError("The reviewed RL commit must pin this Gym revision in its submodule and dependency lock")
-    if len(set(args.harnesses)) != len(args.harnesses):
-        raise ValueError("Each harness must occur once in the requested blend")
-    if args.route == "old-run" and args.harnesses != ["opencode"]:
-        raise ValueError("Only OpenCode's independent old /run pairing is wired in this recipe so far")
     if args.steps in (1, 5) and (args.count != 8 or args.harnesses != ["opencode"]):
         raise ValueError("The one/five-update qualification uses OpenCode and the first eight tasks")
     rows, tasks = select_rows(args.source, args.roster, args.image_pins, count=args.count)
@@ -235,6 +351,10 @@ def prepare(args: argparse.Namespace) -> dict:
         raise ValueError(f"Use the pinned Hugging Face snapshot directory ending in {revision}")
     model_provenance = model_manifest(model, revision, model_path)
     output.mkdir(parents=True, exist_ok=False)
+    for name, data in assets.items():
+        destination = output / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
     source = output / "source.jsonl"
     source.write_text("".join(json.dumps(row) + "\n" for row in rows))
     prepared = None
@@ -295,7 +415,8 @@ def prepare(args: argparse.Namespace) -> dict:
         "ordering": "cohort of eight tasks, task, harness; no shuffle; repeat full epochs",
         "runtime_files_sha256": {},
         "files_sha256": {
-            name: digest((output / name).read_bytes()) for name in ("source.jsonl", "train.jsonl", "config.yaml")
+            name: digest((output / name).read_bytes())
+            for name in ("source.jsonl", "train.jsonl", "config.yaml", *assets)
         },
         "qualification": "Preparation only. No model, sandbox, optimizer update or container qualification.",
     }
@@ -322,6 +443,9 @@ def main() -> None:
         parser.add_argument(f"--{name}", type=Path, default=ROOT / "examples/training/swe_selection.json")
     parser.add_argument("--route", choices=("old-run", "single-agent-turn", "harbor"), default="single-agent-turn")
     parser.add_argument("--harnesses", choices=HARNESSES, nargs="+", default=["opencode"])
+    parser.add_argument(
+        "--codex-catalog", type=Path, help="Pinned export models.json with adjacent fallback.json and provenance.json"
+    )
     parser.add_argument("--model", choices=MODELS, default="4b")
     parser.add_argument("--count", choices=(8, 16, 32, 64), type=int, default=32)
     parser.add_argument("--steps", choices=(1, 5, 20), type=int, default=20)

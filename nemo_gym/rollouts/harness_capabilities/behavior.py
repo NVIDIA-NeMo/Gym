@@ -391,8 +391,11 @@ def model_checks(
         exchange = fingerprint(attempt["request"], attempt["status_code"], response)
         expected_exchanges[exchange] += 1
         chat = "messages" in attempt["request"]
+        messages = response.get("type") == "message"
         choices = response.get("choices") or []
-        finish = choices[0].get("finish_reason") if chat and choices else None
+        finish = (
+            response.get("stop_reason") if messages else choices[0].get("finish_reason") if chat and choices else None
+        )
         expected_metadata[
             (exchange, json.dumps(response.get("id")), json.dumps(response.get("status")), json.dumps(finish))
         ] += 1
@@ -406,6 +409,17 @@ def model_checks(
             usage.get("total_tokens"),
             (usage.get("prompt_tokens_details" if chat else "input_tokens_details") or {}).get("cached_tokens"),
         )
+        if messages:
+            # Anthropic's input count excludes cache reads/writes. Its wire usage
+            # has no total or reasoning count; derive a total only from known parts.
+            prompt = usage.get("input_tokens")
+            cached = usage.get("cache_read_input_tokens")
+            cache_total = (cached or 0) + (usage.get("cache_creation_input_tokens") or 0)
+            if prompt is not None or cache_total:
+                prompt = (prompt or 0) + cache_total
+            output = usage.get("output_tokens")
+            total = prompt + output if prompt is not None and output is not None else None
+            counts = (prompt, output, None, total, cached)
         expected_tokens[(exchange, json.dumps(counts))] += 1
     for call in calls:
         metadata = _mapping(call.get("response_metadata"))

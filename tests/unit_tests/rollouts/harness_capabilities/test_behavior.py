@@ -91,6 +91,43 @@ def test_canonical_counts_cannot_be_swapped_between_calls(behavior_episode):
     assert failed_model_checks(record, witness["attempts"]) == {"model.token_counts"}
 
 
+@pytest.mark.parametrize(
+    "usage,counts",
+    [
+        (None, [None, None, None, None, None]),
+        ({"input_tokens": 20, "output_tokens": 8}, [20, 8, None, 28, None]),
+        (
+            {"input_tokens": 20, "output_tokens": 8, "cache_read_input_tokens": 3, "cache_creation_input_tokens": 2},
+            [25, 8, None, 33, 3],
+        ),
+        ({"cache_read_input_tokens": 3, "output_tokens": 8}, [3, 8, None, 11, 3]),
+        ({"cache_read_input_tokens": 0, "output_tokens": 8}, [None, 8, None, None, 0]),
+    ],
+)
+def test_messages_stop_reason_and_usage_are_compared_without_inventing_counts(usage, counts):
+    request = {"messages": [{"role": "user", "content": "hello"}]}
+    response = {"id": "msg-1", "type": "message", "stop_reason": "end_turn", "content": []}
+    if usage is not None:
+        response["usage"] = usage
+    fields = ("prompt_tokens", "completion_tokens", "reasoning_tokens", "total_tokens", "cached_tokens")
+    call = {
+        "request": request,
+        "response": copy.deepcopy(response),
+        "response_metadata": {"status_code": 200, "response_id": "msg-1", "finish_reason": "end_turn"},
+        "token_stats": dict(zip(fields, counts)),
+    }
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    assert not failed_model_checks(record, attempts)
+    call["response_metadata"]["finish_reason"] = "stop"
+    assert failed_model_checks(record, attempts) == {"model.response_metadata"}
+    call["response_metadata"]["finish_reason"] = "end_turn"
+    for field, value in zip(fields, counts):
+        call["token_stats"][field] = 0 if value is None else value + 1
+        assert failed_model_checks(record, attempts) == {"model.token_counts"}
+        call["token_stats"][field] = value
+
+
 def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     record, witness = behavior_episode
     inv = record["ng_trajectory"]["invocations"][0]

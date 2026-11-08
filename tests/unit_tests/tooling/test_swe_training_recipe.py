@@ -14,8 +14,92 @@ from omegaconf import OmegaConf
 from scripts import check_swe_training_recipe as check
 from scripts import prepare_swe_single_agent_turn_recipe as recipe
 
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import (
+    ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
+    ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+)
+from nemo_gym.rollouts.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 from tests.unit_tests.tooling.test_swe_rows_to_harbor import REBENCH_ROW, parser_cache  # noqa: F401
+
+
+@pytest.fixture
+def codex_catalog(tmp_path):
+    directory = tmp_path / "export"
+    directory.mkdir()
+    fallback = {
+        "slug": "gym-policy-model",
+        "base_instructions": "Keep these exact instructions.",
+        "context_window": 272000,
+        "max_context_window": 272000,
+        "supports_parallel_tool_calls": False,
+        "truncation_policy": {"mode": "bytes", "limit": 10000},
+    }
+    descriptor = {key: value for key, value in fallback.items() if key not in ("context_window", "max_context_window")}
+    (directory / "models.json").write_text(json.dumps({"models": [descriptor]}))
+    (directory / "fallback.json").write_text(json.dumps(fallback))
+    provenance = recipe.CODEX_EXPORT | {
+        f"{name}_sha256": check.file_sha256(directory / name) for name in ("models.json", "fallback.json")
+    }
+    (directory / "provenance.json").write_text(json.dumps(provenance))
+    return directory / "models.json"
+
+
+@pytest.mark.parametrize("harnesses", [["atom"], [], ["pi", "pi"], ["pi", "hermes"]])
+def test_unsupported_or_reordered_blends_fail_before_preparation(harnesses):
+    with pytest.raises(ValueError):
+        recipe.harness_assets(harnesses, codex_catalog=None)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "source_revision",
+        "codex_version",
+        "exporter_sha256",
+        "status",
+        "bytes",
+        "alias",
+        "duplicate",
+        "context",
+        "prompt",
+        "tools",
+    ],
+)
+def test_codex_export_rejects_mismatched_provenance_and_controls(codex_catalog, mutation):
+    provenance_path = codex_catalog.with_name("provenance.json")
+    provenance = json.loads(provenance_path.read_text())
+    catalog = json.loads(codex_catalog.read_text())
+    descriptor = catalog["models"][0]
+    if mutation in ("source_revision", "codex_version", "exporter_sha256", "status"):
+        provenance[mutation] = "unreviewed"
+    elif mutation == "bytes":
+        codex_catalog.write_text(codex_catalog.read_text() + " ")
+    else:
+        if mutation == "alias":
+            descriptor["slug"] = "/checkpoint/path"
+        elif mutation == "duplicate":
+            catalog["models"].append(copy.deepcopy(descriptor))
+        elif mutation == "context":
+            descriptor["auto_compact_token_limit"] = 32000
+        elif mutation == "prompt":
+            descriptor["base_instructions"] = "Changed prompt"
+        elif mutation == "tools":
+            descriptor["supports_parallel_tool_calls"] = True
+        codex_catalog.write_text(json.dumps(catalog))
+        # A matching receipt alone cannot conceal changed non-context model behavior.
+        provenance["models.json_sha256"] = check.file_sha256(codex_catalog)
+    provenance_path.write_text(json.dumps(provenance))
+    with pytest.raises(ValueError):
+        recipe.harness_assets(["codex"], codex_catalog=codex_catalog)
+
+
+def test_codex_export_is_required_only_when_selected(codex_catalog):
+    with pytest.raises(ValueError, match="requires --codex-catalog"):
+        recipe.harness_assets(["codex"], codex_catalog=None)
+    with pytest.raises(ValueError, match="requires selecting codex"):
+        recipe.harness_assets(["opencode"], codex_catalog=codex_catalog)
 
 
 def test_task_order_and_verifier_payload_are_preserved_without_prompt_leakage():
@@ -49,9 +133,10 @@ def test_old_run_uses_the_original_flat_agent_contract():
 
 
 @pytest.mark.parametrize("route", ["old-run", "single-agent-turn", "harbor"])
-def test_generated_gym_configuration_resolves_offline(tmp_path, route):
+def test_generated_gym_configuration_resolves_offline(monkeypatch, tmp_path, route):
+    monkeypatch.delenv(ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME, raising=False)
     config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
-    harnesses = ["opencode"] if route == "old-run" else list(recipe.HARNESSES)
+    harnesses = list(recipe.HARNESSES)
     recipe.configure_gym(
         config,
         harnesses=harnesses,
@@ -78,9 +163,13 @@ def test_generated_gym_configuration_resolves_offline(tmp_path, route):
         )
     )
     assert resolved.environment_routing_mode == ("agent" if route == "old-run" else "taskset")
+    assert resolved[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] is True
     if route != "harbor":
         assert resolved.swe_resources.resources_servers.swe_rebench.verification_log_dir == str(tmp_path / "verifier")
+        assert resolved.swe_resources.resources_servers.swe_rebench.allowed_agents == ["opencode_sandboxed_agent"]
     if route == "old-run":
+        for implementation in recipe.OLD_AGENTS.values():
+            assert resolved[implementation].responses_api_agents[implementation].sandbox_provider == "sandbox"
         agent = resolved.opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent
         assert agent.opencode_env.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX == "1024"
         model = agent.opencode_config.provider.nemo_gym.models.dummy_model
@@ -90,11 +179,99 @@ def test_generated_gym_configuration_resolves_offline(tmp_path, route):
         impl = {"old-run": "legacy_agent", "single-agent-turn": "single_agent_turn", "harbor": "harbor"}[route]
         env = resolved[name].environment_servers[impl]
         assert env.default_episode_timeout_seconds == 1200
-        assert env.agent_server.name == ("opencode_sandboxed_agent" if route == "old-run" else f"{harness}_agent")
+        agent_name = recipe.OLD_AGENTS[harness] if route == "old-run" else f"{harness}_agent"
+        assert env.agent_server.name == agent_name
+        agent = resolved[agent_name].responses_api_agents[agent_name]
+        assert agent.token_id_capture and agent.num_workers == 1 and agent.datasets == []
+        assert agent.resources_server == (
+            {"type": "resources_servers", "name": "swe_resources"} if route == "old-run" else None
+        )
+        if harness == "opencode":
+            assert agent.concurrency == 8
+            assert agent.report_agent_sandbox_oom is True
+            if route == "old-run":
+                assert agent.sandbox_timeout == 480
+            else:
+                assert agent.sandbox_install_timeout_seconds == 480 and agent.timeout == 480
+        elif harness == "claude_code":
+            assert agent.claude_code_version == "2.1.108" and agent.timeout == 480
+            assert agent.model_server.name == "policy_model" and agent.anthropic_api_key == ""
+            assert agent.model == "claude-sonnet-4-6" and agent.bare and agent.thinking == "enabled"
+            assert agent.settings == str(tmp_path / "claude-settings.json")
+        elif harness == "codex":
+            assert agent.codex_version == "0.144.4" and agent.timeout == 480
+            assert agent.model == "gym-policy-model" and agent.model_server.name == "policy_model"
+            assert agent.model_context_window is None and agent.model_auto_compact_token_limit is None
+            assert agent.model_catalog_json == str(tmp_path / "codex/models.json")
+            assert agent.features == {"multi_agent": False, "code_mode": False, "token_budget": False}
+        elif harness == "hermes":
+            assert agent.context_length == 32768 and agent.max_tokens == 1024 and not agent.compression_enabled
+            assert agent.max_turns == 30 and agent.terminal_timeout == 60 and agent.concurrency == 32
+            if route == "old-run":
+                assert agent.runtime_python is None and agent.sandbox_timeout == 480
+                assert agent.chat_template_kwargs == {"truncate_history_thinking": False}
+                assert agent.model == "test-model"
+        elif harness == "pi":
+            assert agent.pi_version == "0.80.2" and agent.timeout == 480
+            assert agent.context_window == 32768 and agent.max_output_tokens == 1024
+            assert agent.output_token_policy == "fixed" and not agent.auto_compaction
+            if route == "old-run":
+                assert not agent.execution_failure_reward_zero and agent.network_access == "inherit"
+                assert agent.model_server.name == "policy_model" and agent.model == "test-model"
+                assert not any("pi_sandboxed_agent/configs" in path for path in resolved.config_paths)
         if route == "harbor":
             assert env.verifier_completion_key == "evaluation_completed"
             assert env.inconclusive_verification_retries == 1
             assert env.sandbox_resources_override.memory_mib == 30720
+        # Run the actual dispatch admission check, beyond resolving the composed YAML.
+        row = copy.deepcopy(REBENCH_ROW)
+        prepared = None
+        if route == "harbor":
+            task = SimpleNamespace(
+                task_id=recipe.task_folder_name("swe_rebench", row["instance_id"]),
+                task_data={"instance_id": row["instance_id"]},
+                digest="a" * 64,
+                instruction=row["responses_create_params"]["input"][0]["content"],
+                turns=[],
+                config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=480)),
+            )
+            prepared = SimpleNamespace(tasks=[task])
+        records = recipe.materialize_training_rows([row], harnesses=[harness], route=route, prepared=prepared)
+        if route == "old-run":
+            validate = RolloutCollectionHelper._validate_agent_pairings
+        else:
+            records[0][NG_ENVIRONMENT_SERVER_KEY] = resolved.environment_server_routes[f"swe_rebench_{harness}"]
+            validate = RolloutCollectionHelper._validate_environment_servers
+        validate(records, resolved)
+        without_override = copy.deepcopy(resolved)
+        without_override[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = False
+        if route == "harbor" or (route == "old-run" and harness == "opencode"):
+            validate(records, without_override)
+        else:
+            with pytest.raises(ValueError, match="accepts only: opencode_sandboxed_agent"):
+                validate(records, without_override)
+        if route == "harbor":
+            # Converted tasks currently declare no allowlist. A typed dataset declaration, when present,
+            # is checked by the same guard even though Harbor has no resources_server binding.
+            without_override[agent_name].responses_api_agents[agent_name].datasets = [
+                {
+                    "name": f"swe_rebench_{harness}",
+                    "taskset": f"swe_rebench_{harness}",
+                    "type": "benchmark",
+                    "verified": False,
+                    "jsonl_fpath": "tasks.jsonl",
+                    "allowed_agents": ["opencode_sandboxed_agent"],
+                }
+            ]
+            with pytest.raises(ValueError, match="admits only: opencode_sandboxed_agent"):
+                validate(records, without_override)
+            without_override[ALLOW_UNSUPPORTED_PAIRING_KEY_NAME] = True
+            validate(records, without_override)
+        if route != "old-run":
+            mismatched = copy.deepcopy(records)
+            mismatched[0]["agent_ref"] = {"name": "unbound_agent"}
+            with pytest.raises(ValueError, match="is not an agent of environment server"):
+                validate(mismatched, resolved)
 
 
 @pytest.fixture
@@ -171,16 +348,26 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
 
 
 @pytest.mark.parametrize("model,expert_parallel_size", [("4b", 1), ("30b", 2)])
-@pytest.mark.parametrize("steps", [1, 5, 20])
+@pytest.mark.parametrize(
+    "steps,count,harnesses,route",
+    [
+        (1, 8, ["opencode"], "single-agent-turn"),
+        (5, 8, ["opencode"], "single-agent-turn"),
+        (20, 8, ["opencode"], "single-agent-turn"),
+        (20, 32, list(recipe.HARNESSES), "old-run"),
+        (20, 32, list(recipe.HARNESSES), "single-agent-turn"),
+        (20, 32, list(recipe.HARNESSES), "harbor"),
+    ],
+)
 def test_preparation_materializes_the_requested_update_budget(
-    monkeypatch, tmp_path, model, expert_parallel_size, steps
+    monkeypatch, tmp_path, codex_catalog, model, expert_parallel_size, steps, count, harnesses, route
 ):
     rl_root = tmp_path / "rl"
     rl_root.mkdir()
     (rl_root / "uv.lock").write_text("# test lock\n")
     roster = tmp_path / "roster.json"
     roster.write_text(json.dumps({"source_uncompressed_sha256": "source-fixture"}))
-    rows = [copy.deepcopy(REBENCH_ROW) | {"instance_id": f"task-{index}"} for index in range(8)]
+    rows = [copy.deepcopy(REBENCH_ROW) | {"instance_id": f"task-{index}"} for index in range(count)]
     revision = "a" * 40
     # Stub provenance/network reads; exercise the real materializer, route configuration and budget calculation.
     monkeypatch.setattr(
@@ -196,6 +383,25 @@ def test_preparation_materializes_the_requested_update_budget(
         "load_rl_config",
         lambda root: OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml"),
     )
+    if route == "harbor":
+        # Image/registry preparation is covered separately; exercise the real Harbor row materializer here.
+        folder = tmp_path / "harbor-tasks"
+        tasks = [
+            SimpleNamespace(
+                task_id=recipe.task_folder_name("swe_rebench", row["instance_id"]),
+                path=folder / recipe.task_folder_name("swe_rebench", row["instance_id"]),
+                task_data={"instance_id": row["instance_id"]},
+                digest="a" * 64,
+                instruction=row["responses_create_params"]["input"][0]["content"],
+                turns=[],
+                config=SimpleNamespace(agent=SimpleNamespace(timeout_sec=480)),
+            )
+            for row in rows
+        ]
+        monkeypatch.setattr(recipe, "convert", lambda *args, **kwargs: None)
+        monkeypatch.setattr(
+            recipe, "prepare_target", lambda *args, **kwargs: SimpleNamespace(tasks=tasks, folder=folder, skipped=[])
+        )
     args = SimpleNamespace(
         rl_root=rl_root,
         rl_revision=revision,
@@ -203,29 +409,92 @@ def test_preparation_materializes_the_requested_update_budget(
         source=tmp_path / "source",
         roster=roster,
         image_pins=roster,
-        route="single-agent-turn",
-        harnesses=["opencode"],
+        route=route,
+        harnesses=harnesses,
         model=model,
         model_path=tmp_path / recipe.MODELS[model][1],
         output_dir=tmp_path / "prepared",
-        count=8,
+        count=count,
         steps=steps,
         wandb_project=None,
+        codex_catalog=codex_catalog if "codex" in harnesses else None,
     )
     manifest = recipe.prepare(args)
     config = OmegaConf.load(args.output_dir / "config.yaml")
     train = [json.loads(line) for line in (args.output_dir / "train.jsonl").read_text().splitlines()]
-    assert len(train) == 8 and manifest["episodes"] == steps * 32
-    assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps
-    assert config.grpo.num_prompts_per_step == 8 and config.grpo.num_generations_per_prompt == 4
-    assert config.policy.train_global_batch_size == 32
-    assert config.async_rl.max_inflight_prompts == (4 if steps in (1, 5) else 8)
+    width = len(harnesses)
+    assert len(train) == count * width and manifest["episodes"] == steps * 32 * width
+    assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps * 8 // count
+    assert config.grpo.num_prompts_per_step == 8 * width and config.grpo.num_generations_per_prompt == 4
+    assert config.policy.train_global_batch_size == 32 * width
+    assert config.async_rl.max_inflight_prompts == (4 if steps in (1, 5) else 8 if width == 1 else 16)
+    expected_ids = [(row["instance_id"], f"swe_rebench_{harness}") for row in rows for harness in harnesses]
+    if route == "old-run":
+        assert [(row["instance_id"], row["task_source"]) for row in train] == expected_ids
+        assert [row["agent_ref"]["name"] for row in train] == [recipe.OLD_AGENTS[name] for name in harnesses] * count
+    else:
+        assert [
+            (row["task_input"]["task_data"]["instance_id"], row["task_id"]["taskset"]) for row in train
+        ] == expected_ids
+    if width == 5:
+        assert count == 32 and steps == 20 and config.grpo.max_num_epochs == 5
+        assert len(train) == 160 and config.policy.train_global_batch_size == 160
+        for offset in range(0, len(train), 40):
+            assert expected_ids[offset : offset + 40] == [
+                (f"task-{task}", f"swe_rebench_{harness}")
+                for task in range(offset // width, offset // width + 8)
+                for harness in harnesses
+            ]
+        for name in ("models.json", "fallback.json", "provenance.json"):
+            staged = args.output_dir / "codex" / name
+            assert staged.read_bytes() == codex_catalog.with_name(name).read_bytes()
+            assert manifest["files_sha256"][f"codex/{name}"] == check.file_sha256(staged)
+        settings = args.output_dir / "claude-settings.json"
+        assert json.loads(settings.read_text()) == {
+            "env": {
+                "DISABLE_COMPACT": "1",
+                "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "32768",
+                "CLAUDE_CODE_MAX_OUTPUT_TOKENS": "1024",
+            }
+        }
+        assert manifest["files_sha256"][settings.name] == check.file_sha256(settings)
     assert config.checkpointing.save_period == (1 if steps == 1 else 10)
     assert (
         config.checkpointing.save_optimizer
         and config.policy.megatron_cfg.expert_model_parallel_size == expert_parallel_size
     )
     assert not config.grpo.val_at_start and not config.grpo.val_at_end and config.grpo.val_period == 0
+    assert config.data.validation is None and not config.data.shuffle and not config.data.use_multiple_dataloader
+    assert config.async_rl.sampler == {"name": "in_order", "max_lookahead_versions": 0}
+    assert config.async_rl.min_groups_for_streaming_train == config.async_rl.max_buffered_rollouts == 8 * width
+    assert config.async_rl.rollout_failure.min_step_batch_fraction == 1
+    assert config.async_rl.rollout_failure.max_consecutive_dropped_prompts == 0
+    assert config.async_rl.rollout_failure.max_skipped_prompts == 0
+    assert not config.grpo.use_dynamic_sampling and config.grpo.masked_reward_policy == "include"
+    assert config.env.should_mask_flagged_samples and config.grpo.overlong_filtering
+    assert config.policy.max_total_sequence_length == config.policy.generation.vllm_cfg.max_model_len == 32768
+    assert config.policy.generation.max_new_tokens == 1024
+    assert config.policy.generation.temperature == config.policy.generation.top_p == 1
+    assert config.env.nemo_gym.policy_model.responses_api_models.vllm_model.chat_template_kwargs == {
+        "enable_thinking": True,
+        "truncate_history_thinking": False,
+    }
+
+
+@pytest.mark.parametrize(
+    "name", ["claude-settings.json", "codex/models.json", "codex/fallback.json", "codex/provenance.json"]
+)
+def test_preflight_covers_staged_harness_assets(assets, codex_catalog, name):
+    prepared, root, _, manifest = assets
+    for relative, data in recipe.harness_assets(list(recipe.HARNESSES), codex_catalog=codex_catalog).items():
+        path = prepared / relative
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(data)
+        manifest["files_sha256"][relative] = check.file_sha256(path)
+    check.check_files(prepared, {"gym": root}, manifest)
+    (prepared / name).write_text("changed")
+    with pytest.raises(ValueError, match="Prepared file changed"):
+        check.check_files(prepared, {"gym": root}, manifest)
 
 
 def test_launcher_dry_run_builds_one_node_submission_without_calling_slurm(tmp_path):

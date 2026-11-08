@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Controlled Chat/Responses endpoints and private episode witnesses."""
+"""Controlled Chat/Responses/Messages endpoints and private episode witnesses."""
 
 import asyncio
 import json
 import shlex
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from time import time
@@ -16,8 +17,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymChatCompletion
+from nemo_gym.core import NeMoGymChatCompletion, NeMoGymResponse
 from nemo_gym.models import (
+    AnthropicConverter,
     ModelCallCaptureConfig,
     flatten_namespace_tools,
     install_model_call_capture,
@@ -37,10 +39,35 @@ from nemo_gym.verification import call_judge
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "exec", "python_cell")
+SHELL_TOOLS = (
+    "bash",
+    "Bash",
+    "terminal",
+    "shell",
+    "shell_command",
+    "exec_command",
+    "code_exec",
+    "exec",
+    "python_cell",
+)
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
+_ANTHROPIC_CONVERTER = AnthropicConverter()
+
+
+def _messages_sse(payload: dict) -> Iterator[str]:
+    for event in _ANTHROPIC_CONVERTER.anthropic_response_to_sse(payload):
+        if "usage" not in payload:
+            # The omitted-usage scenario deliberately violates the SDK's required
+            # usage fields. Remove the converter's defaults from the wire too.
+            header, data = event.rstrip("\n").split("\ndata: ", 1)
+            body = json.loads(data)
+            body.pop("usage", None)
+            if "message" in body:
+                body["message"].pop("usage", None)
+            event = f"{header}\ndata: {json.dumps(body)}\n\n"
+        yield event
 
 
 # Identify the actual summary instruction, never the availability of tools or a
@@ -222,7 +249,13 @@ class Probe:
             call["executed"] = marker.is_file() and marker.read_text() == call["token"]
 
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
-        body = await request.json()
+        wire_body = await request.json()
+        messages = request.url.path.endswith("/messages")
+        body = (
+            _ANTHROPIC_CONVERTER.anthropic_request_to_responses(wire_body).model_dump(exclude_none=True)
+            if messages
+            else wire_body
+        )
         self._observe_tool_results(body)
         index = len(self.attempts)
         status = 200
@@ -367,6 +400,12 @@ class Probe:
                             "input_tokens_details": {"cached_tokens": 3},
                             "output_tokens_details": {"reasoning_tokens": 0 if compacting else 2},
                         }
+                    if messages:
+                        payload = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(
+                            NeMoGymResponse.model_validate(payload), model=payload["model"]
+                        )
+                        if not self.scenario.usage:
+                            payload.pop("usage", None)
                 if compacting:
                     self.compaction_response_ids.append(response_id)
             except ValueError as exc:
@@ -374,13 +413,15 @@ class Probe:
                 self.violations.append(str(exc))
                 payload = {"error": {"message": str(exc), "type": "probe_protocol_error"}}
         self.attempts.append(
-            {"attempt_id": f"attempt-{index}", "request": body, "response": payload, "status_code": status}
+            {"attempt_id": f"attempt-{index}", "request": wire_body, "response": payload, "status_code": status}
         )
         self.save()
-        if status != 200 or not body.get("stream"):
+        if status != 200 or not wire_body.get("stream"):
             return JSONResponse(payload, status_code=status, headers={"Retry-After": "0"})
         events = (
-            synthesize_chat_completion_sse(payload, include_usage=True)
+            _messages_sse(payload)
+            if messages
+            else synthesize_chat_completion_sse(payload, include_usage=True)
             if request.url.path.endswith("/chat/completions")
             else synthesize_responses_sse(payload)
         )
@@ -396,6 +437,7 @@ class Probe:
         )
         app.post("/v1/chat/completions", response_model=None)(self.model)
         app.post("/v1/responses", response_model=None)(self.model)
+        app.post("/v1/messages", response_model=None)(self.model)
         return app
 
     def judge_app(self) -> FastAPI:

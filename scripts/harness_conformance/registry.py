@@ -14,3 +14,6 @@ HARNESSES = {
     "openclaw": "OpenClawAgent",
     "nooa": "NOOAAgent",
 }
+
+# Explicit diagnostic selection only; these adapters are not in the default/CI matrix.
+PROBE_HARNESSES = HARNESSES | {"claude_code": "ClaudeCodeAgent"}

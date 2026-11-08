@@ -18,6 +18,122 @@ from nemo_gym.rollouts.harness_capabilities import digest_file, json_rows
 PORTS = {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004}
 
 
+def test_claude_is_explicit_opt_in_and_does_not_change_default_cli_or_ci(tmp_path, monkeypatch):
+    from scripts.harness_conformance.ci import select_harnesses
+    from scripts.harness_conformance.registry import HARNESSES, PROBE_HARNESSES
+
+    default = ["simple", "opencode", "pi", "codex", "hermes", "kilocode", "stirrup", "openclaw", "nooa"]
+    assert list(HARNESSES) == default
+    assert PROBE_HARNESSES["claude_code"] == "ClaudeCodeAgent"
+    assert select_harnesses(["nemo_gym/models/model_call_capture.py"]) == default
+    assert select_harnesses(["responses_api_agents/claude_code_agent/app.py"]) == []
+    calls = []
+
+    def run(**kwargs):
+        calls.append(kwargs)
+        return {}, 0
+
+    monkeypatch.setattr(runner, "run_suite", run)
+    assert runner.main(["--output", str(tmp_path / "default")]) == 0
+    assert calls[-1]["harnesses"] == default
+    assert calls[-1]["scenarios"] == SCENARIOS
+    assert runner.main(["--harness", "claude_code", "--output", str(tmp_path / "claude")]) == 0
+    assert calls[-1]["harnesses"] == ["claude_code"] and calls[-1]["scenarios"] == SCENARIOS
+
+
+async def test_prepared_claude_settings_and_model_survive_local_auth_rewiring(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from fastapi import HTTPException
+
+    from nemo_gym.agents import AgentSeedSessionRequest
+    from nemo_gym.client import ServerClient
+    from responses_api_agents.claude_code_agent import app
+
+    runtime_settings = tmp_path / "settings.json"
+    runtime_settings.write_text(
+        json.dumps({"env": {"DISABLE_COMPACT": "1", "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "32768"}})
+    )
+    source = tmp_path / "prepared.yaml"
+    source.write_text(
+        yaml.safe_dump(
+            {
+                "config_paths": [
+                    str(
+                        Path(__file__).resolve().parents[3]
+                        / "responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml"
+                    )
+                ],
+                "claude_code_agent": {
+                    "responses_api_agents": {
+                        "claude_code_agent": {
+                            "model": "${policy_model_name}",
+                            "claude_code_version": "2.1.108",
+                            "bare": True,
+                            "settings": str(runtime_settings),
+                            "max_turns": 17,
+                            "anthropic_base_url": "${unavailable_remote_endpoint}",
+                        }
+                    }
+                },
+            }
+        )
+    )
+    settings = episode.prepared_settings(
+        harness="claude_code",
+        config_path=source,
+        agent_name="claude_code_agent",
+        sampling_path=None,
+        policy_model_name="served-policy-alias",
+    )
+    assert settings["agent"]["model"] == "served-policy-alias"
+    assert settings["agent"]["claude_code_version"] == "2.1.108"
+    assert settings["agent"]["bare"] is True and settings["agent"]["max_turns"] == 17
+    assert "anthropic_api_key" not in settings["agent"] and "anthropic_base_url" not in settings["agent"]
+    assert settings["referenced_files"] == {str(runtime_settings): digest_file(runtime_settings)}
+    config = episode._config(
+        "claude_code", tmp_path, PORTS, 10, use_agent_sessions=True, prepared_agent=settings["agent"]
+    )
+    effective = config["probe_agent"]["responses_api_agents"]["claude_code_agent"]
+    parsed = app.ClaudeCodeAgentConfig.model_validate(effective)
+    assert parsed.model == "served-policy-alias" and parsed.claude_code_version == "2.1.108"
+    assert parsed.settings == str(runtime_settings) and parsed.bare and parsed.max_turns == 17
+    assert parsed.anthropic_api_key == "conformance" and parsed.anthropic_base_url is None
+    assert parsed.model_server.name == "policy_model"
+    assert episode._supports_agent_sessions(app.ClaudeCodeAgent)
+    assert set(config["probe_environment"]["environment_servers"]) == {"single_agent_turn_legacy"}
+    monkeypatch.setattr(episode.shutil, "which", lambda _: pytest.fail("session mode must not inspect host runtime"))
+    assert episode.check_runtime("claude_code", use_agent_sessions=True) == {"installation": "agent_session"}
+
+    # No pin is invented when the published adapter default is null, and setup
+    # rejects it before any provider or runtime work.
+    unpinned = episode._config("claude_code", tmp_path, PORTS, 10, use_agent_sessions=True)
+    unpinned_config = app.ClaudeCodeAgentConfig.model_validate(
+        unpinned["probe_agent"]["responses_api_agents"]["claude_code_agent"]
+    )
+    assert unpinned_config.claude_code_version is None
+    agent = app.ClaudeCodeAgent(config=unpinned_config, server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(
+        app, "create_provider", lambda *a, **kw: pytest.fail("provider must not be created without a pin")
+    )
+    with pytest.raises(HTTPException, match="exact claude_code_version"):
+        await agent._seed_agent_session_state(
+            AgentSeedSessionRequest(
+                agent_session_id="session",
+                episode_id={"rollout_id": "rollout"},
+                task_id={"taskset": "fixture", "task_id": "task"},
+            )
+        )
+    runtime_settings.write_text("{}")
+    monkeypatch.setattr(
+        episode.importlib, "import_module", lambda _: pytest.fail("runtime imported before hash check")
+    )
+    with pytest.raises(ValueError, match="Prepared behavior file changed"):
+        await episode.run_episode(
+            harness="claude_code", scenario_name="tool_success", directory=tmp_path, timeout=1, settings=settings
+        )
+
+
 def write_config(path, agent, **global_values):
     path.write_text(yaml.safe_dump(global_values | {"selected": {"responses_api_agents": {"opencode_agent": agent}}}))
     return path
@@ -140,7 +256,8 @@ def test_runner_freezes_inputs_and_keeps_selected_compaction_scenario(tmp_path, 
 
 
 @pytest.mark.parametrize(
-    "api,limit_field", [("chat/completions", "max_completion_tokens"), ("responses", "max_output_tokens")]
+    "api,limit_field",
+    [("chat/completions", "max_completion_tokens"), ("responses", "max_output_tokens"), ("messages", "max_tokens")],
 )
 def test_required_sampling_reaches_effective_witness_and_capture_without_training_tokens(tmp_path, api, limit_field):
     scenario = next(s for s in SCENARIOS if s.name == "judge_verifier")
@@ -150,7 +267,7 @@ def test_required_sampling_reaches_effective_witness_and_capture_without_trainin
     sampling = ModelCallSampling(temperature=1.0, top_p=1.0, max_output_tokens=1024)
     segment = encode_model_sampling(sampling)
     body = {"model": "conformance-model", "temperature": 0.2, "top_p": 0.4, limit_field: 4096}
-    body["messages" if api == "chat/completions" else "input"] = []
+    body["input" if api == "responses" else "messages"] = []
     with TestClient(app) as client:
         assert client.post(f"/ng-rollout/0-0/v1/{api}", json=body).status_code == 422
         response = client.post(f"/ng-rollout/0-0/ng-sampling/{segment}/v1/{api}", json=body)

@@ -33,7 +33,8 @@ from nemo_gym.rollouts.harness_capabilities import (
     render_matrices,
 )
 
-from .episode import HARNESSES, prepared_settings
+from .episode import prepared_settings
+from .registry import HARNESSES, PROBE_HARNESSES
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
 
@@ -341,8 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--harness",
         action="append",
-        choices=HARNESSES,
-        help="repeat for a matrix; defaults to all registered harnesses",
+        choices=PROBE_HARNESSES,
+        help="repeat for a matrix; defaults to the CI harnesses (Claude Code is opt-in)",
     )
     parser.add_argument(
         "--scenario", action="append", choices=[s.name for s in SCENARIOS], help="run a diagnostic subset"

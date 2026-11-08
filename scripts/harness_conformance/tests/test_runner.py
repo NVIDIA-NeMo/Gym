@@ -245,7 +245,7 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
     module = SimpleNamespace(
         TestAgent=LegacyAgent if interface == "legacy" else SessionAgent, TestAgentConfig=BaseResponsesAPIAgentConfig
     )
-    monkeypatch.setitem(episode.HARNESSES, "codex", "TestAgent")
+    monkeypatch.setitem(episode.PROBE_HARNESSES, "codex", "TestAgent")
     monkeypatch.setattr(episode, "importlib", SimpleNamespace(import_module=lambda _: module))
     monkeypatch.setattr(episode, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(episode, "check_runtime", lambda *args, **kwargs: {})
