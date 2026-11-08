@@ -280,14 +280,23 @@ class TestEpisode:
         assert sandbox.stopped and not server._sandboxes and not server._sessions
         assert (Path(result.verifier_logs_dir) / "reward.txt").read_text() == "1\n"
 
-    def test_run_endpoint_returns_the_episode_without_a_sandbox_handle(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("terminal_id", [None, "served-response"])
+    def test_run_endpoint_returns_the_episode_without_a_sandbox_handle(self, tmp_path, monkeypatch, terminal_id):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        if terminal_id is not None:
+            server.server_client.turn_response = (
+                agent_response()
+                .model_copy(update={"metadata": {"terminal_response_id": terminal_id}})
+                .model_dump(mode="json")
+            )
         with TestClient(server.setup_webserver()) as client:
             response = client.post("/run", json=episode(task).model_dump(mode="json"))
         assert response.status_code == 200, response.text
         payload = response.json()
         assert payload["result"]["reward"] == 1.0 and payload["failure"] is None
         assert payload["episode_id"] == {"rollout_id": "r1", "attempt": 0}
+        assert payload["result"].get("terminal_response_id") == terminal_id
+        assert ("terminal_response_id" in payload["result"]) is (terminal_id is not None)
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
 

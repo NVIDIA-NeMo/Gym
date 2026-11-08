@@ -129,6 +129,32 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert resources_close_body.episode_id == EpisodeId(rollout_id="rollout", attempt=2)
 
 
+@pytest.mark.parametrize("verifier_terminal", [None, "verifier-response"])
+@pytest.mark.parametrize("keep_metadata", [False, True])
+async def test_verification_preserves_the_harness_terminal_declaration(
+    verifier_terminal: str | None, keep_metadata: bool
+) -> None:
+    environment_server, client = _environment_server()
+    agent_response = _agent_response().model_copy(update={"metadata": {"terminal_response_id": "served-response"}})
+    client.responses[2] = _Response(agent_response.model_dump(mode="json"))
+    verified_response = agent_response if keep_metadata else _agent_response()
+    payload = {
+        "responses_create_params": {"input": "task"},
+        "response": verified_response.model_dump(mode="json"),
+        "reward": 1.0,
+    }
+    if verifier_terminal:
+        payload["terminal_response_id"] = verifier_terminal
+    client.responses[4] = _Response(payload)
+
+    episode = await environment_server.run_request(_request())
+
+    assert episode.result is not None
+    assert episode.result.terminal_response_id == (verifier_terminal or "served-response")
+    assert episode.result.response.metadata == verified_response.metadata
+    assert episode.result.model_dump(mode="json")["terminal_response_id"] == (verifier_terminal or "served-response")
+
+
 async def test_single_agent_turn_translates_resources_mcp_metadata_to_canonical_tool_access() -> None:
     environment_server, client = _environment_server(resources_tool_transports=["direct_http", "mcp"])
     client.responses[0] = _Response(

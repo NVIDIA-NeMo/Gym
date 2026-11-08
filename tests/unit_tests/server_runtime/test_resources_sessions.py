@@ -45,6 +45,37 @@ def test_single_agent_turn_result_preserves_benchmark_fields() -> None:
     assert response.model_dump()["benchmark_diagnostic"] == "kept"
 
 
+@pytest.mark.parametrize("explicit", [None, "explicit-response"])
+@pytest.mark.parametrize(
+    "metadata", [None, {}, {"terminal_response_id": ""}, {"terminal_response_id": "served-response"}]
+)
+def test_session_result_carries_terminal_declaration_on_the_wire(
+    explicit: str | None, metadata: dict[str, str] | None
+) -> None:
+    response = NeMoGymResponse(
+        id="synthetic-response",
+        created_at=0,
+        model="policy",
+        object="response",
+        output=[],
+        tool_choice="auto",
+        tools=[],
+        parallel_tool_calls=True,
+        metadata=metadata,
+    )
+    result = SingleAgentTurnResult(
+        responses_create_params={"input": "task"}, response=response, reward=1.0, terminal_response_id=explicit
+    )
+    expected = explicit or (metadata or {}).get("terminal_response_id") or None
+    payload = json.loads(result.model_dump_json())
+    if expected:
+        assert payload["terminal_response_id"] == expected
+    else:
+        assert "terminal_response_id" not in payload
+    assert payload["response"]["metadata"] == metadata
+    assert SingleAgentTurnResult.model_validate_json(result.model_dump_json()).terminal_response_id == expected
+
+
 def test_resources_seed_response_omits_unset_observation_without_changing_other_defaults() -> None:
     response = ResourcesSeedSessionResponse(resources_session_id="resources-session")
     expected = {"resources_session_id": "resources-session", "resources_tools": None, "sandbox_access": None}

@@ -92,6 +92,7 @@ _PYTHON_SHA256 = {
 _IMPORT_CHECK = (
     "import sys; assert sys.version_info[:3] == (3,13,14); "
     "import nooa, nooa_cli; from nooa_bench.bench_agent import BenchAgent; "
+    "from nooa_atom.gym import AtomHarness; "
     "import responses_api_agents.nooa_agent.sandbox_entrypoint; "
     "from responses_api_agents.nooa_agent.resource_tools import ResourceToolDispatcher; "
     "from responses_api_agents.nooa_agent.observability import GymTraceHooks"

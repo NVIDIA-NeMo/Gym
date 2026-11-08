@@ -17,9 +17,23 @@ cd responses_api_agents/nooa_agent
 uv sync --locked
 ```
 
-The requirements pin all three NOOA packages: `nooa`, `nooa-cli`, and `nooa-bench`. The CLI supplies executor
-support, and the benchmark package supplies the default BenchAgent. Gym's server installation uses this same
-requirements file.
+The project pins `nooa`, `nooa-cli`, `nooa-bench`, and `nooa-atom` to the same source revision. The CLI supplies
+executor support, and the benchmark package supplies the default BenchAgent. Gym's server installation uses
+the same project and lockfile.
+
+## Atom
+
+Load `configs/nooa_agent.yaml` and `configs/nooa_atom_agent.yaml`, then select `nooa_atom_agent` in the taskset's
+agent route. This constructs `nooa_atom.gym:AtomHarness` and invokes it through
+`responses_api_agents.nooa_agent.atom_adapter:invoke_atom`. Each rollout gets one Atom session and Gym's model
+client. `nooa.init_kwargs.turn_method` defaults to `handle_batch`; `handle_orchestrate` is also supported by
+the pinned harness. Select `nooa.execution_mode: sandboxed` when the task needs its Resources-owned workspace.
+
+Atom's structured return is kept as a verifier-facing message. That synthetic message has no training tokens.
+The response metadata separately declares the last served response from the first model-calling root agent,
+including its later session turns. Pure orchestration wrappers and later calls from child agents do not
+replace that declaration. Environment results carry it to RL's receipt consumer; a declaration that cannot
+be matched to a captured response remains masked.
 
 ## Embedded CodeAct scope
 

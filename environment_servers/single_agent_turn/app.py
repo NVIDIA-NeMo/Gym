@@ -561,7 +561,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
                 raise
             await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
-            return SingleAgentTurnResult.model_validate(payload)
+            result = SingleAgentTurnResult.model_validate(payload)
+            if not result.terminal_response_id:
+                declared = (agent_response.metadata or {}).get("terminal_response_id")
+                if isinstance(declared, str) and declared:
+                    # A verifier may omit response metadata. Preserve the harness declaration
+                    # for receipt consumers unless the verifier supplied its own declaration.
+                    result.terminal_response_id = declared
+            return result
         except Exception as error:
             raise dependency_failure(
                 error,
