@@ -24,13 +24,14 @@ import signal
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, nullcontext
 from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from time import time
-from typing import Any, ClassVar, Literal, Mapping, Optional
+from typing import Any, ClassVar, Literal, Optional
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
@@ -65,6 +66,7 @@ from nemo_gym.config import (
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -76,6 +78,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    model_sampling_context,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -1064,10 +1067,12 @@ class CodexAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        run_body: CodexAgentRunRequest | None = None,
     ) -> NeMoGymResponse:
         mcp_servers, skipped_grants = self._granted_mcp_servers(state.request)
         invocation_id = state.request.episode_id.capture_key
-        base_url = self._resolve_call_base_url(invocation_id)
+        rollout_id = self.rollout_id_from_run(run_body) if run_body is not None else invocation_id
+        base_url = self._resolve_call_base_url(rollout_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
@@ -1097,7 +1102,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         raw = ""
         failure = None
         try:
-            async with self.sem:
+            # /run holds the permit through resource setup, verification, and close.
+            async with self.sem if run_body is None else nullcontext():
                 raw = await state.execute(
                     payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
                 )
@@ -1847,14 +1853,79 @@ class CodexAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body)
 
+    async def _run_sandbox_response(
+        self, body: CodexAgentRunRequest, seed: dict[str, Any], *, skills_path: str | None
+    ) -> tuple[NeMoGymResponse, AgentObservationBundle | None, bool]:
+        """Execute in the resource-owned sandbox while retaining /run's flat verifier contract."""
+        descriptor = seed.get("sandbox_descriptor")
+        if not isinstance(descriptor, dict) or not descriptor:
+            raise HTTPException(422, "Codex /run requires sandbox_descriptor from sandbox.serialize()")
+        if not self.config.sandbox_provider:
+            raise HTTPException(422, "Codex /run requires sandbox_provider to connect to the task sandbox")
+        workdir = seed.get("workdir") or descriptor.get("workdir")
+        if not isinstance(workdir, str) or not workdir:
+            raise HTTPException(422, "Codex /run requires the task sandbox workdir")
+        prompt, system = self._sandbox_input(body.responses_create_params)
+        rollout_id = self.rollout_id_from_run(body) or uuid4().hex
+        tools = [
+            MCPToolAccess(
+                name=name,
+                required=True,
+                connection={"url": entry["url"], "headers": entry.get("http_headers", {})},
+            )
+            for name, entry in (self._rollout_mcp_servers(seed) or {}).items()
+        ]
+        state = None
+        try:
+            try:
+                state = await self._seed_agent_session_state(
+                    AgentSeedSessionRequest(
+                        agent_session_id=uuid4().hex,
+                        episode_id=EpisodeId.from_capture_key(rollout_id),
+                        task_id={"taskset": self.config.resources_server.name, "task_id": rollout_id},
+                        tool_accesses=tools,
+                        sandbox_access={
+                            "connection": {
+                                "provider_config_ref": self.config.sandbox_provider,
+                                "descriptor": descriptor,
+                            },
+                            "workdir": workdir,
+                        },
+                    )
+                )
+            except AgentSessionSetupError as error:
+                state = error.state
+                raise error.error from error
+            if skills_path:
+                with tempfile.TemporaryDirectory(prefix="gym-codex-skills-") as directory:
+                    skills = Path(directory) / "skills"
+                    await asyncio.to_thread(stage_skills, skills_path, skills)
+                    for source in sorted(skills.rglob("*")):
+                        if source.is_file():
+                            target = f"{state.session.session_dir}/home/.codex/skills/{source.relative_to(skills).as_posix()}"
+                            await state.session.sandbox.upload(source, target)
+            response = await self._sandbox_response(
+                state, body.responses_create_params, prompt=prompt, system=system, run_body=body
+            )
+            return response, state.observations, bool(state.session.cleanup and state.session.cleanup["timed_out"])
+        finally:
+            if state is not None:
+                with CancelScope(shield=True):
+                    await state.close(self.config.session_close_timeout_seconds)
+
     async def run(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
         if self._session_marker(request) is not None:
             raise HTTPException(409, "Use the agent session responses and close routes")
         if self.config.resources_server is None:
             raise HTTPException(422, "Legacy /run requires resources_server")
-        async with self.sem:
-            cookies = request.cookies
+        with model_sampling_context(self.model_sampling_segment_for_run(body)):
+            async with self.sem:
+                return await self._run_with_resources(request, body)
 
+    async def _run_with_resources(self, request: Request, body: CodexAgentRunRequest) -> CodexAgentVerifyResponse:
+        cookies = dict(request.cookies)
+        close_resources = False
+        try:
             seed_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
@@ -1862,24 +1933,36 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
             await raise_for_status(seed_resp)
-            cookies = seed_resp.cookies
+            cookies.update(seed_resp.cookies)
+            # A successful seed can own a sandbox even when its response cannot be decoded.
+            close_resources = True
             seed_resp_json = await get_response_json(seed_resp)
+            if not isinstance(seed_resp_json, dict):
+                raise ValueError("Codex /run seed response must be a JSON object")
+            borrowed = "sandbox_descriptor" in seed_resp_json or "sandbox_handle" in seed_resp_json
+            close_resources = borrowed
 
-            # The run-level skills_ref (stamped by rollout collection) rides on the request body
-            # (extra="allow"). Pass its path straight into _create_response so the CLI invocation
-            # can stage the skills into its per-request CODEX_HOME.
+            # Collection stamps skills_ref on the run body. Both execution paths stage
+            # those skills into the request's private CODEX_HOME.
             skills_path = ((body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
             rollout_id = self.rollout_id_from_run(body)
 
-            agent_resp = await self._create_response(
-                body.responses_create_params,
-                mcp_servers=self._rollout_mcp_servers(seed_resp_json),
-                skills_path=skills_path,
-                rollout_id=rollout_id,
-            )
+            if borrowed:
+                agent_resp, observations, timed_out = await self._run_sandbox_response(
+                    body, seed_resp_json, skills_path=skills_path
+                )
+            else:
+                agent_resp = await self._create_response(
+                    body.responses_create_params,
+                    mcp_servers=self._rollout_mcp_servers(seed_resp_json),
+                    skills_path=skills_path,
+                    rollout_id=rollout_id,
+                )
+                observations = getattr(agent_resp, "_ng_agent_observations", None)
+                timed_out = bool(getattr(agent_resp, "_ng_agent_timed_out", False))
             agent_resp_json = agent_resp.model_dump(mode="json")
-            observations = agent_resp_json.pop("_ng_agent_observations", None)
-            timed_out = bool(agent_resp_json.pop("_ng_agent_timed_out", False))
+            agent_resp_json.pop("_ng_agent_observations", None)
+            agent_resp_json.pop("_ng_agent_timed_out", None)
 
             verify_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -1900,6 +1983,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             # A timed-out run can still end in an assistant message, so the last item alone is not enough.
             naturally = (
                 not timed_out
+                and (not borrowed or gym_resp.status == "completed")
                 and getattr(last, "type", None) == "message"
                 and getattr(last, "role", None) == "assistant"
             )
@@ -1909,6 +1993,17 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 | {"turns_used": turns, "finished_naturally": naturally, "agent_timed_out": timed_out}
                 | ({"ng_agent_observations": observations} if observations is not None else {})
             )
+        finally:
+            if close_resources:
+                with CancelScope(shield=True):
+                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                        closed = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/close_session",
+                            json={},
+                            cookies=cookies,
+                        )
+                        await raise_for_status(closed)
 
 
 if __name__ == "__main__":

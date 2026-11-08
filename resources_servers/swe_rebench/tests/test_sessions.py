@@ -67,6 +67,7 @@ def _server(monkeypatch: MonkeyPatch) -> tuple[SWERebenchResourcesServer, list[M
     async def create_sandbox(self, body, files=None, *, session_id=None, verifier_session_id=None) -> MagicMock:
         sandbox = MagicMock()
         sandbox._handle = SandboxHandle(sandbox_id=f"sb-{len(sandboxes) + 1}", provider_name="test", raw=None)
+        sandbox.sandbox_id = sandbox._handle.sandbox_id
         sandbox.exec = AsyncMock(return_value=SandboxExecResult(return_code=0, stdout="", stderr=""))
         sandbox.serialize = AsyncMock(return_value={"sandbox_id": sandbox._handle.sandbox_id})
         sandbox.stop = AsyncMock()
@@ -144,11 +145,78 @@ def test_agent_run_seed_still_returns_the_sandbox_handle(monkeypatch: MonkeyPatc
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         seeded = client.post("/seed_session", json=_ROW)
         assert seeded.status_code == 200, seeded.text
-        assert seeded.json() == {"sandbox_handle": "sb-1", "workdir": "/moto"}
+        assert seeded.json() == {
+            "sandbox_handle": "sb-1",
+            "workdir": "/moto",
+            "sandbox_descriptor": {"sandbox_id": "sb-1"},
+        }
+        sandboxes[0].serialize.assert_awaited_once_with(scope="operate")
+        cookies = dict(client.cookies)
         verified = client.post("/verify", json=_VERIFY)
         assert verified.status_code == 200, verified.text
         assert verified.json()["reward"] == 1.0
+        client.cookies.clear()
+        client.cookies.update(cookies)
+        assert client.post("/close_session", json={}).status_code == 200
     sandboxes[0].stop.assert_awaited_once()
+
+
+def test_agent_run_seed_preserves_the_complete_provider_descriptor(monkeypatch: MonkeyPatch) -> None:
+    server, sandboxes = _server(monkeypatch)
+    start = SWERebenchResourcesServer._start_task_sandbox
+    descriptor = {"sandbox_id": "sb-1", "workdir": "/moto", "user": "1000", "ports": [8080]}
+
+    async def start_with_descriptor(self, session_id, body):
+        workdir = await start(self, session_id, body)
+        sandboxes[-1].serialize.return_value = descriptor
+        return workdir
+
+    monkeypatch.setattr(SWERebenchResourcesServer, "_start_task_sandbox", start_with_descriptor)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        seeded = client.post("/seed_session", json=_ROW)
+        assert seeded.status_code == 200, seeded.text
+        assert seeded.json()["sandbox_descriptor"] == descriptor
+        assert client.post("/close_session", json={}).status_code == 200
+    sandboxes[0].stop.assert_awaited_once()
+
+
+def test_agent_run_seed_cleans_up_if_descriptor_cannot_be_delivered(monkeypatch: MonkeyPatch) -> None:
+    server, sandboxes = _server(monkeypatch)
+    start = SWERebenchResourcesServer._start_task_sandbox
+
+    async def start_without_descriptor(self, session_id, body):
+        workdir = await start(self, session_id, body)
+        sandboxes[-1].serialize.side_effect = RuntimeError("Descriptor unavailable")
+        return workdir
+
+    monkeypatch.setattr(SWERebenchResourcesServer, "_start_task_sandbox", start_without_descriptor)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_ROW).status_code == 500
+        sandboxes[0].stop.assert_awaited_once()
+        assert server._session_id_to_sandbox == {}
+
+
+def test_agent_run_close_retries_failed_cleanup(monkeypatch: MonkeyPatch) -> None:
+    server, sandboxes = _server(monkeypatch)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_ROW).status_code == 200
+        sandboxes[0].stop.side_effect = [RuntimeError("Provider unavailable"), None]
+        assert client.post("/close_session", json={}).status_code == 500
+        assert len(server._session_id_to_sandbox) == 1
+        closed = client.post("/close_session", json={})
+        assert closed.status_code == 200, closed.text
+        assert server._session_id_to_sandbox == {} and server._session_id_to_pristine_untracked == {}
+        assert sandboxes[0].stop.await_count == 2
+
+
+def test_agent_run_close_cannot_close_an_episode_session(monkeypatch: MonkeyPatch) -> None:
+    server, sandboxes = _server(monkeypatch)
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=_seed().model_dump(mode="json")).status_code == 200
+        assert client.post("/close_session", json={}).status_code == 409
+        sandboxes[0].stop.assert_not_awaited()
+        assert client.post("/close_session", json={"resources_session_id": "resources-session"}).status_code == 422
+        sandboxes[0].stop.assert_not_awaited()
 
 
 def test_session_conformance(monkeypatch: MonkeyPatch) -> None:

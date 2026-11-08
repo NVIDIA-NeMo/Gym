@@ -36,7 +36,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, JsonValue
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
@@ -55,6 +55,8 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
@@ -145,6 +147,13 @@ class SWERebenchSeedSessionRequest(SWERebenchInstanceRequest, BaseSeedSessionReq
 class SWERebenchSeedSessionResponse(BaseSeedSessionResponse):
     sandbox_handle: str
     workdir: str
+    sandbox_descriptor: dict[str, JsonValue]
+
+
+class SWERebenchCloseSessionRequest(BaseModel):
+    """Close an agent-run sandbox using the request's session cookie."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 class SWERebenchVerifyRequest(SWERebenchInstanceRequest, BaseVerifyRequest):
@@ -293,13 +302,32 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
             await self._stop_task_sandbox(session_id)
             try:
                 await self._start_task_sandbox(session_id, body)
+                sandbox = self._session_id_to_sandbox[session_id]
+                response = SWERebenchSeedSessionResponse(
+                    sandbox_handle=str(sandbox.sandbox_id),
+                    workdir=repo_directory(body.repo),
+                    sandbox_descriptor=await sandbox.serialize(scope="operate"),
+                )
             except BaseException:
                 await self._stop_failed_seed_sandbox(session_id)
                 raise
-            return SWERebenchSeedSessionResponse(
-                sandbox_handle=str(self._session_id_to_sandbox[session_id]._handle.sandbox_id),
-                workdir=repo_directory(body.repo),
-            )
+            return response
+
+    async def close_resources_session(
+        self, request: Request, body: ResourcesCloseSessionRequest | SWERebenchCloseSessionRequest
+    ) -> ResourcesCloseSessionResponse:
+        """Close either an explicit episode session or a cookie-scoped agent-run session."""
+        if isinstance(body, ResourcesCloseSessionRequest):
+            return await super().close_resources_session(request, body)
+        session_id = request.session[SESSION_ID_KEY]
+        async with self._locked_task_session(session_id) as record:
+            if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                raise ResourcesSessionConflictError("An episode session requires its explicit close request")
+            await self._stop_session_sandboxes(session_id)
+            self._task_sessions.pop(session_id, None)
+            self._open_task_sessions.pop(session_id, None)
+            request.session.pop(SESSION_ID_KEY, None)
+            return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
     async def _start_task_sandbox(self, session_id: str, body: SWERebenchInstanceRequest) -> str:
         self._forget_task_sandbox_state(session_id)

@@ -23,13 +23,14 @@ import shutil
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
-from contextlib import suppress
+from contextlib import nullcontext, suppress
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
 from typing import Any, Callable, Optional
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
@@ -54,6 +55,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -62,6 +64,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
+    model_sampling_context,
 )
 from nemo_gym.models import CaptureStore
 from nemo_gym.rollouts import (
@@ -70,7 +73,12 @@ from nemo_gym.rollouts import (
     read_available_model_call_records,
 )
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
-from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
 from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
@@ -744,9 +752,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str | None,
+        run_body: ClaudeCodeAgentRunRequest | None = None,
+        mcp_config_path: str | None = None,
     ) -> NeMoGymResponse:
         directory = state.session.session_dir
-        base_url = self._resolve_call_base_url(state.request.episode_id.capture_key)
+        rollout_id = (
+            self.rollout_id_from_run(run_body) if run_body is not None else state.request.episode_id.capture_key
+        )
+        base_url = self._resolve_call_base_url(rollout_id)
         model = self.config.model if base_url else self.config.model.split("/")[-1]
         env = {
             "CLAUDE_CONFIG_DIR": directory + "/config",
@@ -770,9 +783,19 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         failure = None
         try:
             # Close can fence the staging phase just as it fences the execution phase.
-            async with self.sem:
-                mcp_config = directory + "/mcp.json" if self.config.mcp_config else None
-                skills_path = self._configured_skills_path()
+            # /run already holds the permit across resource seed, execution, verification, and close.
+            async with self.sem if run_body is None else nullcontext():
+                mcp_settings = None
+                if mcp_config_path:
+                    mcp_settings = json.loads(Path(mcp_config_path).read_text())
+                elif self.config.mcp_config:
+                    mcp_settings = self._get_static_mcp_config()
+                mcp_config = directory + "/mcp.json" if mcp_settings is not None else None
+                skills_path = (
+                    ((run_body.model_extra or {}).get(SKILLS_REF_KEY_NAME) or {}).get("path")
+                    if run_body is not None
+                    else self._configured_skills_path()
+                )
                 command = self._build_command(
                     model, prompt, system, mcp_config=mcp_config, skills_active=bool(skills_path)
                 )
@@ -783,7 +806,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                         "cwd": state.session.workdir,
                         "env": env,
                         "settings": self._build_settings(),
-                        "mcp_config": self._get_static_mcp_config() if mcp_config else None,
+                        "mcp_config": mcp_settings,
                         "skills_path": skills_path,
                     },
                     timeout=resolve_agent_timeout(body.metadata, ceiling=self.config.timeout),
@@ -821,9 +844,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
-        state.observations = await self._associate_compaction_calls(
-            state.observations, rollout_id=state.request.episode_id.capture_key
-        )
+        state.observations = await self._associate_compaction_calls(state.observations, rollout_id=rollout_id)
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup:
@@ -950,14 +971,77 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 
+    async def _run_sandbox_episode(
+        self,
+        body: ClaudeCodeAgentRunRequest,
+        seed: dict[str, Any],
+        *,
+        mcp_config_path: str | None,
+    ) -> AgentEpisode:
+        """Use the resource-owned task sandbox while retaining /run's flat orchestration."""
+        descriptor = seed.get("sandbox_descriptor")
+        if not isinstance(descriptor, dict) or not descriptor:
+            raise HTTPException(422, "Claude /run requires sandbox_descriptor from sandbox.serialize()")
+        if not self.config.sandbox_provider:
+            raise HTTPException(422, "Claude /run requires sandbox_provider to connect to the task sandbox")
+        workdir = seed.get("workdir") or descriptor.get("workdir")
+        if not isinstance(workdir, str) or not workdir:
+            raise HTTPException(422, "Claude /run requires the task sandbox workdir")
+        self._validate_sandbox_request(body.responses_create_params)
+        rollout_id = self.rollout_id_from_run(body) or uuid4().hex
+        state = None
+        try:
+            try:
+                # These identities name only private execution state; resources still receives the flat run body.
+                state = await self._seed_agent_session_state(
+                    AgentSeedSessionRequest(
+                        agent_session_id=uuid4().hex,
+                        episode_id=EpisodeId.from_capture_key(rollout_id),
+                        task_id={"taskset": self.config.resources_server.name, "task_id": rollout_id},
+                        sandbox_access={
+                            "connection": {
+                                "provider_config_ref": self.config.sandbox_provider,
+                                "descriptor": descriptor,
+                            },
+                            "workdir": workdir,
+                        },
+                    )
+                )
+            except AgentSessionSetupError as error:
+                state = error.state
+                raise error.error from error
+            prompt, system = self._conversation_input(body.responses_create_params)
+            response = await self._sandbox_response(
+                state,
+                body.responses_create_params,
+                prompt=prompt,
+                system=system,
+                run_body=body,
+                mcp_config_path=mcp_config_path,
+            )
+            return AgentEpisode(response=response, observations=state.observations)
+        finally:
+            if state is not None:
+                # This confirms harness termination and releases the borrowed connection. The resources
+                # server still owns the task sandbox and can extract its patch during verification.
+                with CancelScope(shield=True):
+                    await state.close(self.config.session_close_timeout_seconds)
+
     async def run(self, request: Request, body: ClaudeCodeAgentRunRequest) -> ClaudeCodeAgentVerifyResponse:
         if self._agent_session_id_from_request(request) is not None:
             raise HTTPException(409, "Claude Code sandbox sessions must use EnvironmentServer /run")
         if self.config.resources_server is None:
-            raise HTTPException(422, "Local Claude Code /run requires resources_server")
-        async with self.sem:
-            cookies = request.cookies
+            raise HTTPException(422, "Claude Code /run requires resources_server")
+        with model_sampling_context(self.model_sampling_segment_for_run(body)):
+            async with self.sem:
+                return await self._run_with_resources(request, body)
 
+    async def _run_with_resources(
+        self, request: Request, body: ClaudeCodeAgentRunRequest
+    ) -> ClaudeCodeAgentVerifyResponse:
+        cookies = dict(request.cookies)
+        close_resources = False
+        try:
             seed_resp = await self.server_client.post(
                 server_name=self.config.resources_server.name,
                 url_path="/seed_session",
@@ -965,8 +1049,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 cookies=cookies,
             )
             await raise_for_status(seed_resp)
-            cookies = seed_resp.cookies
+            cookies.update(seed_resp.cookies)
+            # A successful seed may already own a sandbox, even if its reply cannot be decoded.
+            close_resources = True
             seed_resp_json = await get_response_json(seed_resp)
+            if not isinstance(seed_resp_json, dict):
+                raise ValueError("Claude /run seed response must be a JSON object")
+            borrowed = "sandbox_descriptor" in seed_resp_json or "sandbox_handle" in seed_resp_json
+            close_resources = borrowed
 
             # The run-level skills_ref (stamped by rollout collection) rides on the request body
             # (extra="allow"). Pass its path straight into _create_response so the CLI invocation
@@ -977,7 +1067,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
             with tempfile.TemporaryDirectory(prefix="nemo_gym_claude_mcp_") as mcp_config_dir:
                 mcp_config = self._write_rollout_mcp_config(seed_resp_json, Path(mcp_config_dir))
-                if rollout_id is not None:
+                if borrowed:
+                    episode = await self._run_sandbox_episode(body, seed_resp_json, mcp_config_path=mcp_config)
+                    agent_resp, observations = episode.response, episode.observations
+                elif rollout_id is not None:
                     episode = await self._create_episode(
                         body.responses_create_params,
                         mcp_config=mcp_config,
@@ -999,8 +1092,10 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 url_path="/verify",
                 json=body.model_dump() | {"response": agent_resp_json},
                 cookies=cookies,
+                **({"headers": {CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"}} if close_resources else {}),
             )
             await raise_for_status(verify_resp)
+            cookies.update(verify_resp.cookies)
             verify_json = await get_response_json(verify_resp)
 
             gym_resp = NeMoGymResponse.model_validate(agent_resp_json)
@@ -1016,6 +1111,17 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             if observations is not None:
                 result["ng_agent_observations"] = observations.model_dump(mode="json")
             return ClaudeCodeAgentVerifyResponse.model_validate(result)
+        finally:
+            if close_resources:
+                with CancelScope(shield=True):
+                    async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                        closed = await self.server_client.post(
+                            server_name=self.config.resources_server.name,
+                            url_path="/close_session",
+                            json={},
+                            cookies=cookies,
+                        )
+                        await raise_for_status(closed)
 
 
 if __name__ == "__main__":

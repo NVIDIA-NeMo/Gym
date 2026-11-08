@@ -299,6 +299,26 @@ with legacy swap configurations, explicitly restore
 `resources_server: {type: resources_servers, name: "???"}` on the agent. Existing
 resource-bound recipes retain their bindings.
 
+The agent's existing `/run` endpoint also accepts a task sandbox returned by its
+resources server's flat `/seed_session`. That reply must contain the complete
+`sandbox_descriptor` from `sandbox.serialize(scope="operate")` and an absolute
+`workdir` (also accepted inside the descriptor). Set `sandbox_provider` to the
+matching provider configuration and pin `claude_code_version`. A bare
+`sandbox_handle` is rejected; Claude never falls back to the host for a sandbox
+task. Seeds without either sandbox field retain the host execution path.
+
+This path uses the same runtime installer, command builder, settings, and process
+supervisor as an agent session. It keeps the flat seed and verification requests,
+including resource cookies, generated MCP configuration, and run-level skills.
+It closes the harness and releases its borrowed connection before `/verify`, then
+calls the resource owner's `/close_session` with `{}` and the session cookies.
+The resources server must support that flat close body. Setup, execution, and
+verification failures also close the resources session; a cleanup failure raises
+instead of returning a successful reward. Settings-file environment values and
+the run's model sampling values reach this path just as they do session calls.
+Local tests cover the orchestration; real model and Linux runtime qualification
+are still required for a new pairing.
+
 For borrowed execution, the seed request supplies `sandbox_access` with a direct
 provider connection descriptor and an absolute task `workdir`. Resources prepares
 the task directory; Claude Code only stages its own runtime and settings outside

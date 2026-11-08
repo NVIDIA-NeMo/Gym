@@ -57,6 +57,17 @@ does not call the agent's compatibility `/run`. No additional materializer is ne
 Pass the same configuration to startup and `--no-serve` collection; collection does not
 inherit routing settings from the running servers.
 
+The agent's compatibility `/run` also uses the task sandbox when Resources returns a
+serialized `sandbox_descriptor` and absolute `workdir`. Configure `sandbox_provider` to
+attach it. This path keeps the flat resource seed and verify requests, reuses the pinned
+session runtime, closes the harness before verification, and calls the resource owner's
+`/close_session` afterward, including on setup failure. A bare `sandbox_handle` is rejected.
+Resource-close failures remain request failures. Run-specific skills stay in private
+`CODEX_HOME`; resource MCP metadata becomes required MCP grants. The task's HOME and workdir,
+rollout capture identity, and run-level sampling remain intact. Without sandbox metadata,
+the existing host execution path remains available. Sandbox request restrictions below
+apply to the borrowed `/run` path too; finite-context automatic compaction is unchanged.
+
 ### Switch harness or benchmark
 
 To change a compatible harness, replace its config import, harness-specific settings,

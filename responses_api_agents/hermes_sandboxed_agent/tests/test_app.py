@@ -349,8 +349,9 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     )
     seeded = SimpleNamespace(cookies={"session": "seeded"}, data={"sandbox_descriptor": {"sandbox_id": "box"}})
     verified = SimpleNamespace(
+        cookies={},
         data=body.model_dump()
-        | {"response": response.model_dump(), "reward": verifier_reward, "evaluation_completed": evaluation_completed}
+        | {"response": response.model_dump(), "reward": verifier_reward, "evaluation_completed": evaluation_completed},
     )
 
     async def post(*, url_path, **kwargs):
@@ -373,6 +374,7 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     monkeypatch.setattr(module.AsyncSandbox, "connect", connected)
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {"sandbox": {"fake": {}}})
     provider = SimpleNamespace(aclose=AsyncMock())
+    sandbox.disconnect = AsyncMock(side_effect=provider.aclose)
     monkeypatch.setattr(module, "create_provider", lambda config: provider)
     monkeypatch.setattr(module, "raise_for_status", AsyncMock())
     monkeypatch.setattr(module, "get_response_json", AsyncMock(side_effect=lambda r: r.data))
@@ -392,7 +394,10 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
             )
         ),
     )
-    if failed_endpoint == "/verify":
+    if failed_endpoint in {"/close_session", "/cleanup_timeout"}:
+        with pytest.raises((RuntimeError, TimeoutError)):
+            await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
+    elif failed_endpoint == "/verify":
         result = await agent.run(SimpleNamespace(cookies={"original": "cookie"}), body)
         wire = result.model_dump(mode="json")
         assert wire["_ng_failure_class"] == "agent_run_error"
@@ -416,7 +421,8 @@ async def test_run_cookies_descriptor_reward_and_cleanup(
     assert agent.server_client.post.call_args.kwargs["cookies"] == {"original": "cookie", "session": "seeded"}
     connected.assert_awaited_once_with({"sandbox_id": "box"}, provider=provider)
     provider.aclose.assert_awaited_once()
-    assert sandbox.stop.await_count == (1 if failed_endpoint in ("/close_session", "/cleanup_timeout") else 0)
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
 
 
 @pytest.mark.asyncio
