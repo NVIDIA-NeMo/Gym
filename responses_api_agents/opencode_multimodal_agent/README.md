@@ -100,6 +100,26 @@ agent-owned sandbox that is stopped on close. OpenCode is installed in the sandb
 at session seed, not on the agent-server host. A verified preinstalled binary can
 be supplied with `sandbox_executable_path` and `sandbox_executable_sha256`.
 
+For OpenSandbox with `model_only` or `model_and_tools`, use
+`benchmarks/opencode_multimodal_benchmarks/opencode_sessions_opensandbox.yaml`.
+The provider restricts egress at creation, before seed: a fresh sandbox cannot
+download OpenCode or npm dependencies. The task image must contain OpenCode,
+a plugin dependency archive, and ripgrep; supply each `sandbox_*_path` and
+`sandbox_*_sha256` required by that overlay. Missing pins reject seed before
+allocating a sandbox. See the shared agent's
+[offline bundle instructions](../opencode_agent/README.md#pinned-offline-runtime-bundle)
+for archive layout and checksum generation. The paths are inside the task image,
+not paths on the Gym host. Bash, tar/gzip, checksum tools, and util-linux `unshare`
+must also be available in the image.
+
+The private Python helper is prepared on the Gym host and uploaded. Restricted
+seed then runs the actual network wrapper to verify namespace creation, private
+procfs, and proxy setup before activation. A request that narrows an `inherit`
+session performs this check before its first restricted activation. Setup failure
+closes the owned sandbox and remains an infrastructure failure. This check does
+not prove that an OpenSandbox deployment's outer egress policy is configured
+correctly; qualify the deployment with a real rollout and network-denial probes.
+
 The adapter reuses `opencode_agent`'s supervised execution and cleanup. Input images,
 plugins and session state are staged outside the task repository; the prompt names
 the staged image paths. Tool-produced images are embedded in returned tool results

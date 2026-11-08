@@ -49,9 +49,13 @@ def request_body():
 def visual_setup(opencode_setup, tmp_path, monkeypatch):
     from unittest.mock import AsyncMock
 
+    from responses_api_agents.opencode_agent import app as base_app
     from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
 
     monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=True))
+    # Owned cases use local-provider setup semantics; OpenSandbox's offline
+    # contract is exercised explicitly below.
+    base_app.create_provider.return_value.name = "local"
     original, sandbox = opencode_setup
     config = OpenCodeMultimodalAgentConfig(
         **(
@@ -83,6 +87,106 @@ def visual_setup(opencode_setup, tmp_path, monkeypatch):
     sandbox.events = json.dumps(export)
     capture_observations(sandbox, tmp_path)
     return agent, sandbox
+
+
+def test_restricted_opensandbox_missing_bundle_refuses_before_allocation(visual_setup):
+    from unittest.mock import AsyncMock, patch
+
+    from responses_api_agents.opencode_agent import app as base_app
+
+    agent, sandbox = visual_setup
+    base_app.create_provider.return_value.name = "opensandbox"
+    base_app.create_provider.return_value.aclose = AsyncMock()
+    agent.config.network_access = "model_only"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+    sandbox.start = AsyncMock()
+    body = seed()
+    body.sandbox_access = None
+    body.tool_accesses = []
+    with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox):
+        with TestClient(agent.setup_webserver()) as client:
+            result = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+    assert result.status_code == 422, result.text
+    assert "pinned offline runtime bundle" in result.text
+    sandbox.start.assert_not_awaited()
+    sandbox.exec.assert_not_awaited()
+    sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("asset", ["executable", "plugin_dependencies", "ripgrep"])
+@pytest.mark.parametrize("field", ["path", "sha256"])
+def test_restricted_opensandbox_requires_each_offline_pin(visual_setup, asset, field):
+    from types import SimpleNamespace
+
+    from nemo_gym.agents import AgentSeedRejectedError
+    from nemo_gym.sandbox import SandboxSpec
+
+    agent, _ = visual_setup
+    agent.config.network_access = "model_only"
+    for item in ("executable", "plugin_dependencies", "ripgrep"):
+        setattr(agent.config, f"sandbox_{item}_path", f"/opt/runtime/{item}")
+        setattr(agent.config, f"sandbox_{item}_sha256", "a" * 64)
+    missing = f"sandbox_{asset}_{field}"
+    setattr(agent.config, missing, None)
+    with pytest.raises(AgentSeedRejectedError, match=missing):
+        agent._restrict_owned_sandbox_network(SandboxSpec(image="test"), SimpleNamespace(name="opensandbox"), seed())
+
+
+def test_offline_bundle_preserves_opensandbox_model_only_policy(visual_setup):
+    from types import SimpleNamespace
+
+    from nemo_gym.sandbox import SandboxSpec
+
+    agent, _ = visual_setup
+    agent.config.network_access = "model_only"
+    for item in ("executable", "plugin_dependencies", "ripgrep"):
+        setattr(agent.config, f"sandbox_{item}_path", f"/opt/runtime/{item}")
+        setattr(agent.config, f"sandbox_{item}_sha256", "a" * 64)
+    body = seed()
+    body.tool_accesses = []
+    spec = agent._restrict_owned_sandbox_network(SandboxSpec(image="test"), SimpleNamespace(name="opensandbox"), body)
+    assert spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "model.example"}],
+    }
+
+
+@pytest.mark.parametrize("error_type", [None, "timeout"])
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_namespace_preflight_failure_closes_before_activation(visual_setup, error_type, cleanup_fails):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, patch
+
+    agent, sandbox = visual_setup
+    agent.config.network_access = "model_only"
+    agent.config.sandbox_config = {"image": "test-image", "workdir": "/app"}
+    sandbox.start = AsyncMock()
+    original_exec = sandbox.run_exec
+
+    async def execute(command, **kwargs):
+        if "network_runner.py" in command and "--model-url" in command:
+            return SimpleNamespace(
+                return_code=1 if error_type is None else 0,
+                error_type=error_type,
+                stdout="",
+                stderr="unshare unavailable or forbidden",
+            )
+        return await original_exec(command, **kwargs)
+
+    sandbox.exec.side_effect = execute
+    if cleanup_fails:
+        sandbox.stop = AsyncMock(side_effect=[RuntimeError("cleanup failed"), None])
+    body = seed()
+    body.sandbox_access = None
+    body.tool_accesses = []
+    with patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox):
+        with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+            result = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+            assert result.status_code >= 400
+            sandbox.launch.assert_not_awaited()
+            sandbox.stop.assert_awaited()
+    if cleanup_fails:
+        assert sandbox.stop.await_count >= 2
 
 
 def test_session_stages_images_preserves_outputs_and_replays_once(visual_setup):
@@ -296,6 +400,9 @@ def test_owned_session_network_and_websearch_policy(visual_setup, mode, websearc
 
             assert payload["command"][:2] == [_NETWORK_RUNTIME.python, "-I"]
             assert payload["command"][3:5] == ["--mode", mode]
+            probes = [c for c in sandbox.exec.call_args_list if "--model-url" in c.args[0]]
+            assert len(probes) == 1
+            assert probes[0].kwargs["timeout_s"] == 30
         assert (
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
@@ -358,6 +465,7 @@ def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, mode):
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
         assert response.status_code == 200, response.text
         command = sandbox.params()["command"]
+        assert sum("--model-url" in c.args[0] for c in sandbox.exec.call_args_list) == 1
         urls = [command[index + 1] for index, arg in enumerate(command) if arg == "--tool-url"]
         assert urls == (
             ["http://resources.example:8000/search/mcp", "http://docs.example:9000/mcp"]

@@ -93,13 +93,47 @@ tool that introduced it. OpenSandbox's outer host policy may allow more ports;
 the wrapper still enforces the configured ports. The model endpoint must not
 provide an unrestricted forwarding service.
 
-Owned Linux sessions need Bash, tar/gzip and util-linux `unshare`. Seed installs a
-private, checksum-verified stdlib Python runtime before restriction. The local
-training path uses its Bubblewrap filesystem sandbox. Both paths require nested
-user, network, mount and PID namespaces. Restricted borrowed sessions and
-unsupported providers fail closed. Runtime installation happens before restricted
-execution; preinstalled OpenCode is preferred.
+Owned Linux sessions need Bash, tar/gzip and util-linux `unshare`. The private,
+checksum-verified stdlib Python runtime is prepared on the host and uploaded at
+seed. Restricted seed runs the actual wrapper, checking user, network, mount and
+PID namespaces, private procfs, loopback and proxy listeners. Per-request narrowing
+of an `inherit` session checks these before its first restricted activation.
+The local training path uses its Bubblewrap filesystem sandbox. Restricted
+borrowed sessions and unsupported providers fail closed.
+
+OpenSandbox's provider policy is already active during seed. Restricted
+OpenSandbox sessions require pinned, preinstalled OpenCode, plugin dependencies
+and ripgrep; use `opencode_sessions_opensandbox.yaml` and the shared agent's
+[offline bundle instructions](../opencode_agent/README.md#pinned-offline-runtime-bundle).
+There is no unrestricted installation phase followed by a provider policy switch.
+Enroot/local apply the wrapper at execution, after seed. Do not loosen an
+OpenSandbox policy to permit package downloads throughout an evaluation.
 
 Filesystem isolation remains necessary: do not mount host service sockets or
 credentials into the task sandbox. Outer provider restrictions always remain in
 force. Other Gym agents and their sandbox policies are unchanged.
+
+## Agent-X and host service isolation
+
+Agent-X needs public web access. Its `inherit` pairing must run inside a provider
+boundary that isolates task processes from the Gym host. The local compatibility
+Bubblewrap path currently shares host procfs and host networking; it is not a
+credential-isolation boundary. A read-only procfs mount can expose host command
+lines, and switching only that mount to private procfs still leaves host services
+reachable through inherited networking.
+
+For a remote sandbox deployment, keep the Gym head, agent control endpoints,
+judge and verifier services on host loopback or a network inaccessible to task
+sandboxes. Expose only the model gateway and explicitly granted task services.
+The OpenSandbox overlay binds the head and agent to loopback; also configure
+any judge/verifier instances and external firewall rules for the deployment.
+Do not expose the head's unauthenticated `/global_config_dict_yaml` endpoint on
+the sandbox-facing address. Do not mount host procfs, service sockets, runtime
+configurations or credentials into the task image.
+
+This arrangement preserves Agent-X's web tools and `inherit` policy. It still
+needs deployment qualification: use synthetic sentinels to check process/file
+isolation, confirm public web and model access, and confirm head/judge/control
+services are unreachable by hostname and IP. Local Enroot or Bubblewrap with
+inherited host networking does not establish that separation. No remote
+OpenSandbox qualification is claimed by the overlay alone.

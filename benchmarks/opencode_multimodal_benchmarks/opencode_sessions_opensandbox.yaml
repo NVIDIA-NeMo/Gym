@@ -1,0 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Compose after the benchmark catalog config. All paths are inside the task image.
+config_paths:
+- benchmarks/opencode_multimodal_benchmarks/opencode_sessions.yaml
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+use_absolute_ip: true
+# Keep control endpoints off the address remote sandboxes use for model requests.
+head_server:
+  host: 127.0.0.1
+visual_agent:
+  responses_api_agents:
+    opencode_multimodal_agent:
+      host: 127.0.0.1
+      sandbox_executable_path: ???
+      sandbox_executable_sha256: ???
+      sandbox_plugin_dependencies_path: ???
+      sandbox_plugin_dependencies_sha256: ???
+      sandbox_ripgrep_path: ???
+      sandbox_ripgrep_sha256: ???

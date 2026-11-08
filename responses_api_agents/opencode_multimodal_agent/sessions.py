@@ -5,6 +5,7 @@
 import asyncio
 import copy
 import json
+import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -32,7 +33,7 @@ from responses_api_agents.opencode_multimodal_agent.media import stage_inputs
 _NETWORK_RUNTIME = SandboxPythonRuntime(
     harness="opencode-network",
     requirements=(),
-    import_check="import asyncio, fcntl, socket; assert hasattr(__import__('os'), 'unshare')",
+    import_check="import asyncio, fcntl, socket",
 )
 
 
@@ -41,6 +42,7 @@ class MultimodalSandboxSession(OpenCodeSandboxSession):
     """Track staged inputs alongside the shared sandbox lifecycle."""
 
     expected_images: int = 0
+    network_checked: bool = False
 
 
 class MultimodalSessionMixin:
@@ -54,6 +56,21 @@ class MultimodalSessionMixin:
     def _restrict_owned_sandbox_network(
         self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
     ) -> SandboxSpec:
+        if provider.name == "opensandbox" and self.config.network_access != "inherit":
+            # OpenSandbox applies egress restrictions at creation, before seed.
+            # Every activation uses private plugin/cache directories, so a binary
+            # alone does not prevent npm or ripgrep downloads during activation.
+            required = [
+                f"sandbox_{asset}_{field}"
+                for asset in ("executable", "plugin_dependencies", "ripgrep")
+                for field in ("path", "sha256")
+            ]
+            missing = [name for name in required if not getattr(self.config, name)]
+            if missing:
+                raise AgentSeedRejectedError(
+                    "Restricted OpenSandbox sessions require a pinned offline runtime bundle before creation; "
+                    "provide files in the task image and configure: " + ", ".join(missing)
+                )
         if self.config.network_access == "inherit" or provider.name == "opensandbox":
             return super()._restrict_owned_sandbox_network(spec, provider, body)
         if provider.name not in {"enroot", "local"}:
@@ -81,6 +98,8 @@ class MultimodalSessionMixin:
                 await _NETWORK_RUNTIME.install(
                     state.session.sandbox, timeout_s=self.config.sandbox_install_timeout_seconds
                 )
+            if self.config.network_access != "inherit":
+                await self._check_session_network(state)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -89,6 +108,34 @@ class MultimodalSessionMixin:
                 raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
+
+    async def _check_session_network(self, state: MultimodalSandboxSession) -> None:
+        if state.network_checked:
+            return
+        runner = f"{state.session.session_dir}/network_runner.py"
+        await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), runner)
+        # Run the actual wrapper: this exercises util-linux, all four namespaces,
+        # private procfs, loopback setup, and the Unix/TCP proxy listeners. No
+        # request is sent to the placeholder origin and no model call is made.
+        command = shlex.join(
+            [
+                _NETWORK_RUNTIME.python,
+                "-I",
+                runner,
+                "--mode",
+                "model_only",
+                "--model-url",
+                "http://127.0.0.1:9",
+                "--",
+                _NETWORK_RUNTIME.python,
+                "-I",
+                "-c",
+                "from pathlib import Path; assert Path('/proc/self/status').is_file()",
+            ]
+        )
+        result = await state.session.sandbox.exec(command, cwd="/", timeout_s=30)
+        self._check_sandbox_setup(command, result)
+        state.network_checked = True
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         return await super()._close_agent_session_state(state)
@@ -172,6 +219,9 @@ class MultimodalSessionMixin:
         ]
         if network_access == "model_only" and any(access.required for access in grants):
             raise HTTPException(422, "model_only blocks required MCP tool grants")
+        if network_access != "inherit":
+            # An inherit session may first request restricted execution here.
+            await self._check_session_network(state)
         with TemporaryDirectory(prefix="gym-visual-session-") as temporary:
             directory = Path(temporary)
             try:

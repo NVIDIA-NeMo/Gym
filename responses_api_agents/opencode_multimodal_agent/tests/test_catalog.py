@@ -16,12 +16,15 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize("benchmark", ["vstar", "hrbench8k", "vtcbench", "agentx", "zerobench"])
-@pytest.mark.parametrize("sessions", [False, True])
+@pytest.mark.parametrize("sessions", [False, True, "opensandbox"])
 def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     monkeypatch.chdir(ROOT)
     prefix = "benchmarks/opencode_multimodal_benchmarks"
     suffix = f"{benchmark}/config.yaml" if sessions else f"{benchmark}/opencode_relay.yaml"
     profile = "opencode_sessions.yaml" if sessions else "opencode_eval_agent.yaml"
+    if sessions == "opensandbox":
+        profile = "opencode_sessions_opensandbox.yaml"
+        monkeypatch.setenv("OPENSANDBOX_API_KEY", "test-placeholder")
     if benchmark == "agentx" and sessions:
         suffix = "agentx/opencode.yaml"
     initial = OmegaConf.create(
@@ -55,6 +58,11 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     initial["opencode_multimodal_benchmarks"] = {
         "resources_servers": {"opencode_multimodal_benchmarks": {"judge_model": "test-judge"}}
     }
+    if sessions == "opensandbox":
+        settings = initial.visual_agent.responses_api_agents.opencode_multimodal_agent
+        for asset in ("executable", "plugin_dependencies", "ripgrep"):
+            settings[f"sandbox_{asset}_path"] = f"/opt/runtime/{asset}"
+            settings[f"sandbox_{asset}_sha256"] = "a" * 64
     cfg = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(
             initial_global_config_dict=initial,
@@ -88,6 +96,10 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
         cfg.policy_model.responses_api_models.vllm_model.turn_budget
     )
     if sessions:
+        if sessions == "opensandbox":
+            assert agent.host == cfg.head_server.host == "127.0.0.1"
+            assert cfg.use_absolute_ip
+            assert agent.sandbox_plugin_dependencies_path == "/opt/runtime/plugin_dependencies"
         assert cfg.environment_routing_mode == "taskset"
         assert cfg.environment_server_routes.visual_tasks == "visual_environment"
         assert "single_agent_turn" in cfg.visual_environment.environment_servers

@@ -22,6 +22,14 @@ from responses_api_agents.opencode_multimodal_agent.tests.test_sessions import (
 )
 
 
+def offline_bundle(obj):
+    # Policy tests start with the required offline setup; missing pins have
+    # separate allocation-boundary regressions in test_sessions.py.
+    for asset in ("executable", "plugin_dependencies", "ripgrep"):
+        setattr(obj.config, f"sandbox_{asset}_path", f"/opt/runtime/{asset}")
+        setattr(obj.config, f"sandbox_{asset}_sha256", "a" * 64)
+
+
 def test_network_inherits_by_default():
     from responses_api_agents.opencode_multimodal_agent.eval import OpenCodeMultimodalEvalConfig
 
@@ -251,6 +259,7 @@ def test_owned_network_uses_upstream_policy_for_opensandbox(monkeypatch, provide
     from nemo_gym.sandbox import SandboxSpec
 
     obj = agent(monkeypatch, network_access=mode)
+    offline_bundle(obj)
     monkeypatch.setattr(type(obj), "resolve_model_base_url", lambda *args, **kwargs: "http://model.example:8000/v1")
     request = seed()
     request.sandbox_access = None
@@ -278,6 +287,7 @@ def test_owned_opensandbox_conflicting_policy_is_terminal(visual_setup):
     from unittest.mock import AsyncMock, patch
 
     obj, sandbox = visual_setup
+    offline_bundle(obj)
     obj.config.network_access = "model_only"
     obj.config.sandbox_provider = "agent-provider"
     obj.config.sandbox_config = {
@@ -422,6 +432,7 @@ def test_model_and_tools_accepts_generic_mcp_grants(monkeypatch, provider_name):
     from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import owned_seed_with_several_grants
 
     obj = agent(monkeypatch, network_access="model_and_tools")
+    offline_bundle(obj)
     monkeypatch.setattr(type(obj), "resolve_model_base_url", lambda *args, **kwargs: "http://model.example:8000/v1")
     request = AgentSeedSessionRequest.model_validate(owned_seed_with_several_grants(required=True))
     spec = SandboxSpec(image="test-image")
