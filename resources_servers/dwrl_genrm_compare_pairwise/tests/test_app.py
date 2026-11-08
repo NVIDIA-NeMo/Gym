@@ -351,7 +351,17 @@ class TestMessageHelpers:
 
     def test_flatten_labels_each_role(self):
         messages = self._messages(("system", " Be nice "), ("user", "Hi"), ("assistant", "Hello!"), ("user", "Bye"))
-        assert flatten_to_single_turn(messages) == "System: Be nice\n\nUser: Hi\n\nAssistant: Hello!\n\nUser: Bye"
+        assert flatten_to_single_turn(messages) == (
+            "[The Start of the System Prompt for this Conversation]\n Be nice \n[The End of the System Prompt for this Conversation]"
+            "\n\nUser: Hi\n\nAssistant: Hello!\n\nUser: Bye"
+        )
+
+    def test_flatten_strips_role_prefixes_from_the_content(self):
+        messages = self._messages(("system", "System: Be nice"), ("user", "User: Hi"), ("assistant", "Assistant: Hello!"))
+        assert flatten_to_single_turn(messages) == (
+            "[The Start of the System Prompt for this Conversation]\nBe nice\n[The End of the System Prompt for this Conversation]"
+            "\n\nUser: Hi\n\nAssistant: Hello!"
+        )
 
     def test_flatten_removes_thinking_from_assistant_turns(self):
         messages = self._messages(
@@ -542,6 +552,16 @@ class TestRunSingleComparison:
             assert self._call(client, index)["server_name"] == "dwrl_model"
             assert self._call(client, index)["url_path"] == "/v1/chat/completions"
 
+    def test_score_request_continues_the_evaluation_session(self):
+        """The score call reuses the evaluation's session, so a replicated GenRM serves both on the same replica."""
+        evaluation_response = _http_response(_evaluation_payload(JUDGE_JSON))
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=[evaluation_response, _http_response(_score_payload(*FIRST_BETTER))])
+        self._run(_make_server(_make_config(), client))
+
+        assert "cookies" not in self._call(client, 0)
+        assert self._call(client, 1)["cookies"] is evaluation_response.cookies
+
     def test_evaluation_request_contains_context_both_responses_and_principle(self):
         server, client = self._make()
         self._run(
@@ -619,13 +639,21 @@ class TestRunSingleComparison:
 
         body = self._call(client, 1)["json"]
         assert [m["role"] for m in body.messages] == ["user", "assistant", "user"]
-        assert body.messages[1]["content"] == "My evaluation text."
+        # the "<think>\n" that the generation prompt opened is put back in front of the generation, as in training
+        assert body.messages[1]["content"] == "<think>\nMy evaluation text."
         assert body.messages[2]["content"] == BT_PROMPT
         assert body.max_tokens == 1
         assert body.logprobs is True
         assert body.top_logprobs == 20
         assert body.temperature == approx(1.0)
         assert body.top_p == approx(1.0)
+
+    def test_score_request_keeps_a_generation_that_opens_its_own_reasoning(self):
+        server, client = self._make(evaluation="<think>\nMy reasoning.\n</think>\n\nMy evaluation text.")
+        self._run(server)
+
+        body = self._call(client, 1)["json"]
+        assert body.messages[1]["content"] == "<think>\nMy reasoning.\n</think>\n\nMy evaluation text."
 
     def test_score_request_turns_thinking_off(self):
         server, client = self._make()
@@ -634,6 +662,8 @@ class TestRunSingleComparison:
         metadata = self._call(client, 1)["json"].metadata
         assert '"enable_thinking": false' in metadata["chat_template_kwargs"]
         assert '"enable_thinking": false' in metadata["extra_body"]
+        assert '"truncate_history_thinking": false' in metadata["chat_template_kwargs"]
+        assert '"truncate_history_thinking": false' in metadata["extra_body"]
 
     def test_win_probability_is_the_probability_of_the_score_token(self):
         server, _ = self._make(score_logprobs=(("2", math.log(0.9)), ("1", math.log(0.1))))
@@ -837,7 +867,7 @@ class TestRunSingleComparisonWithParseRetries:
 
         second_score_request = client.post.call_args_list[3].kwargs["json"]
         assert [m["role"] for m in second_score_request.messages] == ["user", "assistant", "user"]
-        assert second_score_request.messages[1]["content"].startswith("second evaluation")
+        assert second_score_request.messages[1]["content"].startswith("<think>\nsecond evaluation")
         assert second_score_request.messages[2]["content"] == BT_PROMPT
 
     def test_every_attempt_evaluates_the_same_prompt(self):
@@ -1009,10 +1039,7 @@ def expected_rewards(
             results.append((3.0, 3.0, probability))
             metadata.append((i, j, judge_idx))
     response_objs = [_response_obj(_text(rid, texts)) for rid in ids]
-    rewards, _, _, _ = aggregate_scores(
-        comparison_results=results,
-        comparison_metadata=metadata,
-        response_objs=response_objs,
+    settings = dict(
         aggregator_method="simple_tiebreaker",
         default_score=3.0,
         reasoning_bonus=0.0,
@@ -1020,8 +1047,14 @@ def expected_rewards(
         top_percentile=0.2,
         group_reasoning_length_penalty_coeff=0.0,
         group_answer_length_penalty_coeff=0.0,
+    )
+    settings.update(aggregate)
+    rewards, _, _, _ = aggregate_scores(
+        comparison_results=results,
+        comparison_metadata=metadata,
+        response_objs=response_objs,
         ref_answer_last=with_reference,
-        **aggregate,
+        **settings,
     )
     return rewards
 
@@ -1661,6 +1694,46 @@ class TestVerifyStylePenalty:
 
         expected = expected_rewards([0, 1, 2, 3], with_reference=True, texts=texts, group_style_penalty_coeff=0.5)
         assert [r.reward for r in results] == approx(expected, abs=1e-6)
+
+
+class TestVerifyLengthPenalty:
+    """The length settings of the config reach the rewards of verify(), with and without a reference answer."""
+
+    # Rollout 1 has a much longer answer than the others. The text has to keep "rollout-<n>" for the fake judge.
+    TEXTS = {1: "rollout-1 " + "with a much longer answer than the others " * 10}
+    LENGTH = dict(group_reasoning_length_penalty_coeff=0.06, group_answer_length_penalty_coeff=0.12)
+
+    def _rewards(self, judge, ref_answer=None, **config):
+        async def scenario():
+            judge.reset()
+            server = _server(**config)
+            tasks = await _arrive(server, [0, 1, 2, 3], ref_answer=ref_answer, texts=self.TEXTS)
+            await _release_all(judge)
+            return await asyncio.gather(*tasks)
+
+        return [r.reward for r in _run(scenario())]
+
+    def test_a_longer_answer_is_rewarded_less(self, judge):
+        plain = self._rewards(judge)
+        penalized = self._rewards(judge, **self.LENGTH)
+
+        assert plain == approx(expected_rewards([0, 1, 2, 3], texts=self.TEXTS), abs=1e-6)
+        assert penalized == approx(expected_rewards([0, 1, 2, 3], texts=self.TEXTS, **self.LENGTH), abs=1e-6)
+        assert penalized[1] < plain[1]
+        assert all(penalized[i] > plain[i] for i in (0, 2, 3))
+        # Zero-centered over the cohort: the adjustments do not change the mean reward
+        assert sum(penalized) == approx(sum(plain), abs=1e-6)
+
+    def test_with_a_reference_only_the_rollouts_are_adjusted(self, judge):
+        plain = self._rewards(judge, ref_answer=REFERENCE)
+        penalized = self._rewards(judge, ref_answer=REFERENCE, **self.LENGTH)
+
+        expected = expected_rewards([0, 1, 2, 3], with_reference=True, texts=self.TEXTS, **self.LENGTH)
+        assert len(penalized) == 4
+        assert penalized == approx(expected, abs=1e-6)
+        assert penalized[1] < plain[1]
+        # The adjustments are centered over the four rollouts, the reference answer is not part of them
+        assert sum(penalized) == approx(sum(plain), abs=1e-6)
 
 
 class TestVerifyRandomizedSchedules:

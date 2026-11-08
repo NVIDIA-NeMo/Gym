@@ -21,7 +21,7 @@ This module provides:
 - GenRM output parsing (JSON score extraction)
 - Response API object text extraction
 - Score aggregation: a Bradley-Terry (Elo) fit of the pairwise judgments of one prompt's rollouts
-- Style-density penalty computation (length bonuses/penalties exist but are disabled in aggregate_scores)
+- Length bonuses/penalties and style-density penalty computation, applied to the ratings in aggregate_scores
 """
 
 from __future__ import annotations
@@ -712,17 +712,25 @@ def aggregate_scores(
 
     The 1-5 scores (score_1, score_2) do not influence the rewards; they only go into the metrics.
 
+    The optional length bonuses and style penalty are then added to the ratings, as in `genrm_compare`: first the
+    length bonuses (`apply_length_bonuses`), then the style penalty (`apply_style_penalties`). Both are computed over
+    the rollouts only, never the reference answer. The group-relative length and style adjustments are zero-centered
+    over the rollouts, so they leave the mean reward of the cohort unchanged. Note that the ratings are in log-odds
+    units, not on the 1-5 scale of `genrm_compare`, so the same coefficient does not have the same strength there.
+
     Args:
         comparison_results: List of (score_1, score_2, win_probability) from pairwise comparisons
         comparison_metadata: List of (response_i, response_j, judge_idx) for each comparison
         response_objs: Raw Response API objects (the reference answer last, if `ref_answer_last`)
         aggregator_method: Only "simple_tiebreaker" is supported (the name is a leftover: ratings are fitted)
         default_score: Unused: every response has to take part in at least one comparison
-        reasoning_bonus: Unused (length bonuses are disabled)
-        answer_bonus: Unused (length bonuses are disabled)
-        top_percentile: Unused (length bonuses are disabled)
-        group_reasoning_length_penalty_coeff: Unused (length bonuses are disabled)
-        group_answer_length_penalty_coeff: Unused (length bonuses are disabled)
+        reasoning_bonus: Bonus for the shortest non-empty reasoning, if that rollout is among the top performers
+        answer_bonus: Bonus for the shortest non-empty answer, if that rollout is among the top performers
+        top_percentile: Fraction of the rollouts (by rating) that count as top performers for the two bonuses
+        group_reasoning_length_penalty_coeff: Coefficient for the group-relative reasoning length adjustment.
+            Shorter reasoning than the other rollouts raises the reward, longer lowers it (zero-centered)
+        group_answer_length_penalty_coeff: Coefficient for the group-relative answer length adjustment.
+            Shorter answers than the other rollouts raise the reward, longer lower it (zero-centered)
         group_style_penalty_coeff: Coefficient for style density penalty.
             Penalizes responses with higher density of formatting elements
             (headers, lists, bold, emojis) relative to text length.
@@ -732,8 +740,8 @@ def aggregate_scores(
         Tuple of:
         - final_scores: Per-response rewards after all adjustments (without the reference answer)
         - metrics: Aggregation statistics (mean and std of the 1-5 scores, tiebreak rate)
-        - base_scores: Scores before the style adjustment
-        - bonuses: Style adjustment applied to each response
+        - base_scores: The ratings, before the length and style adjustments
+        - bonuses: Length and style adjustments applied to each response (final_scores = base_scores + bonuses)
 
     Raises:
         AssertionError: If a response took part in no comparison, or the fit diverged
@@ -791,8 +799,8 @@ def aggregate_scores(
     base_scores = list(final_scores)
     bonuses = [0.0] * (num_responses - int(ref_answer_last))
 
-    # Apply length bonuses if any are configured
-    '''
+    # Apply length bonuses if any are configured. As with the style penalty below, only the rollouts take part: the
+    # reference answer (if any) is not rewarded, and including it would shift the group's length range and mean.
     if any(
         [
             reasoning_bonus > 0,
@@ -801,16 +809,16 @@ def aggregate_scores(
             group_answer_length_penalty_coeff > 0,
         ]
     ):
-        final_scores, bonuses = apply_length_bonuses(
+        final_scores, length_bonuses = apply_length_bonuses(
             scores=final_scores,
-            response_objs=response_objs,
+            response_objs=response_objs[: len(final_scores)],
             reasoning_bonus=reasoning_bonus,
             answer_bonus=answer_bonus,
             top_percentile=top_percentile,
             group_reasoning_length_penalty_coeff=group_reasoning_length_penalty_coeff,
             group_answer_length_penalty_coeff=group_answer_length_penalty_coeff,
         )
-    '''
+        bonuses = [b + lb for b, lb in zip(bonuses, length_bonuses)]
 
     # Apply style penalties if configured. The reference answer (if any) is not rewarded, so it has no style score.
     if group_style_penalty_coeff > 0:

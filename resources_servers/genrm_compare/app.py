@@ -30,12 +30,13 @@ Output:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
-from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -49,6 +50,13 @@ from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from resources_servers.dwrl_genrm_compare_pairwise.cohort import (
+    Cohort,
+    CohortRegistry,
+    MemberJudgmentFailed,
+    Slot,
+    comparison_slots,
+)
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -61,10 +69,14 @@ from resources_servers.genrm_compare.utils import (
 
 logger = logging.getLogger(__name__)
 
-# Cohort state for verify(): buffer by prompt_key until num_rollouts_per_prompt received (Difference 1)
-_cohort_lock: asyncio.Lock = asyncio.Lock()
-_cohort_buffers: Dict[str, List[Tuple[Any, asyncio.Future]]] = defaultdict(list)
-_cohort_jit_buffers: Dict[str, Tuple[List[float, float, float], List[int, int, int]]] = defaultdict(lambda: ([], []))
+# Cohort state for verify(): rollouts are grouped by prompt_key until num_rollouts_per_prompt have arrived. The cohort
+# bookkeeping is shared with the DWRL pairwise server (see its cohort.py).
+_cohorts = CohortRegistry()
+
+
+def _response_digest(response_obj: Any) -> str:
+    """Fingerprint of a rollout's response, to tell a repeated request from a different rollout with the same index."""
+    return hashlib.sha256(json.dumps(response_obj, sort_keys=True, default=str).encode()).hexdigest()
 
 
 class GenRMCompareConfig(BaseResourcesServerConfig):
@@ -84,6 +96,7 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         group_style_penalty_coeff: Coefficient for style density penalty
         default_score: Default neutral score when parsing fails
         default_ranking: Default neutral ranking when parsing fails
+        reasoning_split_word: Marker that ends the GenRM's reasoning; the verdict is parsed from the text after it
         debug_logging: Enable verbose logging for debugging
         genrm_parse_retries: Number of retries on parse failures
         genrm_parse_retry_sleep_s: Sleep duration between parse retries
@@ -136,12 +149,27 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     default_score: float = 3.0
     default_ranking: float = 3.5
 
+    # The verdict is parsed from the GenRM output after the last reasoning_split_word (see parse_genrm_output), as when
+    # the GenRM is trained. null parses the whole output, for a GenRM that does not reason.
+    reasoning_split_word: Optional[str] = "</think>"
+
     # Debug logging
     debug_logging: bool = False
 
     # Retry config for parse failures
     genrm_parse_retries: int = 3
     genrm_parse_retry_sleep_s: float = 0.2
+
+    @model_validator(mode="after")
+    def _cohorts_need_a_single_worker_process(self) -> "GenRMCompareConfig":
+        # The rollouts of a prompt are grouped in memory (see cohort.py). With several uvicorn worker processes they
+        # would be spread over separate groups that never fill up, and every verify() call would wait forever.
+        if self.num_rollouts_per_prompt > 1 and self.num_workers is not None and self.num_workers > 1:
+            raise ValueError(
+                f"num_workers must be 1 when num_rollouts_per_prompt > 1 (got num_workers={self.num_workers}): "
+                "rollouts of one prompt have to be handled by the same process."
+            )
+        return self
 
 
 class GenRMCompareVerifyRequest(BaseVerifyRequest):
@@ -196,18 +224,29 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     """Resources server for GenRM pairwise comparison of multiple responses.
 
     Supports two modes:
-    - Cohort-based verify (Difference 1): When num_rollouts_per_prompt > 1, verify() buffers by prompt;
-      when the cohort is full, runs comparison and returns per-rollout rewards. Callers await until
-      their cohort is complete and get their reward.
+    - Cohort-based verify: When num_rollouts_per_prompt > 1, the rollouts of a prompt are grouped into a cohort of
+      `num_rollouts_per_prompt`, the responses of the cohort are compared in pairs, and each rollout's reward is
+      relative to its cohort. Callers await until their cohort has been judged completely and get their reward.
     - Batch /compare: Direct comparison of N response_objs (e.g. for rollout_collection or tests).
     """
 
     config: GenRMCompareConfig
 
     async def verify(self, body: GenRMCompareVerifyRequest) -> BaseVerifyResponse:
-        """Verify a single rollout. When num_rollouts_per_prompt > 1, buffers by prompt and runs comparison when cohort is full."""
+        """Verify a single rollout.
+
+        When num_rollouts_per_prompt > 1, rollouts of the same prompt are grouped into a cohort. A comparison is
+        judged as soon as both of its responses have arrived, by the request of the response that arrived last, and
+        the cohort's rewards are computed by whichever request finishes judging last (see cohort.py), so every
+        comparison is in them. A full cohort takes no more members: further rollouts with the same key (e.g. a prompt
+        that occurs twice in a batch) start a new cohort. Every caller awaits until its cohort is complete and gets
+        its reward.
+
+        A request that repeats one that is already being handled (same prompt, same `rollout_index` and the same
+        response, e.g. a client retry) takes no slot in the cohort and is not judged again: it waits for the reward
+        of the request it repeats. If that request failed, the repeat fails as well.
+        """
         cfg = self.config
-        principle = body.principle
         if cfg.num_rollouts_per_prompt <= 1:
             return BaseVerifyResponse(
                 responses_create_params=body.responses_create_params,
@@ -215,66 +254,68 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 reward=cfg.default_score,
             )
 
+        principle = body.principle
+
+        # Everything that can fail on malformed input is computed before joining the cohort, so a bad request
+        # never leaves a member slot that is never filled.
         input_messages = getattr(body.responses_create_params, "input", None) or []
         prompt_key = self._get_verify_cohort_key(
             body,
             input_messages if isinstance(input_messages, list) else list(input_messages),
             principle,
         )
-        future: asyncio.Future[float] = asyncio.get_running_loop().create_future()
+        conversation_history = _input_to_conversation_history(input_messages)
+        response_obj = body.response.model_dump() if hasattr(body.response, "model_dump") else body.response
+        slots = self._comparison_slots()
 
-        _cohort_buffers[prompt_key].append((body, future))
+        # A rollout is identified by its index within its task, plus its response so that a different rollout that
+        # reuses the index is not mistaken for a repeat. Without an index nothing is treated as a repeat.
+        identity = None
+        if body.rollout_index is not None:
+            identity = (body.rollout_index, _response_digest(response_obj))
 
-        conversation_history = _input_to_conversation_history(getattr(body.responses_create_params, "input", []) or [])
-        buf = _cohort_buffers[prompt_key]
-        response_objs = [
-            (b.response.model_dump() if hasattr(b.response, "model_dump") else b.response) for b, _ in buf
-        ]
-        principle_val = getattr(body, "principle", None) or principle
-
-        existing_results, existing_metadata = _cohort_jit_buffers[prompt_key]
-        new_results, new_metadata = await self._run_jit_compare_using_most_recent_response_obj(
-            conversation_history, response_objs, existing_metadata, principle_val
+        cohort, member_idx, future, is_new = _cohorts.join(
+            prompt_key,
+            response_obj,
+            size=cfg.num_rollouts_per_prompt,
+            slots=slots,
+            identity=identity,
         )
-        existing_results.extend(new_results)
-        existing_metadata.extend(new_metadata)
 
-        cohort_ready = False
-        if len(response_objs) >= cfg.num_rollouts_per_prompt:
-            assert len(response_objs) == cfg.num_rollouts_per_prompt
-            cohort_ready = True
-
-        # Only run for the final response
-        if cohort_ready:
-            existing_results, existing_metadata = _cohort_jit_buffers.pop(prompt_key)
-
-            # Sort to match the ordering of the original `_run_compare` logic
-            existing_results, existing_metadata = zip(
-                *sorted(
-                    zip(existing_results, existing_metadata), key=lambda pair: (pair[1][2], pair[1][0], pair[1][1])
-                )
+        if not is_new:
+            logger.warning(
+                f"[GenRM] Repeated verify request for rollout_index={body.rollout_index} (task_index={body.task_index}, "
+                f"prompt_id={body.prompt_id}); waiting for the reward of the request that is already being handled"
+            )
+            # Shielded: cancelling this request must not cancel the future that the other requests are waiting on.
+            reward = await asyncio.shield(future)
+            return BaseVerifyResponse(
+                responses_create_params=body.responses_create_params,
+                response=body.response,
+                reward=reward,
             )
 
-            rewards, _, _, _ = aggregate_scores(
-                comparison_results=existing_results,
-                comparison_metadata=existing_metadata,
-                response_objs=response_objs,
-                aggregator_method=cfg.aggregator_method,
-                default_score=cfg.default_score,
-                reasoning_bonus=cfg.reasoning_bonus,
-                answer_bonus=cfg.answer_bonus,
-                top_percentile=cfg.top_percentile,
-                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
-            )
+        owned = cohort.owned_slots(member_idx)
+        error: Optional[BaseException] = None
+        try:
+            results = await self._judge_slots(cohort, owned, conversation_history, principle)
+        except BaseException as e:  # Includes cancellation, e.g. the client disconnecting.
+            # Fill the slots of this member with neutral results so the rest of the cohort is not left waiting.
+            error = e
+            results = {slot: (cfg.default_score, cfg.default_score, cfg.default_ranking) for slot in owned}
 
-            cohort_buf = _cohort_buffers.pop(prompt_key)
-            for i, (_, f) in enumerate(cohort_buf):
-                if not f.done():
-                    f.set_result(rewards[i])
+        if error is None:
+            cohort.record(results)
+        else:
+            cohort.record_failure(member_idx, error, results)
+        if cohort.is_complete:
+            self._finalize_cohort(cohort)
 
-        reward = await future
+        if error is not None:
+            raise error
+
+        # Shielded, because a repeated request may be waiting on the same future (see above).
+        reward = await asyncio.shield(future)
         return BaseVerifyResponse(
             responses_create_params=body.responses_create_params,
             response=body.response,
@@ -300,53 +341,80 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             return f"prompt_id::{body.prompt_id}::{prompt_key}"
         return prompt_key
 
-    async def _run_jit_compare_using_most_recent_response_obj(
-        self,
-        conversation_history: List[Dict[str, str]],
-        response_objs: List[Dict[str, Any]],
-        seen_comparison_metadata: List[Tuple[int, int, int]],
-        principle: Optional[str] = None,
-    ) -> Tuple[List[Tuple[float, float, float]], List[Tuple[int, int, int]]]:
-        # Cannot run comparison with only 1 result
-        if len(response_objs) == 1:
-            return [], []
-
+    def _comparison_slots(self) -> List[Slot]:
+        """The comparisons that a cohort has to judge."""
         cfg = self.config
-        this_response_idx = len(response_objs) - 1
+        pairs = generate_comparison_pairs(cfg.comparison_strategy, cfg.num_rollouts_per_prompt)
+        return comparison_slots(pairs, cfg.num_judges_per_comparison)
 
-        comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, cfg.num_rollouts_per_prompt)
-        comparison_tasks = []
-        comparison_metadata: List[Tuple[int, int, int]] = []
-        for judge_idx in range(cfg.num_judges_per_comparison):
-            for i, j in comparison_pairs:
-                # If one of the indices has not yet been run, continue
-                if not (i < len(response_objs) and j < len(response_objs)):
-                    continue
-
-                # At least one of the indices must be this index
-                if i != this_response_idx and j != this_response_idx:
-                    continue
-
-                this_comparison_metadata = (i, j, judge_idx)
-
-                # Don't double count since this will trigger when both i and j are finished.
-                if this_comparison_metadata in seen_comparison_metadata:
-                    continue
-
-                comparison_tasks.append(
-                    self._run_single_comparison(
-                        conversation_history,
-                        response_objs[i],
-                        response_objs[j],
-                        pair_idx=(i, j),
-                        principle=principle,
-                    )
+    async def _judge_slots(
+        self,
+        cohort: Cohort,
+        slots: List[Slot],
+        conversation_history: List[Dict[str, str]],
+        principle: Optional[str] = None,
+    ) -> Dict[Slot, Tuple[float, float, float]]:
+        """Judge the given comparisons of a cohort concurrently. Only responses that have already arrived are used."""
+        results = await asyncio.gather(
+            *[
+                self._run_single_comparison(
+                    conversation_history,
+                    cohort.payloads[i],
+                    cohort.payloads[j],
+                    pair_idx=(i, j),
+                    principle=principle,
                 )
-                comparison_metadata.append(this_comparison_metadata)
+                for i, j, _ in slots
+            ]
+        )
+        return dict(zip(slots, results))
 
-        comparison_results = await asyncio.gather(*comparison_tasks)
+    def _finalize_cohort(self, cohort: Cohort) -> None:
+        """Compute the rewards of a fully judged cohort and resolve each member's future.
 
-        return comparison_results, comparison_metadata
+        Called once, by the verify() call that records the last judge result. There is no await in here, so
+        no other task can observe the cohort half-finished.
+        """
+        cfg = self.config
+        # From here on a repeat of one of its members is no longer recognized: it starts a cohort of its own.
+        _cohorts.finish(cohort)
+        try:
+            # Ordered by (judge_idx, i, j), as in the original `_run_compare` logic.
+            comparison_results, comparison_metadata = cohort.ordered()
+            rewards, _, _, _ = aggregate_scores(
+                comparison_results=comparison_results,
+                comparison_metadata=comparison_metadata,
+                response_objs=list(cohort.payloads),
+                aggregator_method=cfg.aggregator_method,
+                default_score=cfg.default_score,
+                reasoning_bonus=cfg.reasoning_bonus,
+                answer_bonus=cfg.answer_bonus,
+                top_percentile=cfg.top_percentile,
+                group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
+                group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
+                group_style_penalty_coeff=cfg.group_style_penalty_coeff,
+            )
+        except Exception as e:
+            # Fail every member instead of leaving the other callers waiting forever.
+            logger.exception("[GenRM] Failed to aggregate cohort scores")
+            for f in cohort.futures:
+                if not f.done():
+                    f.set_exception(e)
+                    f.exception()  # Mark as retrieved: not every future is awaited by someone.
+            return
+
+        for member_idx, (reward, f) in enumerate(zip(rewards, cohort.futures)):
+            if f.done():
+                continue
+            if member_idx in cohort.failures:
+                # The request that judged this rollout raised its own error. Only a repeat of that request can be
+                # waiting here, and it must not be given the reward that was computed without its judgments.
+                f.set_exception(
+                    MemberJudgmentFailed(f"The request judging this rollout failed: {cohort.failures[member_idx]!r}")
+                )
+                f.exception()  # Mark as retrieved: usually nobody is waiting on it.
+            else:
+                f.set_result(reward)
 
     async def _run_compare(
         self,
@@ -488,7 +556,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 )
                 raw_response = await response.json()
 
-                # Extract output_text from GenRM response (skip reasoning, only parse the final JSON scores)
+                # The GenRM's output text. It includes the reasoning unless the judge server has a reasoning parser;
+                # parse_genrm_output reads the verdict from after the reasoning, as when the GenRM is trained.
                 genrm_answer = extract_output_text(raw_response)
 
                 try:
@@ -497,6 +566,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                         cfg.default_score,
                         cfg.default_ranking,
                         raise_on_fail=True,
+                        reasoning_split_word=cfg.reasoning_split_word,
+                        truncated=raw_response.get("status") == "incomplete",
                     )
                     return score_1, score_2, ranking
 

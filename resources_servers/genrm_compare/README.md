@@ -36,6 +36,14 @@ The GenRM model should output JSON in the following format:
 }
 ```
 
+or the same fields nested under `"overall"` (the rubric format, `{"rubric_evaluations": [...], "overall": {...}}`).
+
+The verdict is parsed the way NeMo-RL's `VanillaGenRMEnvironment` parses it when the GenRM is trained:
+
+- Only the text after the last `reasoning_split_word` (`</think>`) is read, so nothing written while reasoning (e.g. a draft verdict) counts. Without it the whole text is read, unless the generation was cut off, in which case the reasoning never ended and the verdict is a parse failure.
+- That text must contain exactly one JSON object (fenced or not); invalid escapes such as LaTeX in analysis strings are repaired.
+- `score_1`, `score_2` and `ranking` are all required, as integers in range.
+
 ### Score Interpretation
 
 - **Individual helpfulness scores** (`score_1`, `score_2`): Range from 1 to 5, where higher means better.
@@ -139,6 +147,7 @@ Send a POST request to the `/compare` endpoint:
 | `group_answer_length_penalty_coeff` | float | `0.0` | Coefficient for answer length penalty |
 | `default_score` | float | `3.0` | Default score when parsing fails |
 | `default_ranking` | float | `3.5` | Default ranking when parsing fails |
+| `reasoning_split_word` | string | `"</think>"` | The verdict is parsed from the text after it; `null` parses the whole output (a GenRM that does not reason) |
 | `debug_logging` | bool | `false` | Enable verbose logging |
 | `genrm_parse_retries` | int | `3` | Number of retries on parse failures |
 | `genrm_parse_retry_sleep_s` | float | `0.2` | Sleep duration between retries |
@@ -238,7 +247,7 @@ Compare multiple candidate responses.
 Cohort-based verification endpoint used during rollout collection.
 
 - When `num_rollouts_per_prompt <= 1`, returns `default_score`
-- When `num_rollouts_per_prompt > 1`, buffers rollouts by task/prompt identity plus principle, waits for a full cohort, then assigns relative rewards to that cohort
+- When `num_rollouts_per_prompt > 1`, groups rollouts by task/prompt identity plus principle into cohorts of `num_rollouts_per_prompt` and assigns relative rewards within each cohort. A comparison is judged as soon as both of its responses have arrived, and the rewards are computed once every comparison of the cohort has been judged. A full cohort takes no more members, so further rollouts with the same key (e.g. a prompt that occurs twice in a batch) start a new cohort. The cohort bookkeeping is shared with `dwrl_genrm_compare_pairwise` (its `cohort.py`); the server needs a single worker process (`num_workers: 1`).
 
 ## Error Handling
 

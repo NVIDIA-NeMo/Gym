@@ -30,6 +30,7 @@ import hashlib
 import itertools
 import json
 import logging
+import math
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -183,27 +184,110 @@ def generate_comparison_pairs(strategy: str, num_responses: int) -> List[Tuple[i
 # =============================================================================
 
 
+SCORE_MAX = {"score_1": 5, "score_2": 5, "ranking": 6}
+
+
+def _find_balanced_braces(text: str) -> List[str]:
+    """All top-level balanced { ... } substrings of text.
+
+    Prose outside the blocks (e.g. text before the verdict) must not derail the scan: quotes only delimit strings
+    inside a block, and a "}" with no open block is ignored.
+    """
+    results = []
+    depth = 0
+    start = -1
+    in_string = False
+    escape_next = False
+
+    for i, ch in enumerate(text):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == "\\" and in_string:
+            escape_next = True
+            continue
+        # At depth 0 a quote is prose (e.g. `a 12" pizza`); toggling on it would invert the string state for the rest
+        # of the text and hide the braces of every block after it.
+        if ch == '"' and depth > 0:
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        # A stray "}" at depth 0 would otherwise drive depth negative, so no later block would ever be recorded.
+        elif ch == "}" and depth > 0:
+            depth -= 1
+            if depth == 0 and start >= 0:
+                results.append(text[start : i + 1])
+                start = -1
+
+    return results
+
+
+def _fix_invalid_escapes(text: str) -> str:
+    r"""Replace invalid JSON escape sequences with escaped backslashes.
+
+    JSON only allows: \" \\ \/ \b \f \n \r \t \uXXXX
+    Model outputs often contain LaTeX (e.g. \Delta, \ln) which are invalid.
+    """
+    return re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", text)
+
+
+def _safe_json_loads(text: str) -> Optional[dict]:
+    """Parse a JSON string, returning None on failure or if it is not a dict."""
+    for candidate in [text, _fix_invalid_escapes(text)]:
+        try:
+            parsed = json.loads(candidate)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            continue
+    return None
+
+
+def _checked_score(value: Any, high: int) -> float:
+    """A score (1-5) or ranking (1-6): an integer in range. bool is rejected (float(True) would silently be 1.0)."""
+    if isinstance(value, bool):
+        raise ValueError(f"boolean {value!r} is not a valid score or ranking")
+    value = float(value)
+    if not (math.isfinite(value) and value.is_integer() and 1 <= value <= high):
+        raise ValueError(f"{value} is not an integer in 1-{high}")
+    return value
+
+
 def parse_genrm_output(
     output: str,
     default_score: float,
     default_ranking: float,
     *,
     raise_on_fail: bool = False,
+    reasoning_split_word: Optional[str] = "</think>",
+    truncated: bool = False,
 ) -> Tuple[float, float, float]:
-    """Parse GenRM output to extract scores from JSON format.
+    """Parse the GenRM verdict, the way NeMo-RL's VanillaGenRMEnvironment does when it trains the GenRM.
 
-    Searches for JSON in the output text, trying:
-    1. Fenced JSON blocks (```json {...} ```)
-    2. Any {...} JSON objects, taking the last valid one
+    - The verdict is read from the text after the last `reasoning_split_word`, so nothing the GenRM wrote while
+      reasoning (e.g. a draft verdict) is used. Without the split word the whole text is the verdict (a GenRM that
+      does not reason, or a judge server whose reasoning parser already separated the reasoning), unless the
+      generation was `truncated`: then the reasoning never ended and there is no verdict.
+    - That text must contain exactly one JSON object (fenced or not). Invalid escapes, e.g. LaTeX in an analysis
+      string, are repaired. No object, or more than one (e.g. a repeated verdict), is a parse failure.
+    - The scores are read from its "overall" object if it has one (the rubric format), otherwise from the object
+      itself (the flat format). score_1 and score_2 must be integers in 1-5 and ranking an integer in 1-6.
 
-    Expected JSON format:
+    Expected JSON format (flat, or nested under "overall"):
         {"score_1": <1-5>, "score_2": <1-5>, "ranking": <1-6>}
 
     Args:
-        output: Raw text output from GenRM model
+        output: Output text of the GenRM (the output_text of its Response API object)
         default_score: Default score if parsing fails
         default_ranking: Default ranking if parsing fails
         raise_on_fail: If True, raise GenRMOutputParseError on failure
+        reasoning_split_word: The marker that ends the reasoning; None reads the whole text
+        truncated: The generation was cut off (e.g. at max_output_tokens)
 
     Returns:
         Tuple of (score_1, score_2, ranking)
@@ -211,103 +295,31 @@ def parse_genrm_output(
     Raises:
         GenRMOutputParseError: If raise_on_fail=True and parsing fails
     """
-
-    def _try_parse(json_str: str) -> Optional[Tuple[float, float, float]]:
-        """Attempt to parse a JSON string into scores."""
-        try:
-            parsed = json.loads(json_str)
-        except json.JSONDecodeError:
-            return None
-
-        if not isinstance(parsed, dict):
-            return None
-
-        # Handle nested format: {"rubric_evaluations": [...], "overall": {...}}
-        if "overall" in parsed and isinstance(parsed["overall"], dict):
-            parsed = parsed["overall"]
-
-        # Must have at least one expected key
-        if not any(k in parsed for k in ("score_1", "score_2", "ranking")):
-            return None
-
-        try:
-            score_1 = float(parsed.get("score_1", default_score))
-            score_2 = float(parsed.get("score_2", default_score))
-            ranking = float(parsed.get("ranking", default_ranking))
-            return score_1, score_2, ranking
-        except (TypeError, ValueError):
-            return None
-
-    def _find_json_objects(text: str) -> List[str]:
-        """Find top-level JSON objects in text using brace counting."""
-        results = []
-        i = 0
-        while i < len(text):
-            if text[i] == "{":
-                depth = 0
-                start = i
-                in_string = False
-                escape_next = False
-                for j in range(i, len(text)):
-                    ch = text[j]
-                    if escape_next:
-                        escape_next = False
-                        continue
-                    if ch == "\\" and in_string:
-                        escape_next = True
-                        continue
-                    if ch == '"' and not escape_next:
-                        in_string = not in_string
-                        continue
-                    if in_string:
-                        continue
-                    if ch == "{":
-                        depth += 1
-                    elif ch == "}":
-                        depth -= 1
-                        if depth == 0:
-                            results.append(text[start : j + 1])
-                            i = j
-                            break
-            i += 1
-        return results
-
     try:
-        # Strategy 1: Look for fenced JSON blocks (```json ... ```)
-        for match in re.finditer(r"```json\s*([\s\S]*?)\s*```", output, flags=re.IGNORECASE):
-            for json_str in _find_json_objects(match.group(1)):
-                result = _try_parse(json_str)
-                if result is not None:
-                    return result
+        if reasoning_split_word and reasoning_split_word in output:
+            output = output.split(reasoning_split_word)[-1]
+        elif reasoning_split_word and truncated:
+            raise GenRMOutputParseError(f"Generation cut off before the reasoning ended ({reasoning_split_word!r})")
 
-        # Strategy 2: Find all top-level {...} and take the last valid one.
-        #
-        # Note: We keep this intentionally permissive because model outputs can include
-        # extra prose around a JSON blob, and the JSON may be pretty-printed across lines.
-        last_valid: Optional[Tuple[float, float, float]] = None
-        for json_str in _find_json_objects(output):
-            result = _try_parse(json_str)
-            if result is not None:
-                last_valid = result
-
-        if last_valid is not None:
-            return last_valid
-
-        # Parsing failed
-        preview = output[:200] + "..." if len(output) > 200 else output
-        msg = f"No parseable JSON found in GenRM output: {preview}"
-
-        if raise_on_fail:
-            raise GenRMOutputParseError(msg)
-
-        logger.warning(msg)
-        return default_score, default_score, default_ranking
-    except Exception as e:
+        verdicts = [parsed for parsed in map(_safe_json_loads, _find_balanced_braces(output)) if parsed is not None]
+        if len(verdicts) != 1:
+            raise GenRMOutputParseError(f"Expected exactly one JSON object in the verdict, found {len(verdicts)}")
+        verdict = verdicts[0]
+        if "overall" in verdict:
+            verdict = verdict["overall"]
+            if not isinstance(verdict, dict):
+                raise GenRMOutputParseError(f"'overall' is not a JSON object (got {type(verdict).__name__})")
+        missing = [key for key in SCORE_MAX if key not in verdict]
+        if missing:
+            raise GenRMOutputParseError(f"Verdict is missing {missing}")
+        score_1, score_2, ranking = (_checked_score(verdict[key], high) for key, high in SCORE_MAX.items())
+        return score_1, score_2, ranking
+    except (GenRMOutputParseError, TypeError, ValueError) as e:
         preview = output[:200] + "..." if len(output) > 200 else output
         msg = f"Error parsing GenRM output: {e}. Output: {preview}"
         if raise_on_fail:
             raise GenRMOutputParseError(msg) from e
-        logger.exception(msg)
+        logger.warning(msg)
         return default_score, default_score, default_ranking
 
 

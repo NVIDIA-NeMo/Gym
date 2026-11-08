@@ -50,12 +50,23 @@ def _response_obj(text: str) -> dict:
     return {"output": [{"type": "message", "content": [{"type": "output_text", "text": text}]}]}
 
 
+def _response_obj_with_reasoning(reasoning: str, answer: str) -> dict:
+    return {
+        "output": [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": reasoning}]},
+            {"type": "message", "content": [{"type": "output_text", "text": answer}]},
+        ]
+    }
+
+
 def _logit(p: float) -> float:
     return math.log(p / (1.0 - p))
 
 
 def _aggregate(results, metadata, texts, **overrides):
-    """aggregate_scores with all of the optional settings off. `results` are win probabilities."""
+    """aggregate_scores with all of the optional settings off. `results` are win probabilities.
+
+    `texts` are the answers of the responses, or whole Response API objects (e.g. with reasoning)."""
     kwargs = dict(
         aggregator_method="simple_tiebreaker",
         default_score=3.0,
@@ -69,7 +80,7 @@ def _aggregate(results, metadata, texts, **overrides):
     return aggregate_scores(
         comparison_results=[(3.0, 3.0, p) if not isinstance(p, tuple) else p for p in results],
         comparison_metadata=metadata,
-        response_objs=[_response_obj(t) for t in texts],
+        response_objs=[t if isinstance(t, dict) else _response_obj(t) for t in texts],
         **kwargs,
     )
 
@@ -397,22 +408,6 @@ class TestAggregateScores:
 
         assert all(abs(r) < 10 for r in rewards)
 
-    def test_length_bonuses_are_disabled(self):
-        # The length settings are accepted but have no effect on the rewards.
-        plain, _, _, _ = _aggregate([0.8], [(0, 1, 0)], ["short", "a much longer answer than the other one"])
-        with_bonuses, _, _, _ = _aggregate(
-            [0.8],
-            [(0, 1, 0)],
-            ["short", "a much longer answer than the other one"],
-            reasoning_bonus=1.0,
-            answer_bonus=1.0,
-            group_reasoning_length_penalty_coeff=1.0,
-            group_answer_length_penalty_coeff=1.0,
-        )
-
-        assert with_bonuses == plain
-
-
 class TestAggregateScoresWithReferenceAnswer:
     # Two rollouts, and the reference answer as the third "response".
     METADATA = [(0, 1, 0), (1, 0, 0), (0, 2, 0), (1, 2, 0)]
@@ -585,7 +580,7 @@ class TestAggregateScoresWithStylePenalty:
 
 
 class TestApplyLengthBonuses:
-    """The length bonuses are not used by aggregate_scores at the moment, but the function is kept working."""
+    """`apply_length_bonuses` on its own. Its use in aggregate_scores is tested in TestAggregateScoresWithLength*."""
 
     LONG, SHORT = "a long answer " * 10, "short"
 
@@ -629,3 +624,237 @@ class TestApplyLengthBonuses:
 
         assert scores == [1.0]
         assert bonuses == [0.0]
+
+
+# A cohort of three in which the judge sees no difference: every rating is 0, so the rewards are the adjustments.
+NEUTRAL_3 = ([0.5, 0.5, 0.5], [(0, 1, 0), (1, 2, 0), (2, 0, 0)])
+
+
+class TestAggregateScoresWithLengthPenalty:
+    """The group-relative length adjustments, added to the ratings as in genrm_compare.
+
+    Within the cohort the lengths are scaled to [0, 1] (shortest 1, longest 0) and centered, and the reward gets
+    `coeff * weight`. With lengths 10, 20 and 30 the weights are +0.5, 0 and -0.5."""
+
+    ANSWERS = ["a" * 10, "a" * 20, "a" * 30]
+
+    @staticmethod
+    def _with_reasoning(reasoning_lengths, answer_lengths):
+        return [
+            _response_obj_with_reasoning("r" * r, "a" * a) for r, a in zip(reasoning_lengths, answer_lengths)
+        ]
+
+    def test_the_penalty_is_off_by_default(self):
+        rewards, _, base_scores, bonuses = _aggregate(*NEUTRAL_3, self.ANSWERS)
+
+        assert rewards == base_scores
+        assert bonuses == [0.0, 0.0, 0.0]
+
+    def test_a_longer_answer_is_rewarded_less(self):
+        rewards, _, _, bonuses = _aggregate(*NEUTRAL_3, self.ANSWERS, group_answer_length_penalty_coeff=0.12)
+
+        assert bonuses == approx([0.06, 0.0, -0.06])
+        assert rewards == approx([0.06, 0.0, -0.06], abs=1e-6)
+
+    def test_longer_reasoning_is_rewarded_less(self):
+        # Same answers: only the reasoning differs, and only the reasoning coefficient is set.
+        responses = self._with_reasoning([10, 20, 30], [15, 15, 15])
+
+        _, _, _, bonuses = _aggregate(*NEUTRAL_3, responses, group_reasoning_length_penalty_coeff=0.06)
+
+        assert bonuses == approx([0.03, 0.0, -0.03])
+
+    def test_each_coefficient_reads_its_own_length(self):
+        # Reasoning gets shorter from 0 to 2 while the answer gets longer.
+        responses = self._with_reasoning([10, 20, 30], [30, 20, 10])
+
+        reasoning_only = _aggregate(*NEUTRAL_3, responses, group_reasoning_length_penalty_coeff=0.06)[3]
+        answer_only = _aggregate(*NEUTRAL_3, responses, group_answer_length_penalty_coeff=0.12)[3]
+
+        assert reasoning_only == approx([0.03, 0.0, -0.03])
+        assert answer_only == approx([-0.06, 0.0, 0.06])
+
+    def test_the_two_adjustments_add_up(self):
+        responses = self._with_reasoning([10, 20, 30], [30, 20, 10])
+
+        _, _, _, bonuses = _aggregate(
+            *NEUTRAL_3,
+            responses,
+            group_reasoning_length_penalty_coeff=0.06,
+            group_answer_length_penalty_coeff=0.12,
+        )
+
+        # 0.06 * [0.5, 0, -0.5] + 0.12 * [-0.5, 0, 0.5]
+        assert bonuses == approx([-0.03, 0.0, 0.03])
+
+    def test_the_adjustment_scales_with_the_coefficient(self):
+        _, _, _, small = _aggregate(*NEUTRAL_3, self.ANSWERS, group_answer_length_penalty_coeff=0.1)
+        _, _, _, large = _aggregate(*NEUTRAL_3, self.ANSWERS, group_answer_length_penalty_coeff=0.3)
+
+        assert large == approx([3 * b for b in small])
+
+    def test_the_adjustment_is_added_to_the_ratings(self):
+        # The judge prefers the longest answer: the penalty narrows the gap but the ratings are kept underneath.
+        results = [0.3, 0.4, 0.7]
+        plain, _, _, _ = _aggregate(results, NEUTRAL_3[1], self.ANSWERS)
+        rewards, _, base_scores, bonuses = _aggregate(
+            results, NEUTRAL_3[1], self.ANSWERS, group_answer_length_penalty_coeff=0.12
+        )
+
+        assert base_scores == approx(plain)
+        assert rewards == approx([b + a for b, a in zip(base_scores, bonuses)])
+        assert bonuses == approx([0.06, 0.0, -0.06])
+
+    def test_the_mean_reward_is_unchanged(self):
+        rewards, _, _, bonuses = _aggregate(
+            [0.9, 0.3, 0.6],
+            NEUTRAL_3[1],
+            self._with_reasoning([5, 40, 12], [100, 7, 33]),
+            group_reasoning_length_penalty_coeff=0.06,
+            group_answer_length_penalty_coeff=0.12,
+        )
+
+        assert sum(bonuses) == approx(0.0, abs=1e-9)
+        assert sum(rewards) == approx(0.0, abs=1e-6)  # The ratings sum to zero without a reference
+
+    def test_equal_lengths_change_nothing(self):
+        same = ["same length", "same length", "same length"]
+        plain, _, _, _ = _aggregate([0.9, 0.3, 0.6], NEUTRAL_3[1], same)
+        rewards, _, _, bonuses = _aggregate(
+            [0.9, 0.3, 0.6],
+            NEUTRAL_3[1],
+            same,
+            group_reasoning_length_penalty_coeff=0.06,
+            group_answer_length_penalty_coeff=0.12,
+        )
+
+        assert rewards == approx(plain)
+        assert bonuses == [0.0, 0.0, 0.0]
+
+    @pytest.mark.parametrize("coeff", [0.0, -0.1])
+    def test_no_adjustment_without_a_positive_coefficient(self, coeff):
+        _, _, _, bonuses = _aggregate(
+            *NEUTRAL_3,
+            self.ANSWERS,
+            group_reasoning_length_penalty_coeff=coeff,
+            group_answer_length_penalty_coeff=coeff,
+        )
+
+        assert bonuses == [0.0, 0.0, 0.0]
+
+    def test_length_and_style_adjustments_add_up(self):
+        texts = ["A plain answer, rather long and without any formatting at all.", "# A\n- **b**\n- **c**", "Plain."]
+        length_only = _aggregate(*NEUTRAL_3, texts, group_answer_length_penalty_coeff=0.12)[3]
+        style_only = _aggregate(*NEUTRAL_3, texts, group_style_penalty_coeff=0.5)[3]
+
+        rewards, _, base_scores, bonuses = _aggregate(
+            *NEUTRAL_3, texts, group_answer_length_penalty_coeff=0.12, group_style_penalty_coeff=0.5
+        )
+
+        assert bonuses == approx([lo + so for lo, so in zip(length_only, style_only)])
+        assert rewards == approx([b + a for b, a in zip(base_scores, bonuses)])
+
+
+class TestAggregateScoresWithLengthPenaltyAndReferenceAnswer:
+    """With a reference answer the length adjustments are computed over the rollouts only, as the style penalty is."""
+
+    METADATA = [(0, 2, 0), (1, 2, 0)]  # Two rollouts, each against the reference answer
+    RESULTS = [0.7, 0.6]
+
+    def _bonuses(self, rollouts, reference, **overrides):
+        rewards, _, base_scores, bonuses = _aggregate(
+            self.RESULTS, self.METADATA, rollouts + [reference], ref_answer_last=True, **overrides
+        )
+        assert len(rewards) == len(base_scores) == len(bonuses) == len(rollouts)
+        assert rewards == approx([b + a for b, a in zip(base_scores, bonuses)])
+        return bonuses
+
+    def test_only_the_rollouts_are_adjusted(self):
+        bonuses = self._bonuses(
+            ["a" * 10, "a" * 30], "The reference answer.", group_answer_length_penalty_coeff=0.12
+        )
+
+        assert bonuses == approx([0.06, -0.06])
+        assert sum(bonuses) == approx(0.0, abs=1e-9)
+
+    def test_the_reference_does_not_shift_the_reasoning_adjustment(self):
+        # The reference answer has no reasoning (length 0). If it were part of the group it would be the shortest,
+        # and both rollouts would be pushed down: the weights over [10, 20, 0] are [0, -0.5, +0.5].
+        rollouts = [_response_obj_with_reasoning("r" * 10, "same"), _response_obj_with_reasoning("r" * 20, "same")]
+
+        bonuses = self._bonuses(rollouts, "The reference answer.", group_reasoning_length_penalty_coeff=0.06)
+
+        assert bonuses == approx([0.03, -0.03])
+
+    @pytest.mark.parametrize("reference", ["r", "a reference of medium length", "a very long reference " * 50])
+    def test_the_length_of_the_reference_does_not_matter(self, reference):
+        bonuses = self._bonuses(
+            ["a" * 10, "a" * 20], reference, group_answer_length_penalty_coeff=0.12
+        )
+
+        assert bonuses == approx([0.06, -0.06])
+
+    def test_the_answer_bonus_goes_to_a_rollout_even_if_the_reference_is_shorter(self):
+        # The reference is not rewarded, so it cannot take the bonus for the shortest answer.
+        bonuses = self._bonuses(["a" * 20, "a" * 30], "ref", answer_bonus=0.5, top_percentile=1.0)
+
+        assert bonuses == approx([0.5, 0.0])
+
+    def test_matches_the_cohort_without_the_reference(self):
+        # The adjustments depend only on the rollouts, so they are those of apply_length_bonuses over the rollouts.
+        rollouts = [
+            _response_obj_with_reasoning("r" * 12, "a" * 40),
+            _response_obj_with_reasoning("r" * 50, "a" * 5),
+        ]
+        _, expected = apply_length_bonuses(
+            [0.0, 0.0],
+            rollouts,
+            reasoning_bonus=0.0,
+            answer_bonus=0.0,
+            top_percentile=0.2,
+            group_reasoning_length_penalty_coeff=0.06,
+            group_answer_length_penalty_coeff=0.12,
+        )
+
+        bonuses = self._bonuses(
+            rollouts,
+            "ref",
+            group_reasoning_length_penalty_coeff=0.06,
+            group_answer_length_penalty_coeff=0.12,
+        )
+
+        assert bonuses == approx(expected)
+
+
+class TestAggregateScoresWithTopPerformerBonuses:
+    """`reasoning_bonus` / `answer_bonus`: the shortest rollout gets the bonus if it is among the `top_percentile`
+    best rated. In this cohort rollout 0 is rated best (it beats 1 and 2 with probability 0.9)."""
+
+    RESULTS, METADATA = [0.9, 0.5, 0.1], [(0, 1, 0), (1, 2, 0), (2, 0, 0)]
+
+    def test_the_shortest_answer_gets_the_bonus_if_it_is_a_top_performer(self):
+        _, _, _, bonuses = _aggregate(
+            self.RESULTS, self.METADATA, ["a" * 5, "a" * 20, "a" * 30], answer_bonus=0.5, top_percentile=0.34
+        )
+
+        assert bonuses == approx([0.5, 0.0, 0.0])
+
+    def test_no_bonus_if_the_shortest_answer_is_not_a_top_performer(self):
+        _, _, _, bonuses = _aggregate(
+            self.RESULTS, self.METADATA, ["a" * 30, "a" * 20, "a" * 5], answer_bonus=0.5, top_percentile=0.34
+        )
+
+        assert bonuses == [0.0, 0.0, 0.0]
+
+    def test_the_shortest_reasoning_gets_the_reasoning_bonus(self):
+        responses = [
+            _response_obj_with_reasoning("r" * 5, "same"),
+            _response_obj_with_reasoning("r" * 20, "same"),
+            _response_obj_with_reasoning("r" * 30, "same"),
+        ]
+
+        _, _, _, bonuses = _aggregate(
+            self.RESULTS, self.METADATA, responses, reasoning_bonus=0.25, top_percentile=0.34
+        )
+
+        assert bonuses == approx([0.25, 0.0, 0.0])

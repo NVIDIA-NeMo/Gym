@@ -1,4 +1,5 @@
 - [Example run config](#example-run-config)
+- [Independent replicas](#independent-replicas)
 - [E2E sanity testing](#e2e-sanity-testing)
 
 # Example run config
@@ -21,6 +22,19 @@ tail -f temp.log
 Call the server. If you see a model response here, then everything is working as intended!
 ```bash
 python responses_api_agents/simple_agent/client.py
+```
+
+
+# Independent replicas
+`num_replicas` (default 1) launches that many independent vLLM servers for one model server, each using `data_parallel_size * tensor_parallel_size * pipeline_parallel_size` GPUs. All of their URLs go into `base_url`, and requests are spread over them by session: every turn of a session goes to the same replica, and requests that arrive without a session cookie are each assigned at random.
+
+Use replicas, rather than a larger `data_parallel_size`, to scale out a MoE model. vLLM's data parallel ranks are one engine: unless expert parallelism is on, every MoE layer is split across all of their GPUs and gathers every rank's tokens, and the ranks step in lockstep. Adding ranks therefore adds communication more than throughput. Replicas share nothing.
+
+For example, eight single-node TP4 copies of a model on eight 4-GPU nodes:
+```bash
+    ++dwrl_model.responses_api_models.local_vllm_model.num_replicas=8 \
+    ++dwrl_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.data_parallel_size=1 \
+    ++dwrl_model.responses_api_models.local_vllm_model.vllm_serve_kwargs.tensor_parallel_size=4
 ```
 
 

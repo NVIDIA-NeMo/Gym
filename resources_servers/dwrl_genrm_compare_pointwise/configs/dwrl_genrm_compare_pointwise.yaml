@@ -8,10 +8,14 @@
 # structure as responses_api_models/genrm_model/configs/genrm_model.yaml). Override
 # genrm_model_server.name to use a different model server (e.g. from another config).
 #
-# Expected GenRM output format (JSON). It does not influence the reward:
+# Expected GenRM output format (JSON, as asked for by dwrl_prompt). It does not influence the reward:
 # {
-#     "score_1": <1-5>  # Helpfulness score of the response
+#     "rubric_evaluations": [{"rubric_id": 1, "response_analysis": "...", "score_1": <1-5>}, ...],
+#     "overall": {"response_analysis": "...", "score_1": <1-5>}  # score_1: helpfulness score of the response
 # }
+#
+# dwrl_prompt and default_principle must stay identical to the prompt DWRL training uses (NeMo-RL's
+# nemo_rl/data/genrm_prompts.py); NeMo-RL's tests/unit/data/test_genrm_gym_prompt_drift.py checks this.
 
 dwrl_pointwise_compare_resources_server:
   resources_servers:
@@ -36,7 +40,12 @@ dwrl_pointwise_compare_resources_server:
       
       # Principle-based comparison
       use_principle: true
-      default_principle: "Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user prompt. Begin your evaluation by generating your own answer to the prompt. You must provide your answer before judging any answers. When evaluating the assistant's response, compare the assistant's response with your answer. You must identify and correct any mistakes or inaccurate information. Then consider if the assistant's response is helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when the user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user rather than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive. Then consider the creativity and novelty of the assistant's response when needed. Finally, identify any missing important information in the assistant's response which would be beneficial to include when responding to the user prompt."
+      default_principle: |
+        You will be given one or more evaluation criteria (rubrics).
+        Evaluate the Response on EACH criterion individually first, then synthesize an overall judgment.
+        Criteria:
+
+        1. Please act as an impartial judge and evaluate the quality of the response provided by an AI assistant to the user prompt. Begin your evaluation by generating your own answer to the prompt. You must provide your answer before judging any answers. When evaluating the assistant's response, compare the assistant's response with your answer. You must identify and correct any mistakes or inaccurate information. Then consider if the assistant's response is helpful, relevant, and concise. Helpful means the answer correctly responds to the prompt or follows the instructions. Note when the user prompt has any ambiguity or more than one interpretation, it is more helpful and appropriate to ask for clarifications or more information from the user rather than providing an answer based on assumptions. Relevant means all parts of the response closely connect or are appropriate to what is being asked. Concise means the response is clear and not verbose or excessive. Then consider the creativity and novelty of the assistant's response when needed. Finally, identify any missing important information in the assistant's response which would be beneficial to include when responding to the user prompt.
       
       # Aggregator method (only "simple_tiebreaker" is currently supported)
       aggregator_method: simple_tiebreaker
@@ -76,35 +85,45 @@ dwrl_pointwise_compare_resources_server:
       value: Compare multiple candidate responses using DWRL-pointwise model
       
       dwrl_prompt: |
-        You are an expert evaluation judge specializing in the assessment of LLM responses. You are impartial, rigorous, and consistent. Given the conversation context and a single response to the user's latest query, you will follow the evaluation plan and scoring guidelines exactly as written below.
-        
+        You are an expert evaluation judge specializing in the assessment of LLM responses. You are impartial, rigorous, and consistent. Given the conversation context and a single assistant response to the user's latest query, you will follow the evaluation plan and scoring guidelines exactly as written below.
+
         #### Conversation Context ####
         {context}
-        
+
         #### Response to be Scored ####
         [The Start of Response]
         {response}
         [The End of Response]
-        
+
         #### Evaluation Plan ####
         {principle}
-        
+
         #### Scoring Guidelines ####
-        Based on the evaluation plan above, assign scores using these scales:
-        
+        Based on the evaluation plan above, assign a score using these scales:
+
         **Individual Helpfulness Scores (1-5):**
         - 5: Extremely Helpful - Completely aligned with what the user was asking for
         - 4: Mostly Helpful - Generally useful with minor room for improvement
         - 3: Partially Helpful - Misses the overall goal in some way
         - 2: Borderline Unhelpful - Mostly doesn't capture what the user wanted
         - 1: Not Helpful - Completely missed the essence of the request
-        
+
         #### Output Format ####
-        Analyze step by step following the evaluation plan, then provide your judgment as JSON:
+        First, evaluate each rubric individually. Then synthesize an overall judgment.
+        Provide your judgment as JSON:
         ```json
         {{
-            "response_analysis": "Your detailed analysis of the Response based on the evaluation plan",
-            "score_1": <1-5>
+            "rubric_evaluations": [
+                {{
+                    "rubric_id": 1,
+                    "response_analysis": "Your analysis of the Response for this rubric",
+                    "score_1": <1-5>
+                }}
+            ],
+            "overall": {{
+                "response_analysis": "Your overall analysis of the Response considering all rubrics",
+                "score_1": <1-5>
+            }}
         }}
         ```
 

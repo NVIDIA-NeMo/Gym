@@ -64,17 +64,29 @@ from resources_servers.dwrl_genrm_compare_pointwise.utils import (
 logger = logging.getLogger(__name__)
 
 def flatten_to_single_turn(message_log):
+    """The conversation as the judge prompt's {context}, exactly as DWRL training renders it (NeMo-RL's
+    nemo_rl/data/genrm_prompts.py `flatten_to_single_turn`, for text content; NeMo-RL's
+    tests/unit/data/test_genrm_gym_prompt_drift.py checks that the two agree)."""
+    def strip_prefix(text: str) -> str:
+        if text.lower().startswith("user:"):
+            return text[5:].strip()
+        if text.lower().startswith("assistant:"):
+            return text[10:].strip()
+        if text.lower().startswith("system:"):
+            return text[7:].strip()
+
+        return text
+
     ret = ""
-    for idx, message in enumerate(message_log):
+    for message in message_log:
         if message.role == "system":
-            ret += "System: " + message.content.strip() + "\n\n"
+            ret += '\n[The Start of the System Prompt for this Conversation]\n' + strip_prefix(message.content) + '\n[The End of the System Prompt for this Conversation]' + "\n\n"
         elif message.role == "user":
-            ret += "User: " + message.content.strip() + "\n\n"
+            ret += "User: " + strip_prefix(message.content) + "\n\n"
         elif message.role == "assistant":
-            resp_no_thinking1 = re.sub(r"(?i)(?s)(\<think\>)(.*?)(\<\/think\>)", "", message.content).strip()
-            resp_no_thinking2 = re.sub(r"(?i)(?s)(.*?)(\<\/think\>)", "", resp_no_thinking1).strip()
-            ret += "Assistant: " + resp_no_thinking2 + "\n\n"
-    
+            resp_no_thinking = message.content.split('</think>')[-1].lstrip()
+            ret += "Assistant: " + strip_prefix(resp_no_thinking.strip()) + "\n\n"
+
     return ret.strip()
 
 def convert_to_chat_completion_format(message_log):
@@ -279,6 +291,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         ]
 
         principle_val = principle if principle else cfg.default_principle.strip()
+        # As in DWRL training (NeMo-RL's examples/run_dwrl_vlm.py): the data's principles are written for pairwise
+        # judging; fix the header line for a single response.
+        principle_val = principle_val.replace("Evaluate both responses", "Evaluate the Response")
         #print("### PRINCIPLE_INSIDE_COMPARE: ", principle_val, flush=True)
         prompt_template = cfg.dwrl_prompt.strip().format(context=flatten_to_single_turn(messages), response=response_1, principle=principle_val)
         init_msg = [NeMoGymEasyInputMessage(role="user", content=prompt_template, type="message")]
@@ -314,8 +329,13 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
 				
                 # The second turn continues this attempt's evaluation. It is built here, not appended to init_msg,
                 # so that a later attempt does not see the evaluations of the earlier ones.
+                # As in training (dwrl.py stage 2): a template whose generation prompt opens the reasoning
+                # (Super 3.5: "<think>\n") returns the generation without that opening; put it back.
+                assistant_turn = thought_raw_str
+                if assistant_turn and not assistant_turn.lstrip().startswith("<think>"):
+                    assistant_turn = "<think>\n" + assistant_turn
                 second_turn_msg = init_msg + [
-                    NeMoGymEasyInputMessage(role="assistant", content=thought_raw_str, type="message"),
+                    NeMoGymEasyInputMessage(role="assistant", content=assistant_turn, type="message"),
                     NeMoGymEasyInputMessage(role="user", content=cfg.bt_prompt, type="message"),
                 ]
 				
@@ -325,16 +345,22 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 #responses_second_turn.input = init_msg
                 responses_second_turn.messages = convert_to_chat_completion_format(second_turn_msg)
                 responses_second_turn.logprobs = True
-                responses_second_turn.metadata = {"chat_template_kwargs": json.dumps({"enable_thinking": False}), "extra_body": json.dumps({"chat_template_kwargs": {"enable_thinking": False}})}
+                # truncate_history_thinking would cut the reasoning out of the earlier assistant turn (Super 3.5's template)
+                second_turn_kwargs = {"enable_thinking": False, "truncate_history_thinking": False}
+                responses_second_turn.metadata = {"chat_template_kwargs": json.dumps(second_turn_kwargs), "extra_body": json.dumps({"chat_template_kwargs": second_turn_kwargs})}
                 responses_second_turn.top_p = 1.0
                 responses_second_turn.temperature = 1.0
                 responses_second_turn.max_tokens = 1
                 responses_second_turn.top_logprobs = 20
 				
+                # Send the second turn in the first turn's session, so that a GenRM served by several vLLM replicas
+                # (local_vllm_model num_replicas) answers it on the same replica, whose prefix cache already holds the
+                # prompt and the evaluation.
                 response_score = await self.server_client.post(
                     server_name=cfg.genrm_model_server.name,
                     url_path="/v1/chat/completions",
                     json=responses_second_turn,
+                    cookies=response_thought.cookies,
                 )
                 raw_response_score = await response_score.json()
                 #print("### RAW_RESPONSE_SCORE: ", raw_response_score, flush=True)

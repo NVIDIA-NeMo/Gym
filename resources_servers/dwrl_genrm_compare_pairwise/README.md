@@ -68,9 +68,14 @@ fitted to all comparisons of the cohort by unregularized logistic regression (`g
 
 If `group_style_penalty_coeff > 0`, rollouts with a higher *style density* than the others in the cohort get a lower reward. The density is the number of headers, list items, bold spans and emojis (code blocks excluded) per character of the answer. The rollouts' densities are turned into zero-centered weights (lowest density: highest weight) and `weight * group_style_penalty_coeff` is added to each rating. It is off by default and the reference answer is not part of it.
 
-### Length bonuses are disabled
+### Length penalties and bonuses (optional)
 
-`reasoning_bonus`, `answer_bonus`, `top_percentile` and the two `group_*_length_penalty_coeff` settings are accepted, but the code that applies them is switched off in `aggregate_scores`.
+These work as in `genrm_compare`, with the same settings. They are added to the ratings before the style penalty, and like it they are computed over the rollouts only: the reference answer is neither adjusted nor part of the comparison of lengths. All are off by default. Lengths are in characters, of the reasoning (the `summary` text of the `reasoning` items) and of the answer (the `output_text` parts), counted separately.
+
+- **Group-relative penalties** (`group_reasoning_length_penalty_coeff`, `group_answer_length_penalty_coeff`). Within the cohort, each length is scaled to a weight between 1 (the shortest) and 0 (the longest), and the weights are centered on their mean. The reward gets `group_reasoning_length_penalty_coeff * reasoning_weight + group_answer_length_penalty_coeff * answer_weight`. Shorter than the cohort's other rollouts raises the reward, longer lowers it, and the mean reward of the cohort is unchanged. With answers of 10, 20 and 30 characters the answer weights are +0.5, 0 and -0.5. When all lengths are equal nothing changes.
+- **Top-performer bonuses** (`reasoning_bonus`, `answer_bonus`, `top_percentile`). The rollout with the shortest non-empty reasoning gets `reasoning_bonus`, and the one with the shortest non-empty answer gets `answer_bonus`, if it is among the `top_percentile` best rated rollouts of the cohort. These are not centered, so they raise the mean reward.
+
+The ratings are log-odds, not the 1-5 scores of `genrm_compare`, so the same coefficient has a different strength here. The largest gap that the group-relative penalties make between two rollouts is the sum of the two coefficients (e.g. 0.06 + 0.12 = 0.18 log-odds). What matters for training is that gap compared with the spread of the ratings in a cohort, since GRPO normalizes the rewards of a group. In a cohort where the GenRM sees little difference, the lengths decide most of the ranking.
 
 ## Cohorts
 
@@ -193,13 +198,18 @@ dwrl_pairwise_compare_resources_server:
 | `comparison_strategy` | string | `"circular"` | `"circular"` (N comparisons) or `"all_pairs"` (N(N-1)/2) |
 | `num_judges_per_comparison` | int | `1` | Number of independent judge passes per pair (at least 1). Each is a full evaluation sampled separately; their probabilities are averaged in the fit |
 | `default_principle` | string | *(see config)* | Evaluation plan when the request has none |
+| `group_reasoning_length_penalty_coeff` | float | `0.0` | Group-relative reasoning length penalty (see *Length penalties and bonuses*). `0` disables it |
+| `group_answer_length_penalty_coeff` | float | `0.0` | Group-relative answer length penalty. `0` disables it |
+| `reasoning_bonus` | float | `0.0` | Bonus for the shortest reasoning if it is a top performer. `0` disables it |
+| `answer_bonus` | float | `0.0` | Bonus for the shortest answer if it is a top performer. `0` disables it |
+| `top_percentile` | float | `0.2` | Fraction of the rollouts (by rating) that count as top performers for the two bonuses |
 | `group_style_penalty_coeff` | float | `0.0` | Style density penalty. `0` disables it |
 | `default_ranking` | float | `0.5` | Win probability of a comparison that could not be judged. Must be between 0 and 1: it is added to the win counts that the ratings are fitted to |
 | `default_score` | float | `3.0` | The 1-5 scores of an unparseable evaluation, and the reward when `num_rollouts_per_prompt <= 1` |
 | `genrm_parse_retries` | int | `0` | How many times an evaluation that cannot be parsed is repeated (the same pair). `0` disables retries. Each retry is two more GenRM calls |
 | `genrm_parse_retry_sleep_s` | float | `0.2` | Seconds to wait between a failed attempt and its retry |
 
-Accepted but with no effect on `/verify`: `use_principle`, `aggregator_method` (only `"simple_tiebreaker"` is accepted, whatever it says), `reasoning_bonus`, `answer_bonus`, `top_percentile`, `group_reasoning_length_penalty_coeff`, `group_answer_length_penalty_coeff`, and `debug_logging` (only `/compare` reads it).
+Accepted but with no effect on `/verify`: `use_principle`, `aggregator_method` (only `"simple_tiebreaker"` is accepted, whatever it says), and `debug_logging` (only `/compare` reads it).
 
 ### The GenRM server
 
@@ -239,7 +249,7 @@ dwrl_genrm_compare_pairwise/
 ├── __init__.py
 ├── app.py                         # Resources server: /verify with cohorts, /compare, the GenRM calls
 ├── cohort.py                      # Cohort bookkeeping: grouping, comparison slots, repeated requests
-├── utils.py                       # Prompt keys, output parsing, Bradley-Terry fit, style penalty
+├── utils.py                       # Prompt keys, output parsing, Bradley-Terry fit, length and style adjustments
 ├── configs/
 │   └── dwrl_genrm_compare_pairwise.yaml   # Default configuration (including the GenRM model block)
 ├── data/
@@ -250,7 +260,7 @@ dwrl_genrm_compare_pairwise/
 │   ├── __init__.py
 │   ├── test_app.py                # Server tests: GenRM calls, verify() schedules, failures, repeats
 │   ├── test_cohort.py             # Cohort bookkeeping tests
-│   └── test_utils.py              # Parsing, prompt keys, Bradley-Terry fit, style penalty tests
+│   └── test_utils.py              # Parsing, prompt keys, Bradley-Terry fit, length and style adjustment tests
 └── README.md                      # This file
 ```
 

@@ -110,13 +110,76 @@ class TestParseGenRMOutput:
         assert score_2 == approx(2.0)
         assert ranking == approx(1.0)
 
-    def test_partial_json_uses_defaults(self) -> None:
-        """Missing keys use default values."""
+    def test_partial_json_is_a_parse_failure(self) -> None:
+        """A verdict must give score_1, score_2 and ranking, as when the GenRM is trained."""
         output = '{"score_1": 4}'
         score_1, score_2, ranking = parse_genrm_output(output, 3.0, 3.5)
-        assert score_1 == approx(4.0)
+        assert score_1 == approx(3.0)  # default
         assert score_2 == approx(3.0)  # default
         assert ranking == approx(3.5)  # default
+        with pytest.raises(GenRMOutputParseError, match="missing"):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True)
+
+    def test_rubric_format_reads_overall(self) -> None:
+        output = (
+            '```json\n{"rubric_evaluations": [{"rubric_id": 1, "score_1": 5, "score_2": 1, "ranking": 1}],\n'
+            ' "overall": {"response_1_analysis": "a", "score_1": 4, "score_2": 2, "ranking": 2}}\n```'
+        )
+        assert parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True) == (4.0, 2.0, 2.0)
+
+    def test_draft_verdict_in_the_reasoning_is_ignored(self) -> None:
+        """Only the text after the reasoning is the verdict, even if a draft in the reasoning is fenced."""
+        output = (
+            'Draft:\n```json\n{"score_1": 1, "score_2": 5, "ranking": 6}\n```\nOn reflection...\n</think>\n'
+            '```json\n{"overall": {"score_1": 5, "score_2": 2, "ranking": 1}}\n```'
+        )
+        assert parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True) == (5.0, 2.0, 1.0)
+
+    def test_without_split_word_the_whole_text_is_the_verdict(self) -> None:
+        """No </think>: a GenRM that does not reason, or reasoning already separated by the judge server."""
+        output = '{"overall": {"score_1": 5, "score_2": 2, "ranking": 1}}'
+        assert parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True) == (5.0, 2.0, 1.0)
+
+    def test_truncated_reasoning_is_a_parse_failure(self) -> None:
+        """Cut off before </think>: the reasoning never ended, so a draft in it is not taken as the verdict."""
+        output = 'Draft: {"score_1": 1, "score_2": 5, "ranking": 6} and I keep thinking'
+        with pytest.raises(GenRMOutputParseError, match="cut off"):
+            parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True, truncated=True)
+        # A truncated generation that did end its reasoning is parsed as usual.
+        done = 'thinking</think>{"score_1": 4, "score_2": 3, "ranking": 2}'
+        assert parse_genrm_output(done, 3.0, 3.5, raise_on_fail=True, truncated=True) == (4.0, 3.0, 2.0)
+
+    def test_split_word_none_parses_the_whole_text(self) -> None:
+        output = 'reasoning</think>{"score_1": 4, "score_2": 3, "ranking": 2}'
+        assert parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True, reasoning_split_word=None) == (4.0, 3.0, 2.0)
+
+    def test_latex_escapes_in_analysis_strings_are_repaired(self) -> None:
+        output = r'</think>{"overall": {"response_1_analysis": "uses \sqrt{x} and \ln 2", "score_1": 4, "score_2": 3, "ranking": 2}}'
+        assert parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True) == (4.0, 3.0, 2.0)
+
+    def test_more_than_one_verdict_is_a_parse_failure(self) -> None:
+        """A repeated verdict block must not pass on the last copy."""
+        verdict = '{"score_1": 4, "score_2": 3, "ranking": 2}'
+        with pytest.raises(GenRMOutputParseError, match="exactly one"):
+            parse_genrm_output(f"</think>{verdict}\n{verdict}", 3.0, 3.5, raise_on_fail=True)
+
+    def test_quotes_in_prose_do_not_hide_the_verdict(self) -> None:
+        output = 'The first response mentions a 12" pizza.\n{"score_1": 4, "score_2": 3, "ranking": 2}'
+        assert parse_genrm_output(output, 3.0, 3.5, raise_on_fail=True) == (4.0, 3.0, 2.0)
+
+    @pytest.mark.parametrize(
+        "verdict",
+        [
+            '{"score_1": 6, "score_2": 3, "ranking": 2}',  # score out of range
+            '{"score_1": 4, "score_2": 3, "ranking": 7}',  # ranking out of range
+            '{"score_1": 4.5, "score_2": 3, "ranking": 2}',  # not an integer
+            '{"score_1": true, "score_2": 3, "ranking": 2}',  # bool
+            '{"overall": [4, 3, 2]}',  # overall is not an object
+        ],
+    )
+    def test_invalid_scores_are_a_parse_failure(self, verdict) -> None:
+        with pytest.raises(GenRMOutputParseError):
+            parse_genrm_output(verdict, 3.0, 3.5, raise_on_fail=True)
 
     def test_no_json_returns_defaults(self) -> None:
         """No JSON found returns default values."""

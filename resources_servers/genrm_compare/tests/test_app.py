@@ -40,7 +40,7 @@ from resources_servers.genrm_compare.app import (
     GenRMCompareVerifyRequest,
     _input_to_conversation_history,
 )
-from resources_servers.genrm_compare.utils import get_prompt_key_from_input
+from resources_servers.genrm_compare.utils import extract_output_text, get_prompt_key_from_input
 
 
 class TestGenRMCompareConfig:
@@ -189,7 +189,7 @@ class TestGenRMCompareResourcesServer:
             f"prompt_id::prompt-123::{prompt_hash}"
         )
 
-    async def test_run_jit_compare_using_most_recent_response_obj(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_verify_cohort_rewards_match_batch_compare(self, monkeypatch: MonkeyPatch) -> None:
         config = GenRMCompareConfig(
             host="localhost",
             port=8000,
@@ -360,11 +360,121 @@ class TestGenRMCompareResourcesServer:
         )
         # Call 1 since the second call is our tested call
         actual_metadata = aggregate_scores_mock.call_args_list[1].kwargs["comparison_metadata"]
-        assert expected_metadata == actual_metadata
+        assert expected_metadata == tuple(actual_metadata)
 
         expected_rewards = golden_rewards
         actual_rewards = [r.reward for r in results]
         assert expected_rewards == actual_rewards
+
+
+class TestVerifyCohorts:
+    """Cohort bookkeeping of verify(): every comparison is in the rewards, and a cohort never takes more members."""
+
+    SIZE = 4
+
+    @staticmethod
+    def _config(**overrides):
+        kwargs = dict(
+            host="localhost",
+            port=8000,
+            entrypoint="app.py",
+            domain="rlhf",
+            name="genrm_compare",
+            genrm_model_server=ModelServerRef(type="responses_api_models", name="genrm_model"),
+            genrm_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[], max_output_tokens=1024),
+            comparison_strategy="circular",
+            num_rollouts_per_prompt=TestVerifyCohorts.SIZE,
+        )
+        kwargs.update(overrides)
+        return GenRMCompareConfig(**kwargs)
+
+    @staticmethod
+    def _request(answer: str, rollout_index=None) -> GenRMCompareVerifyRequest:
+        return GenRMCompareVerifyRequest.model_validate(
+            {
+                "responses_create_params": NeMoGymResponseCreateParamsNonStreaming(
+                    input=[NeMoGymEasyInputMessage(role="user", content="What is 2+2?", type="message")]
+                ),
+                "response": NeMoGymResponse(
+                    id=f"resp_{answer}",
+                    created_at=0.0,
+                    model="dummy_model",
+                    tools=[],
+                    parallel_tool_calls=True,
+                    tool_choice="auto",
+                    output=[
+                        NeMoGymResponseOutputMessage(
+                            id=f"msg_{answer}",
+                            role="assistant",
+                            status="completed",
+                            type="message",
+                            content=[NeMoGymResponseOutputText(text=answer, type="output_text", annotations=[])],
+                        )
+                    ],
+                    object="response",
+                ),
+                **({ROLLOUT_INDEX_KEY_NAME: rollout_index} if rollout_index is not None else {}),
+            }
+        )
+
+    @staticmethod
+    def _judge(delays=None):
+        """A judge for which the response with the higher number always wins; comparisons in `delays` are slow."""
+        judged = []
+
+        async def run_single_comparison(conversation, response_obj_1, response_obj_2, pair_idx=(0, 0), principle=None):
+            judged.append(pair_idx)
+            await asyncio.sleep((delays or {}).get(pair_idx, 0.0))
+            a, b = (float(extract_output_text(r)) for r in (response_obj_1, response_obj_2))
+            return (5.0, 1.0, 1.0) if a > b else (1.0, 5.0, 6.0)
+
+        return run_single_comparison, judged
+
+    async def test_rewards_wait_for_comparisons_still_running_for_earlier_arrivals(self) -> None:
+        """The cohort is completed by whichever request finishes judging last, not by the last arrival."""
+        server = GenRMCompareResourcesServer.model_construct(config=self._config(), server_client=MagicMock())
+        # (1, 2) is judged by member 2 and is slow: the last arrival (member 3) finishes its own comparisons first.
+        judge, judged = self._judge(delays={(1, 2): 0.05})
+        server._run_single_comparison = judge
+
+        results = await asyncio.gather(*(server.verify(self._request(str(n))) for n in range(self.SIZE)))
+        golden, _, _, _ = await server._run_compare(
+            [{"role": "user", "content": "What is 2+2?"}],
+            [self._request(str(n)).response.model_dump() for n in range(self.SIZE)],
+        )
+
+        assert sorted(judged[: self.SIZE]) == [(0, 1), (1, 2), (2, 3), (3, 0)]
+        assert [r.reward for r in results] == golden
+
+    async def test_a_prompt_that_occurs_twice_fills_two_cohorts(self) -> None:
+        """More than num_rollouts_per_prompt rollouts with the same key start a second cohort instead of failing."""
+        server = GenRMCompareResourcesServer.model_construct(config=self._config(), server_client=MagicMock())
+        judge, _ = self._judge()
+        server._run_single_comparison = judge
+
+        answers = [str(n) for n in range(self.SIZE)] * 2
+        results = await asyncio.gather(*(server.verify(self._request(a)) for a in answers))
+        golden, _, _, _ = await server._run_compare(
+            [{"role": "user", "content": "What is 2+2?"}],
+            [self._request(str(n)).response.model_dump() for n in range(self.SIZE)],
+        )
+
+        assert [r.reward for r in results] == golden * 2
+
+    async def test_a_repeated_request_waits_for_the_reward_of_the_original(self) -> None:
+        server = GenRMCompareResourcesServer.model_construct(config=self._config(), server_client=MagicMock())
+        judge, judged = self._judge()
+        server._run_single_comparison = judge
+
+        requests = [self._request(str(n), rollout_index=n) for n in range(self.SIZE)]
+        results = await asyncio.gather(*(server.verify(r) for r in requests + [requests[1]]))
+
+        assert results[-1].reward == results[1].reward
+        assert len(judged) == self.SIZE  # the repeat is not judged again
+
+    def test_cohorts_need_a_single_worker_process(self) -> None:
+        with pytest.raises(ValueError, match="num_workers must be 1"):
+            self._config(num_workers=2)
 
 
 class TestRunSingleComparison:
