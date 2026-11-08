@@ -12028,6 +12028,8 @@ class TestEnvironmentServerRouting:
                     "task_data": {"instance_id": "instance"},
                 },
             },
+            # The row's collector indices, which the task input does not carry, travel typed for /verify.
+            "rollout_coordinates": {"task_index": 0, "rollout_index": 0},
         }
 
     @pytest.mark.parametrize(

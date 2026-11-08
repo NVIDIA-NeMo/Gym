@@ -23,6 +23,7 @@ from nemo_gym.core import (
     ENVIRONMENT_SERVER_FAILED,
     EpisodeId,
     FailureReportRow,
+    RolloutCoordinates,
     maybe_rollout_id_from_run_body,
 )
 from nemo_gym.data import materialize_task
@@ -96,6 +97,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return SingleAgentTurnRequest(
             episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),
+            # materialize_task drops the row's _ng_* keys; the coordinates among them travel typed to /verify.
+            rollout_coordinates=RolloutCoordinates.from_row(row),
         )
 
     def _legacy_result(self, response: SingleAgentTurnResponse) -> dict[str, Any]:

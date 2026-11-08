@@ -39,7 +39,8 @@ would leave that child bound to different Resources.
 A relay stays when its agent binds no Resources Server, would get a grant `simple_agent` sessions reject
 (a required MCP tool access, or more than one direct HTTP tool access), or binds a Resources Server whose
 `seed_session` accepts only the legacy body, not the `ResourcesSeedSessionRequest` an Environment Server sends,
-or whose request models read the row's rollout coordinates, which an Environment Server does not forward.
+or whose request models read the row's flat `_ng_*` rollout coordinates, which an Environment Server forwards only
+as the typed `rollout_coordinates` field, and not that field.
 It also stays when it sets keys the switched server would drop, or when another config merges it with a
 `legacy_agent` server of the same name, unless a relay it inherits switches: it cannot stay alone then, so the
 script refuses (exit 2) and names the config, which should declare its own server instead.
@@ -117,7 +118,8 @@ SWITCHED_CHILD = """\
 # The keys a switched stanza writes; a relay that sets any other key stays, so nothing it configures is dropped.
 SWITCHED_RELAY_KEYS = {"entrypoint", AGENT_SERVER}
 SWITCHED_INSTANCE_KEYS = {"environment_servers", "_inherit_from"}
-# Request-model aliases for the row's rollout coordinates, which an Environment Server does not forward.
+# Request-model aliases for the row's flat rollout coordinates, which an Environment Server sends to /verify only
+# as the typed field below.
 ROLLOUT_COORDINATES = {
     "ROLLOUT_INDEX_KEY_NAME",
     "GROUP_ID_KEY_NAME",
@@ -125,6 +127,7 @@ ROLLOUT_COORDINATES = {
     "'_ng_group_id'",
     "'_ng_group_attempt'",
 }
+TYPED_ROLLOUT_COORDINATES = "rollout_coordinates"
 
 
 class UnreadableConfigError(ValueError):
@@ -452,14 +455,23 @@ def _reads_rollout_coordinates(path: Path) -> bool:
     )
 
 
+def _reads_typed_rollout_coordinates(path: Path) -> bool:
+    """True when ``path`` reads the typed `rollout_coordinates` field an Environment Server sends to /verify."""
+    try:
+        return TYPED_ROLLOUT_COORDINATES in path.read_text()
+    except (OSError, ValueError):
+        return False
+
+
 def resources_blocker(resources: dict) -> str | None:
     """Why an Environment Server cannot drive this Resources Server instance, or None when it can.
 
     An Environment Server seeds with a `ResourcesSeedSessionRequest` and expects its `resources_session_id` back.
     The base `seed_session` does that. An override must accept the typed body, or read `resources_session_id`
     from the raw request; one that takes only the legacy body would fail every seed.
-    It verifies with the task's data, without the row's `_ng_*` rollout coordinates, so a server whose request
-    models read them, such as a cohort comparison, would fail every verify.
+    It verifies with the task's data, without the row's `_ng_*` rollout coordinates, which it sends as the typed
+    `rollout_coordinates` field instead. A server whose request models read the flat keys and not that field,
+    such as a cohort comparison that has not moved to it, would fail every verify.
     The checks read the source, so a server passes them once it migrates; a server whose source is not under
     `resources_servers/` cannot be checked, so it stays.
     """
@@ -481,8 +493,14 @@ def resources_blocker(resources: dict) -> str | None:
         source = ast.unparse(override)
         if TYPED_SEED not in source and "resources_session_id" not in source:
             return f"resources server {implementation} seeds only the legacy body, not {TYPED_SEED}"
-    if any(_reads_rollout_coordinates(path) for path in [entrypoint, *sources]):
-        return f"resources server {implementation} reads the row's rollout coordinates, which are not forwarded"
+    paths = [entrypoint, *sources]
+    if any(_reads_rollout_coordinates(path) for path in paths) and not any(
+        _reads_typed_rollout_coordinates(path) for path in paths
+    ):
+        return (
+            f"resources server {implementation} reads the row's rollout coordinates, "
+            f"which are forwarded only as {TYPED_ROLLOUT_COORDINATES}"
+        )
     return None
 
 

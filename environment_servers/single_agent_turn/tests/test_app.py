@@ -41,6 +41,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
+    RolloutCoordinates,
     TaskId,
 )
 from nemo_gym.server_runtime import (
@@ -93,7 +94,7 @@ async def test_single_agent_turn_with_direct_resources_tools() -> None:
     assert verify_call["json"]["instance_id"] == "task"
     assert verify_body.responses_create_params.input == "task"
     assert verify_body.response.id == "response"
-    assert not {"episode_id", "task_id", "verification_input"} & verify_call["json"].keys()
+    assert not {"episode_id", "task_id", "verification_input", "rollout_coordinates"} & verify_call["json"].keys()
     assert verify_call["cookies"] == {"session": "updated-cookie"}
     resources_seed_body = ResourcesSeedSessionRequest.model_validate(client.calls[0][2]["json"])
     create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
@@ -1050,6 +1051,63 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
     response = await environment_server.run_request(request)
 
     assert [path for _, path, _ in client.calls] == ["/v1/agent_sessions/close", "/verify", "/close_session"]
+    assert response.result.reward == 1.0
+
+
+@pytest.mark.parametrize(
+    "coordinates",
+    [
+        RolloutCoordinates(task_index=4, rollout_index=2, group_id="cohort", group_attempt=1),
+        RolloutCoordinates(task_index=4, rollout_index=0),
+    ],
+    ids=["group", "collector_indices"],
+)
+async def test_verify_receives_the_rollouts_coordinates_as_a_typed_field(coordinates: RolloutCoordinates) -> None:
+    environment_server, client = _environment_server()
+    request = _request().model_copy(update={"rollout_coordinates": coordinates})
+
+    response = await environment_server.run_request(request)
+
+    assert response.result is not None and response.result.reward == 1.0
+    [verify_body] = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+    assert verify_body["rollout_coordinates"] == coordinates.model_dump(mode="json", exclude_none=True)
+    assert BaseVerifyRequest.model_validate(verify_body).rollout_coordinates == coordinates
+    # The coordinates are the verifier's input only: the seeds keep their bodies and the result does not echo them.
+    assert all("rollout_coordinates" not in kwargs["json"] for _, path, kwargs in client.calls if path != "/verify")
+    assert "rollout_coordinates" not in response.result.model_dump(mode="json")
+
+
+async def test_an_episode_restored_at_verify_verifies_with_its_coordinates() -> None:
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
+
+    environment_server, client = _environment_server()
+    participant = EnvironmentParticipant(mode="exported")
+    environment_server._checkpoint = participant
+    coordinates = RolloutCoordinates(task_index=4, rollout_index=1, group_id="cohort", group_attempt=0)
+    # The replacement attempt arrives with the row's coordinates again; the saved boundary does not hold them.
+    request = _request().model_copy(update={"rollout_coordinates": coordinates})
+    participant.restore_records(
+        [
+            EpisodeRecord(
+                episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
+                task_digest=task_digest(request.task.model_dump(mode="json")),
+                boundary={
+                    "next": "verify",
+                    "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
+                    "response": _agent_response().model_dump(mode="json"),
+                    "observations": None,
+                    "trajectory": None,
+                },
+            )
+        ]
+    )
+    # Only the verification and the final resources close remain.
+    del client.responses[:4]
+
+    response = await environment_server.run_request(request)
+
+    assert [path for _, path, _ in client.calls] == ["/verify", "/close_session"]
+    assert client.calls[0][2]["json"]["rollout_coordinates"] == coordinates.model_dump(mode="json", exclude_none=True)
     assert response.result.reward == 1.0
 
 

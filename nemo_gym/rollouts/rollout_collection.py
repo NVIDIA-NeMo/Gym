@@ -93,7 +93,7 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
 )
 from nemo_gym.core.episode_context import check_rollout_id_length, maybe_rollout_id_from_run_body
-from nemo_gym.core.episode_types import EpisodeId, TaskId, is_materialized_task_row
+from nemo_gym.core.episode_types import EpisodeId, RolloutCoordinates, TaskId, is_materialized_task_row
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     CANCELLED,
@@ -510,13 +510,16 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
     # Decode the identity the way the agent does.
     # An explicit id may carry the attempt suffix itself, as a restored attempt does.
     capture_key = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-    return {
+    body: dict[str, Any] = {
         "episode_id": EpisodeId.from_capture_key(capture_key).model_dump(mode="json"),
         "task": {
             "task_id": row["task_id"],
             "task_input": row["task_input"],
         },
     }
+    if (coordinates := RolloutCoordinates.from_row(row)) is not None:
+        body["rollout_coordinates"] = coordinates.model_dump(mode="json", exclude_none=True)
+    return body
 
 
 def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:

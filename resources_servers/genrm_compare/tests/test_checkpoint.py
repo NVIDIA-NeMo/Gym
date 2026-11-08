@@ -22,6 +22,7 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.tests.support import request_with_session
+from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member as cohort_member
 
 
 def comparison_result(score_1=4.0, score_2=2.0, ranking=1.0):
@@ -97,10 +98,11 @@ def count_wait_open(participant) -> dict[str, int]:
     return counts
 
 
-async def finish_cohort(server) -> list:
+async def finish_cohort(server, build=None) -> list:
     """Verify both members; member 0 then records its outcome and closes, member 1 has not recorded its own."""
+    build = build or member
     outcomes = await asyncio.gather(
-        *(verify_as(server, SESSIONS[index], member(index)) for index in range(2)), return_exceptions=True
+        *(verify_as(server, SESSIONS[index], build(index)) for index in range(2)), return_exceptions=True
     )
     server._checkpoint.ended(SESSIONS[0])
     return outcomes
@@ -125,6 +127,28 @@ async def test_a_member_that_has_not_recorded_its_reward_gets_it_back_after_a_re
 
     assert replayed.reward == outcomes[1].reward
     # Answered from the restored cohort: no sibling had to verify again, and the judge did not run.
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
+def typed_member(index):
+    """A member as an Environment Server sends it: the coordinates only in `rollout_coordinates`."""
+    return cohort_member(index, typed=True)
+
+
+@pytest.mark.parametrize("replay_with", [typed_member, member], ids=["typed_replay", "flat_replay"])
+async def test_a_member_with_typed_coordinates_gets_its_reward_back_after_a_restore(config, replay_with):
+    server, participant = seeded(config, judge=AsyncMock(side_effect=member_0_wins))
+    outcomes = await finish_cohort(server, typed_member)
+    assert outcomes[0].reward != outcomes[1].reward
+    records = await participant.export(None)
+    assert [record.session_id for record in records] == [SESSIONS[1]]
+    await server.aclose()
+
+    restored, _ = await restore(config, records)
+    replayed = await asyncio.wait_for(verify_as(restored, SESSIONS[1], replay_with(1)), timeout=0.5)
+
+    assert (replayed.rollout_index, replayed.reward) == (1, outcomes[1].reward)
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 

@@ -9,7 +9,7 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, JsonValue, TypeAdapter, ValidationError
 
 from nemo_gym.config.global_config import GlobalConfigDictParser
-from nemo_gym.core.episode_types import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId, RolloutCoordinates
 from nemo_gym.data.dataset_preparation import TrainDataProcessor
 from nemo_gym.data.task_data import TaskDataValidator
 from nemo_gym.data.task_materialization import materialize_task
@@ -272,6 +272,27 @@ def test_episode_request_decodes_the_capture_key_like_the_agent(identity, expect
     row = {"task_id": {"taskset": "tasks", "task_id": "task"}, "task_input": {}, **identity}
 
     assert EpisodeId.model_validate(_episode_request_body(row)["episode_id"]) == expected
+
+
+def test_episode_request_carries_the_rows_coordinates_beside_the_task() -> None:
+    row = {
+        "task_id": {"taskset": "tasks", "task_id": "task"},
+        "task_input": {"responses_create_params": {"input": "prompt"}, "task_data": {"instance_id": "task"}},
+        "_ng_task_index": 3,
+        "_ng_rollout_index": 2,
+        "_ng_attempt_index": 1,
+        "_ng_group_id": "cohort",
+        "_ng_group_attempt": 4,
+    }
+
+    request = SingleAgentTurnRequest.model_validate(_episode_request_body(row))
+
+    assert request.rollout_coordinates == RolloutCoordinates(
+        task_index=3, rollout_index=2, group_id="cohort", group_attempt=4
+    )
+    assert request.episode_id == EpisodeId(rollout_id="3-2", attempt=1)
+    # The task input stays as prepared; only the typed field carries the coordinates.
+    assert request.task.task_input.task_data == {"instance_id": "task"}
 
 
 def _resources_server(name, datasets, implementation="test"):

@@ -654,7 +654,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 server_name=self.config.resources_server.name,
                 url_path="/verify",
                 # The session cookie identifies the episode.
-                json=self._verify_body(request, agent_response) | verification_failure_fields(agent_response),
+                json=self._verify_body(request, agent_response)
+                | self._rollout_coordinate_fields(request)
+                | verification_failure_fields(agent_response),
                 cookies=handles.resources_cookies,
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
@@ -690,6 +692,17 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             "responses_create_params": task_input.responses_create_params.model_dump(mode="json", exclude_unset=True),
             "response": agent_response.model_dump(mode="json"),
         }
+
+    @staticmethod
+    def _rollout_coordinate_fields(request: SingleAgentTurnRequest) -> dict[str, Any]:
+        """The rollout's coordinates as the typed `rollout_coordinates` field that `BaseVerifyRequest` reads.
+
+        An Agent's /run forwarded the row's `_ng_*` keys instead; the task's data no longer carries them.
+        Omitted when the caller sent none, so the body stays as before.
+        """
+        if request.rollout_coordinates is None:
+            return {}
+        return {"rollout_coordinates": request.rollout_coordinates.model_dump(mode="json", exclude_none=True)}
 
     @staticmethod
     def _agent_failure(response: NeMoGymResponse) -> NgFailureEvent | None:

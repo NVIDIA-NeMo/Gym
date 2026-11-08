@@ -214,6 +214,59 @@ def test_legacy_adapter_preserves_task_identity_and_data():
     assert request.episode_id.attempt == 1
 
 
+@pytest.mark.parametrize(
+    "group, expected_group",
+    [
+        ({"_ng_group_id": "cohort", "_ng_group_attempt": 1}, {"group_id": "cohort", "group_attempt": 1}),
+        ({}, {}),
+    ],
+    ids=["caller_group", "collector_indices"],
+)
+def test_each_repeat_of_a_flat_row_reaches_verify_with_its_own_coordinates(group: dict, expected_group: dict) -> None:
+    verify_bodies = []
+    for rollout_index in range(3):
+        environment_server, client = _environment_server()
+        adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+        row = {
+            "instance_id": "task",
+            "responses_create_params": {"input": "task"},
+            "_ng_task_index": 5,
+            "_ng_rollout_index": rollout_index,
+            "_ng_attempt_index": 1,
+            **group,
+        }
+
+        response = TestClient(adapter.setup_webserver()).post("/run", json=row)
+
+        assert response.status_code == 200 and response.json()["reward"] == 1.0
+        [verify_body] = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
+        verify_bodies.append(verify_body)
+
+    assert [body["rollout_coordinates"] for body in verify_bodies] == [
+        {"task_index": 5, "rollout_index": rollout_index, **expected_group} for rollout_index in range(3)
+    ]
+    # The task's data stays the row's own fields: the coordinates travel only in the typed field.
+    assert all(not any(key.startswith("_ng_") for key in body) for body in verify_bodies)
+    assert all(body["instance_id"] == "task" for body in verify_bodies)
+
+
+def test_a_flat_row_with_malformed_coordinates_is_refused_before_any_session() -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    with pytest.raises(ValueError, match="group_attempt"):
+        adapter._episode_request_from_row(
+            {
+                "instance_id": "task",
+                "responses_create_params": {"input": "task"},
+                "_ng_task_index": 5,
+                "_ng_rollout_index": 0,
+                "_ng_group_attempt": "1",
+            }
+        )
+    assert client.calls == []
+
+
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])
 def test_explicit_identity_does_not_require_collector_indexes(task_id_field: str) -> None:
     environment_server, client = _environment_server()

@@ -67,6 +67,49 @@ class TaskId(BaseModel):
     task_id: str = Field(min_length=1)
 
 
+class RolloutCoordinates(BaseModel):
+    """Where one rollout sits in its run, beside its episode identity.
+
+    Rollout collection numbers every row with its task and its repeat of that task. A caller that compares the
+    rollouts of one task as a group, such as a GenRM cohort, also names the group and the attempt that group is on.
+    Environment Servers pass these to the Resources Server's `/verify` as they arrived; each is None when the
+    caller did not send it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # Strict, so a boolean or a numeric string is refused rather than read as an index.
+    task_index: int | None = Field(default=None, ge=0, strict=True)
+    rollout_index: int | None = Field(default=None, ge=0, strict=True, description="The task's repeat, from zero.")
+    group_id: str | None = Field(default=None, min_length=1, strict=True)
+    group_attempt: int | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description="Shared by every member of a group; a replacement of the whole group raises it.",
+    )
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> Self | None:
+        """Read the coordinates a flat dataset row carries as ``_ng_*`` keys, or None when it carries none."""
+        # Imported here because global_config imports feature modules that import the episode identity.
+        from nemo_gym.config.global_config import (
+            GROUP_ATTEMPT_KEY_NAME,
+            GROUP_ID_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            TASK_INDEX_KEY_NAME,
+        )
+
+        keys = {
+            "task_index": TASK_INDEX_KEY_NAME,
+            "rollout_index": ROLLOUT_INDEX_KEY_NAME,
+            "group_id": GROUP_ID_KEY_NAME,
+            "group_attempt": GROUP_ATTEMPT_KEY_NAME,
+        }
+        fields = {name: row[key] for name, key in keys.items() if row.get(key) is not None}
+        return cls.model_validate(fields) if fields else None
+
+
 def is_materialized_task_row(row: Mapping[str, object]) -> bool:
     """Return whether a row has a materialized-task envelope.
 
@@ -97,6 +140,7 @@ class BaseEpisodeRequest(BaseModel, Generic[TaskInputT]):
 
     episode_id: EpisodeId
     task: MaterializedTask[TaskInputT]
+    rollout_coordinates: RolloutCoordinates | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 class BaseEpisodeResponse(BaseModel, Generic[EpisodeResultT]):
