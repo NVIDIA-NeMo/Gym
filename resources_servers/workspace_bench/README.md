@@ -23,6 +23,6 @@ them on this server, and lends the sandbox to the agent through `sandbox_access`
   seed gets 409. A failed stop raises and keeps the sandbox for the retried close.
 - A session that is never closed expires after the sandbox's `ttl_s`, and shutdown stops every sandbox still open.
 
-`harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; a second seed of the same
-session gets 409, and its verify stops the sandbox. The session behavior comes from `SandboxSessionResourcesServer` in
-`resources_servers/swebench/sandbox_sessions.py`.
+The deprecated `harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; a second seed
+of the same session gets 409, and its verify stops the sandbox. The session behavior comes from
+`SandboxSessionResourcesServer` in `resources_servers/swebench/sandbox_sessions.py`.
