@@ -8,12 +8,16 @@ dry_run=0
 source_mount=0
 gym_root_override=
 excluded_nodes=
+wandb_project=
+wandb_entity=
 while (( $# )); do
     case "$1" in
         --dry-run) dry_run=1 ;;
         --source-mount) source_mount=1 ;;
         --exclude) excluded_nodes=${2:?Pass the excluded node list}; shift ;;
         --walltime) WALLTIME=${2:?Pass the Slurm time limit}; shift ;;
+        --wandb-project) wandb_project=${2:?Pass the W&B project}; shift ;;
+        --wandb-entity) wandb_entity=${2:?Pass the W&B entity}; shift ;;
         --gym-root) gym_root_override=${2:?Pass the source Gym root}; shift ;;
         *) printf 'Unexpected argument: %s\n' "$1" >&2; exit 2 ;;
     esac
@@ -56,6 +60,12 @@ export SETUP_COMMAND=""
 export OMP_NUM_THREADS=16
 export NRL_VLLM_ASYNC_TIMEOUT_SECONDS=1800
 driver=(uv run --no-sync examples/run_grpo_single_controller.py --config "$CONFIG_PATH")
+if [[ -n "$wandb_project" ]]; then
+    driver+=("++logger.wandb_enabled=true" "++logger.wandb.project=$wandb_project"
+        "++logger.wandb.mode=online" "++logger.wandb.name=${EXP_NAME:-swe-env-server}"
+        "++logger.wandb.id=null" "++logger.wandb.resume=null" "++logger.wandb.log_nemo_gym_full_result_tables=false")
+    if [[ -n "$wandb_entity" ]]; then driver+=("++logger.wandb.entity=$wandb_entity"); fi
+fi
 printf -v driver_command '%q ' "${driver[@]}"
 export COMMAND="cd /opt/nemo-rl && exec $driver_command"
 # Exclusivity alone does not reserve node memory; checkpoint staging needs more than a fixed 128 GiB cap.

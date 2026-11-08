@@ -278,6 +278,10 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
             "unhealthy-node",
             "--walltime",
             "02:00:00",
+            "--wandb-project",
+            "test-project",
+            "--wandb-entity",
+            "test-entity",
         ],
         env=env,
         capture_output=True,
@@ -294,6 +298,10 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     ]
     assert "uv run --no-sync examples/run_grpo_single_controller.py" in lines[5]
     assert "check_swe_training_recipe" not in lines[5] and "--runtime" not in lines[5]
+    assert "++logger.wandb_enabled=true" in lines[5]
+    assert "++logger.wandb.mode=online" in lines[5]
+    assert "++logger.wandb.project=test-project" in lines[5]
+    assert "++logger.wandb.entity=test-entity" in lines[5]
     assert "test-key" not in result.stdout
     assert "--exclude=unhealthy-node" in lines[6:]
     assert "--time=02:00:00" in lines[6:]

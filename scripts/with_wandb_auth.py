@@ -7,6 +7,7 @@ import contextlib
 import io
 import os
 import sys
+from pathlib import Path
 
 
 def runtime_environment() -> dict[str, str]:
@@ -16,13 +17,23 @@ def runtime_environment() -> dict[str, str]:
     initialization; there is no login, verification request, or credential write here.
     """
     environment = os.environ.copy()
+    if not environment.get("WANDB_BASE_URL"):
+        # The saved login may target a private server. Resolve its settings
+        # locally and carry that same destination into the container.
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            from wandb import Settings
+
+            config_dir = Path(environment.get("WANDB_CONFIG_DIR", "~/.config/wandb")).expanduser()
+            settings = Settings(settings_system=str(config_dir / "settings"))
+            settings.update_from_system_settings()
+            environment["WANDB_BASE_URL"] = settings.base_url
     if not environment.get("WANDB_API_KEY"):
         # SDK diagnostics may describe malformed credential files. Keep their
         # contents out of launcher logs, including exceptions at this boundary.
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             from wandb.sdk.lib.wbauth import read_netrc_auth
 
-            key = read_netrc_auth(host=environment.get("WANDB_BASE_URL", "https://api.wandb.ai"))
+            key = read_netrc_auth(host=environment["WANDB_BASE_URL"])
         if not key:
             raise RuntimeError("W&B authentication is unavailable")
         environment["WANDB_API_KEY"] = key
@@ -44,8 +55,9 @@ def main() -> None:
     except Exception:
         # Deliberate credential boundary: never serialize the exception or key.
         print(
-            "W&B authentication could not be loaded. Use the installed W&B SDK and run wandb login privately "
-            "on this host, or supply WANDB_API_KEY through the approved runtime environment.",
+            "W&B authentication could not be loaded for the configured server. Check the installed W&B SDK "
+            "and saved server settings, or supply WANDB_BASE_URL and WANDB_API_KEY through the approved runtime "
+            "environment. No job was dispatched by this wrapper.",
             file=sys.stderr,
         )
         raise SystemExit(1) from None
