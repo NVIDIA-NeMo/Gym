@@ -28,10 +28,10 @@ host in a fresh compose stack, not in the box the model controlled.
     run-seed-then-evaluate.py is not used; see the comment above SEED_SCRIPT.)
   * ``close_session`` stops the sandbox if verify has not, and removes the copied app.
 
-The legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench.yaml``) still works: its
-``seed_session`` gets the PRD text and asset directories and starts no sandbox, its agent builds in a sandbox of its
-own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and grades the
-same way.
+The deprecated legacy relay path (``responses_api_agents/vibench_agent``, ``configs/vibench_legacy_agent.yaml``)
+still works: its ``seed_session`` gets the PRD text and asset directories and starts no sandbox, its agent builds in a
+sandbox of its own, and its ``verify`` names a tarball in the shared ``artifact_dir``, which this server unpacks and
+grades the same way.
 
 Sessions are process-local, so the server runs with one worker. Grading shells into a local
 Docker daemon, so this server needs Docker and ``docker-compose`` on its host.

@@ -70,7 +70,7 @@ editing anything else.
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench.yaml \
+    --config resources_servers/vibench/configs/vibench_legacy_agent.yaml \
     --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 

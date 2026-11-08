@@ -13,12 +13,12 @@ on its own Harbor harness, is not integrated.
 
 Two configs run this server:
 
-- `configs/vibench_sessions.yaml` runs the episode through the `single_agent_turn_legacy` Environment
+- `configs/vibench.yaml`, the default, runs the episode through the `single_agent_turn_legacy` Environment
   Server and the agent-session protocol. This server owns the build sandbox and lends it; the agent
   only borrows it. The rest of this README describes this path unless it says otherwise.
-- `configs/vibench.yaml`, the default, keeps the legacy relay path through `vibench_agent`; see
-  [Legacy relay path](#legacy-relay-path). It stays the default until both paths are graded on the
-  same tasks, since their scores are not directly comparable.
+- `configs/vibench_legacy_agent.yaml` is deprecated. It keeps the legacy relay path through `vibench_agent`;
+  see [Legacy relay path](#legacy-relay-path). The two paths are configured differently, so their scores are not
+  directly comparable.
 
 | Stage | Owner |
 | --- | --- |
@@ -131,7 +131,7 @@ With OpenSandbox, start Gym on a host the sandboxes can route to:
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench_sessions.yaml \
+    --config resources_servers/vibench/configs/vibench.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
     --model-type openai_model \
     ++use_absolute_ip=true \
@@ -147,7 +147,7 @@ exec timeout would also kill the build, which OpenCode runs as one long exec. Do
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench_sessions.yaml \
+    --config resources_servers/vibench/configs/vibench.yaml \
     --config resources_servers/vibench/configs/docker.yaml \
     --model-type openai_model
 ```
@@ -182,8 +182,8 @@ per test plan; wall-clock is tens of minutes and the box needs headroom for
 ## Legacy relay path
 
 `responses_api_agents/vibench_agent` still runs ViBench behind the `legacy_agent` relay, from
-`configs/vibench.yaml`, the default config. That agent starts its own build sandbox from the same image, runs
-OpenCode in it with the legacy recipe above, and writes the app as a tarball into `artifact_dir`, a
+`configs/vibench_legacy_agent.yaml`, which is deprecated. That agent starts its own build sandbox
+from the same image, runs OpenCode in it with the legacy recipe above, and writes the app as a tarball into `artifact_dir`, a
 directory it shares with this server; `seed_session` hands it only the PRD text and asset
 directories, and `verify` unpacks the tarball and grades it the same way. The shared directory puts
 the agent and this server on one host. With Docker, use the agent's own `configs/docker.yaml`; with
@@ -192,14 +192,14 @@ OpenSandbox, set `sandbox_model_base_url` on the agent. See
 
 ```bash
 gym env start \
-    --config resources_servers/vibench/configs/vibench.yaml \
+    --config resources_servers/vibench/configs/vibench_legacy_agent.yaml \
     --config responses_api_agents/vibench_agent/configs/docker.yaml \
     --model-type openai_model
 ```
 
 The two paths differ in output budget and command deny-list, so their scores are not directly
-comparable. Making the sessions path the default, and removing `vibench_agent`, waits until both
-have been graded on the same tasks.
+comparable. `vibench_agent` will be removed after the Environment Server migration; until then
+this config keeps it runnable.
 
 ## Validation
 
