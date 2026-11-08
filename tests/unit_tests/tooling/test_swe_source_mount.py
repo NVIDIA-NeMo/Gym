@@ -239,11 +239,13 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     gym = root / mount.GYM_RELATIVE
     (gym / "scripts").mkdir(parents=True)
     launcher = Path(__file__).resolve().parents[3] / "scripts/launch_swe_single_agent_turn_training.sh"
-    copied = gym / "scripts" / launcher.name
+    tools = tmp_path / "reviewed-launch-tools"
+    tools.mkdir()
+    copied = tools / launcher.name
     copied.write_bytes(launcher.read_bytes())
     binary = tmp_path / "bin"
     binary.mkdir()
-    (binary / "uv").write_text("#!/bin/sh\nprintf '4\\n'\n")
+    (binary / "uv").write_text("#!/bin/sh\necho unexpected-preflight >&2\nexit 89\n")
     (binary / "uv").chmod(0o755)
     (binary / "sbatch").write_text(
         '#!/bin/sh\nprintf "%s\\n" "$MOUNTS" "$UV_PROJECT_ENVIRONMENT" "$NEMO_RL_VENV_DIR" '
@@ -254,6 +256,7 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     env = os.environ | {
         "PATH": f"{binary}:{os.environ['PATH']}",
         "NEMO_RL_ROOT": str(root),
+        "GPUS_PER_NODE": "4",
         "CONFIG_PATH": str(tmp_path / "config.yaml"),
         "CONTAINER": str(tmp_path / "image.sqsh"),
         "CONTAINER_PROVENANCE": str(tmp_path / "image.json"),
@@ -264,7 +267,9 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
         "OPENSANDBOX_API_KEY": "test-key",
         "SUBMISSION_RECEIPT": str(receipt),
     }
-    result = subprocess.run(["bash", str(copied), "--source-mount"], env=env, capture_output=True, text=True)
+    result = subprocess.run(
+        ["bash", str(copied), "--source-mount", "--gym-root", str(gym)], env=env, capture_output=True, text=True
+    )
     assert result.returncode == 0, result.stderr
     lines = receipt.read_text().splitlines()
     assert lines[:5] == [
@@ -274,8 +279,8 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
         "/opt/gym_venvs",
         "1",
     ]
-    assert "uv run --no-sync" in lines[5] and "--runtime" in lines[5]
-    assert f"--verification-cache {tmp_path.parent}/.swe-verification-cache" in lines[5]
+    assert "uv run --no-sync examples/run_grpo_single_controller.py" in lines[5]
+    assert "check_swe_training_recipe" not in lines[5] and "--runtime" not in lines[5]
     assert "test-key" not in result.stdout
     assert f"--chdir={tmp_path}" in lines[6:]
     assert f"--output={tmp_path}/slurm/slurm-%j.out" in lines[6:]
