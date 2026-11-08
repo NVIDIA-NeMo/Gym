@@ -85,7 +85,7 @@ def test_dependency_and_compiled_changes_need_another_runtime(sources, name):
         mount.snapshot(root, base_rl_commit=base_rl, base_gym_commit=base_gym)
 
 
-@pytest.mark.parametrize("kind", ["bytes", "mode", "extra-module", "bytecode", "escape", "index"])
+@pytest.mark.parametrize("kind", ["bytes", "mode", "extra-module", "bytecode", "escape", "index", "symlink-directory"])
 def test_snapshot_rejects_tampering_and_shadow_modules(sources, kind):
     root, gym, base_rl, base_gym = sources
     source = mount.snapshot(root, base_rl_commit=base_rl, base_gym_commit=base_gym)
@@ -101,8 +101,13 @@ def test_snapshot_rejects_tampering_and_shadow_modules(sources, kind):
     elif kind == "escape":
         path.unlink()
         path.symlink_to("/etc/passwd")
-    else:
+    elif kind == "index":
         subprocess.run(["git", "-C", str(gym), "update-index", "--force-remove", "scripts/example.py"], check=True)
+    else:
+        external = root.parent / "external"
+        external.mkdir()
+        (external / "__init__.py").write_text("VALUE = 99\n")
+        (gym / "shadow_package").symlink_to(external, target_is_directory=True)
     with pytest.raises(ValueError, match="Mounted source changed|Untracked executable|symlink escapes|Git inventory"):
         mount.check_snapshot(root, source)
 

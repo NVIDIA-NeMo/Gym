@@ -81,7 +81,12 @@ def snapshot(rl_root: Path, *, base_rl_commit: str, base_gym_commit: str) -> dic
 
     def visit(relative: str, base: str, expected: str | None = None) -> None:
         root = rl_root / relative
-        if not (root / ".git").is_dir() or (root / ".git/objects/info/alternates").exists():
+        if (
+            not (root / ".git").is_dir()
+            or (root / ".git").is_symlink()
+            or (root / ".git/objects/info/alternates").exists()
+            or (root / ".git/commondir").exists()
+        ):
             raise ValueError(f"Mount a self-contained Git snapshot, without worktree/alternate pointers: {relative}")
         revision = git(root, "rev-parse", "HEAD").strip()
         if expected is not None and revision != expected:
@@ -121,7 +126,12 @@ def check_snapshot(root: Path, source: dict) -> None:
     root = root.resolve()
     for relative, expected in source["repositories"].items():
         repository = root / relative
-        if not (repository / ".git").is_dir() or (repository / ".git/objects/info/alternates").exists():
+        if (
+            not (repository / ".git").is_dir()
+            or (repository / ".git").is_symlink()
+            or (repository / ".git/objects/info/alternates").exists()
+            or (repository / ".git/commondir").exists()
+        ):
             raise ValueError(f"Source requires portable Git metadata: {relative}")
         if git(repository, "rev-parse", "HEAD").strip() != expected["commit"]:
             raise ValueError(f"Mounted source revision changed: {relative}")
@@ -153,10 +163,16 @@ def check_snapshot(root: Path, source: dict) -> None:
     # A stale bytecode file or an extra Python module can shadow otherwise correct
     # tracked sources. Host preparation may have a .venv; runtime uses /opt venvs.
     for directory, dirs, names in os.walk(root):
+        for name in dirs:
+            path = Path(directory) / name
+            if name != ".venv" and path.is_symlink() and path.relative_to(root).as_posix() not in source["files"]:
+                raise ValueError(
+                    f"Untracked executable source directory in mounted snapshot: {path.relative_to(root)}"
+                )
         dirs[:] = [name for name in dirs if name not in {".git", ".venv"}]
         for name in names:
             relative = (Path(directory) / name).relative_to(root).as_posix()
-            if relative not in source["files"] and Path(name).suffix in {".py", ".pyc", ".so", ".pth", ".js", ".mjs"}:
+            if relative not in source["files"]:
                 raise ValueError(f"Untracked executable source in mounted snapshot: {relative}")
 
 
