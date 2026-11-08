@@ -35,6 +35,109 @@ def messages_body(stream):
     }
 
 
+def title_body(stream):
+    # Claude Code 2.1.108's observed title contract; ordinary no-tool requests
+    # and other structured outputs must retain their existing behavior.
+    return messages_body(stream) | {
+        "tools": [],
+        "system": [
+            {
+                "type": "text",
+                "text": "Generate a concise, sentence-case title (3-7 words) that captures the main topic "
+                'or goal of this coding session.\n\nReturn JSON with a single "title" field.',
+            }
+        ],
+        "output_config": {
+            "format": {
+                "type": "json_schema",
+                "schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                    "additionalProperties": False,
+                },
+            }
+        },
+    }
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("scenario_name", ["tool_success", "judge_verifier", "usage_omitted"])
+def test_claude_title_helper_preserves_task_replies_and_raw_capture(tmp_path, stream, scenario_name):
+    scenario = next(s for s in SCENARIOS if s.name == scenario_name)
+    probe = Probe(scenario, tmp_path)
+    title = title_body(stream)
+    with TestClient(probe.model_app()) as client:
+        reply = client.post("/ng-rollout/0-0/v1/messages", json=title)
+        assert reply.status_code == 200
+        payload = probe.attempts[-1]["response"]
+        assert json.loads(payload["content"][0]["text"]) == {"title": "Run conformance shell checks"}
+        assert payload["stop_reason"] == "end_turn"
+        assert not probe.finished and not probe.tool_calls
+        if not scenario.usage:
+            assert "usage" not in payload
+            if stream:
+                events = [json.loads(line[6:]) for line in reply.text.splitlines() if line.startswith("data: ")]
+                assert "usage" not in events[0]["message"]
+                assert all("usage" not in event for event in events)
+        reply = client.post("/ng-rollout/0-0/v1/messages", json=messages_body(False))
+        assert reply.status_code == 200
+        if scenario.tool_steps:
+            assert reply.json()["content"][0]["name"] == "Bash"
+            assert len(probe.tool_calls) == 1 and not probe.finished
+        else:
+            assert reply.json()["content"] == [{"type": "text", "text": "CONFORMANCE_DONE"}]
+            assert probe.finished
+        # Background title traffic can finish after the task or between tool turns.
+        assert client.post("/ng-rollout/0-0/v1/messages", json=title).status_code == 200
+    assert not probe.violations
+    captures = [row for _, row in json_rows(tmp_path / "capture/0-0.capture.jsonl")]
+    assert len(captures) == len(probe.attempts) == 3
+    assert [row["request"] for row in captures] == [attempt["request"] for attempt in probe.attempts]
+    assert captures[0]["request"] == title
+    assert "token_ids" not in json.dumps(captures)
+
+
+@pytest.mark.parametrize("mismatch", ["instruction", "schema", "user_instruction", "tools"])
+def test_claude_title_detection_requires_observed_contract(tmp_path, mismatch):
+    probe = Probe(next(s for s in SCENARIOS if s.name == "tool_success"), tmp_path)
+    body = title_body(False)
+    if mismatch == "instruction":
+        body["system"] = [{"type": "text", "text": "Solve the task and provide a title."}]
+    elif mismatch == "schema":
+        body["output_config"]["format"]["schema"]["properties"]["answer"] = {"type": "string"}
+    elif mismatch == "user_instruction":
+        body["messages"][0]["content"] = body.pop("system")
+    else:
+        body["tools"] = messages_body(False)["tools"]
+    with TestClient(probe.model_app()) as client:
+        reply = client.post("/v1/messages", json=body)
+    if mismatch == "tools":
+        assert reply.status_code == 200 and reply.json()["content"][0]["type"] == "tool_use"
+    else:
+        assert reply.status_code == 409
+        assert probe.violations == ["harness did not advertise a supported shell tool"]
+
+
+def test_title_helper_keeps_existing_http_error_schedule(tmp_path):
+    probe = Probe(next(s for s in SCENARIOS if s.name == "retry_429"), tmp_path)
+    with TestClient(probe.model_app()) as client:
+        for status in (429, 429, 200):
+            assert client.post("/v1/messages", json=title_body(False)).status_code == status
+    assert [attempt["status_code"] for attempt in probe.attempts] == [429, 429, 200]
+    assert not probe.finished and not probe.tool_calls
+
+
+def test_title_helper_does_not_allow_task_requests_after_final_answer(tmp_path):
+    probe = Probe(next(s for s in SCENARIOS if s.name == "judge_verifier"), tmp_path)
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/messages", json=title_body(False)).status_code == 200
+        assert client.post("/v1/messages", json=messages_body(False)).status_code == 200
+        assert client.post("/v1/messages", json=title_body(False)).status_code == 200
+        assert client.post("/v1/messages", json=messages_body(False)).status_code == 409
+    assert probe.violations == ["unexpected model request after the scripted final answer"]
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "retry_429", "retry_500", "usage_omitted"])
 def test_messages_tools_retries_and_usage_match_raw_capture(tmp_path, stream, scenario_name):

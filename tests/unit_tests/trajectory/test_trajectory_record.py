@@ -13,6 +13,7 @@ from nemo_gym.trajectory.trajectory_record import (
     ModelCallRef,
     ObservationGap,
     SandboxObservation,
+    SessionTitleObservation,
     ToolCallObservation,
     TrajectoryModelCall,
     TrajectoryRecord,
@@ -367,6 +368,42 @@ def test_join_model_calls_resolves_compaction_boundaries() -> None:
     assert compaction.model_calls[0].model_call_id == "call-compaction"
     assert compaction.after_model_call.model_call_id == "call-after"
     assert joined.gaps == []
+
+
+@pytest.mark.parametrize("version", ["1.0", "2.0"])
+def test_title_calls_keep_identity_and_unknown_usage_through_join_and_serialization(version: str) -> None:
+    model_ref = ModelServerRef(name="policy", type="responses_api_models")
+    reference = ModelCallRef(model_ref=model_ref, response_id="title-response")
+    bundle = AgentObservationBundle(
+        schema_version=version,
+        source="claude_code",
+        records=[
+            AgentInvocation(invocation_id="root", model_calls=[reference]),
+            SessionTitleObservation(invocation_id="root", model_calls=[reference]),
+        ],
+    )
+    call = ModelCallRecord(model_call_id="title-call", model_ref=model_ref, response_id="title-response", call_index=0)
+    joined = join_agent_model_calls(bundle, [call])
+    restored = AgentObservationBundle.model_validate(joined.model_dump(mode="json"))
+    assert restored.records[0].model_calls == restored.records[1].model_calls
+    assert restored.records[1].model_calls[0].model_call_id == "title-call"
+    assert restored.gaps == []
+    assert bundle.records[1].model_calls[0].model_call_id is None
+    assert call.tokens_in is None and call.tokens_out is None
+
+
+@pytest.mark.parametrize("owner", [None, "other"])
+def test_title_purpose_cannot_invent_or_override_ownership(owner: str | None) -> None:
+    reference = ModelCallRef(model_call_id="title-call")
+    records = [SessionTitleObservation(invocation_id="root", model_calls=[reference])]
+    if owner is not None:
+        records.append(AgentInvocation(invocation_id=owner, model_calls=[reference]))
+    joined = join_agent_model_calls(
+        AgentObservationBundle(source="test", records=records),
+        [ModelCallRecord(model_call_id="title-call", call_index=0)],
+    )
+    expected = "model_call_ownership_unavailable" if owner is None else "model_call_reference_conflict"
+    assert any(gap.code == expected and gap.invocation_id == "root" for gap in joined.gaps)
 
 
 def test_join_model_calls_rejects_cross_invocation_compaction_ownership() -> None:

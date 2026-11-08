@@ -29,6 +29,7 @@ from nemo_gym.trajectory import (
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
+    SessionTitleObservation,
     ToolCallObservation,
 )
 
@@ -664,6 +665,142 @@ def extract_claude_code_observations(
         ],
         gaps=gaps,
     )
+
+
+def _is_title_request(request: dict[str, Any]) -> bool:
+    # Claude Code 2.1.108's title helper has both this system instruction and this
+    # output contract. A task request without tools is not sufficient evidence.
+    system = request.get("system")
+    if isinstance(system, str):
+        texts = [system]
+    elif isinstance(system, list):
+        texts = [
+            item["text"]
+            for item in system
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)
+        ]
+    else:
+        return False
+    output_config = request.get("output_config")
+    return (
+        request.get("tools") == []
+        and any(
+            text.startswith(
+                "Generate a concise, sentence-case title (3-7 words) that captures the main topic "
+                "or goal of this coding session."
+            )
+            for text in texts
+        )
+        and isinstance(output_config, dict)
+        and output_config.get("format")
+        == {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        }
+    )
+
+
+def associate_claude_code_title_calls(
+    bundle: AgentObservationBundle, calls: list[ModelCallRecord], *, model_ref: ModelServerRef
+) -> AgentObservationBundle:
+    """Associate title attempts by their exact request contract and existing root session identity."""
+    if bundle.source != SOURCE:
+        return bundle
+    invocation_counts = Counter(
+        record.invocation_id for record in bundle.records if isinstance(record, AgentInvocation)
+    )
+    if any(count > 1 for count in invocation_counts.values()):
+        return bundle
+    result = bundle.model_copy()
+    result.records = [
+        record.model_copy(update={"model_calls": list(record.model_calls)})
+        if isinstance(record, (AgentInvocation, SessionTitleObservation))
+        else record
+        for record in bundle.records
+    ]
+    result.gaps = list(bundle.gaps)
+    invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
+    orphan_children = {gap.invocation_id for gap in bundle.gaps if gap.code == "subagent_parent_unavailable"}
+    call_counts = Counter(call.model_call_id for call in calls)
+    call_indices = {call.model_call_id: call.call_index for call in calls}
+
+    def matches(reference: ModelCallRef, call: ModelCallRecord) -> bool:
+        if reference.model_call_id:
+            return reference.model_call_id == call.model_call_id
+        return reference.model_ref == call.model_ref and reference.response_id == call.response_id
+
+    for call in sorted(calls, key=lambda call: call.call_index):
+        if (
+            call.dialect != "messages"
+            or call.model_ref != model_ref
+            or not call.model_call_id
+            or call_counts[call.model_call_id] != 1
+            or call.request is None
+            or not _is_title_request(call.request)
+        ):
+            continue
+        metadata = call.request.get("metadata")
+        if not isinstance(metadata, dict) or not isinstance(metadata.get("user_id"), str):
+            continue
+        try:
+            identity = json.loads(metadata["user_id"])
+        except ValueError:
+            continue
+        if (
+            not isinstance(identity, dict)
+            or not isinstance(identity.get("session_id"), str)
+            or not identity["session_id"]
+            or (call.client_session_id is not None and call.client_session_id != identity["session_id"])
+            or any(key in mapping for mapping in (identity, metadata, call.request) for key in ("agentId", "agent_id"))
+        ):
+            continue
+        owners = [record for record in invocations if record.invocation_id == identity["session_id"]]
+        if len(owners) != 1:
+            continue
+        owner = owners[0]
+        if owner.parent_invocation_id is not None or owner.spawned_by_tool_call_id is not None:
+            continue
+        if owner.invocation_id in orphan_children:
+            continue
+        # A matching ID must not steal a call from another invocation or purpose.
+        if any(
+            matches(reference, call)
+            and (
+                record.invocation_id != owner.invocation_id
+                or isinstance(record, ContextCompactionObservation)
+                or (reference.model_ref is not None and reference.model_ref != model_ref)
+                or (reference.response_id is not None and reference.response_id != call.response_id)
+            )
+            for record in result.records
+            if isinstance(record, (AgentInvocation, ContextCompactionObservation, SessionTitleObservation))
+            for reference in record.model_calls
+        ):
+            continue
+        titles = [
+            record
+            for record in result.records
+            if isinstance(record, SessionTitleObservation) and record.invocation_id == owner.invocation_id
+        ]
+        if len(titles) > 1:
+            continue
+        reference = ModelCallRef(
+            model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id
+        )
+        if titles:
+            title = titles[0]
+            if not any(matches(existing, call) for existing in title.model_calls):
+                title.model_calls.append(reference)
+            title.model_calls.sort(key=lambda ref: call_indices.get(ref.model_call_id, math.inf))
+        else:
+            result.records.append(SessionTitleObservation(invocation_id=owner.invocation_id, model_calls=[reference]))
+        if not any(matches(existing, call) for existing in owner.model_calls):
+            owner.model_calls.append(reference)
+    return result
 
 
 def associate_claude_code_compaction_calls(

@@ -88,6 +88,7 @@ from nemo_gym.trajectory import (
 )
 from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
+    associate_claude_code_title_calls,
     extract_claude_code_observations,
 )
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
@@ -844,7 +845,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             state.observations = AgentObservationBundle(
                 source="claude_code", gaps=[ObservationGap(code="agent_artifact_unavailable")]
             )
-        state.observations = await self._associate_compaction_calls(state.observations, rollout_id=rollout_id)
+        state.observations = await self._associate_helper_calls(state.observations, rollout_id=rollout_id)
         if state.runtime_info is None:
             state.observations.gaps.append(ObservationGap(code="runtime_info_unavailable"))
         if cleanup:
@@ -853,6 +854,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 SandboxObservation(
                     role="agent",
                     provider=access.connection.provider_config_ref if access else self.config.sandbox_provider,
+                    sandbox_id=state.session.sandbox.sandbox_id,
                     outcome=(
                         "timeout"
                         if cleanup["timed_out"]
@@ -895,18 +897,11 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             return (await asyncio.shield(state.task)).model_copy(deep=True)
         return await self._create_response(body, rollout_id=request.path_params.get("rollout_id"))
 
-    async def _associate_compaction_calls(
+    async def _associate_helper_calls(
         self, observations: AgentObservationBundle, *, rollout_id: str | None
     ) -> AgentObservationBundle:
         """Resolve Claude's hidden helpers before handing its bundle to the collector."""
-        if (
-            rollout_id is None
-            or self.config.model_server is None
-            or not any(
-                isinstance(record, ContextCompactionObservation) and not record.model_calls
-                for record in observations.records
-            )
-        ):
+        if rollout_id is None or self.config.model_server is None:
             return observations
         try:
             capture_dirs = model_call_capture_dirs_from_config(self.server_client.global_config_dict)
@@ -917,12 +912,15 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             calls, _ = await asyncio.to_thread(
                 read_available_model_call_records, CaptureStore(capture_dirs[0], create=False), rollout_id
             )
-            return associate_claude_code_compaction_calls(
-                observations, [call for call in calls if call.model_ref == self.config.model_server]
+            calls = [call for call in calls if call.model_ref == self.config.model_server]
+            return associate_claude_code_title_calls(
+                associate_claude_code_compaction_calls(observations, calls), calls, model_ref=self.config.model_server
             )
         except Exception:
-            LOG.warning("Could not associate Claude Code compaction calls for rollout %s.", rollout_id, exc_info=True)
-            observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
+            LOG.warning("Could not associate Claude Code helper calls for rollout %s.", rollout_id, exc_info=True)
+            observations.gaps.append(ObservationGap(code="session_title_model_call_join_failed"))
+            if any(isinstance(record, ContextCompactionObservation) for record in observations.records):
+                observations.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
             return observations
 
     async def _create_episode(
@@ -967,7 +965,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 source="claude_code",
                 gaps=[ObservationGap(code="agent_transcript_unavailable")],
             )
-        observations = await self._associate_compaction_calls(observations, rollout_id=rollout_id)
+        observations = await self._associate_helper_calls(observations, rollout_id=rollout_id)
         observations.gaps.append(ObservationGap(code="no_sandbox_runtime"))
         return AgentEpisode(response=response, observations=observations)
 

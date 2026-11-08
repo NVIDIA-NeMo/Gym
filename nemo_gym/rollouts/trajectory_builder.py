@@ -40,6 +40,7 @@ from nemo_gym.trajectory.trajectory_record import (
     ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
+    SessionTitleObservation,
     ToolCallObservation,
     TrajectoryModelCall,
     TrajectoryRecord,
@@ -127,12 +128,13 @@ def _turns_from_model_calls(
     *,
     verifier_invocations: Iterable[VerifierInvocation] = (),
     compactions: Sequence[ContextCompactionObservation] = (),
+    session_titles: Sequence[SessionTitleObservation] = (),
 ) -> list[TrajectoryTurn]:
     """Build policy turns from captured calls for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent. Compaction helpers remain invocation-owned
+    or auxiliary calls that do not belong to the agent. Compaction and session-title helpers remain invocation-owned
     calls for token accounting, but never become policy turns, even when agent ownership claims
     conflict. Preserve those claims for validation rather than choosing which owner is correct.
     Explicit verifier ownership also excludes a call from turns when an agent incorrectly references it;
@@ -150,9 +152,9 @@ def _turns_from_model_calls(
             if ref.response_id:
                 invocation_by_response_id[ref.response_id] = invocation.invocation_id
 
-    compaction_calls: set[int] = set()
-    for compaction in compactions:
-        for ref in compaction.model_calls:
+    helper_calls: set[int] = set()
+    for helper in (*compactions, *session_titles):
+        for ref in helper.model_calls:
             matches = [
                 call
                 for call in model_calls
@@ -162,7 +164,7 @@ def _turns_from_model_calls(
             ]
             # Unresolved or ambiguous references must not silently hide policy calls.
             if len(matches) == 1:
-                compaction_calls.add(id(matches[0]))
+                helper_calls.add(id(matches[0]))
 
     turns: list[TrajectoryTurn] = []
     turn_counts: Counter = Counter()
@@ -177,7 +179,7 @@ def _turns_from_model_calls(
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )
-        if invocation_id is None or id(call) in compaction_calls:
+        if invocation_id is None or id(call) in helper_calls:
             continue
         question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
         turn_counts[invocation_id] += 1
@@ -216,6 +218,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
     compactions: list[ContextCompactionObservation] = []
+    session_titles: list[SessionTitleObservation] = []
 
     producer_turns_observed = False
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
@@ -254,6 +257,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             compactions = [
                 record for record in observations.records if isinstance(record, ContextCompactionObservation)
             ]
+            session_titles = [record for record in observations.records if isinstance(record, SessionTitleObservation)]
             gaps.extend(observations.gaps)
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
             producer_invocation_ids = {record.invocation_id for record in invocations}
@@ -414,6 +418,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             result.get("resolved"),
             verifier_invocations=verifier_invocations,
             compactions=compactions,
+            session_titles=session_titles,
         )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))

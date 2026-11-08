@@ -89,6 +89,41 @@ def is_compaction_request(body: dict) -> bool:
     return last.get("role") == "user" and message_content_to_text(last.get("content")).startswith(SUMMARY_PROMPTS)
 
 
+def _is_claude_title_request(body: dict) -> bool:
+    # Claude Code 2.1.108 sends this helper independently of the task conversation.
+    # Both its explicit instruction and its exact output contract are required.
+    system = body.get("system") or []
+    texts = (
+        [system]
+        if isinstance(system, str)
+        else [
+            item["text"]
+            for item in system
+            if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str)
+        ]
+    )
+    return (
+        body.get("tools") == []
+        and any(
+            text.startswith(
+                "Generate a concise, sentence-case title (3-7 words) that captures the main topic "
+                "or goal of this coding session."
+            )
+            for text in texts
+        )
+        and (body.get("output_config") or {}).get("format")
+        == {
+            "type": "json_schema",
+            "schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+                "required": ["title"],
+                "additionalProperties": False,
+            },
+        }
+    )
+
+
 @dataclass
 class Probe:
     scenario: Scenario
@@ -251,6 +286,7 @@ class Probe:
     async def model(self, request: Request) -> JSONResponse | StreamingResponse:
         wire_body = await request.json()
         messages = request.url.path.endswith("/messages")
+        title_helper = messages and _is_claude_title_request(wire_body)
         body = (
             _ANTHROPIC_CONVERTER.anthropic_request_to_responses(wire_body).model_dump(exclude_none=True)
             if messages
@@ -272,15 +308,31 @@ class Probe:
             }
         else:
             try:
-                if self.finished:
+                if self.finished and not title_helper:
                     raise ValueError("unexpected model request after the scripted final answer")
                 # A summary can cover only older history. Policy requests must still
                 # show every executed result before receiving the next scripted action.
-                if not compacting and any(
+                if not (compacting or title_helper) and any(
                     not call["result_seen"] or not call.get("executed") for call in self.tool_calls
                 ):
                     raise ValueError("tool execution or model-visible result was not witnessed")
-                if compacting:
+                if title_helper:
+                    output = [
+                        {
+                            "type": "message",
+                            "id": f"msg_{uuid4().hex}",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [
+                                {
+                                    "type": "output_text",
+                                    "text": '{"title":"Run conformance shell checks"}',
+                                    "annotations": [],
+                                }
+                            ],
+                        }
+                    ]
+                elif compacting:
                     if self.scenario.compaction is not True or not self.tool_calls or self.compaction_response_ids:
                         raise ValueError("unexpected compaction request outside the single summary stage")
                     output = [

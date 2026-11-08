@@ -59,7 +59,9 @@ def run_case(monkeypatch, tmp_path):
         close_error=False,
         seed={"sandbox_descriptor": {"sandbox_id": "task-sandbox", "workdir": "/task/repo"}},
     )
-    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock())
+    remote = SimpleNamespace(
+        sandbox_id="task-sandbox", exec=AsyncMock(return_value=result()), upload=AsyncMock(), start=AsyncMock()
+    )
     provider = SimpleNamespace(name="local", aclose=AsyncMock())
     context.remote = remote
     context.provider = provider
