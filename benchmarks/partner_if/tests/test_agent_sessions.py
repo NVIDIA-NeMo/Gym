@@ -363,6 +363,7 @@ async def test_environment_closes_each_session_before_verify_and_grades_only_dec
     config = environment.OrderingEnvironmentConfig.model_construct(
         agent_server=SimpleNamespace(name="agent"),
         resources_server=SimpleNamespace(name="partner_if"),
+        tool_servers=[],
         max_parent_turns=1 if mode == "safe_cutoff" else 6,
         max_policy_calls=8,
     )
