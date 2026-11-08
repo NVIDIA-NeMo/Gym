@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 """Prepare matched SWE training inputs using RL's existing controller and Gym task loaders.
 
 No model calls, sandboxes or training jobs are started. Harbor preparation may read
@@ -12,13 +13,20 @@ import importlib.util
 import json
 import math
 import subprocess
+import sys
 from pathlib import Path
+
+
+# A mounted snapshot rejects untracked bytecode. Disable it before importing any
+# local module, including when this preparer is invoked without Python's -B flag.
+sys.dont_write_bytecode = True
 
 from huggingface_hub import HfApi
 from omegaconf import DictConfig, OmegaConf
 from scripts.check_swe_training_recipe import DEFAULT_HARDWARE_PROFILE, HARDWARE_PROFILES
 from scripts.prepare_swe_verifier_controls import ROOT, clean_revision, digest, select_rows
 from scripts.swe_rows_to_harbor.convert import convert, server_config, task_folder_name
+from scripts.swe_source_mount import GYM_RELATIVE, check_image_binding, snapshot
 
 from nemo_gym.data import materialize_task
 from nemo_gym.data.tasks.harbor import materialize_task as materialize_harbor_task
@@ -387,6 +395,18 @@ def prepare(args: argparse.Namespace) -> dict:
     if model_path.name != revision:
         raise ValueError(f"Use the pinned Hugging Face snapshot directory ending in {revision}")
     model_provenance = model_manifest(model, revision, model_path)
+    mount_image_path = getattr(args, "source_mount_image_provenance", None)
+    source_mount = None
+    if mount_image_path is not None:
+        if ROOT.resolve() != (rl_root / GYM_RELATIVE).resolve():
+            raise ValueError("Source mounting requires preparing from the nested Gym checkout")
+        base_image = json.loads(mount_image_path.read_text())
+        source_mount = {
+            "base_image": base_image,
+            "snapshot": snapshot(
+                rl_root, base_rl_commit=base_image["rl_commit"], base_gym_commit=base_image["gym_commit"]
+            ),
+        }
     output.mkdir(parents=True, exist_ok=False)
     for name, data in assets.items():
         destination = output / name
@@ -420,6 +440,11 @@ def prepare(args: argparse.Namespace) -> dict:
     configure_gym(
         config, harnesses=args.harnesses, route=args.route, output=output, parser_cache=parser_cache, prepared=prepared
     )
+    if source_mount is not None:
+        config.env.nemo_gym.skip_venv_if_present = True
+        config.env.nemo_gym.uv_venv_dir = "/opt/gym_venvs"
+        config.env.nemo_gym.cache_dir = str(output / "runtime-cache")
+        config.env.nemo_gym.results_dir = str(output / "gym-results")
     config.policy.megatron_cfg.expert_model_parallel_size = ep
     config.grpo.num_prompts_per_step = 8 * len(args.harnesses)
     config.grpo.num_generations_per_prompt = generations
@@ -471,15 +496,26 @@ def prepare(args: argparse.Namespace) -> dict:
                 and "tests" not in path.parts
             ):
                 manifest["runtime_files_sha256"][f"{label}/{name}"] = digest(path.read_bytes())
+    if source_mount is not None:
+        manifest["source_mount"] = {"base_image": source_mount["base_image"]}
+        check_image_binding(manifest, source_mount["base_image"])
+        source_file = output / "source-mount.json"
+        source_file.write_text(json.dumps(source_mount["snapshot"], indent=2) + "\n")
+        manifest["files_sha256"][source_file.name] = digest(source_file.read_bytes())
     (output / "provenance.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--source-mount-image-provenance",
+        type=Path,
+        help="Reuse this image's compiled environments with a compatible, self-contained source snapshot",
+    )
     for name in ("rl-root", "source", "parser-cache", "model-path", "output-dir"):
         parser.add_argument(f"--{name}", type=Path, required=True)
-    parser.add_argument("--rl-revision", required=True, help="Exact reviewed RL commit used by the container build")
+    parser.add_argument("--rl-revision", required=True, help="Exact reviewed RL commit that will execute")
     for name in ("roster", "image-pins"):
         parser.add_argument(f"--{name}", type=Path, default=ROOT / "examples/training/swe_selection.json")
     parser.add_argument("--route", choices=("old-run", "single-agent-turn", "harbor"), default="single-agent-turn")

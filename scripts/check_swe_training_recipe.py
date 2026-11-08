@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+# ruff: noqa: E402
 """Check prepared training assets and the built container before an RL job starts."""
 
 import argparse
@@ -8,10 +9,20 @@ import json
 import platform
 import re
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+
+sys.dont_write_bytecode = True
+
 from omegaconf import DictConfig, OmegaConf
+
+
+if __package__:
+    from .swe_source_mount import check_image_binding, check_runtime_imports, check_snapshot
+else:
+    from swe_source_mount import check_image_binding, check_runtime_imports, check_snapshot
 
 
 @dataclass(frozen=True)
@@ -141,6 +152,7 @@ def main() -> None:
     parser.add_argument("--container", type=Path)
     parser.add_argument("--container-provenance", type=Path)
     parser.add_argument("--runtime", action="store_true")
+    parser.add_argument("--source-mount", action="store_true")
     parser.add_argument(
         "--rl-config-only",
         action="store_true",
@@ -156,6 +168,8 @@ def main() -> None:
         print("RL_CONFIG_SCHEMA_PASSED")
         return
     manifest = json.loads((args.prepared / "provenance.json").read_text())
+    if not args.runtime and bool(manifest.get("source_mount")) != args.source_mount:
+        raise ValueError("Launch mode must match preparation: use --source-mount only for a mounted preparation")
     # Older preparations used the four-B300 recipe without an explicit profile.
     profile_name = manifest.get("hardware_profile", DEFAULT_HARDWARE_PROFILE)
     if profile_name not in HARDWARE_PROFILES:
@@ -167,6 +181,8 @@ def main() -> None:
             if not Path(path).resolve().is_relative_to(args.shared_root.resolve()):
                 raise ValueError(f"Runtime asset lies outside the shared mount: {path}")
     check_files(args.prepared, roots, manifest)
+    if manifest.get("source_mount"):
+        check_snapshot(roots["rl"], json.loads((args.prepared / "source-mount.json").read_text()))
     config = OmegaConf.load(args.prepared / "config.yaml")
     check_megatron_activation(config, model_path=Path(manifest["model"]["path"]))
     generation = config.policy.generation.colocated
@@ -207,14 +223,21 @@ def main() -> None:
             "torch": torch.__version__,
             "model_content_checked_against_hub": manifest["model"]["revision"],
         }
+        if manifest.get("source_mount"):
+            receipt["source_mount"] = {
+                "base_image": manifest["source_mount"]["base_image"],
+                "executed_repositories": json.loads((args.prepared / "source-mount.json").read_text())["repositories"],
+                "source_manifest_sha256": file_sha256(args.prepared / "source-mount.json"),
+                "prepared_manifest_sha256": file_sha256(args.prepared / "provenance.json"),
+                "imports": check_runtime_imports(config),
+                "qualification": "Existing interpreter imports only; actual Ray/Gym startup and training remain separate evidence",
+            }
         (args.prepared / "runtime-check.json").write_text(json.dumps(receipt, indent=2) + "\n")
     else:
         if args.container is None or args.container_provenance is None:
             parser.error("Host checks require --container and --container-provenance")
         image = json.loads(args.container_provenance.read_text())
-        for key in ("gym_commit", "rl_commit", "gym_lock_sha256", "rl_lock_sha256"):
-            if image[key] != manifest[key]:
-                raise ValueError(f"Container build provenance differs from the prepared recipe: {key}")
+        check_image_binding(manifest, image)
         check_image_identity(image, expected_platform=profile.image_platform)
         if file_sha256(args.container) != image["squashfs_sha256"]:
             raise ValueError("Container SquashFS bytes differ from the build provenance")
