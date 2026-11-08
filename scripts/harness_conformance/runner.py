@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 import psutil
+from omegaconf.errors import OmegaConfBaseException
 
 from nemo_gym.config import ConfigError
 from nemo_gym.rollouts import harness_capabilities
@@ -32,7 +33,7 @@ from nemo_gym.rollouts.harness_capabilities import (
     render_matrices,
 )
 
-from .episode import HARNESSES
+from .episode import HARNESSES, prepared_settings
 from .scenarios import SCENARIOS, SUITE, Scenario, suite_manifest
 
 
@@ -189,6 +190,10 @@ def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dic
                 witness_path,
                 directory / "runtime.json",
                 directory / "launch.json",
+                directory / "effective_agent_config.json",
+                directory / "prepared_settings.json",
+                directory / "local_overrides.json",
+                directory / "sampling_requests.jsonl",
                 health_report,
             )
             if path.exists()
@@ -203,15 +208,31 @@ def run_suite(
     output: Path,
     timeout: float,
     gate_tier: PriorityTier = "P0",
+    prepared_config: Path | None = None,
+    agent_name: str | None = None,
+    model_sampling: Path | None = None,
+    policy_model_name: str | None = None,
 ) -> tuple[dict, int]:
     """Run each requested harness/scenario in a fresh process and publish the completed report."""
     if not harnesses or not scenarios:
         raise ValueError("at least one harness and one scenario are required")
     if not any(s.tier <= gate_tier for s in scenarios):
         raise ValueError("no selected scenarios are covered by --gate-tier; use --gate-tier P1 for compaction")
+    if prepared_config is not None and len(harnesses) != 1:
+        raise ValueError("--prepared-config requires exactly one --harness")
+    settings = prepared_settings(
+        harness=harnesses[0],
+        config_path=prepared_config,
+        agent_name=agent_name,
+        sampling_path=model_sampling,
+        policy_model_name=policy_model_name,
+    )
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     manifest = suite_manifest(scenarios)
+    if settings is not None:
+        (output / "prepared_settings.json").write_text(_json(settings))
+        manifest["prepared_settings_sha256"] = digest_file(output / "prepared_settings.json")
     manifest.update(
         harnesses=harnesses,
         timeout=timeout,
@@ -250,6 +271,8 @@ def run_suite(
                 "--timeout",
                 str(timeout),
             ]
+            if settings is not None:
+                command.extend(["--prepared-settings", str(output / "prepared_settings.json")])
             execution = run_process(command, directory=directory, timeout=timeout + 30)
             execution_error |= scenario.tier <= gate_tier and (execution["returncode"] != 0 or execution["timed_out"])
             try:
@@ -327,6 +350,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", type=Path, help="new directory for rollouts, captures, witnesses and reports")
     parser.add_argument("--timeout", type=float, default=90, help="seconds per harness episode (default: 90)")
     parser.add_argument(
+        "--prepared-config", type=Path, help="Gym config or prepared RL config containing env.nemo_gym"
+    )
+    parser.add_argument("--agent-name", help="named agent instance selected from --prepared-config")
+    parser.add_argument(
+        "--policy-model-name", help="actual served alias injected by the RL launcher as policy_model_name"
+    )
+    parser.add_argument(
+        "--model-sampling", type=Path, help="JSON/YAML ModelCallSampling values; require sampling transport"
+    )
+    parser.add_argument(
         "--gate-tier",
         choices=("P0", "P1"),
         default="P0",
@@ -350,8 +383,12 @@ def main(argv: list[str] | None = None) -> int:
             output=args.output,
             timeout=args.timeout,
             gate_tier=args.gate_tier,
+            prepared_config=args.prepared_config,
+            agent_name=args.agent_name,
+            model_sampling=args.model_sampling,
+            policy_model_name=args.policy_model_name,
         )
-    except (ConfigError, OSError, ValueError, TypeError, KeyError) as exc:
+    except (ConfigError, OSError, ValueError, TypeError, KeyError, OmegaConfBaseException) as exc:
         print(f"runner_error: {exc}", file=sys.stderr)
         return 2
     if os.environ.get("GITHUB_ACTIONS") == "true":

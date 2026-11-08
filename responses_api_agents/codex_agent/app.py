@@ -33,7 +33,7 @@ from uuid import uuid4
 
 from anyio import CancelScope
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
+from pydantic import ConfigDict, Field, FilePath, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agents import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -90,6 +90,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from responses_api_agents.codex_agent.model_catalog import load_model_catalog
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     associate_codex_compaction_calls,
@@ -608,11 +609,14 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
     # When None, openai_base_url is used directly (default: the real OpenAI API).
     model_server: Optional[ModelServerRef] = None
     concurrency: int = 32
-    # None -> omit `model` from the generated config and use the Codex CLI's own default. Gym model
-    # servers substitute their configured model anyway; set explicitly for direct endpoints.
+    # None selects gym-policy-model with a Gym Model Server, which substitutes its configured model.
+    # Without a Model Server, None leaves model selection to the CLI; set it for direct endpoints.
     model: Optional[str] = None
     model_context_window: Optional[int] = Field(default=None, gt=0, strict=True)
     model_auto_compact_token_limit: Optional[int] = Field(default=None, gt=0, strict=True)
+    model_catalog_json: FilePath | None = None
+    _model_catalog_text: str | None = PrivateAttr(default=None)
+    _model_catalog_unknown_context: bool = PrivateAttr(default=False)
     openai_api_key: str = ""  # pragma: allowlist secret
     openai_base_url: Optional[str] = None
     sandbox_mode: Literal["read-only", "workspace-write", "danger-full-access"] = "danger-full-access"
@@ -718,6 +722,26 @@ class CodexAgentConfig(BaseResponsesAPIAgentConfig):
         """A tool call cannot outlast the Codex run that makes it."""
         if self.mcp_tool_timeout_seconds is not None and self.mcp_tool_timeout_seconds > self.timeout:
             raise ValueError("mcp_tool_timeout_seconds must not exceed timeout, which bounds the whole Codex run")
+        return self
+
+    @model_validator(mode="after")
+    def validate_model_catalog(self) -> "CodexAgentConfig":
+        """Load a complete catalog once so every invocation stages the same validated bytes."""
+        if self.model_catalog_json is not None:
+            model = self.model or ("gym-policy-model" if self.model_server else None)
+            self._model_catalog_text, self._model_catalog_unknown_context = load_model_catalog(
+                self.model_catalog_json, model=model
+            )
+            overrides = [self.extra_config]
+            if profile := self.extra_config.get("profile"):
+                overrides.append((self.extra_config.get("profiles") or {}).get(profile, {}))
+            if any("model" in override or "model_catalog_json" in override for override in overrides):
+                raise ValueError("Configure model and model_catalog_json through their typed fields")
+            if self._model_catalog_unknown_context and any(
+                getattr(self, name) is not None or any(override.get(name) is not None for override in overrides)
+                for name in ("model_context_window", "model_auto_compact_token_limit")
+            ):
+                raise ValueError("Unknown catalog context conflicts with a finite context or compaction override")
         return self
 
 
@@ -1075,6 +1099,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
         base_url = self._resolve_call_base_url(rollout_id)
         config = self._build_config(base_url, developer_instructions=system, mcp_servers=mcp_servers or None)
         config["model_providers"]["gym"]["http_headers"] = {"x-session-id": invocation_id}
+        if self.config._model_catalog_text is not None:
+            await state.upload_text("home/.codex/models.json", self.config._model_catalog_text)
+            config["model_catalog_json"] = f"{state.session.session_dir}/home/.codex/models.json"
         await state.upload_text("home/.codex/config.toml", toml_dumps(config))
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = self._build_command("-", state.session.workdir)
@@ -1568,6 +1595,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
         codex_home = Path.home() / ".codex_agent" / uuid4().hex
         codex_home.mkdir(parents=True)
         try:
+            if self.config._model_catalog_text is not None:
+                catalog_path = codex_home / "models.json"
+                catalog_path.write_bytes(self.config._model_catalog_text.encode("utf-8"))
+                config = {**config, "model_catalog_json": str(catalog_path)}
             (codex_home / "config.toml").write_text(toml_dumps(config))
             if skills_path:
                 stage_skills(skills_path, codex_home / "skills")

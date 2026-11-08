@@ -108,6 +108,45 @@ hle_equivalence_llm_judge_environment_server:
 
 ## Runtime and model requirements
 
+`model_catalog_json` optionally names a complete catalog on the agent host. The adapter requires
+one exact entry for its effective CLI model, validates the records, and stages the validated UTF-8
+bytes in each invocation's private `CODEX_HOME` for host and sandbox execution. It does not add
+metadata to task prompts. Omission preserves the CLI's existing model resolution.
+
+For Codex **0.144.4**, prepare an unknown-context fallback descriptor from the exact published source:
+
+```bash
+python responses_api_agents/codex_agent/prepare_model_catalog.py \
+  --source-checkout /path/to/openai-codex \
+  --output /tmp/codex-catalog-preparation \
+  --model gym-policy-model --allow-downloads
+```
+
+Preparation requires Rust **1.95.0** on PATH and a checkout containing commit
+`8c68d4c87dc54d38861f5114e920c3de2efa5876`; working-tree changes are excluded by `git archive`.
+It stages an independently written example against the unmodified upstream library, keeps the
+bundled catalog, resolves the actual fallback, and clears only `context_window`, `max_context_window`,
+and `auto_compact_token_limit`. The exporter checks descriptor and instruction parity after reloading.
+An alias already selecting a bundled model is rejected. No upstream implementation or prompt is
+vendored in Gym. Generated catalogs, logs, source archive, and provenance stay in the output directory.
+
+Only source-local lockfile versions may change from `0.0.0` to the release's `0.144.4`; dependency
+versions, revisions, and checksums must remain unchanged. Provenance records both lock hashes.
+Downloads use an isolated Cargo cache. Without `--allow-downloads`, preparation is offline;
+`--cargo-cache /existing/cargo-home` copies an existing cache without modifying it.
+
+Set `model_catalog_json` to the generated `models.json`, and use the exact `--model` alias in the
+agent's `model`. The default alias is `gym-policy-model` only when a Model Server is configured and
+`model` is unset; a composed YAML may set another value. Unknown context rejects finite context or
+compaction overrides, including host `extra_config` and its selected profile. Catalog resolution
+clears Codex's internal fallback-warning marker, which JSON cannot retain; with Gym's default
+features this removes the fallback warning. All serialized non-context fields remain unchanged.
+Keep the selected alias and `comp_hash` fixed and `features.token_budget` disabled. The catalog
+removes automatic token thresholds; it does not blanket-disable manual or model-requested compaction.
+This is preparation evidence, not native CLI qualification or unlimited context. A matched recipe
+still needs separate proof of engine/RL enforcement of **32768 context / 1024 output**, unchanged
+model-visible prompts/tools/history, and behavior on context refusal.
+
 Use a pinned `codex_version` (default **0.144.4**), direct `SandboxAccess`,
 and an absolute task workdir disjoint from the adapter directories under `/tmp` (`/` is accepted: a task
 image without `WORKDIR` runs there, as Harbor starts it). Codex supplies its own shell and

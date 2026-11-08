@@ -13,9 +13,8 @@ import pytest
 import yaml
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from nemo_gym.models.token_capture.records import TokenEntry
-from nemo_gym.models.token_capture.terminal import resolve_terminal
-from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnResult
+from nemo_gym.models.token_capture import TokenEntry, resolve_terminal
+from nemo_gym.server_runtime import SingleAgentTurnResult
 from responses_api_agents.nooa_agent.atom_adapter import invoke_atom
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.invocation import validate_invocation

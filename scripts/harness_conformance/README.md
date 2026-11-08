@@ -122,6 +122,65 @@ directory). During an agent session, the subprocess sandbox provider uses the sa
 local filesystem. These probes qualify the local adapter path; they do not exercise a
 remote sandbox deployment.
 
+### Probe a prepared configuration
+
+Use a prepared agent's settings without changing the default suite:
+
+```bash
+python scripts/run_harness_conformance.py --harness opencode \
+    --prepared-config resolved-gym.yaml --agent-name opencode_agent \
+    --policy-model-name actual-served-model-alias \
+    --model-sampling sampling.json \
+    --scenario tool_success --scenario tool_failure --scenario retry_500 \
+    --output results/prepared-opencode
+```
+
+`--prepared-config` accepts a Gym configuration or the `env.nemo_gym` block in a
+prepared RL configuration. Select exactly one harness and name its agent instance.
+Gym's existing `config_paths` loader merges nested defaults and permission profiles
+in their normal order before applying the supplied configuration. Required
+references must resolve. If the RL launcher normally injects `policy_model_name`,
+pass its actual served alias with `--policy-model-name`; the probe records this
+global before resolving `${policy_model_name}`. A conflicting configured value
+is an input error. This option does not change an agent's explicit model or null
+value, and is unnecessary for an already resolved configuration. It never guesses
+an alias from a checkpoint name. The selected model name, runtime pins, context,
+output, reasoning, compaction, permissions, and token-capture settings are preserved.
+
+Prepared mode replaces the conformance behavior presets, including the special
+compaction preset. Only disposable server addresses, routing/authentication,
+single-worker/concurrency settings, sandbox provider, and workspace paths are
+rewired locally. The resolved selected settings, original input/include hashes,
+and rewired field names are retained in `prepared_settings.json`. Each episode
+also records `local_overrides.json` and the validated `effective_agent_config.json`.
+Unrelated provider blocks are not copied into these artifacts. Use credential-free
+agent settings: the selected behavior configuration is retained. Referenced
+`model_catalog_json` and file-based `settings` inputs are hashed and checked before
+each episode; changed files fail. Other runtime assets are not snapshotted by this
+option, so retain their provenance separately.
+For agent sessions, `runtime.json` records requested runtime pins, not the actual
+installed executable's hash; that proof requires separate runtime evidence.
+
+`--model-sampling` is optional and independent of prepared configuration. Its
+JSON/YAML object uses Gym's `ModelCallSampling` fields, for example
+`{"temperature": 1.0, "top_p": 1.0, "max_output_tokens": 1024}`. Supply the values
+from the recipe being tested. The runner puts them beside each task under
+`_ng_model_sampling` and requires Gym's normal sampling URL segment on policy
+calls. A dropped segment produces HTTP 422. The existing sampling middleware caps
+the caller's output limit, keeping any smaller limit. Verifier calls use the
+`null` segment and keep their own settings. `sampling_requests.jsonl` records
+incoming paths/statuses; `witness.json` and `capture/` retain effective requests.
+The scripted provider generates no training token IDs or log probabilities.
+
+Scenario selection and checks remain unchanged. Selecting `context_compaction`
+with compaction disabled still measures the expected compaction behavior and can
+fail; it is never silently skipped or counted as proof of disabled compaction.
+Choose a diagnostic subset explicitly, or keep the full suite and its measured
+failures. Prepared token-capture requirements that the scripted provider cannot
+satisfy also remain failures. These probes do not establish real-model thinking,
+training-token validity, remote sandbox behavior, or learning. Absence of a summary
+in a short successful scenario does not prove compaction is disabled.
+
 ## Scenarios
 
 ```bash

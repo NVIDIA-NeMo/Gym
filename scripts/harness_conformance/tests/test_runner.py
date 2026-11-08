@@ -153,7 +153,16 @@ def test_session_runtime_does_not_require_host_cli(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "interface", ["legacy", "session", "session_setup_error", "session_response_error", "session_close_error"]
+    "interface",
+    [
+        "legacy",
+        "session",
+        "session_sampling",
+        "session_prepared_compaction",
+        "session_setup_error",
+        "session_response_error",
+        "session_close_error",
+    ],
 )
 async def test_episode_selects_interface_and_collects_through_environment(tmp_path, monkeypatch, interface):
     from types import SimpleNamespace
@@ -215,6 +224,13 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
             calls.append("responses")
             if interface == "session_response_error":
                 raise HTTPException(422, "controlled activation failure")
+            if interface == "session_sampling":
+                reply = await self.server_client.post(
+                    server_name="policy_model",
+                    url_path="/v1/chat/completions",
+                    json={"model": "prepared-alias", "messages": [], "max_tokens": 4096, "temperature": 0.2},
+                )
+                assert reply.status == 200
             return response
 
         async def _close_agent_session_state(self, state):
@@ -240,7 +256,23 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
             await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
     else:
-        await episode.run_episode(harness="codex", scenario_name="tool_success", directory=tmp_path, timeout=10)
+        settings = None
+        scenario_name = "tool_success"
+        if interface == "session_sampling":
+            settings = {"model_sampling": {"temperature": 1.0, "max_output_tokens": 1024}}
+            scenario_name = "judge_verifier"
+        elif interface == "session_prepared_compaction":
+            settings = {
+                "agent": {
+                    "model": "prepared-alias",
+                    "model_context_window": 32768,
+                    "model_auto_compact_token_limit": None,
+                }
+            }
+            scenario_name = "context_compaction"
+        await episode.run_episode(
+            harness="codex", scenario_name=scenario_name, directory=tmp_path, timeout=10, settings=settings
+        )
 
     runtime = json.loads((tmp_path / "runtime.json").read_text())
     witness = json.loads((tmp_path / "witness.json").read_text())
@@ -270,6 +302,22 @@ async def test_episode_selects_interface_and_collects_through_environment(tmp_pa
         if interface == "session":
             assert rollout["ng_agent_observations"]["source"] == "test"
             assert witness["verifications"] == [{"reward": 1.0, "answer_seen": True}]
+        if interface == "session_sampling":
+            attempt = witness["attempts"][0]["request"]
+            assert attempt["max_completion_tokens"] == 1024 and attempt["temperature"] == 1.0
+            assert witness["judge_calls"][0]["request"]["max_tokens"] == 16
+            paths = [row for _, row in json_rows(tmp_path / "sampling_requests.jsonl")]
+            assert any(row["server"] == "policy_model" and "/ng-sampling/" in row["path"] for row in paths)
+            assert any(row["server"] == "judge_model" and "/ng-sampling/null/" in row["path"] for row in paths)
+            [(_, task)] = list(json_rows(tmp_path / "requests.jsonl"))
+            assert task["_ng_model_sampling"] == settings["model_sampling"]
+        if interface == "session_prepared_compaction":
+            launch = json.loads((tmp_path / "launch.json").read_text())["probe_agent"]["responses_api_agents"][
+                "codex_agent"
+            ]
+            assert launch["model_auto_compact_token_limit"] is None
+            assert launch["model"] == "prepared-alias"
+            assert (tmp_path / "effective_agent_config.json").is_file()
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "retry_429"])
