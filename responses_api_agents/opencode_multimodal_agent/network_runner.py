@@ -11,7 +11,9 @@ credentials through that sandbox. Runtime installation happens before this wrapp
 import argparse
 import asyncio
 import contextlib
+import ctypes
 import fcntl
+import ipaddress
 import json
 import os
 import signal
@@ -28,6 +30,89 @@ def origin(url: str) -> tuple[str, int]:
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("Expected an HTTP(S) model URL without embedded credentials")
     return parsed.hostname.lower(), parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def local_addresses() -> set[str]:
+    """Read all local interface addresses before entering the task namespace."""
+
+    class Ifaddrs(ctypes.Structure):
+        pass
+
+    Ifaddrs._fields_ = [
+        ("next", ctypes.POINTER(Ifaddrs)),
+        ("name", ctypes.c_char_p),
+        ("flags", ctypes.c_uint),
+        ("address", ctypes.c_void_p),
+        ("netmask", ctypes.c_void_p),
+        ("destination", ctypes.c_void_p),
+        ("data", ctypes.c_void_p),
+    ]
+    libc = ctypes.CDLL(None, use_errno=True)
+    libc.getifaddrs.argtypes = [ctypes.POINTER(ctypes.POINTER(Ifaddrs))]
+    libc.freeifaddrs.argtypes = [ctypes.POINTER(Ifaddrs)]
+    head = ctypes.POINTER(Ifaddrs)()
+    if libc.getifaddrs(ctypes.byref(head)):
+        raise OSError(ctypes.get_errno(), "Cannot enumerate interfaces for public-web isolation")
+    addresses = set()
+    current = head
+    try:
+        while current:
+            address = current.contents.address
+            if address:
+                family = ctypes.cast(address, ctypes.POINTER(ctypes.c_ushort)).contents.value
+                if family == socket.AF_INET:
+                    addresses.add(str(ipaddress.ip_address(ctypes.string_at(address, 16)[4:8])))
+                elif family == socket.AF_INET6:
+                    addresses.add(str(ipaddress.ip_address(ctypes.string_at(address, 28)[8:24])))
+            current = current.contents.next
+    finally:
+        libc.freeifaddrs(head)
+    if not addresses:
+        raise ValueError("Cannot establish local addresses for public-web isolation")
+    return addresses
+
+
+async def resolved_addresses(destination: tuple[str, int]) -> list[tuple[int, str]]:
+    records = await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(*destination, type=socket.SOCK_STREAM), 10)
+    return list(dict.fromkeys((family, str(ipaddress.ip_address(address[0]))) for family, _, _, _, address in records))
+
+
+def public_address(address: str) -> bool:
+    parsed = ipaddress.ip_address(address)
+    if not parsed.is_global or parsed.is_multicast:
+        return False
+    if isinstance(parsed, ipaddress.IPv6Address):
+        # Refuse mapped/transition forms that can embed a different destination,
+        # including NAT64, 6to4 and Teredo. Native public IPv6 remains supported.
+        return parsed in ipaddress.ip_network("2000::/3") and parsed.sixtofour is None and parsed.teredo is None
+    return True
+
+
+class PublicWebPolicy:
+    """Prototype public-web boundary; explicitly admitted model/tool origins are trusted."""
+
+    def __init__(self, allowed: set[tuple[str, int]], protected_addresses: set[str]):
+        self.allowed = allowed
+        self.protected_addresses = protected_addresses
+
+    async def connect(self, destination: tuple[str, int]):
+        addresses = await resolved_addresses(destination)
+        if not addresses:
+            raise OSError("Destination has no usable addresses")
+        if destination not in self.allowed and any(
+            not public_address(address) or address in self.protected_addresses for _, address in addresses
+        ):
+            raise PermissionError("Destination is not an admitted public-web origin")
+        # Connect to a validated numeric address, never resolve the hostname again.
+        # Validate every answer before connecting so mixed private/public DNS fails closed.
+        for family, address in addresses:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.open_connection(address, destination[1], family=family, flags=socket.AI_NUMERICHOST), 15
+                )
+            except OSError:
+                continue
+        raise OSError("No validated destination address was reachable")
 
 
 async def relay(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -62,7 +147,12 @@ async def splice(
         right_writer.close()
 
 
-async def proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allowed: set[tuple[str, int]]) -> None:
+async def proxy(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    allowed: set[tuple[str, int]],
+    public_web: PublicWebPolicy | None = None,
+) -> None:
     remote_writer = None
     try:
         raw = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 15)
@@ -72,11 +162,19 @@ async def proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, allo
             raise ValueError("Unsupported HTTP version")
         parsed = urlsplit("https://" + target if method == "CONNECT" else target)
         destination = origin(parsed.geturl())
-        if destination not in allowed or (method != "CONNECT" and parsed.scheme != "http"):
+        if (public_web is None and destination not in allowed) or (method != "CONNECT" and parsed.scheme != "http"):
             writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
             await writer.drain()
             return
-        remote_reader, remote_writer = await asyncio.wait_for(asyncio.open_connection(*destination), 15)
+        if public_web is None:
+            remote_reader, remote_writer = await asyncio.wait_for(asyncio.open_connection(*destination), 15)
+        else:
+            try:
+                remote_reader, remote_writer = await public_web.connect(destination)
+            except PermissionError:
+                writer.write(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                await writer.drain()
+                return
         if method == "CONNECT":
             writer.write(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             await writer.drain()
@@ -143,7 +241,7 @@ async def run_child(command: list[str], env: dict[str, str] | None = None) -> in
 
 
 async def run(args: argparse.Namespace) -> int:
-    if args.mode == "inherit":
+    if args.mode == "inherit" and not args.public_web:
         os.execvp(args.command[0], args.command)
     if args.inside:
         loopback_up()
@@ -176,12 +274,23 @@ async def run(args: argparse.Namespace) -> int:
         async with server:
             return await run_child(args.command, env)
     allowed = {origin(args.model_url)}
-    if args.mode == "model_and_tools":
+    if args.mode == "model_and_tools" or args.public_web:
         allowed.update(origin(url) for url in args.tool_url)
+    public_web = None
+    if args.public_web:
+        protected_origins = {origin(url) for url in args.protect_url}
+        if protected_origins & allowed:
+            raise ValueError("Protected control service shares an explicitly allowed origin")
+        addresses = local_addresses()
+        # Prevent another hostname/port reaching a model/tool/control host through
+        # the public-web allowance. Only exact explicit origins receive exceptions.
+        for endpoint in allowed | protected_origins:
+            addresses.update(address for _, address in await resolved_addresses(endpoint))
+        public_web = PublicWebPolicy(allowed, addresses)
     # /tmp keeps Unix socket addresses below Linux's length limit.
     with tempfile.TemporaryDirectory(prefix="gym-net-", dir="/tmp") as directory:
         path = str(Path(directory) / "proxy.sock")
-        server = await asyncio.start_unix_server(lambda r, w: proxy(r, w, allowed), path)
+        server = await asyncio.start_unix_server(lambda r, w: proxy(r, w, allowed, public_web), path)
         os.chmod(path, 0o600)
         async with server:
             return await run_child(
@@ -200,6 +309,7 @@ async def run(args: argparse.Namespace) -> int:
                     str(Path(__file__).resolve()),
                     "--mode",
                     args.mode,
+                    *(["--public-web"] if args.public_web else []),
                     "--inside",
                     path,
                     *(["--bubblewrap"] if args.bubblewrap else []),
@@ -217,6 +327,8 @@ def main() -> int:
         required=True,
     )
     parser.add_argument("--model-url")
+    parser.add_argument("--public-web", action="store_true", help="Prototype isolated public HTTP(S) egress")
+    parser.add_argument("--protect-url", action="append", default=[], help="Control-service origin to deny")
     parser.add_argument("--tool-url", action="append", default=[], help="Accepted MCP grant URL (repeatable)")
     parser.add_argument("--inside", help=argparse.SUPPRESS)
     parser.add_argument("--bubblewrap", action="store_true", help=argparse.SUPPRESS)
@@ -230,7 +342,7 @@ def main() -> int:
         args.command.pop(0)
     if not args.command:
         parser.error("A command is required")
-    if args.mode != "inherit" and not args.inside and not args.model_url:
+    if (args.mode != "inherit" or args.public_web) and not args.inside and not args.model_url:
         config = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or Path("opencode.json").read_text())
         args.model_url = config["provider"]["nemo"]["options"]["baseURL"]
     return asyncio.run(run(args))
