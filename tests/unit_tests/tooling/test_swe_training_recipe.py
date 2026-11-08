@@ -558,16 +558,17 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
 @pytest.mark.parametrize("model,expert_parallel_size", [("4b", 1), ("30b", 2)])
 @pytest.mark.parametrize("hardware_profile,gpus,generation_gpus", [("arm64-b300", 4, 2), ("x86_64-h100", 8, 4)])
 @pytest.mark.parametrize(
-    "steps,count,harnesses,route",
+    "steps,count,harnesses,route,generations",
     [
-        (1, 8, ["opencode"], "single-agent-turn"),
-        (5, 8, ["opencode"], "single-agent-turn"),
-        (20, 8, ["opencode"], "single-agent-turn"),
-        (20, 32, list(recipe.OLD_AGENTS), "old-run"),
-        (20, 32, list(recipe.OLD_AGENTS), "single-agent-turn"),
-        (20, 32, list(recipe.OLD_AGENTS), "harbor"),
-        (20, 32, list(recipe.HARNESSES), "single-agent-turn"),
-        (20, 32, list(recipe.HARNESSES), "harbor"),
+        (1, 8, ["opencode"], "single-agent-turn", 4),
+        (5, 8, ["opencode"], "single-agent-turn", 4),
+        (5, 8, ["opencode"], "single-agent-turn", 8),
+        (20, 8, ["opencode"], "single-agent-turn", 4),
+        (20, 32, list(recipe.OLD_AGENTS), "old-run", 4),
+        (20, 32, list(recipe.OLD_AGENTS), "single-agent-turn", 4),
+        (20, 32, list(recipe.OLD_AGENTS), "harbor", 4),
+        (20, 32, list(recipe.HARNESSES), "single-agent-turn", 4),
+        (20, 32, list(recipe.HARNESSES), "harbor", 4),
     ],
 )
 def test_preparation_materializes_the_requested_update_budget(
@@ -583,6 +584,7 @@ def test_preparation_materializes_the_requested_update_budget(
     hardware_profile,
     gpus,
     generation_gpus,
+    generations,
 ):
     rl_root = tmp_path / "rl"
     rl_root.mkdir()
@@ -638,6 +640,7 @@ def test_preparation_materializes_the_requested_update_budget(
         output_dir=tmp_path / "prepared",
         count=count,
         steps=steps,
+        generations_per_prompt=generations,
         wandb_project=None,
         codex_catalog=codex_catalog if "codex" in harnesses else None,
         hardware_profile=hardware_profile,
@@ -660,10 +663,10 @@ def test_preparation_materializes_the_requested_update_budget(
     assert config.policy.megatron_cfg.tensor_model_parallel_size == 2
     assert config.policy.generation.vllm_cfg.tensor_parallel_size == 2
     width = len(harnesses)
-    assert len(train) == count * width and manifest["episodes"] == steps * 32 * width
+    assert len(train) == count * width and manifest["episodes"] == steps * 8 * width * generations
     assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps * 8 // count
-    assert config.grpo.num_prompts_per_step == 8 * width and config.grpo.num_generations_per_prompt == 4
-    assert config.policy.train_global_batch_size == 32 * width
+    assert config.grpo.num_prompts_per_step == 8 * width and config.grpo.num_generations_per_prompt == generations
+    assert config.policy.train_global_batch_size == 8 * width * generations
     assert config.async_rl.max_inflight_prompts == (4 if steps in (1, 5) else 8 if width == 1 else 16)
     expected_ids = [(row["instance_id"], f"swe_rebench_{harness}") for row in rows for harness in harnesses]
     if route == "old-run":
@@ -722,6 +725,22 @@ def test_preparation_materializes_the_requested_update_budget(
         "enable_thinking": True,
         "truncate_history_thinking": False,
     }
+
+
+@pytest.mark.parametrize("generations", [0, -1])
+def test_invalid_generation_count_rejected_before_source_or_model_access(tmp_path, monkeypatch, generations):
+    monkeypatch.setattr(recipe, "clean_revision", lambda _: pytest.fail("Source accessed before count validation"))
+    with pytest.raises(ValueError, match="Generations per prompt must be positive"):
+        recipe.prepare(
+            SimpleNamespace(
+                rl_root=tmp_path,
+                output_dir=tmp_path / "prepared",
+                harnesses=["opencode"],
+                route="single-agent-turn",
+                generations_per_prompt=generations,
+            )
+        )
+    assert not (tmp_path / "prepared").exists()
 
 
 @pytest.mark.parametrize(

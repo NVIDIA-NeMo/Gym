@@ -360,6 +360,9 @@ def prepare(args: argparse.Namespace) -> dict:
     """Write a fixed cohort/task/harness order and its complete configuration provenance."""
     rl_root, output = args.rl_root.resolve(), args.output_dir.resolve()
     validate_harnesses(args.harnesses, route=args.route)
+    generations = getattr(args, "generations_per_prompt", 4)
+    if generations <= 0:
+        raise ValueError("Generations per prompt must be positive")
     profile_name = getattr(args, "hardware_profile", DEFAULT_HARDWARE_PROFILE)
     if profile_name not in HARDWARE_PROFILES:
         raise ValueError(f"Unsupported hardware profile: {profile_name}")
@@ -419,7 +422,8 @@ def prepare(args: argparse.Namespace) -> dict:
     )
     config.policy.megatron_cfg.expert_model_parallel_size = ep
     config.grpo.num_prompts_per_step = 8 * len(args.harnesses)
-    config.policy.train_global_batch_size = 4 * config.grpo.num_prompts_per_step
+    config.grpo.num_generations_per_prompt = generations
+    config.policy.train_global_batch_size = generations * config.grpo.num_prompts_per_step
     config.grpo.max_num_steps = args.steps
     config.grpo.max_num_epochs = math.ceil(args.steps * 8 / args.count)
     config.async_rl.max_inflight_prompts = 4 if args.steps in (1, 5) else 8 if len(args.harnesses) == 1 else 16
@@ -448,7 +452,7 @@ def prepare(args: argparse.Namespace) -> dict:
         "hardware_profile": profile_name,
         "tasks": tasks,
         "steps": args.steps,
-        "episodes": args.steps * 8 * len(args.harnesses) * 4,
+        "episodes": args.steps * 8 * len(args.harnesses) * generations,
         "ordering": "cohort of eight tasks, task, harness; no shuffle; repeat full epochs",
         "runtime_files_sha256": {},
         "files_sha256": {
@@ -492,6 +496,9 @@ def main() -> None:
     )
     parser.add_argument("--count", choices=(8, 16, 32, 64), type=int, default=32)
     parser.add_argument("--steps", choices=(1, 5, 20), type=int, default=20)
+    parser.add_argument(
+        "--generations-per-prompt", type=int, default=4, help="Training samples per task; also sets global batch size"
+    )
     parser.add_argument("--wandb-project")
     manifest = prepare(parser.parse_args())
     print(
