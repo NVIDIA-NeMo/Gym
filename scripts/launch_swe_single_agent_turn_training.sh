@@ -13,6 +13,7 @@ while (( $# )); do
         --dry-run) dry_run=1 ;;
         --source-mount) source_mount=1 ;;
         --exclude) excluded_nodes=${2:?Pass the excluded node list}; shift ;;
+        --walltime) WALLTIME=${2:?Pass the Slurm time limit}; shift ;;
         --gym-root) gym_root_override=${2:?Pass the source Gym root}; shift ;;
         *) printf 'Unexpected argument: %s\n' "$1" >&2; exit 2 ;;
     esac

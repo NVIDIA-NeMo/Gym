@@ -268,7 +268,17 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
         "SUBMISSION_RECEIPT": str(receipt),
     }
     result = subprocess.run(
-        ["bash", str(copied), "--source-mount", "--gym-root", str(gym), "--exclude", "unhealthy-node"],
+        [
+            "bash",
+            str(copied),
+            "--source-mount",
+            "--gym-root",
+            str(gym),
+            "--exclude",
+            "unhealthy-node",
+            "--walltime",
+            "02:00:00",
+        ],
         env=env,
         capture_output=True,
         text=True,
@@ -286,6 +296,7 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     assert "check_swe_training_recipe" not in lines[5] and "--runtime" not in lines[5]
     assert "test-key" not in result.stdout
     assert "--exclude=unhealthy-node" in lines[6:]
+    assert "--time=02:00:00" in lines[6:]
     assert f"--chdir={tmp_path}" in lines[6:]
     assert f"--output={tmp_path}/slurm/slurm-%j.out" in lines[6:]
     assert f"--error={tmp_path}/slurm/slurm-%j.err" in lines[6:]
