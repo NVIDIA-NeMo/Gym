@@ -49,8 +49,9 @@ with the released short-number boundary rule), and numeric (absolute tolerance).
 The default is contains, matching the released evaluator, although the paper
 describes normalized exact match. Empty/missing/nonfinite targets are rejected.
 This preserves the released contains behavior, including its limitations; it is
-not a hardened training verifier. Final answers use <answer>...</answer>, with
-plain terminal text as a fallback; reasoning blocks are excluded.
+not a hardened training verifier. Final answers use <answer>...</answer> (the
+last tag when there are several), with plain terminal text as a fallback;
+reasoning blocks are excluded.
 
 The response includes tool_trace, counts, overthink and process_scores_available=false.
 Overthink counts successful observable interactions relative to reference_tool_calls;

@@ -36,12 +36,16 @@ def judge_tolerance(metadata: dict[str, Any], golden: GoldenAnswer) -> float:
 
 
 def extract_answer(text: str) -> str:
-    """Extract the public atomic answer format, excluding private reasoning."""
+    """Extract the public atomic answer format, excluding private reasoning.
+
+    With several <answer> tags the last one wins: a model that quotes the format before answering
+    (e.g. <answer>YOUR_SHORT_ANSWER</answer>) is scored on the answer it gives afterwards.
+    """
     text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.S | re.I)
     text = re.split(r"</(?:think|thinking)>", text, flags=re.I)[-1]
     text = re.split(r"<(?:think|thinking)>", text, flags=re.I)[0]
-    match = re.search(r"<answer>(.*?)(?:</answer>|$)", text, re.S | re.I)
-    return (match.group(1) if match else text).strip()
+    answers = re.findall(r"<answer>(.*?)(?:</answer>|$)", text, re.S | re.I)
+    return (answers[-1] if answers else text).strip()
 
 
 def matches_answer(answer: str, golden: GoldenAnswer) -> bool:
