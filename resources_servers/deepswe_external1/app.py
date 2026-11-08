@@ -1,13 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""DeepSWE-style tasks with committed-patch transfer into a fresh verifier."""
+"""DeepSWE-style tasks with committed-patch transfer into a fresh verifier.
+
+The server serves two kinds of seed. An Environment Server such as ``single_agent_turn`` seeds an episode session
+with a ``ResourcesSeedSessionRequest`` and hands the agent sandbox to the agent through ``sandbox_access``; the
+session lifecycle (verify once, close, expiry, shutdown) is ``SandboxSessionResourcesServer``'s. An agent that runs
+the episode itself through ``/run`` seeds with the flat task row and gets the sandbox handle back.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import logging
-from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from math import ceil
 from pathlib import Path
 from shutil import rmtree
@@ -15,8 +21,8 @@ from time import monotonic
 from typing import Any, Literal
 from uuid import uuid4
 
-from fastapi import FastAPI, Request
-from pydantic import Field, model_validator
+from fastapi import Request
+from pydantic import BaseModel, Field, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -32,12 +38,17 @@ from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseVerifyRequest,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionConflictError,
     ReverifyMode,
-    SimpleResourcesServer,
+    lost_session_verification,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.app import (
-    AgentSandboxSession,
     DeepSWEResourcesServer,
     DeepSWESeedSessionResponse,
     DeepSWEVerifyResponse,
@@ -47,6 +58,7 @@ from resources_servers.deepswe.app import (
 from resources_servers.deepswe.task_store import task_sandbox_resources
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.task_data import TaskData
+from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
 logger = logging.getLogger(__name__)
@@ -160,32 +172,39 @@ class DeepsweExternal1VerifyResponse(DeepSWEVerifyResponse):
     cleanup_errors: list[str] = Field(default_factory=list)
 
 
-class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
-    """Reuse DeepSWE collection/grading with self-contained task rows."""
+@dataclass(frozen=True)
+class SeededAgentSandbox:
+    """What a seed recorded about the agent sandbox it started, for checks at verify."""
+
+    task_id: str
+    image: str
+    sandbox_id: str
+    descriptor: dict[str, Any]
+
+
+class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionResourcesServer):
+    """Reuse DeepSWE collection/grading with self-contained task rows.
+
+    Agent sandboxes of both kinds of seed live in ``_session_id_to_sandbox``, so close, expiry and shutdown stop
+    them. Golden- and null-patch validation start and stop their own sandboxes and hold no session.
+    """
 
     config: DeepsweExternal1ResourcesServerConfig
 
     def model_post_init(self, context: Any, /) -> None:
-        SimpleResourcesServer.model_post_init(self, context)
-        self._agent_sessions = {}
+        # DeepSWE comes first in the MRO, so the base's super() call skips DeepSWE's initialization, which loads its
+        # filesystem task store: these rows carry their whole task.
+        SandboxSessionResourcesServer.model_post_init(self, context)
+        self._seeded_agent_sandboxes: dict[str, SeededAgentSandbox] = {}
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        original_lifespan = app.router.lifespan_context
+    async def close_resources_session(
+        self, request: Request, body: ResourcesCloseSessionRequest
+    ) -> ResourcesCloseSessionResponse:
+        """Stop the session's sandboxes unless verify already did, and fence later seeds.
 
-        @asynccontextmanager
-        async def lifespan(application: FastAPI):
-            async with original_lifespan(application) as state:
-                try:
-                    yield state
-                finally:
-                    sessions = list(self._agent_sessions.values())
-                    self._agent_sessions.clear()
-                    for session in sessions:
-                        await self._stop_sandbox(session.sandbox, task_id=session.task_id, phase="server-shutdown")
-
-        app.router.lifespan_context = lifespan
-        return app
+        The close is the shared base's, whatever DeepSWE defines: both kinds of seed register their sandbox there.
+        """
+        return await SandboxSessionResourcesServer.close_resources_session(self, request, body)
 
     def _provider_options(self, *, phase: str) -> dict[str, Any]:
         options = super()._provider_options(phase=phase)
@@ -269,25 +288,45 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             return False
 
     async def seed_session(
-        self, request: Request, body: DeepsweExternal1SeedSessionRequest
-    ) -> DeepSWESeedSessionResponse:
+        self, request: Request, body: DeepsweExternal1SeedSessionRequest | ResourcesSeedSessionRequest
+    ) -> DeepSWESeedSessionResponse | ResourcesSeedSessionResponse:
+        """Start the task's agent sandbox.
+
+        An Environment Server seeds an episode session and gets the sandbox back as ``sandbox_access``. An agent's
+        ``/run`` seeds with the task row and gets the sandbox handle; repeating that seed replaces the sandbox.
+        """
         if self.config.is_verifying_golden_patch or self.config.is_verifying_null_patch:
-            raise RuntimeError("seed_session is unavailable in golden/null-validation mode")
+            raise ResourcesSeedRejectedError("seed_session is unavailable in golden/null-validation mode")
+        if isinstance(body, ResourcesSeedSessionRequest):
+            return await self.seed_task_sandbox_session(request, body, TaskData)
         session_id = str(request.session[SESSION_ID_KEY])
-        previous = self._agent_sessions.pop(session_id, None)
-        if previous is not None:
-            await self._stop_sandbox(previous.sandbox, task_id=previous.task_id, phase="replaced-agent")
-        sandbox = await self._create_sandbox(InlineTask(body), phase="agent")
-        try:
-            descriptor = dict(await sandbox.serialize())
-            handle = descriptor["sandbox_id"]
-            self._agent_sessions[session_id] = AgentSandboxSession(
-                body.task_id, body.image, sandbox, handle, descriptor
-            )
-            return DeepSWESeedSessionResponse(sandbox_handle=handle, sandbox_descriptor=descriptor)
-        except Exception:
-            await self._stop_sandbox(sandbox, task_id=body.task_id, phase="failed-agent-seed")
-            raise
+        async with self._locked_task_session(session_id) as record:
+            if record.seed is not None or self._task_session_fences.get(session_id) is not None:
+                raise ResourcesSessionConflictError("An agent-run seed cannot replace an episode session")
+            await self._stop_task_sandbox(session_id)
+            try:
+                await self._start_task_sandbox(session_id, body)
+            except BaseException:
+                await self._stop_failed_seed_sandbox(session_id)
+                raise
+            seeded = self._seeded_agent_sandboxes[session_id]
+            return DeepSWESeedSessionResponse(sandbox_handle=seeded.sandbox_id, sandbox_descriptor=seeded.descriptor)
+
+    async def _start_task_sandbox(self, session_id: str, task: BaseModel) -> str:
+        """Start and set up the agent sandbox for a task row, and return the repository the agent works in."""
+        data = TaskData.model_validate(task)
+        self._forget_task_sandbox_state(session_id)
+        sandbox = await self._create_sandbox(InlineTask(data), phase="agent")
+        # Own the sandbox before anything else can fail, so a failed seed still stops it.
+        self._session_id_to_sandbox[session_id] = sandbox
+        descriptor = dict(await sandbox.serialize())
+        self._seeded_agent_sandboxes[session_id] = SeededAgentSandbox(
+            data.task_id, data.image, str(descriptor["sandbox_id"]), descriptor
+        )
+        return data.workdir
+
+    def _forget_task_sandbox_state(self, session_id: str) -> None:
+        self._seeded_agent_sandboxes.pop(session_id, None)
 
     async def _execute_golden(self, sandbox: AsyncSandbox, task: InlineTask, log_dir: Path) -> None:
         result = await sandbox.exec(
@@ -299,7 +338,61 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             raise RuntimeError(f"Golden solution failed with exit code {result.return_code}")
 
     async def verify(self, request: Request, body: DeepsweExternal1VerifyRequest) -> DeepsweExternal1VerifyResponse:
-        return await self._verify_task(request, body, InlineTask(body))
+        """Grade the committed patch of the session's agent sandbox, or of a fresh one in a validation mode.
+
+        An episode session is verified once: an identical retry replays the verdict, and a verify after close is
+        masked as a lost session.
+        """
+        task = InlineTask(body)
+        if self.config.is_verifying_golden_patch or self.config.is_verifying_null_patch:
+            return await self._verify_task(request, body, task)
+        return await self.verify_task_sandbox_session(
+            request,
+            body,
+            verify=lambda: self._verify_task(request, body, task),
+            lost_response=lambda reason, failure_kind: self._lost_session_response(body, task, reason, failure_kind),
+        )
+
+    def _check_seeded_agent_sandbox(
+        self, session_id: str, body: DeepsweExternal1VerifyRequest, task: InlineTask
+    ) -> str | None:
+        """Return the ID of the agent sandbox the session seeded, or raise when it does not match the verify task.
+
+        The shared base already matched an episode session's verify task against its seed; its retry may find the
+        sandbox stopped and the patch saved.
+        """
+        seeded = self._seeded_agent_sandboxes.get(session_id)
+        record = self._task_sessions.get(session_id)
+        if record is not None and record.seed is not None:
+            return seeded.sandbox_id if seeded is not None else None
+        if seeded is None or session_id not in self._session_id_to_sandbox:
+            raise SessionMismatchError("No seeded agent sandbox exists for this session")
+        if seeded.task_id != task.data.task_id or seeded.image != task.data.image:
+            raise SessionMismatchError("Seeded session task/image does not match verification")
+        if body.sandbox_handle is not None and body.sandbox_handle != seeded.sandbox_id:
+            raise SessionMismatchError("Sandbox handle does not match the seeded session")
+        return seeded.sandbox_id
+
+    def _lost_session_response(
+        self, body: DeepsweExternal1VerifyRequest, task: InlineTask, reason: str, failure_kind: str
+    ) -> DeepsweExternal1VerifyResponse:
+        return DeepsweExternal1VerifyResponse.model_validate(
+            body.model_dump(include={"responses_create_params", "response", "image", "sandbox_handle"})
+            | {
+                "task_id": task.data.task_id,
+                "validation_mode": "agent",
+                "evaluation_completed": False,
+                "verifier_error": reason,
+                "model_patch_sha256": hashlib.sha256(b"").hexdigest(),
+                "model_patch_bytes": 0,
+                "log_dir": "",
+                "patch_collection_time_s": 0.0,
+                "sandbox_start_time_s": 0.0,
+                "verification_time_s": 0.0,
+                "failure_stage": "agent_setup",
+            }
+            | lost_session_verification(reason, failure_kind=failure_kind)
+        )
 
     async def _collect_model_patch(self, sandbox: AsyncSandbox, task: InlineTask) -> bytes:
         try:
@@ -373,40 +466,50 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
         failure_stage: str | None = "agent_setup"
         try:
             if mode == "agent":
-                session = self._agent_sessions.pop(session_id, None)
-                if session is None:
-                    raise SessionMismatchError("No seeded agent sandbox exists for this session")
-                agent_sandbox = session.sandbox
-                agent_id = session.sandbox_handle
-                if session.task_id != task_id or session.image != task.data.image:
-                    raise SessionMismatchError("Seeded session task/image does not match verification")
-                if body.sandbox_handle is not None and body.sandbox_handle != agent_id:
-                    raise SessionMismatchError("Sandbox handle does not match the seeded session")
+                try:
+                    agent_id = self._check_seeded_agent_sandbox(session_id, body, task)
+                    failure_stage = "patch_collection"
+                    started = monotonic()
+                    # An episode session keeps the capture, so a verify retried after the stop reuses it.
+                    model_patch = await self.capture_task_sandbox_patch(
+                        session_id,
+                        lambda: self._collect_model_patch(self._session_id_to_sandbox[session_id], task),
+                    )
+                    collect_time = monotonic() - started
+                finally:
+                    try:
+                        await self._stop_task_sandbox(session_id)
+                    except Exception:
+                        # The sandbox stays registered, so close, expiry or shutdown retries the stop.
+                        logger.exception("Could not release agent sandbox for %s", task_id)
+                        cleanup_errors.append("agent")
+                log_dir.mkdir(parents=True, exist_ok=True)
+                (log_dir / "model.patch").write_bytes(model_patch)
             else:
                 agent_sandbox = await self._create_sandbox(
                     task, phase="agent", files=task.data.files.solution_files() if mode == "golden" else {}
                 )
                 agent_id = str((await agent_sandbox.serialize())["sandbox_id"])
 
-            try:
-                if mode == "golden":
-                    failure_stage = "golden_execution"
+                try:
+                    if mode == "golden":
+                        failure_stage = "golden_execution"
+                        started = monotonic()
+                        await self._execute_golden(agent_sandbox, task, log_dir)
+                        golden_time = monotonic() - started
+                    failure_stage = "patch_collection"
                     started = monotonic()
-                    await self._execute_golden(agent_sandbox, task, log_dir)
-                    golden_time = monotonic() - started
-                failure_stage = "patch_collection"
-                started = monotonic()
-                model_patch = await self._collect_model_patch(agent_sandbox, task)
-                collect_time = monotonic() - started
-                if mode == "golden" and task.data.files.solution_patch and not model_patch:
-                    raise RuntimeError("Golden solution produced no committed patch")
-                log_dir.mkdir(parents=True, exist_ok=True)
-                (log_dir / "model.patch").write_bytes(model_patch)
-            finally:
-                released = await self._release_sandbox(agent_sandbox, task_id=task_id, phase="agent")
-                agent_sandbox = None
-                if not released:
-                    cleanup_errors.append("agent")
+                    model_patch = await self._collect_model_patch(agent_sandbox, task)
+                    collect_time = monotonic() - started
+                    if mode == "golden" and task.data.files.solution_patch and not model_patch:
+                        raise RuntimeError("Golden solution produced no committed patch")
+                    log_dir.mkdir(parents=True, exist_ok=True)
+                    (log_dir / "model.patch").write_bytes(model_patch)
+                finally:
+                    released = await self._release_sandbox(agent_sandbox, task_id=task_id, phase="agent")
+                    agent_sandbox = None
+                    if not released:
+                        cleanup_errors.append("agent")
 
             if cleanup_errors:
                 failure_stage = "agent_cleanup"
@@ -417,6 +520,9 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
             verifier_sandbox = await self._create_sandbox(
                 task, phase="verifier", files=task.data.files.verification_files(model_patch)
             )
+            if mode == "agent":
+                # Registered with the session, so close or shutdown stops a verifier this request cannot release.
+                self._verifier_sandboxes[session_id] = verifier_sandbox
             verifier_id = str((await verifier_sandbox.serialize())["sandbox_id"])
             if verifier_id == agent_id:
                 raise RuntimeError("Provider reused the agent sandbox as the verifier")
@@ -445,7 +551,10 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer):
                 if not await self._release_sandbox(agent_sandbox, task_id=task_id, phase="agent"):
                     cleanup_errors.append("agent")
             if verifier_sandbox is not None:
-                if not await self._release_sandbox(verifier_sandbox, task_id=task_id, phase="verifier"):
+                if await self._release_sandbox(verifier_sandbox, task_id=task_id, phase="verifier"):
+                    if self._verifier_sandboxes.get(session_id) is verifier_sandbox:
+                        self._verifier_sandboxes.pop(session_id)
+                else:
                     cleanup_errors.append("verifier")
 
         response = DeepsweExternal1VerifyResponse.model_validate(

@@ -33,12 +33,26 @@ standalone golden/null validation without an agent.
 
 Configure the sandbox connection and model credentials privately. The model-server
 address must be reachable from the sandbox. The OpenCode configuration is inherited
-from Gym; offline images need its locally cached binary setup.
+from Gym. The agent sandbox denies network except the model host, so OpenCode cannot
+download its runtime there: set `opencode_agent`'s `sandbox_executable_path` and
+`sandbox_executable_sha256` to a binary already in the sandbox, or use images that ship
+the runtime at its cache path.
 The hosted-inference example normalizes structured reasoning for Gym's chat
 contract. Select the model adapter appropriate for your endpoint; training that
 requires token IDs needs a compatible training model server.
-The OpenCode config includes upstream's `legacy_agent` environment server for
-rollout routing; it forwards requests without changing task rows or grading.
+
+`deepswe_external1_opencode.yaml` runs `opencode_agent` through `single_agent_turn`:
+the server seeds an episode session, lends the agent sandbox to the agent session
+through `sandbox_access`, and after the agent closes grades the committed patch in a
+fresh verifier. Rows reach it through the `deepswe_external1` taskset. An episode
+session is verified once; an identical retry replays the verdict, and a verify after
+close is masked as a lost session. Close stops the agent sandbox if verify did not.
+
+`deepswe_external1_opencode_legacy_agent.yaml` is deprecated. It runs
+`opencode_sandboxed_agent` through the `legacy_agent` relay, which seeds with the flat
+row and gets the sandbox handle back, and that agent
+[will be removed](../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx)
+after the Environment Server migration.
 
 `data/example_rollouts.jsonl` contains one recorded Super/OpenCode attempt per public
 example, run with inline-file provisioning on 2026-10-05. Original task fields and
