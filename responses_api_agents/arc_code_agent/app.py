@@ -175,14 +175,15 @@ def _message_text(response: NeMoGymResponse) -> str:
 
 
 def _assistant_message(text: str, tag: str) -> NeMoGymResponseOutputMessage:
-    # `type`, `role` and `status` are passed explicitly: the request is serialized with exclude_unset, which would
-    # drop defaulted ones and leave an item the model server cannot place (KeyError: 'type').
+    # Every `type`, `role` and `status` is passed explicitly, also on the text part: the request is serialized with
+    # exclude_unset, which drops defaulted fields, and the model server then rejects the item (KeyError 'type', or a
+    # 422 when only the text part lacks its type).
     return NeMoGymResponseOutputMessage(
         id=f"{tag}-{uuid.uuid4().hex[:12]}",
         type="message",
         role="assistant",
         status="completed",
-        content=[NeMoGymResponseOutputText(text=text, annotations=[])],
+        content=[NeMoGymResponseOutputText(type="output_text", text=text, annotations=[])],
     )
 
 

@@ -540,3 +540,9 @@ def test_harness_assistant_message_keeps_type_and_role_on_the_wire() -> None:
 
     wire = _assistant_message("", "empty").model_dump(exclude_unset=True)
     assert wire["type"] == "message" and wire["role"] == "assistant"
+    assert wire["content"][0]["type"] == "output_text"
+    # The whole request, as the model server receives it, must validate and convert.
+    request = NeMoGymResponseCreateParamsNonStreaming.model_validate(
+        {"input": [{"role": "user", "content": "puzzle"}, wire, {"role": "user", "content": "continue"}]}
+    )
+    VLLMConverter(return_token_id_information=False).responses_to_chat_completion_create_params(request)
