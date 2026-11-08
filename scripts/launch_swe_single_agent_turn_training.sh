@@ -7,10 +7,12 @@ export PYTHONDONTWRITEBYTECODE=1
 dry_run=0
 source_mount=0
 gym_root_override=
+excluded_nodes=
 while (( $# )); do
     case "$1" in
         --dry-run) dry_run=1 ;;
         --source-mount) source_mount=1 ;;
+        --exclude) excluded_nodes=${2:?Pass the excluded node list}; shift ;;
         --gym-root) gym_root_override=${2:?Pass the source Gym root}; shift ;;
         *) printf 'Unexpected argument: %s\n' "$1" >&2; exit 2 ;;
     esac
@@ -59,6 +61,7 @@ submit=(sbatch --nodes=1 --exclusive --gres="gpu:$GPUS_PER_NODE" --account="$SLU
     --time="${WALLTIME:-4:00:00}" --job-name="${EXP_NAME:-swe-env-server}" --dependency=
     --cpus-per-task=32 --mem=128G --chdir="$output_dir"
     --output="$BASE_LOG_DIR/slurm-%j.out" --error="$BASE_LOG_DIR/slurm-%j.err")
+if [[ -n "$excluded_nodes" ]]; then submit+=(--exclude="$excluded_nodes"); fi
 if [[ -n "${SLURM_QOS:-}" ]]; then submit+=(--qos="$SLURM_QOS"); fi
 submit+=("$NEMO_RL_ROOT/ray.sub")
 printf 'Driver: %s\n' "$COMMAND"

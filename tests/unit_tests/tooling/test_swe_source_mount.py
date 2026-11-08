@@ -268,7 +268,10 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
         "SUBMISSION_RECEIPT": str(receipt),
     }
     result = subprocess.run(
-        ["bash", str(copied), "--source-mount", "--gym-root", str(gym)], env=env, capture_output=True, text=True
+        ["bash", str(copied), "--source-mount", "--gym-root", str(gym), "--exclude", "unhealthy-node"],
+        env=env,
+        capture_output=True,
+        text=True,
     )
     assert result.returncode == 0, result.stderr
     lines = receipt.read_text().splitlines()
@@ -282,6 +285,7 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
     assert "uv run --no-sync examples/run_grpo_single_controller.py" in lines[5]
     assert "check_swe_training_recipe" not in lines[5] and "--runtime" not in lines[5]
     assert "test-key" not in result.stdout
+    assert "--exclude=unhealthy-node" in lines[6:]
     assert f"--chdir={tmp_path}" in lines[6:]
     assert f"--output={tmp_path}/slurm/slurm-%j.out" in lines[6:]
     assert f"--error={tmp_path}/slurm/slurm-%j.err" in lines[6:]

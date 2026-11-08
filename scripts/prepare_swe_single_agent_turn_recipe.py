@@ -446,6 +446,12 @@ def prepare(args: argparse.Namespace) -> dict:
         config.env.nemo_gym.cache_dir = str(output / "runtime-cache")
         config.env.nemo_gym.results_dir = str(output / "gym-results")
     config.policy.megatron_cfg.expert_model_parallel_size = ep
+    config.policy.make_sequence_length_divisible_by = (
+        "${mul:${mul:${policy.megatron_cfg.tensor_model_parallel_size}, "
+        "${policy.megatron_cfg.context_parallel_size}}, 2}"
+    )
+    # BF16 TRTLLM refit shards MoE experts across the serving ranks.
+    config.policy.generation.vllm_cfg.expert_parallel_size = ep
     config.grpo.num_prompts_per_step = 8 * len(args.harnesses)
     config.grpo.num_generations_per_prompt = generations
     config.policy.train_global_batch_size = generations * config.grpo.num_prompts_per_step

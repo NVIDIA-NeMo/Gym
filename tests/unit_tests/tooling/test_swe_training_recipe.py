@@ -5,6 +5,7 @@
 import copy
 import hashlib
 import json
+import operator
 import os
 import pprint
 import subprocess
@@ -555,6 +556,19 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
     assert not list(tmp_path.iterdir())
 
 
+@pytest.fixture
+def rl_arithmetic_resolver():
+    # The real RL config loader registers this resolver; the offline loader skips it.
+    registered_here = not OmegaConf.has_resolver("mul")
+    if registered_here:
+        OmegaConf.register_new_resolver("mul", operator.mul)
+    try:
+        yield
+    finally:
+        if registered_here:
+            OmegaConf.clear_resolver("mul")
+
+
 @pytest.mark.parametrize("model,expert_parallel_size", [("4b", 1), ("30b", 2)])
 @pytest.mark.parametrize("hardware_profile,gpus,generation_gpus", [("arm64-b300", 4, 2), ("x86_64-h100", 8, 4)])
 @pytest.mark.parametrize(
@@ -585,6 +599,7 @@ def test_preparation_materializes_the_requested_update_budget(
     gpus,
     generation_gpus,
     generations,
+    rl_arithmetic_resolver,
 ):
     rl_root = tmp_path / "rl"
     rl_root.mkdir()
@@ -662,6 +677,8 @@ def test_preparation_materializes_the_requested_update_budget(
     assert config.policy.generation.colocated.resources.gpus_per_node == generation_gpus
     assert config.policy.megatron_cfg.tensor_model_parallel_size == 2
     assert config.policy.generation.vllm_cfg.tensor_parallel_size == 2
+    assert config.policy.generation.vllm_cfg.expert_parallel_size == expert_parallel_size
+    assert resolved_config["policy"]["make_sequence_length_divisible_by"] == 4
     width = len(harnesses)
     assert len(train) == count * width and manifest["episodes"] == steps * 8 * width * generations
     assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps * 8 // count
