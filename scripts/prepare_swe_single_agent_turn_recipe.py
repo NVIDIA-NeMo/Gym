@@ -472,6 +472,9 @@ def prepare(args: argparse.Namespace) -> dict:
     config.logger.wandb_enabled = args.wandb_project is not None
     if args.wandb_project:
         config.logger.wandb.project = args.wandb_project
+        config.logger.wandb.entity = getattr(args, "wandb_entity", None)
+        config.logger.wandb.mode = "online"
+        config.logger.wandb.log_nemo_gym_full_result_tables = False
     config.logger.wandb.name = output.name
     OmegaConf.save(config, output / "config.yaml", resolve=False)
     manifest = {
@@ -549,6 +552,7 @@ def main() -> None:
         "--generations-per-prompt", type=int, default=4, help="Training samples per task; also sets global batch size"
     )
     parser.add_argument("--wandb-project")
+    parser.add_argument("--wandb-entity", help="W&B entity owning the requested project")
     manifest = prepare(parser.parse_args())
     print(
         json.dumps(

@@ -666,12 +666,20 @@ def test_preparation_materializes_the_requested_update_budget(
     )
     if count < 8:
         args.max_inflight_prompts = 2
+        args.wandb_project = "test-training"
+        args.wandb_entity = "test-entity"
     manifest = recipe.prepare(args)
     config = OmegaConf.load(args.output_dir / "config.yaml")
     # The RL driver resolves the whole prepared config before Gym injects any aliases.
     resolved_config = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
-    assert resolved_config["logger"]["wandb_enabled"] is False
-    assert resolved_config["logger"]["wandb"]["project"] == "grpo-dev"
+    assert resolved_config["logger"]["wandb_enabled"] is (count < 8)
+    if count < 8:
+        assert resolved_config["logger"]["wandb"]["project"] == "test-training"
+        assert resolved_config["logger"]["wandb"]["entity"] == "test-entity"
+        assert resolved_config["logger"]["wandb"]["mode"] == "online"
+        assert resolved_config["logger"]["wandb"]["log_nemo_gym_full_result_tables"] is False
+    else:
+        assert resolved_config["logger"]["wandb"]["project"] == "grpo-dev"
     if route == "old-run":
         for harness in set(harnesses) & {"hermes", "pi"}:
             name = recipe.OLD_AGENTS[harness]
