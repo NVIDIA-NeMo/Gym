@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Broad web research with official strict table and item matching using
-  the openclaw harness and Exa search.
+  the openclaw harness and the exa_search tool server.
 modality: text
 licensing: MIT
 authors:
@@ -18,7 +18,7 @@ reward:
 determinism: unknown
 config_path: ../widesearch_openclaw.yaml
 resources_server: widesearch
-agent_server: harness_exa_search
+agent_server: openclaw_agent
 datasets:
 - name: widesearch
   type: benchmark

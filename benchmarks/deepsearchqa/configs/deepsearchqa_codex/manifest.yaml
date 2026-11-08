@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Multi-step web research with answer-set F1 scoring using the codex harness
-  and Exa search.
+  and the exa_search tool server.
 modality: text
 licensing: unknown
 authors:
@@ -18,7 +18,7 @@ reward:
 determinism: unknown
 config_path: ../deepsearchqa_codex.yaml
 resources_server: deepsearchqa
-agent_server: harness_exa_search
+agent_server: codex_agent
 datasets:
 - name: deepsearchqa
   type: benchmark

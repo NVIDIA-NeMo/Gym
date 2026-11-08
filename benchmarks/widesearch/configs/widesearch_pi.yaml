@@ -1,3 +1,14 @@
+# WideSearch with Pi in a sandbox the agent creates, searching through the exa_search tool
+# server. single_agent_turn_legacy seeds the widesearch verifier and an exa_search session, grants exa_search to
+# Pi over MCP, closes the agent, verifies its answer, then closes both sessions. Pi calls the
+# model server and exa_search from the sandbox, so Gym binds them to an address the sandbox can reach. Export
+# EXA_API_KEY and pass a sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml).
+config_paths:
+- resources_servers/exa_search/configs/exa_search.yaml
+
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models, resources_servers]
+
 widesearch:
   resources_servers:
     widesearch:
@@ -14,38 +25,34 @@ widesearch:
         max_output_tokens: 32768
         temperature: 0.0
         top_p: 1.0
+
 widesearch_pi_benchmark:
   responses_api_agents:
-    harness_exa_search:
+    pi_agent:
       entrypoint: app.py
       domain: agent
-      description: Run WideSearch with PiAgent in a sandbox
+      description: Run WideSearch with Pi and the exa_search tool server
       value: Evaluate agentic web search
-      model_server:
-        type: responses_api_models
-        name: policy_model
+      # Names the benchmark for its manifest; the Environment Server binds the episode's resources server.
       resources_server:
         type: resources_servers
         name: widesearch
-      agent: pi
-      agent_kwargs:
-        model: ${policy_model_name}
-        thinking: null
-        timeout: 7200
-        system_prompt: You must call the exa_search tool before answering. Research the request on the web and return exactly the requested Markdown table.
-        context_window: 262144
-        max_output_tokens: 131072
-        pi_version: 0.80.2
-      image: nikolaik/python-nodejs:python3.13-nodejs22-slim
-      setup_command: python3 -m pip install -q https://github.com/NVIDIA-NeMo/Gym/archive/621ecac6906f332c54ba4a588e3ce7b7005bbe98.zip
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      timeout: 7200
+      context_window: 262144
+      max_output_tokens: 131072
+      pi_version: 0.80.2
+      system_prompt: You must search with the exa_search tool before answering. Research the request on the web and return exactly the requested Markdown table.
+      concurrency: 32
       sandbox_provider: sandbox
-      sandbox_spec:
+      sandbox_config:
+        image: nikolaik/python-nodejs:python3.13-nodejs22-slim
         ttl_s: 9000
         resources:
           memory_mib: 8192
-      sandbox_model_base_url: null
-      exa_api_key: null
-      token_id_capture: false
       datasets:
         - name: widesearch
           type: benchmark
@@ -55,8 +62,16 @@ widesearch_pi_benchmark:
 
 widesearch_pi_benchmark_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: widesearch
       agent_server:
         type: responses_api_agents
         name: widesearch_pi_benchmark
+      # The widesearch verifier serves no tools; Exa search comes from the exa_search tool server.
+      resources_tool_transports: []
+      tool_servers:
+        - type: resources_servers
+          name: exa_search

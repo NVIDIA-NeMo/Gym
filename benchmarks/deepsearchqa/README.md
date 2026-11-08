@@ -29,10 +29,25 @@ Use `--limit 1` for a quick end-to-end check before running the full benchmark.
 Complete long-run config copies for all supported harnesses are in
 [`configs`](configs). Each file includes the DeepSearchQA verifier, agent
 settings, sandbox settings, prompt, and dataset. The files do not inherit from
-a shared agent config. The `agent` field selects a name from Gym’s shared
-`harness_agent` registry, and `agent_kwargs` contains that agent’s settings.
-Switching agents also requires the matching settings and dependency setup;
-use the corresponding config copy as the starting point.
+a shared agent config. There are two kinds:
+
+- **Session harnesses** (Codex, Pi, Hermes, OpenCode, OpenClaw, Kilo Code) run
+  under `single_agent_turn_legacy`. Each episode, the agent creates its own
+  sandbox and gets Exa search as the `exa_search` tool, granted over MCP by the
+  [`exa_search`](../../resources_servers/exa_search/README.md) tool server
+  (`tool_servers`). The sandbox calls the model server and `exa_search` on the
+  Gym host, so these configs set `use_absolute_ip: true`: the sandbox must be
+  able to reach that host.
+- **Claude Code, Cline, Prime Agent, Simple Strands, and NeMo Fabric
+  DeepAgents** still run through the deprecated `harness_exa_search` agent
+  behind `legacy_agent`, which starts the harness and its Exa integration in a
+  sandbox and relays model calls itself. Claude Code takes no MCP tool grants
+  in a session, and the other four have no session path yet. Their `agent`
+  field selects a name from Gym's shared `harness_agent` registry, and
+  `agent_kwargs` contains that agent's settings.
+
+Export `EXA_API_KEY` for either kind, and pass a sandbox provider config next
+to the config copy.
 
 The Claude Code configs install Gym and the Claude CLI in a fresh sandbox
 using `setup_command`. No cluster runtime archive is required.
