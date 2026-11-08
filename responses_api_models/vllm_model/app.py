@@ -67,6 +67,7 @@ from nemo_gym.models import (
     validate_framework_context_options,
 )
 from nemo_gym.models.base_responses_api_model import _request_messages, _validate_responses_params
+from nemo_gym.models.model_call_capture import note_finish_reason
 from nemo_gym.models.token_capture import (
     CAPTURE_REFUSAL_HEADER,
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -1079,6 +1080,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         )
 
         execution = getattr(request.state, "nemo_gym_model_execution", {})
+        note_finish_reason(request, chat_completion_response.choices[0].finish_reason)
         if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
         return response
@@ -1316,7 +1318,18 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self.config.uses_reasoning_parser and not self.config.preserve_reasoning_in_assistant_content:
             for message_dict in body_dict["messages"]:
-                if message_dict.get("role") != "assistant" or "content" not in message_dict:
+                if message_dict.get("role") != "assistant":
+                    continue
+
+                # External harnesses can supply reasoning separately from content.
+                # Normalize that history too: newer vLLM ignores reasoning_content.
+                reasoning = message_dict.get("reasoning_content") or message_dict.get("reasoning")
+                if reasoning and self.config.uses_interleaved_reasoning:
+                    message_dict.pop("reasoning_content", None)
+                    message_dict.pop("reasoning", None)
+                    _set_reasoning(message_dict, reasoning, self.config.reasoning_field)
+
+                if "content" not in message_dict:
                     continue
 
                 content = message_dict["content"]

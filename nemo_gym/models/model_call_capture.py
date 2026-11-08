@@ -78,6 +78,8 @@ class ModelExecutionOutcome(TypedDict):
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
     local_response_reason: str | None
+    # Why generation stopped, as the chat backend reported it: a Responses payload cannot say it unless cut short.
+    finish_reason: NotRequired[str]
     # Set when the adapter lowered the call's output budget to fit the engine's context window and sent it again.
     requested_max_tokens: NotRequired[int]
     applied_max_tokens: NotRequired[int]
@@ -95,6 +97,19 @@ def start_model_execution(request: Request, *, upstream_attempted: bool) -> Mode
     )
     request.state.nemo_gym_model_execution = outcome
     return outcome
+
+
+def note_finish_reason(request: Request, finish_reason: str | None) -> None:
+    """Note why a chat backend stopped generating with the call's execution facts, which capture saves.
+
+    A Responses payload converted from a chat completion cannot say it unless generation was cut short.
+    """
+    if finish_reason is None:
+        return
+    execution = getattr(request.state, "nemo_gym_model_execution", None)
+    if not isinstance(execution, dict):
+        execution = start_model_execution(request, upstream_attempted=True)
+    execution["finish_reason"] = finish_reason
 
 
 class ModelCallCaptureConfig(BaseModel):

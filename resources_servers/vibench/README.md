@@ -57,9 +57,9 @@ longer ships; without it seeding fails in seconds and reports a fully failed see
 which reads like a bad app rather than a missing binary. The build sandbox can run on any
 provider that supports reattaching.
 
-Since ViBench 2.0 the 1.0 materials live under `v1/` and the shared runner under `_harness/`.
-`v2.0.7` is the tag this environment was checked against; a checkout from before ViBench 2.0
-(`prds/` at the root) also works.
+This environment covers ViBench 1.0. Since ViBench 2.0 the 1.0 materials live under `v1/` and
+the shared runner under `_harness/`. `v2.0.7` is the tag this environment was checked against; a
+checkout from before ViBench 2.0 (`prds/` at the root) also works.
 
 ```bash
 git clone --branch v2.0.7 https://github.com/ViBench/vibench-public.git ~/vibench

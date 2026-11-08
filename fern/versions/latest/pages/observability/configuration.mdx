@@ -177,6 +177,22 @@ Every span and metric carries these process-lifetime attributes:
 | `nemo.gym.server.type` | `responses_api_models` |
 | `nemo.gym.version` | `0.7.0` |
 | `nemo.run.id` | `4f2a91c0be31` |
+| `service.instance.id` | `4f2a91c0be31-policy_model-31844-9c1e02af` |
+
+`nemo.run.id` and `service.instance.id` work as a pair, and they are deliberately
+opposites. The run id is shared by every process of a run, so you can group the whole
+fleet. The instance id identifies one process within it, so you can separate them again —
+it is built from the server's config name, the process ID, and a random suffix, prefixed
+by the run id when the run was configured with one. The suffix is what makes it unique: a
+process ID repeats across hosts and across container PID namespaces, so the readable part
+alone can collide. Use `nemo.run.id` to scope a query to a run and `service.instance.id`
+to tell two Uvicorn workers of the same server apart.
+
+A `service.instance.id` set in `OTEL_RESOURCE_ATTRIBUTES` is replaced, not kept. NeMo Gym
+spawns its servers into one shared environment, so an inherited value would name every one
+of them identically — the collision the instance id exists to break. Code that embeds NeMo
+Gym can still pass its own id programmatically as a resource attribute, which takes
+precedence.
 
 ## Verify That It Works
 
