@@ -531,3 +531,12 @@ def test_native_system_prompt_differs_only_in_the_run_sentence() -> None:
     text = arc_prompt.build_system_prompt(73728, 24, 4000)
     native = arc_prompt.build_system_prompt(73728, 24, 4000, native_tools=True)
     assert text.replace(arc_prompt.TEXT_RUN_SENTENCE, arc_prompt.NATIVE_RUN_SENTENCE) == native
+
+
+def test_harness_assistant_message_keeps_type_and_role_on_the_wire() -> None:
+    # The request is serialized with exclude_unset; an item without `type` and `role` made the model server fail with
+    # KeyError('type') after a reasoning-only cut turn. The wire form must carry both.
+    from responses_api_agents.arc_code_agent.app import _assistant_message
+
+    wire = _assistant_message("", "empty").model_dump(exclude_unset=True)
+    assert wire["type"] == "message" and wire["role"] == "assistant"
