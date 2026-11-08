@@ -42,7 +42,8 @@ async def test_seed_failure_preserves_original_error_and_closes_sandbox(
         await server.seed_session(request, body)
     assert caught.value is error
     sandbox.stop.assert_awaited_once()
-    assert not server._sandboxes
+    # A sandbox whose stop failed stays registered, so shutdown can retry the stop.
+    assert bool(server._session_id_to_sandbox) == cleanup_fails
 
 
 @pytest.mark.parametrize(
@@ -81,7 +82,8 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
     cleanup_error = RuntimeError("cleanup failed")
     sandbox = SimpleNamespace(
         exec=AsyncMock(
-            return_value=SimpleNamespace(return_code=0), side_effect=collection_error if mode == "exec_error" else None
+            return_value=SimpleNamespace(return_code=0, error_type=None),
+            side_effect=collection_error if mode == "exec_error" else None,
         ),
         download=AsyncMock(side_effect=download),
         stop=AsyncMock(side_effect=cleanup_error if cleanup_fails else None),
@@ -93,7 +95,7 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
             artifact_root=tmp_path / "saved" if mode != "temporary" else None,
         )
     )
-    server._sandboxes = {"session": sandbox}
+    server._session_id_to_sandbox["session"] = sandbox
 
     judge_calls = 0
     judge_error = JudgeError("judge interrupted")
@@ -205,8 +207,11 @@ async def test_verify_collects_regular_outputs_without_runtime_links(
             sandbox.download.assert_awaited_once()
     sandbox.stop.assert_awaited_once()
     if cleanup_fails:
-        assert "Job-Bench task sandbox cleanup failed" in caplog.text
-        assert caplog.records[-1].exc_info[1] is cleanup_error
+        stop_failures = [record for record in caplog.records if record.getMessage().startswith("Failed to stop the")]
+        assert [record.exc_info[1] for record in stop_failures] == [cleanup_error]
+        assert server._session_id_to_sandbox == {"session": sandbox}
+    else:
+        assert server._session_id_to_sandbox == {}
 
 
 @pytest.mark.parametrize(
