@@ -174,6 +174,9 @@ class AgentSelection:
     impl_name: str
     # The harness calls the model server from inside the task sandbox (see ``runs_in_sandbox``).
     runs_in_sandbox: bool = False
+    # A Harbor-backed benchmark's settings for the shipped ``harbor_environment_server`` instance, such as a longer
+    # episode bound. ``build_run`` loads them after the server's own config, whichever harness runs.
+    server_settings: dict[str, Any] | None = field(default=None, hash=False)
 
 
 def _write_skipped(output_dir: Path, errors: dict[str, HarborTaskError]) -> None:
@@ -956,8 +959,8 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     ``terminal_bench_4``, or a ``harbor:`` reference) and defines exactly one agent instance: the harness the
     benchmark runs by default, with its benchmark settings. The run config's agent inherits that instance, as
     it inherits the shipped config ``--agent`` names. Beside it the config may set top-level keys, such as the
-    shipped ``harbor_environment_server`` instance's settings; another server instance would start beside the
-    taskset's and is refused.
+    shipped ``harbor_environment_server`` instance's settings (the agent's ``server_settings``, which also apply
+    to a harness ``--agent-type`` swaps in); another server instance would start beside the taskset's and is refused.
     """
     path = Path(config_path)
     config = yaml.safe_load(path.read_text()) or {}
@@ -988,6 +991,9 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
     if not isinstance(impls, dict) or len(impls) != 1:
         raise ValueError(f"{path} must define exactly one agent implementation under {agents[0]}")
     impl_name, impl_config = next(iter(impls.items()))
+    server_settings = config.get(ENVIRONMENT_SERVER_INSTANCE)
+    if server_settings is not None and not isinstance(server_settings, dict):
+        raise ValueError(f"{path}: `{ENVIRONMENT_SERVER_INSTANCE}` must be a mapping of the server's settings")
     return HarborBenchmark(
         config_path=path.resolve(),
         target=target.strip(),
@@ -996,6 +1002,7 @@ def harbor_benchmark(config_path: str | Path) -> HarborBenchmark | None:
             instance_name=agents[0],
             impl_name=impl_name,
             runs_in_sandbox=runs_in_sandbox(impl_name, impl_config),
+            server_settings=server_settings,
         ),
     )
 
@@ -1082,6 +1089,11 @@ def build_run(
     config_path.write_text(yaml.safe_dump(config, sort_keys=False))
 
     config_paths = [config_path.resolve(), agent.config_path, _config_path(ENVIRONMENT_SERVER_CONFIG)]
+    if agent.server_settings:
+        # The server's own config follows the agent's and would override a benchmark's settings for it.
+        server_path = prepared.output_dir / f"server_config_{agent.instance_name}.yaml"
+        server_path.write_text(yaml.safe_dump({ENVIRONMENT_SERVER_INSTANCE: agent.server_settings}, sort_keys=False))
+        config_paths.append(server_path.resolve())
     if sandbox is not None:
         config_paths.append(resolve_sandbox_config(sandbox))
     # Later config files win: explicit user overlays must follow component/provider defaults.

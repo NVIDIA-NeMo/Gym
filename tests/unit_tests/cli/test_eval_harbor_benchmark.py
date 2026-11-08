@@ -3,18 +3,23 @@
 """`gym eval prepare/run --benchmark` for a benchmark config that names a Harbor target."""
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 import pytest
 import yaml
+from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
 import nemo_gym.cli.main as cli_main
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
-from nemo_gym.data.tasks.harbor.prepare import harbor_benchmark
+from nemo_gym.config.global_config import GlobalConfigDictParser
+from nemo_gym.data.tasks.harbor.prepare import PreparedTaskset, build_run, harbor_benchmark
+from nemo_gym.data.tasks.harbor.task import load_task
 from nemo_gym.environment.assets import asset_config_path
+from tests.unit_tests.data.tasks.harbor.harbor_build_helpers import PULL_DOCKERFILE, write_task
 
 
 MINISWE_CONFIG = "responses_api_agents/miniswe_sandboxed_agent/configs/miniswe_sandboxed_agent.yaml"
@@ -68,7 +73,8 @@ class TestHarborBenchmarkConfig:
 
     def test_the_shipped_harbor_server_settings_may_ride_along(self, tmp_path: Path) -> None:
         overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
-        assert harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay)))
+        benchmark = harbor_benchmark(_benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay)))
+        assert benchmark.agent.server_settings == overlay
 
     @pytest.mark.parametrize(
         "extra,message",
@@ -80,6 +86,7 @@ class TestHarborBenchmarkConfig:
             ),
             ({"verifier": {"resources_servers": {"demo": {}}}}, "cannot define verifier"),
             ({"relay": {"environment_servers": {"legacy_agent": {}}}}, "cannot define relay"),
+            ({"harbor_environment_server": "54000"}, "must be a mapping of the server's settings"),
         ],
     )
     def test_refuses_what_the_run_could_not_honor(self, tmp_path: Path, extra: dict, message: str) -> None:
@@ -196,6 +203,31 @@ def test_the_configs_chosen_for_the_benchmark_leave_the_overrides(tmp_path: Path
     agent, overrides = cli_eval._benchmark_agent(args, [*loaded, "+limit=3"], harbor_benchmark(path))
     assert agent.impl_name == (agent_type or "miniswe_sandboxed_agent")
     assert overrides == [f"+config_paths=[{other}]", "+limit=3"]
+
+
+@pytest.mark.parametrize("agent_type", [None, "hermes_agent"])
+def test_the_benchmarks_server_settings_win_in_the_runs_merged_config(tmp_path: Path, agent_type) -> None:
+    """The run's config files, merged as Gym merges them, carry the benchmark's episode bound over the server's own
+    default, whether the benchmark's harness runs or `--agent-type` swaps in another."""
+    overlay = {"environment_servers": {"harbor": {"default_episode_timeout_seconds": 54000}}}
+    path = _benchmark(tmp_path, "tb", _harbor_config(harbor_environment_server=overlay))
+    args = argparse.Namespace(target=None, agent=None, agent_type=agent_type)
+    agent, _ = cli_eval._benchmark_agent(args, [], harbor_benchmark(path))
+    folder = tmp_path / "ds"
+    tasks = [load_task(write_task(folder / "a", dockerfile=PULL_DOCKERFILE))]
+    prepared = PreparedTaskset("ds", folder, tasks, tmp_path / "out" / "tasks.jsonl", tmp_path / "out")
+    prepared.output_dir.mkdir(parents=True)
+
+    run_config, tokens = build_run(prepared, agent, sandbox=None, overrides=[])
+
+    (token,) = [token for token in tokens if token.startswith("+config_paths=[")]
+    paths = [json.loads(entry) for entry in token[len("+config_paths=[") : -1].split(",")]
+    _, configs = GlobalConfigDictParser().load_extra_config_paths(paths)
+    merged = OmegaConf.merge(*configs)
+    written = yaml.safe_load(run_config.read_text())
+    (server,) = [name for name, value in written.items() if isinstance(value, dict) and "environment_servers" in value]
+    GlobalConfigDictParser()._recursively_swap_keys(merged)
+    assert merged[server].environment_servers.harbor.default_episode_timeout_seconds == 54000
 
 
 class TestEvalPrepareDelegation:

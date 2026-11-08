@@ -1754,7 +1754,8 @@ def _benchmark_agent(
 
     By default that is the benchmark config's own agent instance: ``build_run`` loads the config for the run, so its
     harness settings apply. ``--agent-type NAME[/FLAVOR]`` runs that harness's shipped config instead, without the
-    benchmark's harness settings; the dataset's ``allowed_agents`` still decides at prepare whether it may run the
+    benchmark's harness settings but with its settings for the Harbor environment server (``server_settings``,
+    such as the episode bound); the dataset's ``allowed_agents`` still decides at prepare whether it may run the
     tasks. ``--agent`` names the harness of a task TARGET and is refused, so it never silently loses to the
     benchmark's. Sets ``args.target`` to the benchmark's target, which the run prepares and reports.
     """
@@ -1769,7 +1770,7 @@ def _benchmark_agent(
     loaded = {benchmark.config_path}
     agent_type = getattr(args, "agent_type", None)
     if agent_type:
-        agent = resolve_agent(agent_type)
+        agent = replace(resolve_agent(agent_type), server_settings=benchmark.agent.server_settings)
         loaded.add(Path(asset_config_path("agent-type", agent_type)).resolve())
         overrides = [token for token in overrides if not token.startswith("+_selected_langgraph_config=")]
     else:

@@ -525,8 +525,9 @@ gym eval run --benchmark my_benchmark --agent-type hermes_agent --sandbox opensa
 `--agent-type NAME[/FLAVOR]` runs another harness's shipped config on the same tasks, without the benchmark's harness
 settings; the dataset's `[gym] allowed_agents` still decides whether it may. `--agent` is refused here: it names the
 harness of a positional target. Besides its agent instance the config may set top-level keys, including the shipped
-`harbor_environment_server` instance's settings; another server instance is refused, since it would start beside the
-taskset's. Such a benchmark runs on its own (not with a second `--benchmark`), `gym eval plan` does not plan it, and
+`harbor_environment_server` instance's settings (for example a longer `default_episode_timeout_seconds`). Those
+settings override the server's own defaults and apply whichever harness runs, including one `--agent-type` swaps in.
+Another server instance is refused, since it would start beside the taskset's. Such a benchmark runs on its own (not with a second `--benchmark`), `gym eval plan` does not plan it, and
 `gym list benchmarks` does not list it, since it declares no dataset of its own; its manifest sets the same
 `harbor_target` (refer to [Environment Manifest](/main/contribute/environments/new-environment#field-reference)).
 
