@@ -6,7 +6,9 @@ Grading:
 - the response text is every assistant text part joined, and the judge sees its last
   `judge_max_text_chars` characters;
 - `extracted` is string_match's final_answer extraction (last "answer:", else last \\boxed{});
-- correct iff the verdict is "equivalent"; "different", "unsure" and judge errors score 0.
+- correct iff the verdict is "equivalent"; "different" and "unsure" score 0;
+- a judge failure (a failed call, or a reply without a valid verdict) is not scored: the base class's
+  judge_failsafe returns the row masked (judge_failed).
 string_match's grade of `extracted` is kept as a diagnostic, not the reward.
 """
 
