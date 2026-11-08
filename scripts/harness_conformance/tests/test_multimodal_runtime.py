@@ -66,3 +66,23 @@ def test_cli_exports_config_and_native_path(monkeypatch, tmp_path):
     exported = dict(line.split("=", 1) for line in env_file.read_text().splitlines())
     assert exported["GYM_MULTIMODAL_SANDBOX_CONFIG"] == str(config)
     assert exported["PATH"] == "/tmp/runtime with spaces/bin:/usr/bin"
+
+
+def test_scripted_multimodal_probe_does_not_claim_an_enforcing_gateway(monkeypatch, tmp_path):
+    import json
+
+    from scripts.harness_conformance.episode import _config
+
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text(json.dumps({"command": str(tmp_path / "opencode"), "sandbox": {"python_env": str(tmp_path)}}))
+    monkeypatch.setenv("GYM_MULTIMODAL_SANDBOX_CONFIG", str(runtime))
+    config = _config(
+        "opencode_multimodal",
+        tmp_path,
+        {"policy_model": 1, "probe_resources": 2, "probe_agent": 3, "probe_environment": 4},
+        30,
+    )
+    agent = config["probe_agent"]["responses_api_agents"]["opencode_multimodal_agent"]
+    assert agent["max_turns"] == 65
+    assert not agent.get("turn_budget")
+    assert "probe" in config["policy_model"]["responses_api_models"]

@@ -138,6 +138,9 @@ def _config(
             profile_agent.update(command=runtime["command"], sandbox=runtime["sandbox"])
         profile_agent.update(agent)
         agent = profile_agent
+        # The scripted probe model is not the enforcing visual gateway. Keep the
+        # stock harness bound here; real gateway budgets are qualified separately.
+        agent.pop("turn_budget", None)
         agent.update(entrypoint="eval.py", workspace_root=str(directory / "workspace"), timeout=timeout)
     if harness == "nooa":
         agent.pop("model")

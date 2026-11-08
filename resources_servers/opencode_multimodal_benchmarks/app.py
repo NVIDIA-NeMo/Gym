@@ -17,6 +17,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.utils import error_to_http_status, explicit_causes
 from nemo_gym.verification import JUDGE_FAILURES, JudgeError, call_judge, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.metrics import average_repeats, pass_at_k
 from resources_servers.opencode_multimodal_benchmarks.reporting import benchmark_report
@@ -166,15 +167,16 @@ class VisualBenchmarksServer(VisualVerifier, SimpleResourcesServer):
             ) as error:
                 if isinstance(error, JUDGE_FAILURES) and not is_judge_failure(error):
                     raise
-                cause = getattr(error, "http_error", None) or error.__cause__ or error
+                causes = list(explicit_causes(error))
+                # The HTTP carrier may be a proxy 500 around a permanent provider 400.
+                # Typed remote failures preserve that original explicit cause separately.
+                statuses = [status for cause in causes if (status := error_to_http_status(cause)) is not None]
                 status = (
-                    getattr(cause, "status_code", None)
-                    or getattr(cause, "status", None)
-                    or getattr(cause, "http_status", None)
+                    statuses[-1] if statuses else error_to_http_status(getattr(error, "http_error", None) or error)
                 )
                 permanent = (
                     (isinstance(status, int) and 400 <= status < 500 and status not in (408, 429))
-                    or isinstance(cause, (KeyError, IndexError, ValueError, TypeError))
+                    or any(isinstance(cause, (KeyError, IndexError, ValueError, TypeError)) for cause in causes)
                     or (isinstance(error, JudgeError) and not isinstance(error, JudgeHTTPError))
                 )
                 if permanent or attempt + 1 == self.config.judge_attempts:

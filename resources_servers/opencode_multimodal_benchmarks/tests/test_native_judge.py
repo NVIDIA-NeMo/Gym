@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NgFailureEvent
+from nemo_gym.core import FailureBoundary, NgFailureEvent
 from nemo_gym.verification import JudgeError, is_judge_failure
 from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
 from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
@@ -296,3 +296,41 @@ def test_policy_judge_alias_is_rejected_at_startup():
             ),
             server_client=client,
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status,attempts", [(400, 1), (401, 1), (422, 1), (429, 3), (503, 3)])
+async def test_native_retry_policy_follows_remote_cause_not_proxy_carrier(monkeypatch, status, attempts):
+    from aiohttp import ClientResponseError
+
+    from resources_servers.opencode_multimodal_benchmarks import app
+
+    cause = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="judge_failed",
+        failure_reason="provider",
+        http_status=status,
+    )
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="remote judge"
+    )
+    failure.__cause__ = cause
+    failure.http_error = ClientResponseError(MagicMock(), (), status=500)
+    call = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(app, "call_judge", call)
+    monkeypatch.setattr(app.asyncio, "sleep", AsyncMock())
+    server = VisualBenchmarksServer(
+        config=VisualBenchmarksConfig(
+            host="localhost",
+            port=1,
+            name="visual",
+            entrypoint="app.py",
+            judge_server="judge",
+            judge_model="judge",
+            judge_attempts=3,
+        ),
+        server_client=MagicMock(spec=ServerClient),
+    )
+    with pytest.raises(NgFailureEvent):
+        await server._judge("extract the option")
+    assert call.await_count == attempts
