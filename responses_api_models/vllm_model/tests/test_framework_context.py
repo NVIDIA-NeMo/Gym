@@ -159,6 +159,9 @@ def make_capture_harness(
             payload["nvext"] = {"nemo_rl": {"prompt_token_count": 19, "ng_context_measured": True}}
             return payload
         admission = CaptureAdmission.model_validate(fields[NG_CAPTURE_FIELD]) if NG_CAPTURE_FIELD in fields else None
+        if dynamo and admission is not None:
+            # The engine stages the log probabilities it generated with, so the call must ask for them.
+            assert body.get("logprobs") is True and body.get("top_logprobs") is not None
         harness.worker_calls.append((admission, _resend_after_disconnect))
         if reasoning:
             payload["choices"][0]["message"]["reasoning"] = f"reasoning {index}"

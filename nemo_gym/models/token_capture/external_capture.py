@@ -524,9 +524,14 @@ class DynamoWorkerCaptureHandler(_BaseExternalCaptureHandler):
         choice_count = request_payload.get("n")
         if choice_count is not None and choice_count != 1:
             raise ValueError("Dynamo token capture requires n=1")
-        # The prefix is resolved on the worker from ``staging_chain``. The worker also stages
-        # the log probabilities itself, so Gym requests neither prefix ids nor logprobs here.
+        # The prefix is resolved on the worker from ``staging_chain``, so no prefix ids travel. The
+        # engine generates what the request asks for, as the vLLM worker does, so the call asks for
+        # the sampled tokens' log probabilities, which the worker stages; score centering's
+        # ``top_logprobs`` is kept.
         add_dynamo_gym_extras(request_payload, {NG_CAPTURE_FIELD: admission.model_dump(mode="json")})
+        request_payload["logprobs"] = True
+        if request_payload.get("top_logprobs") is None:
+            request_payload["top_logprobs"] = 0
         return request_payload
 
     def request_headers(self) -> dict[str, str]:

@@ -1834,8 +1834,9 @@ class TestApp:
         served = response.model_dump()
         assert "nvext" not in served
         if capture:
-            # The engine stages log probabilities itself; the admission is the only capture field sent.
-            assert "logprobs" not in outbound
+            # The admission is the only capture field in the annotation. The call asks for the sampled
+            # tokens' log probabilities, which the engine generates with and stages.
+            assert (outbound["logprobs"], outbound["top_logprobs"]) == (True, 0)
             assert outbound["stream"] is False
             assert sent[0]["headers"]["x-dynamo-session-id"] == "rollout-1"
             assert context.committed is True
