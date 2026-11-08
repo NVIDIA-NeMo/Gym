@@ -546,3 +546,27 @@ def test_harness_assistant_message_keeps_type_and_role_on_the_wire() -> None:
         {"input": [{"role": "user", "content": "puzzle"}, wire, {"role": "user", "content": "continue"}]}
     )
     VLLMConverter(return_token_id_information=False).responses_to_chat_completion_create_params(request)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "printed, expected",
+    [
+        ("5", None),  # a scalar made predict_answer raise TypeError and lose the rollout
+        ("[1, 2]", None),
+        ("[[1, 2], [3]]", None),
+        ("[[1, 12]]", None),
+        ('"text"', None),
+        ("[[1, 2], [3, 4]]", [[1, 2], [3, 4]]),
+    ],
+)
+async def test_predict_answer_returns_only_valid_grids(printed, expected) -> None:
+    from responses_api_agents.arc_code_agent.arc_sandbox import SandboxPool
+
+    pool = SandboxPool.__new__(SandboxPool)
+
+    async def fake_run(header, codes, code, out_chars=None):
+        return {"output": f"log line\n{printed}\n"}
+
+    pool.run = fake_run
+    assert await pool.predict_answer("", [], "transform") == expected

@@ -36,6 +36,8 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from resources_servers.arc_code.grid import is_grid
+
 
 SERVER_SCRIPT = Path(__file__).parent / "sandbox" / "sandbox_server.py"
 TOOLS_DIR = SERVER_SCRIPT.parent
@@ -226,9 +228,8 @@ class SandboxPool:
             grid = json.loads(reply["output"].strip().splitlines()[-1])
         except (ValueError, IndexError):
             return None
-        if not grid or not all(isinstance(r, list) and r and len(r) == len(grid[0]) for r in grid):
-            return None
-        return grid
+        # The function may return anything (an int, a flat list, ragged rows): only a valid grid is an answer.
+        return grid if is_grid(grid) else None
 
     async def close(self) -> None:
         for s in self._servers:
