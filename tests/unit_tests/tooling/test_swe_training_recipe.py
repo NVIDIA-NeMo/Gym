@@ -80,6 +80,11 @@ def test_generated_gym_configuration_resolves_offline(tmp_path, route):
     assert resolved.environment_routing_mode == ("agent" if route == "old-run" else "taskset")
     if route != "harbor":
         assert resolved.swe_resources.resources_servers.swe_rebench.verification_log_dir == str(tmp_path / "verifier")
+    if route == "old-run":
+        agent = resolved.opencode_sandboxed_agent.responses_api_agents.opencode_sandboxed_agent
+        assert agent.opencode_env.OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX == "1024"
+        model = agent.opencode_config.provider.nemo_gym.models.dummy_model
+        assert model.limit.output == 1024 and model.interleaved.field == "reasoning_content"
     for harness in harnesses:
         name = f"swe_rebench_{harness}_environment"
         impl = {"old-run": "legacy_agent", "single-agent-turn": "single_agent_turn", "harbor": "harbor"}[route]
