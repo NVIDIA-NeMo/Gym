@@ -943,6 +943,7 @@ class TestOpenCodeSandboxedAgent:
             exec=AsyncMock(return_value=SimpleNamespace(stdout="[]", stderr="", return_code=0, error_type=None)),
             download=AsyncMock(),
             stop=AsyncMock(),
+            disconnect=AsyncMock(),
         )
         monkeypatch.setattr(server, "_start_sandbox", AsyncMock(return_value=sandbox))
         monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
@@ -969,8 +970,9 @@ class TestOpenCodeSandboxedAgent:
         assert len({upload.args[1] for upload in sandbox.upload.await_args_list}) == expected_attempts
         sandbox.exec.assert_not_awaited()
         sandbox.download.assert_not_awaited()
-        sandbox.stop.assert_awaited_once()
-        assert client.post.await_count == 1  # Seed only; no verification of an unstarted agent.
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
+        assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session", "/close_session"]
         assert server._sandbox_id_to_sandbox == server._sandbox_id_to_run_result == {}
         assert not hasattr(request.state, "_ng_observation_invocation_id")
         assert not hasattr(request.state, "_ng_opencode_mcp")
@@ -1314,6 +1316,7 @@ class TestOpenCodeSandboxedAgent:
             exec=AsyncMock(side_effect=execute),
             download=AsyncMock(side_effect=download),
             stop=AsyncMock(),
+            disconnect=AsyncMock(),
         )
         sandbox._handle = SandboxHandle(sandbox_id="capture-sandbox", provider_name="opensandbox", raw=None)
         server._start_sandbox = AsyncMock(return_value=sandbox)
@@ -1324,8 +1327,12 @@ class TestOpenCodeSandboxedAgent:
         with raises(NgFailureEvent) as caught:
             await server.run(request, body)
         assert caught.value is failure
-        assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == ["/seed_session"]
-        sandbox.stop.assert_awaited_once()
+        assert [entry.kwargs["url_path"] for entry in client.post.await_args_list] == [
+            "/seed_session",
+            "/close_session",
+        ]
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
         assert server._sandbox_id_to_run_result == server._sandbox_id_to_sandbox == {}
 
     @mark.parametrize(
@@ -1500,6 +1507,7 @@ class TestOpenCodeSandboxedAgent:
 
         sandbox.download = AsyncMock(side_effect=download)
         sandbox.stop = AsyncMock(side_effect=RuntimeError("resource server already stopped the sandbox"))
+        sandbox.disconnect = AsyncMock()
         server._start_sandbox = AsyncMock(return_value=sandbox)
         monkeypatch.setattr(
             "responses_api_agents.opencode_sandboxed_agent.app.__file__",
@@ -1517,6 +1525,8 @@ class TestOpenCodeSandboxedAgent:
         async def post(server_name, url_path, json=None, cookies=None):
             if url_path == "/seed_session":
                 return Response({"sandbox_handle": "seed-sandbox"})
+            if url_path == "/close_session":
+                return Response({})
             assert url_path == "/verify"
             export_path = tmp_path / "results/session-1/export.json"
             assert export_path.is_file()
@@ -1563,6 +1573,8 @@ class TestOpenCodeSandboxedAgent:
             connection.close()
 
         assert result.reward == 1.0
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
         assert [item.model_dump(exclude={"id"}) for item in result.response.output] == [
             item.model_dump(exclude={"id"})
             for item in server._opencode_export_to_output_items(opencode_export_test_data)[1:]
@@ -1572,7 +1584,11 @@ class TestOpenCodeSandboxedAgent:
             report = failure_log.report
             assert report.failure_id is None
             assert report.events[snapshot_timeout.event_id].failure_kind == PROVIDER_IO_TIMEOUT
-            verify_call = server_client.post.await_args_list[-1].kwargs["json"]
+            verify_call = next(
+                call.kwargs["json"]
+                for call in server_client.post.await_args_list
+                if call.kwargs["url_path"] == "/verify"
+            )
             assert snapshot_timeout.event_id in verify_call["failure_report"]["events"]
         parent_usage = NeMoGymResponseUsage.sum_from_list(server._opencode_export_to_usages(opencode_export_test_data))
         usage = result.response.usage
@@ -1642,7 +1658,7 @@ class TestOpenCodeSandboxedAgent:
         assert server._sandbox_id_to_run_result == {}
         assert not (tmp_path / "results" / "session-1" / "opencode.db").exists()
 
-    async def test_a_cancelled_run_stops_its_sandbox(self, monkeypatch: MonkeyPatch) -> None:
+    async def test_a_cancelled_run_closes_its_sandbox_owner(self, monkeypatch: MonkeyPatch) -> None:
         """A caller that disconnects mid-rollout must not leave OpenCode running in its pod.
 
         The server cancels the handler on disconnect, but OpenCode keeps working, and keeps
@@ -1659,17 +1675,21 @@ class TestOpenCodeSandboxedAgent:
 
         request = SimpleNamespace(cookies={}, session={SESSION_ID_KEY: "session-1"}, state=SimpleNamespace())
         server_client = MagicMock(spec=ServerClient)
-        server_client.post = AsyncMock(return_value=Response())
+
+        async def post(**kwargs):
+            if kwargs["url_path"] == "/close_session":
+                await anyio.sleep(0)
+                stopped.set()
+            return Response()
+
+        server_client.post = AsyncMock(side_effect=post)
         server = OpenCodeSandboxedAgent(config=self._create_config(), server_client=server_client)
 
         stopped = anyio.Event()
 
-        async def stop() -> None:
-            await anyio.sleep(0)
-            stopped.set()
-
         sandbox = MagicMock()
-        sandbox.stop = stop
+        sandbox.stop = AsyncMock()
+        sandbox.disconnect = AsyncMock()
         server._start_sandbox = AsyncMock(return_value=sandbox)
         rollout_started = anyio.Event()
 
@@ -1689,6 +1709,8 @@ class TestOpenCodeSandboxedAgent:
             task_group.cancel_scope.cancel()
 
         assert stopped.is_set(), "the pod was left running"
+        sandbox.disconnect.assert_awaited_once()
+        sandbox.stop.assert_not_awaited()
         assert server._sandbox_id_to_sandbox == {}
         assert server._sandbox_id_to_run_result == {}
 
@@ -2354,7 +2376,7 @@ async def test_export_failure_raises_without_a_scored_response(tmp_path, failure
         sandbox.download.assert_not_awaited()
 
 
-async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
+async def test_export_failure_prevents_verification_and_closes_sandbox_owner(tmp_path):
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
     config.execution_failure_reward_zero = True
@@ -2376,6 +2398,7 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
         upload=AsyncMock(), exec=AsyncMock(side_effect=execute), download=AsyncMock(side_effect=download)
     )
     sandbox.stop = AsyncMock()
+    sandbox.disconnect = AsyncMock()
     server._start_sandbox = AsyncMock(return_value=sandbox)
     request = Request({"type": "http", "headers": [], "session": {SESSION_ID_KEY: "trial"}})
     body = OpenCodeSandboxedAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "Solve"}]})
@@ -2383,8 +2406,9 @@ async def test_export_failure_prevents_verification_and_stops_sandbox(tmp_path):
     with raises(NgFailureEvent, match="OpenCode export .* had no assistant messages or was invalid"):
         await server.run(request, body)
 
-    assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session"]
-    sandbox.stop.assert_awaited_once()
+    assert [call.kwargs["url_path"] for call in client.post.await_args_list] == ["/seed_session", "/close_session"]
+    sandbox.disconnect.assert_awaited_once()
+    sandbox.stop.assert_not_awaited()
     assert server._sandbox_id_to_run_result == {}
     assert server._sandbox_id_to_sandbox == {}
 
