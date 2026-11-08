@@ -7,3 +7,22 @@ runs the pinned upstream agent-as-a-judge on `/workspace/output`. Reward is pass
 - Judge API failures go to the failures file instead of scoring zero.
 - Set `artifact_root` to save each trial. Passing a saved `artifact_id` to `/verify` regrades it without rerunning
   the agent.
+
+## Sessions
+
+An Environment Server (`single_agent_turn_legacy` for the flat benchmark rows) seeds an episode session with the row's
+`task_id` and `task_dir`. The seed starts the task sandbox with the inputs in `/workspace/input`, freezes a copy of
+them on this server, and lends the sandbox to the agent through `sandbox_access` with the `operate` scope and
+`/workspace` as the working directory. The server owns the sandbox; the agent only borrows it.
+
+- `/verify` archives the sandbox's `input` and `output`, stops the task sandbox, and judges the archive against the
+  frozen inputs. An identical retried verify gets the first verdict back, or a new judgment of the same capture when
+  judging did not finish. A verify for a closed or expired session is masked (`mask_sample: true`) instead of
+  scoring 0.
+- `/close_session` stops the sandbox if verify did not, drops the frozen inputs, and fences the session ID, so a late
+  seed gets 409. A failed stop raises and keeps the sandbox for the retried close.
+- A session that is never closed expires after the sandbox's `ttl_s`, and shutdown stops every sandbox still open.
+
+`harness_agent`'s `/run` still seeds with the row and gets the sandbox descriptor back; a second seed of the same
+session gets 409, and its verify stops the sandbox. The session behavior comes from `SandboxSessionResourcesServer` in
+`resources_servers/swebench/sandbox_sessions.py`.

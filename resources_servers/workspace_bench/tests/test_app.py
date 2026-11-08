@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import HTTPException, Request
 
 from nemo_gym.verification import JudgeError
 from resources_servers.workspace_bench import app, dataset
@@ -62,7 +62,7 @@ async def test_verify_collects_files_without_runtime_links(monkeypatch, tmp_path
         start=AsyncMock(),
         upload=AsyncMock(),
         serialize=AsyncMock(return_value={"sandbox_id": "test-sandbox"}),
-        exec=AsyncMock(return_value=SimpleNamespace(return_code=0)),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None)),
         download=AsyncMock(side_effect=download),
         stop=AsyncMock(side_effect=cleanup_error if cleanup_fails else None),
     )
@@ -257,8 +257,12 @@ async def test_verify_collects_files_without_runtime_links(monkeypatch, tmp_path
     assert not references.exists()
     assert not server._reference_dirs
     if cleanup_fails:
-        assert "Workspace-Bench task sandbox cleanup failed" in caplog.text
-        assert caplog.records[-1].exc_info[1] is cleanup_error
+        stop_failures = [record for record in caplog.records if record.getMessage().startswith("Failed to stop the")]
+        assert [record.exc_info[1] for record in stop_failures] == [cleanup_error]
+        # The sandbox stays registered, so shutdown retries its stop.
+        assert server._session_id_to_sandbox == {"session": sandbox}
+    else:
+        assert server._session_id_to_sandbox == {}
 
 
 @pytest.mark.parametrize("failure", [None, "error", "cancellation"])
@@ -277,7 +281,7 @@ async def test_seed_installs_native_harness_skills(monkeypatch, tmp_path, caplog
         start=AsyncMock(),
         upload=AsyncMock(side_effect=primary_error),
         stop=AsyncMock(side_effect=cleanup_error if cleanup_fails else None),
-        exec=AsyncMock(return_value=SimpleNamespace(return_code=0)),
+        exec=AsyncMock(return_value=SimpleNamespace(return_code=0, error_type=None)),
         serialize=AsyncMock(return_value={"sandbox_id": "test-sandbox"}),
     )
     monkeypatch.setattr(app, "resolve_provider_config", lambda *_: {})
@@ -299,7 +303,7 @@ async def test_seed_installs_native_harness_skills(monkeypatch, tmp_path, caplog
         assert not server._reference_dirs
         sandbox.stop.assert_awaited_once()
         if cleanup_fails:
-            assert "Workspace-Bench seed sandbox cleanup failed" in caplog.text
+            assert "Failed to stop the task sandbox of failed seed session" in caplog.text
             assert caplog.records[-1].exc_info[1] is cleanup_error
         return
     started = app.asyncio.Event()
@@ -314,34 +318,41 @@ async def test_seed_installs_native_harness_skills(monkeypatch, tmp_path, caplog
         server.seed_session(request, app.WorkspaceBenchRequest(task_id="task", task_dir=str(tmp_path)))
     )
     await started.wait()
-    with pytest.raises(HTTPException, match="session is already active"):
-        await server.seed_session(request, app.WorkspaceBenchRequest(task_id="task", task_dir=str(tmp_path)))
+    # A seed that arrives while the first one starts its sandbox waits for it, then finds the session active.
+    duplicate = app.asyncio.create_task(
+        server.seed_session(request, app.WorkspaceBenchRequest(task_id="task", task_dir=str(tmp_path)))
+    )
+    await app.asyncio.sleep(0)
     proceed.set()
     result = await pending
+    with pytest.raises(HTTPException, match="session is already active"):
+        await duplicate
     assert result.sandbox_handle == "test-sandbox"
     command = sandbox.exec.await_args.args[0]
     assert "office-skills /workspace/.opencode/skills" in command
     assert "agent-homes/claude/.claude/skills /workspace/.claude/skills" in command
     assert sandbox.start.await_args.args[0].workdir == "/workspace"
-    assert server._sandboxes["session"] is sandbox
+    assert server._session_id_to_sandbox["session"] is sandbox
     with pytest.raises(HTTPException, match="session is already active"):
         await server.seed_session(request, app.WorkspaceBenchRequest(task_id="task", task_dir=str(tmp_path)))
     sandbox.start.assert_awaited_once()
 
 
-async def test_shutdown_cleans_frozen_reference_directories(monkeypatch):
+async def test_shutdown_stops_open_sandboxes_and_cleans_frozen_reference_directories(caplog):
     server = app.WorkspaceBenchResourcesServer.model_construct(config=app.WorkspaceBenchConfig.model_construct())
-    directory = tempfile.TemporaryDirectory()
-    server._reference_dirs["session"] = directory
-    sandbox = SimpleNamespace(stop=AsyncMock())
-    server._sandboxes["session"] = sandbox
-    monkeypatch.setattr(app.SimpleResourcesServer, "setup_webserver", lambda _: FastAPI())
-    web = server.setup_webserver()
-    async with web.router.lifespan_context(web):
-        assert Path(directory.name).exists()
-    assert not Path(directory.name).exists()
+    directories = {session_id: tempfile.TemporaryDirectory() for session_id in ("open", "stuck")}
+    sandboxes = {
+        "open": SimpleNamespace(stop=AsyncMock()),
+        "stuck": SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("provider unavailable"))),
+    }
+    server._reference_dirs.update(directories)
+    server._session_id_to_sandbox.update(sandboxes)
+    await server.shutdown()
+    assert not any(Path(directory.name).exists() for directory in directories.values())
     assert not server._reference_dirs
-    sandbox.stop.assert_awaited_once()
+    assert server._session_id_to_sandbox == {"stuck": sandboxes["stuck"]}
+    assert all(sandbox.stop.await_count == 1 for sandbox in sandboxes.values())
+    assert "Failed to stop the abandoned sandboxes of session stuck" in caplog.text
 
 
 @pytest.mark.parametrize("return_code", [0, 1])
