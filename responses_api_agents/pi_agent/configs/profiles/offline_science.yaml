@@ -18,7 +18,9 @@ pi_agent:
     pi_agent:
       # An unseeded request runs the harness on the Gym host, so keep the agent off the address sandboxes reach.
       host: 127.0.0.1
-      num_workers: 4
+      # pi_agent serves from one process (its module exposes no app for extra workers, and session state is
+      # process-local); the deprecated preset's four workers would not start. Concurrency stays per process.
+      num_workers: 1
       concurrency: 512
       model: benchmark-model
       pi_version: 0.85.1
