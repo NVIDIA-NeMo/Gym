@@ -935,7 +935,7 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 10
         assert usage["output_tokens"] == 5
 
-    def test_thinking_prepended(self) -> None:
+    def test_thinking_separate_from_answer(self) -> None:
         line = self._assistant(
             [
                 {"type": "thinking", "thinking": "let me reason"},
@@ -943,23 +943,55 @@ class TestParseStreamJson:
             ]
         )
         items, _ = parse_stream_json(line)
-        assert len(items) == 1
-        text = items[0].content[0].text
-        assert "<think>\nlet me reason\n</think>" in text
-        assert "answer" in text
+        assert [item.type for item in items] == ["reasoning", "message"]
+        assert items[0].summary[0].text == "let me reason"
+        assert items[1].content[0].text == "answer"
 
-    def test_thinking_without_text_not_emitted(self) -> None:
+    def test_thinking_without_text_is_preserved(self) -> None:
         line = self._assistant([{"type": "thinking", "thinking": "just thinking"}])
         items, _ = parse_stream_json(line)
-        assert items == []
+        assert [item.type for item in items] == ["reasoning"]
+        assert items[0].summary[0].text == "just thinking"
 
-    def test_thinking_cleared_after_message(self) -> None:
+    def test_thinking_does_not_modify_later_messages(self) -> None:
         l1 = self._assistant([{"type": "thinking", "thinking": "think"}, {"type": "text", "text": "msg1"}])
         l2 = self._assistant([{"type": "text", "text": "msg2"}])
         items, _ = parse_stream_json(f"{l1}\n{l2}")
-        assert len(items) == 2
-        assert "<think>" in items[0].content[0].text
-        assert "<think>" not in items[1].content[0].text
+        assert [item.type for item in items] == ["reasoning", "message", "message"]
+        assert items[0].summary[0].text == "think"
+        assert [item.content[0].text for item in items if item.type == "message"] == ["msg1", "msg2"]
+
+    def test_tool_turn_reasoning_does_not_enter_final_answer(self) -> None:
+        events = [
+            self._assistant(
+                [
+                    {"type": "thinking", "thinking": "inspect the file"},
+                    {"type": "tool_use", "id": "t1", "name": "Read", "input": {"file_path": "answer.txt"}},
+                ]
+            ),
+            self._user_tool_result("t1", "42"),
+            self._assistant([{"type": "thinking", "thinking": "check the result"}]),
+            self._assistant([{"type": "text", "text": "42"}]),
+        ]
+        items, _ = parse_stream_json("\n".join(events))
+        assert [item.type for item in items] == [
+            "reasoning",
+            "function_call",
+            "function_call_output",
+            "reasoning",
+            "message",
+        ]
+        assert [item.summary[0].text for item in items if item.type == "reasoning"] == [
+            "inspect the file",
+            "check the result",
+        ]
+        assert items[-1].content[0].text == "42"
+
+    def test_literal_think_tags_in_answer_are_preserved(self) -> None:
+        answer = "The literal markup is <think>example</think>."
+        items, _ = parse_stream_json(self._assistant([{"type": "text", "text": answer}]))
+        assert [item.type for item in items] == ["message"]
+        assert items[0].content[0].text == answer
 
     def test_tool_call_and_result(self) -> None:
         assistant_line = self._assistant(
@@ -1129,15 +1161,15 @@ class TestCaptureFriendlyTranscript:
             ]
         )
 
-    def test_fold_thinking_default_prefixes_text(self) -> None:
+    def test_eval_emits_reasoning_item_and_bare_text(self) -> None:
         items, meta = parse_stream_json(self._events())
-        messages = [i for i in items if getattr(i, "type", None) == "message"]
-        assert messages and messages[0].content[0].text.startswith("<think>")
-        assert not any(getattr(i, "type", None) == "reasoning" for i in items)
+        assert [item.type for item in items] == ["reasoning", "message"]
+        assert items[0].summary[0].text == "let me look"
+        assert items[1].content[0].text == "Reading the file."
         assert meta["terminal_response_id"] == "resp_served123"
 
-    def test_no_fold_emits_reasoning_item_and_bare_text(self) -> None:
-        items, meta = parse_stream_json(self._events(), fold_thinking=False)
+    def test_capture_emits_reasoning_item_and_bare_text(self) -> None:
+        items, meta = parse_stream_json(self._events(), capture_transcript=True)
         types = [getattr(i, "type", None) for i in items]
         assert types == ["reasoning", "message"]
         assert items[0].summary[0].text == "let me look"
@@ -1151,7 +1183,7 @@ class TestCaptureFriendlyTranscript:
             token_id_capture=capture,
         )
         agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
-        items, meta = parse_stream_json(self._events(), fold_thinking=not capture)
+        items, meta = parse_stream_json(self._events(), capture_transcript=capture)
         body = NeMoGymResponseCreateParamsNonStreaming(input="fix it")
         with patch.object(agent, "_run_claude_code", AsyncMock(return_value=(items, "m", meta))):
             response = asyncio.run(agent._create_response(body))
@@ -1185,10 +1217,8 @@ class TestCaptureFriendlyTranscript:
     @pytest.mark.parametrize("timeout", [False, True])
     def test_real_run_wires_capture_on_success_and_timeout(self, tmp_path: Path, capture: bool, timeout: bool) -> None:
         response, metadata = self._run_stream(self._events(), tmp_path, capture=capture, timeout=timeout)
-        assert response.output[-1].content[0].text == (
-            "Reading the file." if capture else "<think>\nlet me look\n</think>\n\nReading the file."
-        )
-        assert [item.type for item in response.output] == (["reasoning", "message"] if capture else ["message"])
+        assert response.output[-1].content[0].text == "Reading the file."
+        assert [item.type for item in response.output] == ["reasoning", "message"]
         assert (response.id == "resp_served123") is capture
         assert metadata["status"] == ("incomplete" if timeout else "completed")
         if timeout:
@@ -1199,14 +1229,14 @@ class TestCaptureFriendlyTranscript:
             _event(
                 "assistant", message={"id": "resp_thinking", "content": [{"type": "thinking", "thinking": "plan"}]}
             ),
-            fold_thinking=False,
+            capture_transcript=True,
         )
         assert len(items) == 1
         assert items[0].type == "reasoning" and items[0].summary[0].text == "plan"
         assert metadata["terminal_response_id"] == "resp_thinking"
 
-    @pytest.mark.parametrize("fold_thinking", [False, True])
-    def test_terminal_id_is_last_nonempty_main_thread_id(self, fold_thinking: bool) -> None:
+    @pytest.mark.parametrize("capture_transcript", [False, True])
+    def test_terminal_id_is_last_nonempty_main_thread_id(self, capture_transcript: bool) -> None:
         events = [
             _event("assistant", message={"id": "resp_first"}),
             _event("assistant", message={"id": "resp_last"}),
@@ -1215,8 +1245,44 @@ class TestCaptureFriendlyTranscript:
             _event("assistant", message={"id": None}),
             _event("assistant", parent_tool_use_id="task", message={"id": "resp_child"}),
         ]
-        _, metadata = parse_stream_json("\n".join(events), fold_thinking=fold_thinking)
+        _, metadata = parse_stream_json("\n".join(events), capture_transcript=capture_transcript)
         assert metadata["terminal_response_id"] == "resp_last"
+
+    @pytest.mark.parametrize("capture", [False, True])
+    def test_subagent_output_filtering_is_independent_of_reasoning(self, capture: bool) -> None:
+        events = [
+            _event(
+                "assistant",
+                parent_tool_use_id="task",
+                message={
+                    "id": "resp_child",
+                    "content": [
+                        {"type": "thinking", "thinking": "child reasoning"},
+                        {"type": "text", "text": "child answer"},
+                    ],
+                    "usage": {"input_tokens": 3, "output_tokens": 4},
+                },
+            ),
+            _event(
+                "assistant",
+                message={
+                    "id": "resp_parent",
+                    "content": [
+                        {"type": "thinking", "thinking": "parent reasoning"},
+                        {"type": "text", "text": "parent answer"},
+                    ],
+                    "usage": {"input_tokens": 5, "output_tokens": 6},
+                },
+            ),
+        ]
+        items, metadata = parse_stream_json("\n".join(events), capture_transcript=capture)
+        assert [item.content[0].text for item in items if item.type == "message"] == (
+            ["parent answer"] if capture else ["child answer", "parent answer"]
+        )
+        assert [item.summary[0].text for item in items if item.type == "reasoning"] == (
+            ["parent reasoning"] if capture else ["child reasoning", "parent reasoning"]
+        )
+        assert metadata == {"input_tokens": 8, "output_tokens": 10, "terminal_response_id": "resp_parent"}
 
     @pytest.mark.parametrize("served_id", [None, ""])
     def test_capture_without_served_id_uses_generated_id(self, tmp_path: Path, served_id: str | None) -> None:
@@ -1249,7 +1315,7 @@ class TestCaptureFriendlyTranscript:
                     ),
                 ]
             ),
-            fold_thinking=not capture,
+            capture_transcript=capture,
         )
         calls = [item for item in items if item.type == "function_call"]
         assert [(item.call_id, item.status) for item in calls] == (
