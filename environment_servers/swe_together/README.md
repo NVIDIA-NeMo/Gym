@@ -50,6 +50,10 @@ unmeasured, masked results with independent cleanup receipts. Infrastructure fai
 converted into candidate zeroes. The environment parses task memory declarations
 explicitly and retains the declared resource limit.
 
+`skip_verification` does not apply to this server. Grading is the judge agent's run in the grading sandbox,
+which this server owns as part of the episode. The global `skip_verification` flag reaches only agents, and this
+server has no setting of its own that skips the judge.
+
 Correctness uses the frozen rubric weights and a 0.85 pass threshold. User
 Correction and Intent Coverage are reported separately using accepted simulator
 messages, including simulator actions and original-intent progress. `judge_all`

@@ -11,10 +11,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
+from warnings import warn
 
 from aiohttp import ClientError, ClientResponseError
 from fastapi import Body
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, TypeAdapter
 
 from environment_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeRequest,
@@ -30,6 +31,8 @@ from nemo_gym.agents import (
 from nemo_gym.client import format_exception_with_response_body, get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -102,6 +105,9 @@ class UserSimEnvironmentServerConfig(BaseEnvironmentServerConfig):
     embedding_model: ModelServerRef
     resources_server: ResourcesServerRef
     actor_call_timeout_seconds: float = Field(300.0, gt=0)
+    # Unset, each falls back to the assistant agent's own setting, which also carries the global flag.
+    skip_verification: bool | None = None
+    skip_verification_reward: float | None = None
 
     def target_for_alias(self, alias: str) -> AgentServerRef | ModelServerRef:
         return {
@@ -362,6 +368,15 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
     response_model = UserSimEpisodeResponse
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+        """Forward to the Resources Server; without verification there is nothing to aggregate."""
+        if self._skipped_verification_reward() is not None:
+            warn(
+                "Skipping aggregate metrics because skip_verification=True; "
+                "use disable_aggregation=True to avoid writing aggregate metric files.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return AggregateMetrics()
         response = await self.server_client.post(
             server_name=self.config.resources_server.name,
             url_path="/aggregate_metrics",
@@ -520,6 +535,21 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
                     bridge.resources_cookies.clear()
                     bridge.resources_cookies.update(session.close_response.resources_cookies)
 
+        skipped_reward = self._skipped_verification_reward()
+        if skipped_reward is not None:
+            # The Resources session still closes below; only its scoring is skipped.
+            try:
+                await resources_cleanup.close()
+            except Exception as error:
+                raise self._failure("cleanup", error, terminal=True) from error
+            return UserSimEpisodeResponse(
+                episode_id=request.episode_id,
+                task_id=request.task.task_id,
+                result=UserSimEpisodeResult.skipped(
+                    reward=skipped_reward, usersim_result=result, invocations=bridge.invocations
+                ),
+            )
+
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -589,6 +619,27 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             return event.result
         finally:
             await runtime.close()
+
+    def _skipped_verification_reward(self) -> float | None:
+        """The fixed reward that replaces /verify, or None to verify.
+
+        This server's own setting wins; otherwise the assistant agent's applies, as single_agent_turn falls back to
+        its agent's. Gym fills the agents' settings from the global flags. The agent's raw values are parsed as the
+        agent's own config parses them, so a string "false" stays false.
+        """
+        agent_config = get_first_server_config_dict(
+            self.server_client.global_config_dict,
+            self.config.assistant_agent.name,
+        )
+        skip = self.config.skip_verification
+        if skip is None:
+            skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
+        if not skip:
+            return None
+        reward = self.config.skip_verification_reward
+        if reward is None:
+            reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
+        return reward
 
     def responses_path(
         self,
