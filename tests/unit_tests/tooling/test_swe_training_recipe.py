@@ -695,7 +695,10 @@ def write_hardware_assets(prepared, manifest, profile_name):
     "profile_name,machine,names,valid",
     [
         (None, "aarch64", ["NVIDIA B300"] * 4, True),
+        (None, "aarch64", ["NVIDIA GB300"] * 4, True),
         ("arm64-b300", "aarch64", ["NVIDIA B300"] * 4, True),
+        ("arm64-b300", "aarch64", ["NVIDIA GB300"] * 4, True),
+        ("arm64-b300", "aarch64", ["NVIDIA GB200"] * 4, False),
         ("arm64-b300", "x86_64", ["NVIDIA H100 80GB HBM3"] * 8, False),
         ("x86_64-h100", "x86_64", ["NVIDIA H100 80GB HBM3"] * 8, True),
         ("x86_64-h100", "aarch64", ["NVIDIA H100 80GB HBM3"] * 8, False),

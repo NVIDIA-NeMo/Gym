@@ -19,7 +19,7 @@ class HardwareProfile:
     """One supported whole-node allocation and its training/generation split."""
 
     machine: str
-    gpu_name: str
+    gpu_names: tuple[str, ...]
     image_platform: str
     gpus_per_node: int
     generation_gpus: int
@@ -27,8 +27,8 @@ class HardwareProfile:
 
 DEFAULT_HARDWARE_PROFILE = "arm64-b300"
 HARDWARE_PROFILES = {
-    DEFAULT_HARDWARE_PROFILE: HardwareProfile("aarch64", "B300", "linux/arm64", 4, 2),
-    "x86_64-h100": HardwareProfile("x86_64", "H100", "linux/amd64", 8, 4),
+    DEFAULT_HARDWARE_PROFILE: HardwareProfile("aarch64", ("B300", "GB300"), "linux/arm64", 4, 2),
+    "x86_64-h100": HardwareProfile("x86_64", ("H100",), "linux/amd64", 8, 4),
 }
 
 
@@ -120,14 +120,15 @@ def main() -> None:
                 raise ValueError(f"{label} imports outside the checked image source")
         names = [torch.cuda.get_device_name(index) for index in range(torch.cuda.device_count())]
         machine = platform.machine()
+        gpu_pattern = r"\b(?:" + "|".join(map(re.escape, profile.gpu_names)) + r")\b"
         if (
             machine != profile.machine
             or len(names) != profile.gpus_per_node
-            or any(not re.search(rf"\b{profile.gpu_name}\b", name) for name in names)
+            or any(not re.search(gpu_pattern, name) for name in names)
         ):
             raise ValueError(
                 f"Hardware profile {profile_name} requires one {profile.machine} node with "
-                f"{profile.gpus_per_node} {profile.gpu_name} GPUs; observed {machine}, {names}"
+                f"{profile.gpus_per_node} {'/'.join(profile.gpu_names)} GPUs; observed {machine}, {names}"
             )
         receipt = {
             "hardware_profile": profile_name,
