@@ -16,6 +16,7 @@ from pathlib import Path
 
 from huggingface_hub import HfApi
 from omegaconf import DictConfig, OmegaConf
+from scripts.check_swe_training_recipe import DEFAULT_HARDWARE_PROFILE, HARDWARE_PROFILES
 from scripts.prepare_swe_verifier_controls import ROOT, clean_revision, digest, select_rows
 from scripts.swe_rows_to_harbor.convert import convert, server_config, task_folder_name
 
@@ -359,6 +360,10 @@ def prepare(args: argparse.Namespace) -> dict:
     """Write a fixed cohort/task/harness order and its complete configuration provenance."""
     rl_root, output = args.rl_root.resolve(), args.output_dir.resolve()
     validate_harnesses(args.harnesses, route=args.route)
+    profile_name = getattr(args, "hardware_profile", DEFAULT_HARDWARE_PROFILE)
+    if profile_name not in HARDWARE_PROFILES:
+        raise ValueError(f"Unsupported hardware profile: {profile_name}")
+    profile = HARDWARE_PROFILES[profile_name]
     assets = harness_assets(args.harnesses, codex_catalog=args.codex_catalog)
     if clean_revision(rl_root) != args.rl_revision:
         raise ValueError(f"RL HEAD must match the explicit reviewed revision {args.rl_revision}")
@@ -406,6 +411,8 @@ def prepare(args: argparse.Namespace) -> dict:
     train = output / "train.jsonl"
     train.write_text("".join(json.dumps(row) + "\n" for row in materialized))
     config = load_rl_config(rl_root)
+    config.cluster.gpus_per_node = profile.gpus_per_node
+    config.policy.generation.colocated.resources.gpus_per_node = profile.generation_gpus
     configure_gym(
         config, harnesses=args.harnesses, route=args.route, output=output, parser_cache=parser_cache, prepared=prepared
     )
@@ -438,6 +445,7 @@ def prepare(args: argparse.Namespace) -> dict:
         "model": model_provenance,
         "route": args.route,
         "harnesses": args.harnesses,
+        "hardware_profile": profile_name,
         "tasks": tasks,
         "steps": args.steps,
         "episodes": args.steps * 8 * len(args.harnesses) * 4,
@@ -476,6 +484,12 @@ def main() -> None:
         "--codex-catalog", type=Path, help="Pinned export models.json with adjacent fallback.json and provenance.json"
     )
     parser.add_argument("--model", choices=MODELS, default="4b")
+    parser.add_argument(
+        "--hardware-profile",
+        choices=HARDWARE_PROFILES,
+        default=DEFAULT_HARDWARE_PROFILE,
+        help="Whole-node hardware: four B300s on ARM64 (default), or eight H100s on x86_64; half used for generation",
+    )
     parser.add_argument("--count", choices=(8, 16, 32, 64), type=int, default=32)
     parser.add_argument("--steps", choices=(1, 5, 20), type=int, default=20)
     parser.add_argument("--wandb-project")

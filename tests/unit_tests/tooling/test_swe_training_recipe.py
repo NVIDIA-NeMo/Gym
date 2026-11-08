@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -434,6 +435,7 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
 
 
 @pytest.mark.parametrize("model,expert_parallel_size", [("4b", 1), ("30b", 2)])
+@pytest.mark.parametrize("hardware_profile,gpus,generation_gpus", [("arm64-b300", 4, 2), ("x86_64-h100", 8, 4)])
 @pytest.mark.parametrize(
     "steps,count,harnesses,route",
     [
@@ -448,7 +450,18 @@ def test_model_provenance_records_hub_hashes_without_downloading(monkeypatch, tm
     ],
 )
 def test_preparation_materializes_the_requested_update_budget(
-    monkeypatch, tmp_path, codex_catalog, model, expert_parallel_size, steps, count, harnesses, route
+    monkeypatch,
+    tmp_path,
+    codex_catalog,
+    model,
+    expert_parallel_size,
+    steps,
+    count,
+    harnesses,
+    route,
+    hardware_profile,
+    gpus,
+    generation_gpus,
 ):
     rl_root = tmp_path / "rl"
     rl_root.mkdir()
@@ -506,10 +519,16 @@ def test_preparation_materializes_the_requested_update_budget(
         steps=steps,
         wandb_project=None,
         codex_catalog=codex_catalog if "codex" in harnesses else None,
+        hardware_profile=hardware_profile,
     )
     manifest = recipe.prepare(args)
     config = OmegaConf.load(args.output_dir / "config.yaml")
     train = [json.loads(line) for line in (args.output_dir / "train.jsonl").read_text().splitlines()]
+    assert manifest["hardware_profile"] == hardware_profile
+    assert config.cluster.num_nodes == 1 and config.cluster.gpus_per_node == gpus
+    assert config.policy.generation.colocated.resources.gpus_per_node == generation_gpus
+    assert config.policy.megatron_cfg.tensor_model_parallel_size == 2
+    assert config.policy.generation.vllm_cfg.tensor_parallel_size == 2
     width = len(harnesses)
     assert len(train) == count * width and manifest["episodes"] == steps * 32 * width
     assert config.grpo.max_num_steps == steps and config.grpo.max_num_epochs == steps * 8 // count
@@ -598,13 +617,19 @@ def test_preflight_covers_staged_harness_assets(assets, codex_catalog, name):
         check.check_files(prepared, {"gym": root}, manifest)
 
 
-def test_launcher_dry_run_builds_one_node_submission_without_calling_slurm(tmp_path):
+@pytest.mark.parametrize("gpus", [4, 8])
+@pytest.mark.parametrize("dry_run", [True, False])
+@pytest.mark.parametrize("preflight_ok", [True, False])
+def test_launcher_uses_checked_allocation_and_stops_before_submission_on_failure(
+    tmp_path, gpus, dry_run, preflight_ok
+):
     # Bypass preflight only in this command-construction test; real launches always run it.
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "uv").write_text("#!/bin/sh\nexit 0\n")
+    (bin_dir / "uv").write_text(f"#!/bin/sh\nprintf '{gpus}\\n'\n" if preflight_ok else "#!/bin/sh\nexit 72\n")
     (bin_dir / "uv").chmod(0o755)
-    (bin_dir / "sbatch").write_text("#!/bin/sh\nexit 99\n")
+    receipt = tmp_path / "submission-receipt"
+    (bin_dir / "sbatch").write_text('#!/bin/sh\nprintf "%s\\n" "$GPUS_PER_NODE" "$@" > "$SUBMISSION_RECEIPT"\n')
     (bin_dir / "sbatch").chmod(0o755)
     env = os.environ | {
         "PATH": f"{bin_dir}:{os.environ['PATH']}",
@@ -617,15 +642,162 @@ def test_launcher_dry_run_builds_one_node_submission_without_calling_slurm(tmp_p
         "SLURM_PARTITION": "test-partition",
         "OPENSANDBOX_DOMAIN": "https://example.invalid",
         "OPENSANDBOX_API_KEY": "not-a-real-key",
+        "SUBMISSION_RECEIPT": str(receipt),
     }
     result = subprocess.run(
-        ["bash", str(recipe.ROOT / "scripts/launch_swe_single_agent_turn_training.sh"), "--dry-run"],
+        [
+            "bash",
+            str(recipe.ROOT / "scripts/launch_swe_single_agent_turn_training.sh"),
+            *(["--dry-run"] if dry_run else []),
+        ],
         env=env,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    if not preflight_ok:
+        assert result.returncode == 72 and not receipt.exists()
+        assert "Submit:" not in result.stdout
+        return
+    assert result.returncode == 0, result.stderr
     assert "--nodes=1" in result.stdout and "--exclusive" in result.stdout
+    assert f"--gres=gpu:{gpus}" in result.stdout
     assert "run_grpo_single_controller.py" in result.stdout
     assert "check_swe_training_recipe.py" in result.stdout
     assert "not-a-real-key" not in result.stdout
+    if dry_run:
+        assert not receipt.exists()
+    else:
+        submitted = receipt.read_text().splitlines()
+        assert submitted[0] == str(gpus) and f"--gres=gpu:{gpus}" in submitted
+
+
+@pytest.fixture
+def hardware_assets(assets):
+    prepared, root, _, manifest = assets
+    manifest.update({key: "a" * 64 for key in ("gym_commit", "rl_commit", "gym_lock_sha256", "rl_lock_sha256")})
+    return prepared, root, manifest
+
+
+def write_hardware_assets(prepared, manifest, profile_name):
+    if profile_name is not None:
+        manifest["hardware_profile"] = profile_name
+    profile = check.HARDWARE_PROFILES[profile_name or check.DEFAULT_HARDWARE_PROFILE]
+    config = OmegaConf.load(recipe.ROOT / "examples/training/swe_single_agent_turn.yaml")
+    config.cluster.gpus_per_node = profile.gpus_per_node
+    config.policy.generation.colocated.resources.gpus_per_node = profile.generation_gpus
+    OmegaConf.save(config, prepared / "config.yaml")
+    manifest["files_sha256"]["config.yaml"] = check.file_sha256(prepared / "config.yaml")
+    (prepared / "provenance.json").write_text(json.dumps(manifest))
+
+
+@pytest.mark.parametrize(
+    "profile_name,machine,names,valid",
+    [
+        (None, "aarch64", ["NVIDIA B300"] * 4, True),
+        ("arm64-b300", "aarch64", ["NVIDIA B300"] * 4, True),
+        ("arm64-b300", "x86_64", ["NVIDIA H100 80GB HBM3"] * 8, False),
+        ("x86_64-h100", "x86_64", ["NVIDIA H100 80GB HBM3"] * 8, True),
+        ("x86_64-h100", "aarch64", ["NVIDIA H100 80GB HBM3"] * 8, False),
+        ("x86_64-h100", "x86_64", ["NVIDIA H100 80GB HBM3"] * 4, False),
+        ("x86_64-h100", "x86_64", ["NVIDIA H100 80GB HBM3"] * 7 + ["NVIDIA H200"], False),
+        ("x86_64-h100", "x86_64", ["NVIDIA H1000"] * 8, False),
+    ],
+)
+def test_runtime_enforces_prepared_hardware_and_records_observations(
+    hardware_assets, monkeypatch, profile_name, machine, names, valid
+):
+    prepared, root, manifest = hardware_assets
+    write_hardware_assets(prepared, manifest, profile_name)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["check", "--prepared", str(prepared), "--rl-root", str(root), "--gym-root", str(root), "--runtime"],
+    )
+    monkeypatch.setattr(check.platform, "machine", lambda: machine)
+    for label in ("gym", "rl"):
+        monkeypatch.setitem(sys.modules, f"nemo_{label}", SimpleNamespace(__file__=str(root / "__init__.py")))
+    monkeypatch.setitem(
+        sys.modules,
+        "torch",
+        SimpleNamespace(
+            __version__="test-only",
+            cuda=SimpleNamespace(device_count=lambda: len(names), get_device_name=names.__getitem__),
+        ),
+    )
+    if not valid:
+        with pytest.raises(ValueError, match="Hardware profile"):
+            check.main()
+        assert not (prepared / "runtime-check.json").exists()
+        return
+    check.main()
+    receipt = json.loads((prepared / "runtime-check.json").read_text())
+    assert receipt["hardware_profile"] == (profile_name or "arm64-b300")
+    assert receipt["machine"] == machine and receipt["gpu_names"] == names
+    assert receipt["model_content_checked_against_hub"] == manifest["model"]["revision"]
+
+
+@pytest.mark.parametrize(
+    "profile_name,image_platform,mutation,expected_gpus",
+    [
+        (None, "linux/arm64", None, 4),
+        ("arm64-b300", "linux/arm64", None, 4),
+        ("x86_64-h100", "linux/amd64", None, 8),
+        ("x86_64-h100", "linux/arm64", None, None),
+        ("arm64-b300", "linux/amd64", None, None),
+        ("x86_64-h100", "linux/amd64", "mutable-image", None),
+        ("x86_64-h100", "linux/amd64", "container-bytes", None),
+        ("x86_64-h100", "linux/amd64", "config-split", None),
+        ("x86_64-h100", "linux/amd64", "unknown-profile", None),
+    ],
+)
+def test_host_checks_profile_image_and_config_before_reporting_allocation(
+    hardware_assets, monkeypatch, capsys, profile_name, image_platform, mutation, expected_gpus
+):
+    prepared, root, manifest = hardware_assets
+    write_hardware_assets(prepared, manifest, profile_name)
+    container = prepared / "image.sqsh"
+    container.write_bytes(b"test container bytes")
+    image = {key: manifest[key] for key in ("gym_commit", "rl_commit", "gym_lock_sha256", "rl_lock_sha256")}
+    image.update(
+        platform=image_platform, image="example/image@sha256:" + "b" * 64, squashfs_sha256=check.file_sha256(container)
+    )
+    if mutation == "mutable-image":
+        image["image"] = "example/image:latest"
+    elif mutation == "container-bytes":
+        container.write_bytes(b"changed")
+    elif mutation == "config-split":
+        config = OmegaConf.load(prepared / "config.yaml")
+        config.policy.generation.colocated.resources.gpus_per_node = 2
+        OmegaConf.save(config, prepared / "config.yaml")
+        manifest["files_sha256"]["config.yaml"] = check.file_sha256(prepared / "config.yaml")
+    elif mutation == "unknown-profile":
+        manifest["hardware_profile"] = "any-gpu"
+    (prepared / "provenance.json").write_text(json.dumps(manifest))
+    image_path = prepared / "image.json"
+    image_path.write_text(json.dumps(image))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check",
+            "--prepared",
+            str(prepared),
+            "--rl-root",
+            str(root),
+            "--gym-root",
+            str(root),
+            "--container",
+            str(container),
+            "--container-provenance",
+            str(image_path),
+            "--print-gpus-per-node",
+        ],
+    )
+    if expected_gpus is None:
+        with pytest.raises(ValueError):
+            check.main()
+        assert capsys.readouterr().out == ""
+    else:
+        check.main()
+        assert capsys.readouterr().out == f"{expected_gpus}\n"
