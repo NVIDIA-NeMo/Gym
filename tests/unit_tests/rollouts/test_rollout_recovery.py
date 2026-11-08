@@ -2424,6 +2424,52 @@ async def test_a_grading_provider_stop_ends_the_run_without_a_retry(
         assert "resets at 2026-11-07 21:33 UTC" in str(raised.value)
 
 
+@pytest.mark.parametrize(
+    ("failure_class", "kind"),
+    [
+        ("infrastructure_error", "provider_credentials_rejected"),
+        ("judge_failed", "provider_credentials_rejected"),
+        ("judge_failed", "provider_quota_exhausted"),
+    ],
+)
+async def test_a_credentials_or_quota_stop_writes_no_aggregate(runner_config, monkeypatch, failure_class, kind):
+    """The stop is a rejection like an incomplete run: one rollout scored, yet no score is computed or left behind."""
+    from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+
+    runner_config.require_complete = True
+    runner_config.disable_aggregation = False
+    aggregate = aggregate_metrics_path_for(Path(runner_config.output_jsonl_fpath))
+    aggregate.write_text("[]")  # an earlier segment's aggregate describes other rows
+    urls = []
+    calls = []
+
+    async def post(**kwargs):
+        urls.append(kwargs["url_path"])
+        calls.append(kwargs["json"])
+        if len(calls) == 1:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": failure_class,
+                "failure_kind": kind,
+                "failure_reason": "provider stop",
+                "mask_sample": True,
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError) as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.failure_kind == kind
+    assert "/aggregate_metrics" not in urls
+    assert not aggregate.exists()
+
+
 async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):
     from nemo_gym.rollouts.rollout_recovery import IncompleteEvaluationError
 
