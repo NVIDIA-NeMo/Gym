@@ -40,8 +40,9 @@ from the harness above:
 - Gym's token capture records each model call. The config turns off automatic compaction and sets no step limit,
   because capture cannot join a compaction summary or a step-limit message to the scored calls. The same config
   serves evaluation and RL training.
-- The OpenCode settings match the harness above: OpenCode 1.17.11, no thinking, 1800 s per task, a 131072-token
-  context window and 32768 output tokens. The permissions allow every path and repeated tool calls, because
+- The OpenCode settings match the harness above (OpenCode 1.17.11, 1800 s per task, a 131072-token context window
+  and 32768 output tokens), except that thinking is on, for a reasoning policy. Set `thinking: false` for a model
+  without reasoning. The permissions allow every path and repeated tool calls, because
   `opencode run` ends the run with no answer when it rejects a request. `experimental.continue_loop_on_deny` is not
   needed. Subagents (`task`), `webfetch` and `websearch` are off.
 

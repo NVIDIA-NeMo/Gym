@@ -44,7 +44,8 @@ visual_coding_opencode_session_agent:
       model: ${policy_model_name}
       opencode_version: 1.17.11
       concurrency: 64
-      thinking: false
+      # On for a reasoning policy: the adapter passes --thinking and sets reasoning on the model entry.
+      thinking: true
       # The only hard stop besides the context window: OpenCode itself has no turn cap.
       timeout: 1800
       context_window: 131072

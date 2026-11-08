@@ -69,17 +69,22 @@ Is the model's answer the same as the reference, differing only in formatting?""
 
 
 def parse_verdict(content: str) -> dict[str, Any]:
-    """The first JSON object in the reply; anything without a valid verdict is "unsure"."""
+    """The verdict and reason from the first JSON object in the reply.
+
+    A reply without a JSON object or without a valid verdict is a judge failure, not an "unsure" verdict: it raises
+    JudgeError, so the row is masked instead of scored 0. "unsure" counts only when the judge says it.
+    """
     match = re.search(r"\{.*\}", content or "", re.S)
     try:
-        data = json.loads(match.group(0)) if match else {}
+        data = json.loads(match.group(0)) if match else None
     except json.JSONDecodeError:
-        data = {}
-    verdict = str(data.get("verdict", "unsure")).lower().strip() if isinstance(data, dict) else "unsure"
+        data = None
+    if not isinstance(data, dict):
+        raise JudgeError(f"judge reply has no JSON object: {(content or '')[:200]!r}")
+    verdict = str(data.get("verdict", "")).lower().strip()
     if verdict not in ("equivalent", "different", "unsure"):
-        verdict = "unsure"
-    reason = str(data.get("reason", "")) if isinstance(data, dict) else ""
-    return {"verdict": verdict, "reason": reason[:200]}
+        raise JudgeError(f"judge reply has no valid verdict: {(content or '')[:200]!r}")
+    return {"verdict": verdict, "reason": str(data.get("reason", ""))[:200]}
 
 
 class VisualCodingOpenCodeConfig(BaseResourcesServerConfig):
@@ -140,6 +145,12 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
         return parse_verdict(completion.choices[0].message.content or "")
 
     async def verify(self, body: VisualCodingOpenCodeVerifyRequest) -> VisualCodingOpenCodeVerifyResponse:
+        """Score the final answer with the judge.
+
+        A judge failure (a failed call, or a reply without a valid verdict) is not caught here. The base class's
+        judge_failsafe returns the row masked (mask_sample, failure_kind judge_failed), so RL does not train on it
+        as a wrong answer.
+        """
         result = VisualCodingOpenCodeVerifyResponse(**body.model_dump(), reward=0.0)
         text = _extract_last_assistant_text(body)
         if not text:
@@ -149,12 +160,7 @@ class VisualCodingOpenCodeServer(SimpleResourcesServer):
         result.extracted_answer = _extract_answer(text, "final_answer")
         if result.extracted_answer is not None:
             result.string_match_reward = _grade_string_match(body.expected_answer, result.extracted_answer)
-        try:
-            judged = await self.judge(body.question, body.expected_answer, result.extracted_answer, text)
-        except JudgeError as exc:
-            result.failure_reason = "judge_error"
-            result.judge_reason = str(exc)[:500]
-            return result
+        judged = await self.judge(body.question, body.expected_answer, result.extracted_answer, text)
         result.judge_verdict = judged["verdict"]
         result.judge_reason = judged["reason"]
         result.reward = float(judged["verdict"] == "equivalent")

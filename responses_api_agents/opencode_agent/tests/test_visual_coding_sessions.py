@@ -95,7 +95,7 @@ def test_a_visual_coding_row_runs_in_a_session_with_its_image_attached(setup, ro
     payload = sandbox.params()
     assert payload["prompt"] == text
     command = payload["command"]
-    assert "--thinking" not in command
+    assert "--thinking" in command
     [image_path] = [command[index + 1] for index, arg in enumerate(command) if arg == "--file"]
     assert sandbox.files[image_path] == base64.b64decode(image["image_url"].partition(",")[2])
 
