@@ -752,6 +752,14 @@ def test_runtime_enforces_prepared_hardware_and_records_observations(
         ("x86_64-h100", "linux/amd64", "container-bytes", None),
         ("x86_64-h100", "linux/amd64", "config-split", None),
         ("x86_64-h100", "linux/amd64", "unknown-profile", None),
+        ("arm64-b300", "linux/arm64", "derived", 4),
+        ("arm64-b300", "linux/arm64", "derived-mutable-base", None),
+        ("arm64-b300", "linux/arm64", "derived-ambiguous", None),
+        ("arm64-b300", "linux/arm64", "derived-missing-audit", None),
+        ("arm64-b300", "linux/arm64", "derived-container-bytes", None),
+        ("arm64-b300", "linux/amd64", "derived", None),
+        ("arm64-b300", "linux/arm64", "unknown-format", None),
+        ("arm64-b300", "linux/arm64", "oci-ambiguous", None),
     ],
 )
 def test_host_checks_profile_image_and_config_before_reporting_allocation(
@@ -765,6 +773,23 @@ def test_host_checks_profile_image_and_config_before_reporting_allocation(
     image.update(
         platform=image_platform, image="example/image@sha256:" + "b" * 64, squashfs_sha256=check.file_sha256(container)
     )
+    if mutation and mutation.startswith("derived"):
+        image["image_format"] = "derived-squashfs"
+        image["base_image"] = image.pop("image")
+        for key in ("base_squashfs_sha256", "source_archive_sha256", "derivation_sha256", "environment_audit_sha256"):
+            image[key] = "c" * 64
+        if mutation == "derived-mutable-base":
+            image["base_image"] = "example/image:latest"
+        elif mutation == "derived-ambiguous":
+            image["image"] = image["base_image"]
+        elif mutation == "derived-missing-audit":
+            del image["environment_audit_sha256"]
+        elif mutation == "derived-container-bytes":
+            container.write_bytes(b"changed")
+    elif mutation == "unknown-format":
+        image["image_format"] = "unreviewed"
+    elif mutation == "oci-ambiguous":
+        image["base_image"] = image["image"]
     if mutation == "mutable-image":
         image["image"] = "example/image:latest"
     elif mutation == "container-bytes":

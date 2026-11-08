@@ -38,6 +38,31 @@ def file_sha256(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def check_image_identity(image: dict[str, object], *, expected_platform: str) -> None:
+    """Keep an exported SquashFS identity separate from its immutable OCI base."""
+    image_format = image.get("image_format", "oci")
+    if image_format == "oci":
+        reference = image.get("image")
+        if "base_image" in image:
+            raise ValueError("OCI image provenance must not also describe a derived SquashFS")
+    elif image_format == "derived-squashfs":
+        reference = image.get("base_image")
+        if "image" in image:
+            raise ValueError("A derived SquashFS has no derived OCI image identity")
+        for key in ("base_squashfs_sha256", "source_archive_sha256", "derivation_sha256", "environment_audit_sha256"):
+            value = image.get(key)
+            if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+                raise ValueError(f"Derived SquashFS provenance requires {key}")
+    else:
+        raise ValueError(f"Unsupported container provenance format: {image_format}")
+    if (
+        image.get("platform") != expected_platform
+        or not isinstance(reference, str)
+        or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", reference)
+    ):
+        raise ValueError(f"Container provenance requires an immutable {expected_platform} image or base image")
+
+
 def check_files(prepared: Path, roots: dict[str, Path], manifest: dict) -> None:
     """Check exact prepared bytes and production sources, independent of Git metadata in images."""
     for name, expected in manifest["files_sha256"].items():
@@ -146,10 +171,7 @@ def main() -> None:
         for key in ("gym_commit", "rl_commit", "gym_lock_sha256", "rl_lock_sha256"):
             if image[key] != manifest[key]:
                 raise ValueError(f"Container build provenance differs from the prepared recipe: {key}")
-        if image["platform"] != profile.image_platform or not re.fullmatch(
-            r"[^\s@]+@sha256:[0-9a-f]{64}", image["image"]
-        ):
-            raise ValueError(f"Container provenance requires an immutable {profile.image_platform} image")
+        check_image_identity(image, expected_platform=profile.image_platform)
         if file_sha256(args.container) != image["squashfs_sha256"]:
             raise ValueError("Container SquashFS bytes differ from the build provenance")
     print(
