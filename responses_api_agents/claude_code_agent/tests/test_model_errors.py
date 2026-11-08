@@ -9,6 +9,7 @@ import pytest
 from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.models import CaptureStore
+from nemo_gym.rollouts.harness_capabilities.behavior import _terminal_error_reported
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -66,6 +67,11 @@ def test_synthetic_http_error_keeps_text_and_classifies_original_status(capture:
         "status_code": 400,
     }
     assert response.output[0].content[0].text == ERROR_TEXT
+    assert response.error.code == "server_error"
+    assert response.error.message == ERROR_TEXT
+    assert _terminal_error_reported(
+        [{"status_code": 400, "response": ERROR_BODY}], [response.model_dump(mode="json")], 400
+    )
 
 
 @pytest.mark.parametrize(
@@ -116,7 +122,26 @@ def test_local_failure_status_is_preserved_in_response() -> None:
         NeMoGymResponseCreateParamsNonStreaming(input=[]), items, "model", metadata
     )
     assert response.status == "failed"
+    assert response.error.message == ERROR_TEXT
     assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY])["status_code"] == 400
+
+
+@pytest.mark.parametrize("status", ["completed", "incomplete"])
+def test_nonfailed_response_does_not_promote_stale_error_text(status: str) -> None:
+    items, metadata = parse_stream_json("\n".join(map(json.dumps, [_error_event(), _result()])))
+    response = _make_agent()._response_from_output(
+        NeMoGymResponseCreateParamsNonStreaming(input=[]), items, "model", metadata, status=status
+    )
+    assert response.error is None
+    assert response.output[0].content[0].text == ERROR_TEXT
+
+
+@pytest.mark.parametrize("message", [None, "", {}, 400])
+def test_failed_response_does_not_invent_missing_native_error_text(message: object) -> None:
+    response = _make_agent()._response_from_output(
+        NeMoGymResponseCreateParamsNonStreaming(input=[]), [], "model", {"error_message": message}, status="failed"
+    )
+    assert response.error is None
 
 
 def _call(index: int, *, failed: bool) -> ModelCallRecord:

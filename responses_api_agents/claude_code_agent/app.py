@@ -573,8 +573,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             else f"resp_{uuid4().hex}"
         )
         status = status or run_metadata.get("status")
+        error_message = run_metadata.get("error_message")
         response = NeMoGymResponse(
             **({"status": status} if status is not None else {}),
+            error={"code": "server_error", "message": error_message}
+            if status == "failed" and isinstance(error_message, str) and error_message
+            else None,
             id=response_id,
             created_at=int(time()),
             model=model_name,
