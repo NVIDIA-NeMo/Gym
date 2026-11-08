@@ -285,8 +285,10 @@ evidence or failed release retains the handle for retry. Cleanup is cooperative,
 
 ## Local CLI compatibility
 
-Local settings retain `output_token_policy` (`fixed` or `remaining_context`),
-`auto_compaction`, and an optional per-call `bash_timeout`. The dedicated
+Local settings retain `auto_compaction` and an optional per-call `bash_timeout`.
+`output_token_policy` applies to local runs and sandbox sessions alike: `fixed` caps each
+request at `max_output_tokens`, and `remaining_context` drops the cap so the model server sizes
+the output from the context the request leaves. The dedicated
 `pi_sandboxed_agent` also uses this local adapter inside its sandbox and supplies
 `mcp_servers` for authenticated Gym tools. Sandbox sessions take Resources tools from MCP grants
 instead and reject required HTTP tool grants rather than silently ignoring them.

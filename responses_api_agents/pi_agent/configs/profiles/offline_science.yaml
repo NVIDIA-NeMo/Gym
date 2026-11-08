@@ -1,0 +1,51 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Shared settings of the offline scientific benchmark presets (benchmarks/hle/pi.yaml,
+# benchmarks/apex_shortlist/pi.yaml), merged into the `pi_agent` instance that each preset's agent inherits. Each
+# session creates its own sandbox from the offline science image with Pi
+# (responses_api_agents/pi_sandboxed_agent/offline_science_image), which reaches only the model server. The settings
+# follow pi_sandboxed_agent's configs/benchmark.yaml where pi_agent has them; the benchmark READMEs list what differs.
+use_absolute_ip: true
+# The head server's config endpoint is unauthenticated, so keep it off the address sandboxes reach.
+head_server:
+  host: 127.0.0.1
+config_paths:
+- nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+- responses_api_agents/pi_agent/configs/pi_agent.yaml
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      # An unseeded request runs the harness on the Gym host, so keep the agent off the address sandboxes reach.
+      host: 127.0.0.1
+      num_workers: 4
+      concurrency: 512
+      model: benchmark-model
+      pi_version: 0.85.1
+      # The image lays out Node at /opt/node and Pi at /opt/pi, as install_pi_runtime.sh does under one directory.
+      sandbox_runtime_dir: /opt
+      timeout: 14400
+      sandbox_bash_timeout_seconds: 120
+      context_window: 262144
+      max_output_tokens: 262144
+      # Drop each request's output cap, so the model server sizes it from the context the request leaves.
+      output_token_policy: remaining_context
+      auto_compaction: false
+      sandbox_provider: sandbox
+      network_access: model_only
+      system_prompt: |
+        Internet access is disabled on this machine.
+        Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+      sandbox_config:
+        image: ${oc.env:PI_SANDBOX_IMAGE}
+        ttl_s: 14400
+        ready_timeout_s: 1200
+        workdir: /workspace
+        entrypoint:
+        - sleep
+        - infinity
+        resources:
+          cpu: 2
+          memory_mib: 8192
+        env:
+          EXECD_API_GRACE_SHUTDOWN: 50ms

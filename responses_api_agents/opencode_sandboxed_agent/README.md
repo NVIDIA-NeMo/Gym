@@ -81,7 +81,7 @@ only per-session Gym MCP headers. See [Tavily search](../../fern/versions/latest
 for exclusions, retry limits, and the source-only search response contract.
 
 ```bash
-gym eval run --benchmark hle/pi_search --model-type vllm_model
+gym eval run --benchmark hle/pi_search_legacy_agent --model-type vllm_model
 ```
 
 The presets use 512 concurrent requests per agent worker, 2 CPUs and 8 GiB per

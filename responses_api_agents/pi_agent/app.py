@@ -978,7 +978,10 @@ class PiAgent(SimpleResponsesAPIAgent):
         }
         await state.upload_json("home/.pi/agent/models.json", models)
         await state.upload_json("home/.pi/agent/settings.json", self._build_settings_config())
-        output_limit_extension = "output-limit.mjs"
+        # As on the local path, `remaining_context` drops each request's output cap so the server sizes it.
+        output_limit_extension = (
+            "remaining-context.mjs" if self.config.output_token_policy == "remaining_context" else "output-limit.mjs"
+        )
         await state.session.sandbox.upload(
             Path(__file__).with_name(output_limit_extension), f"{state.session.session_dir}/{output_limit_extension}"
         )
