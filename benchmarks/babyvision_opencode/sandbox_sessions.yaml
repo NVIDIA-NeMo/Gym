@@ -1,0 +1,16 @@
+# BabyVision (388 rows) under OpenCode in a sandbox session: the same rows, prompt and judge as config.yaml, run by
+# opencode_agent in a sandbox through the Environment Server (resources_servers/visual_coding_opencode/configs/
+# sandbox_sessions.yaml says what the session path needs). Data: prepare.py reads $LMUData/BabyVision.tsv (or
+# $BABYVISION_TSV).
+config_paths:
+  - resources_servers/visual_coding_opencode/configs/sandbox_sessions.yaml
+
+visual_coding_opencode_session_agent:
+  responses_api_agents:
+    opencode_agent:
+      datasets:
+      - name: babyvision_opencode
+        type: benchmark
+        jsonl_fpath: benchmarks/babyvision_opencode/data/babyvision_opencode_benchmark.jsonl
+        prepare_script: benchmarks/babyvision_opencode/prepare.py
+        num_repeats: 1

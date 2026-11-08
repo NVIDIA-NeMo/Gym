@@ -44,3 +44,22 @@ gym eval run \
 The policy must accept images, and the OpenCode CLI (1.17.11) must be installable on the agent
 host. The model's shell runs with the agent server's permissions; each task gets its own `/tmp`
 (`private_tmp`, which needs unprivileged user namespaces).
+
+## Run in a sandbox session
+
+`sandbox_sessions.yaml` runs the same rows with `opencode_agent` in a sandbox session: each task runs OpenCode in
+its own sandbox, and Gym's token capture records the model calls for RL training. The resources server's README
+(section "Sandbox sessions") lists what the session needs: the sandbox image, the OpenSandbox provider settings and an
+address that the sandbox can reach.
+
+```bash
+gym eval run \
+    --model-type vllm_model \
+    "+config_paths=[benchmarks/babyvision_opencode/sandbox_sessions.yaml]" \
+    ++output_jsonl_fpath=results/benchmarks/babyvision_opencode_sandbox_sessions.jsonl \
+    ++split=benchmark \
+    ++reuse_existing_data_preparation=true \
+    ++policy_base_url=<> \
+    ++policy_api_key=<> \
+    ++policy_model_name=<>
+```
