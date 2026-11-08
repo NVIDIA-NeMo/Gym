@@ -71,6 +71,10 @@ sandbox:
       # sandbox's lifetime, so the sandboxes of a process that died end one lease later. null renews
       # nothing and creates with the full lifetime.
       lease_s: null
+      # E2B runs every command in a login shell, and a Debian image's /etc/profile resets PATH, losing the
+      # image's toolchain directories (/usr/local/go/bin, ...). true writes a profile.d hook into each new
+      # sandbox that gives login shells back the environment they started with.
+      restore_login_env: true
       # Secure the sandbox envd service with an access token.
       secure: true
       # Permit outbound internet access. Set false for offline/untrusted workloads.

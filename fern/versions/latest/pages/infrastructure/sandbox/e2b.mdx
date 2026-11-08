@@ -65,6 +65,7 @@ sandbox:
       template_map: {}
       timeout_s: 3600.0
       auto_resume: false
+      restore_login_env: true
       secure: true
       allow_internet_access: true
       network: null
@@ -150,6 +151,23 @@ builds to finish; pass `--continue-on-error` to keep building the remaining imag
 
 The bundled builder controls template CPU count and memory. Disk and GPU requirements need a
 suitable template prepared through E2B tooling.
+
+## Image Environment in Login Shells
+
+The E2B SDK starts every command as `bash -l -c` and every terminal as `bash -i -l`. A sandbox
+process does start with its image's environment (the image's `ENV` and working directory), but a
+login shell reads `/etc/profile` first, and on Debian-based images that file resets `PATH`. Tools
+the image installed outside the default `PATH`, such as `/usr/local/go/bin`,
+`/usr/local/cargo/bin` or `/opt/conda/bin`, are then not found by name, both in a grader's test
+command and in an agent's tool calls.
+
+With `create.restore_login_env: true` (the default), the provider writes
+`/etc/profile.d/zz-nemo-gym-env.sh` into each new sandbox, including one created from a snapshot.
+Every login shell sources it last, and it gives the shell back the environment it started with:
+its variables as they were, and `PATH` with its starting entries first, followed by any the
+profile added. Shells other than bash return from it at once. If the hook cannot be written, the
+sandbox is killed and the create fails. Set `restore_login_env: false` to leave login shells as
+the template has them.
 
 ## Timeouts and Reconnection
 
