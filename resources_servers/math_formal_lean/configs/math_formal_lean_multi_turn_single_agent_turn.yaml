@@ -1,0 +1,56 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Proof refinement with multi-turn self-correction, run by the single_agent_turn_legacy Environment Server.
+# The agent runs its correction loop inside one /v1/responses activation and checks each attempt with
+# math_formal_lean's /check_proof through the direct_http grant; the Environment Server then verifies the final
+# attempt once. math_formal_lean_multi_turn.yaml runs the same loop in the agent's /run behind a legacy_agent relay,
+# with the same model inputs and the same reward. This file uses its instance names, so either one can be loaded.
+math_formal_lean:
+  resources_servers:
+    math_formal_lean:
+      entrypoint: app.py
+      sandbox_host: ${oc.env:NEMO_SKILLS_SANDBOX_HOST,127.0.0.1}
+      sandbox_port: ${oc.env:NEMO_SKILLS_SANDBOX_PORT,6000}
+      compilation_timeout: 30.0
+      domain: math
+      verified: false
+      description: Lean4 formal proof verification environment with multi-turn self-correction
+      value: Improve formal theorem proving capabilities
+
+math_formal_lean_refinement_agent:
+  responses_api_agents:
+    proof_refinement_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_formal_lean
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Agent controls the retry loop
+      max_correction_turns: 2
+      # Include all attempts in output (for training data)
+      include_all_attempts: true
+      datasets:
+      - name: train
+        type: train
+        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
+        license: MIT
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/math_formal_lean/data/minif2f_test.jsonl
+
+math_formal_lean_refinement_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: math_formal_lean
+      agent_server:
+        type: responses_api_agents
+        name: math_formal_lean_refinement_agent
+      # The agent checks proofs between correction turns through this grant.
+      resources_tool_transports:
+      - direct_http

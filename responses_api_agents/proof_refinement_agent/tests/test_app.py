@@ -12,11 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from nemo_gym.client import ServerClient
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.server_runtime import BaseSeedSessionRequest, ResourcesSeedSessionRequest
+from resources_servers.math_formal_lean.app import (
+    CheckProofRequest,
+    MathFormalLeanResourcesServer,
+    MathFormalLeanResourcesServerConfig,
+    MathFormalLeanVerifyRequest,
+)
 from responses_api_agents.proof_refinement_agent.app import (
+    PROOF_REFINEMENT_RESPONSE_KEY,
     ModelServerRef,
     ProofRefinementAgent,
     ProofRefinementAgentConfig,
@@ -34,6 +49,9 @@ class _FakeResp:
 
     async def json(self) -> dict[str, Any]:
         return self._payload
+
+    async def read(self) -> bytes:
+        return json.dumps(self._payload).encode()
 
 
 def _usage(input_tokens: int, output_tokens: int, *, cached: int = 0, reasoning: int = 0) -> dict[str, Any]:
@@ -192,3 +210,287 @@ class TestApp:
         assert correction_request["max_output_tokens"] == 1024
         assert correction_request["temperature"] == 0.6
         assert correction_request["top_p"] == 0.9
+
+
+def _agent(*, max_correction_turns: int = 2, server_client: Any = None) -> ProofRefinementAgent:
+    return ProofRefinementAgent(
+        config=ProofRefinementAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="proof_refinement_agent",
+            resources_server=ResourcesServerRef(type="resources_servers", name="lean"),
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            max_correction_turns=max_correction_turns,
+        ),
+        server_client=server_client or MagicMock(spec=ServerClient),
+    )
+
+
+_GRANT = {
+    "kind": "direct_http",
+    "name": "lean.direct_http",
+    "required": True,
+    "base_url": "http://lean:9000/ng-rollout/r",
+    "cookies": {"lean_cookie": "episode"},
+}
+
+
+def _agent_seed(*tool_accesses: dict[str, Any]) -> AgentSeedSessionRequest:
+    return AgentSeedSessionRequest(
+        agent_session_id="agent-session",
+        episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+        task_id=TaskId(taskset="math_formal_lean", task_id="0"),
+        tool_accesses=list(tool_accesses),
+    )
+
+
+def _check(*, needs_correction: bool) -> dict[str, Any]:
+    return {
+        "proof_status": "error" if needs_correction else "completed",
+        "predicted_proof": "theorem t : True := by ...",
+        "needs_correction": needs_correction,
+        "error_feedback": "Error 1: unknown tactic" if needs_correction else None,
+        "correction_prompt": "Fix the proof." if needs_correction else None,
+    }
+
+
+class TestAgentSessions:
+    def test_seed_needs_the_direct_http_grant_to_correct(self) -> None:
+        detail = check_agent_seed_rejected(_agent().setup_webserver(), _agent_seed())
+        assert "resources_tool_transports: [direct_http]" in detail
+
+        # Without corrections there is nothing to check, so no grant is needed.
+        agent = _agent(max_correction_turns=0)
+        with TestClient(agent.setup_webserver()) as client:
+            assert client.post("/v1/agent_sessions", json=_agent_seed().model_dump(mode="json")).status_code == 200
+
+    @pytest.mark.parametrize("kind", ["mcp", "sandbox", "two_direct_http"])
+    def test_seed_refuses_grants_it_cannot_use(self, kind: str) -> None:
+        seed = _agent_seed(_GRANT).model_dump(mode="json")
+        if kind == "mcp":
+            seed["tool_accesses"].append(
+                {
+                    "kind": "mcp",
+                    "name": "search",
+                    "required": True,
+                    "connection": {"transport": "streamable_http", "url": "http://search:9000/mcp"},
+                }
+            )
+        elif kind == "sandbox":
+            seed["sandbox_access"] = {
+                "connection": {"kind": "direct", "provider_config_ref": "sandbox", "descriptor": {}},
+                "workdir": "/workspace",
+            }
+        else:
+            seed["tool_accesses"].append(_GRANT | {"name": "other.direct_http"})
+        agent = _agent()
+        check_agent_seed_rejected(agent.setup_webserver(), AgentSeedSessionRequest.model_validate(seed))
+        assert not agent._session_records
+
+    def test_activation_runs_the_correction_loop(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(
+            side_effect=[
+                _FakeResp(_model_response("resp-0", "bad proof", _usage(10, 20))),
+                _FakeResp(_model_response("resp-1", "good proof", _usage(30, 40))),
+            ]
+        )
+        agent = _agent(server_client=server_client)
+        seed = _agent_seed(_GRANT)
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        body = {"input": [{"role": "user", "content": "Prove it."}], "max_output_tokens": 256}
+        check = AsyncMock(
+            side_effect=[_FakeResp(_check(needs_correction=True)), _FakeResp(_check(needs_correction=False))]
+        )
+        with (
+            patch("responses_api_agents.proof_refinement_agent.app.http_request", check),
+            TestClient(agent.setup_webserver()) as client,
+        ):
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            assert client.post("/ng-rollout/wrong/v1/responses", json=body).status_code == 409
+            result = client.post(path, json=body)
+            assert result.status_code == 200, result.text
+            # The same activation again joins the first: nothing runs twice.
+            assert client.post(path, json=body).json() == result.json()
+            assert client.post(path, json={"input": "different"}).status_code == 409
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
+
+        response = result.json()
+        assert response["id"] == "resp-1"
+        assert response["usage"] == _usage(40, 60)
+        refinement = response[PROOF_REFINEMENT_RESPONSE_KEY]
+        assert refinement["total_turns"] == 2
+        attempts = refinement["all_attempts"]
+        assert [attempt["generation"] for attempt in attempts] == ["bad proof", "good proof"]
+        assert [attempt["reward"] for attempt in attempts] == [0.0, 1.0]
+        assert attempts[1]["input"] == {
+            "input": [{"role": "user", "content": "Fix the proof."}],
+            "model": None,
+            "max_output_tokens": 256,
+        }
+        # Every model call goes to the policy under the rollout's path, without the agent's or the grant's cookies.
+        assert [call.kwargs["url_path"] for call in server_client.post.await_args_list] == [path, path]
+        assert all(not call.kwargs["cookies"] for call in server_client.post.await_args_list)
+        # Each check goes through the grant: its base URL, cookies and headers.
+        assert [call.kwargs["json"] for call in check.await_args_list] == [
+            {"proof": "bad proof"},
+            {"proof": "good proof"},
+        ]
+        for call in check.await_args_list:
+            assert call.kwargs["url"] == "http://lean:9000/ng-rollout/r/check_proof"
+            assert call.kwargs["cookies"] == {"lean_cookie": "episode"}
+        assert closed.status_code == 200, closed.text
+        assert closed.json()["resources_cookies"] is None
+        assert closed.json()["agent_observations"]["gaps"][0]["code"] == "observation_capture_failed"
+
+    async def test_last_allowed_attempt_is_left_to_verify(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(
+            side_effect=[
+                _FakeResp(_model_response("resp-0", "bad proof", _usage(1, 1))),
+                _FakeResp(_model_response("resp-1", "still bad", _usage(1, 1))),
+            ]
+        )
+        agent = _agent(max_correction_turns=1, server_client=server_client)
+        state = await agent._seed_agent_session_state(_agent_seed(_GRANT))
+        check = AsyncMock(return_value=_FakeResp(_check(needs_correction=True)))
+        with patch("responses_api_agents.proof_refinement_agent.app.http_request", check):
+            response = await agent._refine(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="Prove it."), model_url_path="/v1/responses"
+            )
+
+        assert check.await_count == 1
+        refinement = getattr(response, PROOF_REFINEMENT_RESPONSE_KEY)
+        assert refinement["total_turns"] == 2
+        # The unchecked attempt carries no grading fields: math_formal_lean's /verify adds them.
+        assert "proof_status" not in refinement["all_attempts"][-1]
+
+
+# ------------------------------------------------------------------------------------------------
+# Reward parity: the same scripted model and Lean compiler through /run and through an agent session
+# ------------------------------------------------------------------------------------------------
+
+_ROW = {
+    "responses_create_params": {
+        "input": [{"role": "user", "content": "Complete the Lean 4 proof."}],
+        "temperature": 0.6,
+        "max_output_tokens": 512,
+    },
+    "header": "import Mathlib\n\n",
+    "formal_statement": "theorem t : True := by\n",
+    "name": "t",
+}
+
+
+def _wire(value: Any) -> Any:
+    """A request body as ServerClient sends it."""
+    if isinstance(value, BaseModel):
+        value = value.model_dump(exclude_unset=True)
+    return json.loads(json.dumps(value, default=lambda item: item.model_dump(mode="json")))
+
+
+class _Episode:
+    """A scripted policy and Lean compiler. The policy answers its calls in order; Lean passes `good_tactic`."""
+
+    def __init__(self, proofs: list[str]) -> None:
+        self.proofs = proofs
+        self.model_requests: list[dict[str, Any]] = []
+        self.compiled: list[str] = []
+        self.lean = MathFormalLeanResourcesServer(
+            config=MathFormalLeanResourcesServerConfig(host="0.0.0.0", port=8080, entrypoint="", name="lean"),
+            server_client=MagicMock(spec=ServerClient),
+        )
+        self.lean._sandbox_client.execute_lean4 = AsyncMock(side_effect=self._compile)
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(side_effect=self._post)
+        self.agent = _agent(max_correction_turns=2, server_client=server_client)
+
+    async def _compile(self, code: str, timeout: float) -> dict[str, Any]:
+        self.compiled.append(code)
+        if "good_tactic" in code:
+            return {"process_status": "completed", "stdout": "", "stderr": ""}
+        line = code.count("\n") + 1
+        return {"process_status": "error", "stdout": "", "stderr": f"/lean4/my_project/t.lean:{line}:2: error: no"}
+
+    async def _post(self, *, server_name: str, url_path: str, json: Any, cookies: Any = None, **_: Any) -> _FakeResp:
+        body = _wire(json)
+        if server_name == "policy_model":
+            index = len(self.model_requests)
+            self.model_requests.append(body)
+            proof = f"```lean4\ntheorem t : True := by\n  {self.proofs[index]}\n```"
+            return _FakeResp(_model_response(f"resp-{index}", proof, _usage(100 * (index + 1), 10)))
+        if server_name == "proof_refinement_agent":  # /run's call to the agent's own /v1/responses
+            params = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+            response = await self.agent.responses(MagicMock(cookies={}, session={}), MagicMock(), params)
+            return _FakeResp(response.model_dump(mode="json"))
+        if url_path == "/seed_session":
+            await self.lean.seed_session(MagicMock(session={}), BaseSeedSessionRequest.model_validate(body))
+            return _FakeResp({})
+        assert url_path == "/verify"
+        result = await self.lean.verify(MagicMock(session={}), MathFormalLeanVerifyRequest.model_validate(body))
+        return _FakeResp(result.model_dump(mode="json"))
+
+    async def run(self) -> dict[str, Any]:
+        """The legacy path: the agent's /run, behind a legacy_agent relay."""
+        result = await self.agent.run(MagicMock(cookies={}), ProofRefinementRunRequest.model_validate(_ROW))
+        return result.model_dump(mode="json")
+
+    async def session(self) -> dict[str, Any]:
+        """The calls single_agent_turn_legacy makes: seed, seed the agent with the grant, one activation, verify."""
+        task_data = {key: value for key, value in _ROW.items() if key != "responses_create_params"}
+        seed_request = MagicMock(session={})
+        await self.lean.seed_session(
+            seed_request,
+            ResourcesSeedSessionRequest(
+                resources_session_id="resources-session",
+                episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+                task_id=TaskId(taskset="math_formal_lean", task_id="0"),
+                task_data=task_data,
+            ),
+        )
+        resources_request = MagicMock(session=dict(seed_request.session))
+        state = await self.agent._seed_agent_session_state(_agent_seed(_GRANT))
+
+        async def check_proof(*, url: str, json: dict[str, Any], **_: Any) -> _FakeResp:
+            assert url.endswith("/check_proof")
+            result = await self.lean.check_proof(resources_request, CheckProofRequest.model_validate(json))
+            return _FakeResp(result.model_dump(mode="json"))
+
+        params = NeMoGymResponseCreateParamsNonStreaming.model_validate(_ROW["responses_create_params"])
+        with patch("responses_api_agents.proof_refinement_agent.app.http_request", AsyncMock(side_effect=check_proof)):
+            response = await self.agent._refine(state, params, model_url_path="/v1/responses")
+        verify_body = task_data | {
+            "responses_create_params": params.model_dump(mode="json", exclude_unset=True),
+            "response": response.model_dump(mode="json"),
+        }
+        result = await self.lean.verify(resources_request, MathFormalLeanVerifyRequest.model_validate(verify_body))
+        assert resources_request.session[SESSION_ID_KEY] == "resources-session"
+        return result.model_dump(mode="json")
+
+
+class TestRewardParity:
+    @pytest.mark.parametrize(
+        ("proofs", "reward", "total_turns"),
+        [
+            (["good_tactic"], 1.0, 1),
+            (["bad_tactic", "good_tactic"], 1.0, 2),
+            (["bad_tactic", "worse_tactic", "still_bad"], 0.0, 3),
+        ],
+    )
+    async def test_session_result_equals_the_run_result(self, proofs: list[str], reward: float, total_turns: int):
+        legacy, session = _Episode(proofs), _Episode(proofs)
+
+        run_result = await legacy.run()
+        session_result = await session.session()
+
+        assert run_result["reward"] == reward
+        assert run_result["total_turns"] == total_turns
+        # The whole result row is the same: reward, final verification, attempts, response and its summed usage.
+        assert session_result == run_result
+        # The policy saw the same requests, correction prompts included.
+        assert session.model_requests == legacy.model_requests
+        # /verify compiles the final attempt again only when an earlier check already passed it.
+        extra = 1 if reward == 1.0 and total_turns < 3 else 0
+        assert len(session.compiled) == len(legacy.compiled) + extra

@@ -20,6 +20,25 @@ Failure modes detected:
 - Timeout (default 30s)
 - Use of `sorry` tactic
 
+A failed attempt also gets `error_feedback` (the compiler errors with code context) and `correction_prompt`, the prompt
+for the next attempt that a refinement agent such as `proof_refinement_agent` sends.
+
+## Proof checks during an episode
+
+`/check_proof` compiles one attempt for the theorem of the caller's episode session, with the same code `/verify` uses,
+and returns `proof_status`, `predicted_proof`, `compiler_output`, `needs_correction`, `error_feedback` and
+`correction_prompt`, but no reward. Its body is `{"proof": "<the model's text or a Lean 4 code block>"}`.
+
+Only an episode session holds a theorem. An Environment Server's episode seed keeps the task's `header` and
+`formal_statement` until `/close_session`; an agent's `/run` seed keeps nothing, and `/check_proof` answers 404 for it.
+Grant the route with `resources_tool_transports: [direct_http]`.
+
+`configs/math_formal_lean_multi_turn_single_agent_turn.yaml` runs `proof_refinement_agent` this way through
+`single_agent_turn_legacy`: the agent checks each attempt but the last allowed one with `/check_proof`, and `/verify`
+grades the final attempt once. `configs/math_formal_lean_multi_turn.yaml` runs the same loop in the agent's `/run`
+behind a `legacy_agent` relay and calls `/verify` for every attempt. Both send the model the same inputs and give the
+same reward. A `/verify` for an episode session that is already closed returns a masked sample.
+
 ## Data Sources
 
 **MiniF2F Dataset**: 244 formal mathematics problems from the [MiniF2F benchmark](https://github.com/openai/miniF2F), covering:
