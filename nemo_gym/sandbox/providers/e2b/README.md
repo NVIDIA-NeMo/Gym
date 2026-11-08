@@ -168,6 +168,14 @@ metadata.
   no-op command reaches the new sandbox: AgentENV can report a sandbox created while its gateway
   still answers 502. The no-op is retried on that 502 alone; a sandbox still unreachable at the
   deadline is killed and the create raises `E2BCreateError`.
+- The SDK runs every command as `bash -l -c` and every terminal as `bash -i -l`. A process starts
+  with its image's environment, but a Debian image's `/etc/profile` then resets `PATH`, so tools
+  the image installed outside the default `PATH` (`/usr/local/go/bin`, `/usr/local/cargo/bin`,
+  `/opt/conda/bin`) are not found. With `create.restore_login_env` (on by default), each new
+  sandbox, including one created from a snapshot, gets `/etc/profile.d/zz-nemo-gym-env.sh`. Every
+  login shell sources it last, and it restores the environment the shell started with: its
+  variables as they were, and `PATH` with its starting entries first, then any the profile added.
+  A sandbox whose hook cannot be written is killed and the create raises `E2BCreateError`.
 
 ## Snapshots
 

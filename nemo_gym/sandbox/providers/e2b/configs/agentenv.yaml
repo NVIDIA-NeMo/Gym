@@ -39,6 +39,8 @@ sandbox:
       # At hundreds of creates a minute, AgentENV can report a sandbox created before its gateway reaches it (502):
       # wait for it to answer instead of failing the first command run in it.
       reachable_timeout_s: 120.0
+      # Keep the PATH each task image declares in the login shells E2B runs commands in (Debian images reset it).
+      restore_login_env: true
       secure: true
       allow_internet_access: true
       strict_resources: false

@@ -38,6 +38,13 @@ instead of being dropped quietly.
 VM: memory, running processes and disk. A sandbox created from it resumes those
 processes where they were, so the provider sets ``snapshot_keeps_processes``.
 The snapshot is usable as soon as the call returns.
+
+**Commands run in login shells.** The SDK starts every command as
+``bash -l -c`` and every terminal as ``bash -i -l``. A process does start with
+its image's environment, but a Debian image's ``/etc/profile`` then resets
+``PATH``. Each new sandbox therefore gets a ``profile.d`` hook
+(``create.restore_login_env``) that gives a login shell back the environment it
+started with.
 """
 
 import asyncio
@@ -110,6 +117,35 @@ _KILL_MARKED_SCRIPT = (
     'done 2>/dev/null < "$d/environ"; done; true'
 )
 _KILL_MARKED_TIMEOUT_S = 30.0
+
+# A sandbox process starts with its image's environment, but the SDK runs every command and terminal in a login shell,
+# and a Debian image's /etc/profile resets PATH: the directories the image added (/usr/local/go/bin,
+# /usr/local/cargo/bin, /opt/conda/bin, ...) are lost, and a test command fails with "go: command not found". Sourced
+# last by every login shell, this hook puts back the environment the shell started with: its variables as they were,
+# and PATH with the starting entries first, then any the profile added. dash also reads profile.d, so a shell that is
+# not bash returns at the first line, before the bash-only syntax.
+_LOGIN_ENV_HOOK_PATH = "/etc/profile.d/zz-nemo-gym-env.sh"
+_LOGIN_ENV_HOOK = r"""# Written by NeMo Gym's E2B provider: give this login shell back the environment it started with.
+[ -n "${BASH_VERSION-}" ] && [ -r "/proc/$$/environ" ] || return 0
+__ng_path=
+while IFS= read -r -d '' __ng_var; do
+  case $__ng_var in
+    PATH=*) __ng_path=${__ng_var#PATH=} ;;
+    PWD=*|OLDPWD=*|SHLVL=*|_=*) ;;
+    *=*) export "$__ng_var" 2>/dev/null ;;
+  esac
+done <"/proc/$$/environ"
+__ng_merged=
+while IFS= read -r -d: __ng_dir; do
+  case ":$__ng_merged:" in
+    *":$__ng_dir:"*) ;;
+    *) [ -n "$__ng_dir" ] && __ng_merged=${__ng_merged:+$__ng_merged:}$__ng_dir ;;
+  esac
+done <<<"$__ng_path:$PATH:"
+export PATH=$__ng_merged
+unset __ng_path __ng_var __ng_merged __ng_dir
+"""
+
 # A command that raised a timeout this close to its deadline ran out its deadline (E2B ends the stream at, or a hair
 # before, the configured timeout); an earlier timeout is a transport failure.
 _DEADLINE_FRACTION = 0.99
@@ -321,6 +357,10 @@ class E2BCreateConfig:
     # created while its gateway still answers 502 "could not be reached"; the provider then runs a no-op command until
     # it succeeds, so callers never get a sandbox whose first command fails. None hands the sandbox over at once.
     reachable_timeout_s: float | None = field(default=None, kw_only=True)
+    # Install the login-shell hook (``_LOGIN_ENV_HOOK``) in every new sandbox, so commands keep the PATH their image
+    # declares. A sandbox whose hook cannot be written is killed and the create fails. False leaves login shells as
+    # the template has them.
+    restore_login_env: bool = field(default=True, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
     # Outbound traffic rules, passed as the SDK's ``network`` option:
@@ -363,6 +403,8 @@ class E2BCreateConfig:
             raise ValueError("create.auto_resume must be a boolean or None")
         _validate_optional_number("create.lease_s", self.lease_s, positive=True)
         _validate_optional_number("create.reachable_timeout_s", self.reachable_timeout_s, positive=True)
+        if not isinstance(self.restore_login_env, bool):
+            raise ValueError("create.restore_login_env must be a boolean")
 
 
 @dataclass(frozen=True)
@@ -716,16 +758,36 @@ class E2BProvider:
                     self._create.reachable_timeout_s,
                     exc,
                 )
-                self._leases.pop(str(sandbox.sandbox_id), None)
-                try:
-                    await self._stop(sandbox, str(sandbox.sandbox_id))
-                except Exception as kill_error:  # noqa: BLE001 - the lease or timeout still ends it
-                    LOGGER.warning("could not kill unreachable e2b sandbox %s: %r", sandbox.sandbox_id, kill_error)
+                await self._discard(sandbox, "unreachable")
                 raise E2BCreateError(
                     f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but could not be "
                     f"reached within {self._create.reachable_timeout_s:g}s: {exc}"
                 ) from exc
+        if self._create.restore_login_env:
+            # Also on a sandbox created from a snapshot, which has the hook already: writing it again is harmless, and
+            # it covers snapshots taken without it.
+            try:
+                await self._with_retries(
+                    lambda: sandbox.files.write(
+                        _LOGIN_ENV_HOOK_PATH, _LOGIN_ENV_HOOK, user="root", **self._request_params()
+                    ),
+                    operation="write login-shell hook",
+                )
+            except Exception as exc:
+                await self._discard(sandbox, "login-shell hook not written")
+                raise E2BCreateError(
+                    f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but its login-shell "
+                    f"hook {_LOGIN_ENV_HOOK_PATH} could not be written: {exc}"
+                ) from exc
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+
+    async def _discard(self, sandbox: Any, reason: str) -> None:
+        """Kill a new sandbox the caller will not get; the lease or its timeout ends one the kill misses."""
+        self._leases.pop(str(sandbox.sandbox_id), None)
+        try:
+            await self._stop(sandbox, str(sandbox.sandbox_id))
+        except Exception as kill_error:  # noqa: BLE001 - the lease or timeout still ends it
+            LOGGER.warning("could not kill e2b sandbox %s (%s): %r", sandbox.sandbox_id, reason, kill_error)
 
     async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
         """Create through ``POST /sandboxes``, adding ``customExtensionParams``.

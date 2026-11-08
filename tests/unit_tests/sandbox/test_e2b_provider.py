@@ -20,6 +20,8 @@ import inspect
 import json
 import logging
 import re
+import shutil
+import subprocess
 import sys
 import tomllib
 import types
@@ -48,6 +50,8 @@ from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
 from nemo_gym.sandbox.providers.e2b import provider as e2b_provider
 from nemo_gym.sandbox.providers.e2b.provider import (
     _API_PARAM_KEYS,
+    _LOGIN_ENV_HOOK,
+    _LOGIN_ENV_HOOK_PATH,
     E2BCreateError,
     E2BProvider,
     E2BSandboxUnreachableError,
@@ -1041,7 +1045,8 @@ class TestCreateAndLifecycle:
     async def test_provider_create_leaves_spec_files_to_the_facade(self) -> None:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec(files={"/app/seed.txt": "hello"}))
-        assert handle.raw.file_write_calls == []
+        # Only the provider's own login-shell hook.
+        assert [call["path"] for call in handle.raw.file_write_calls] == [_LOGIN_ENV_HOOK_PATH]
 
     async def test_async_sandbox_uploads_spec_files_exactly_once(self) -> None:
         provider = E2BProvider(create={"template": "base"})
@@ -1050,8 +1055,9 @@ class TestCreateAndLifecycle:
             _spec(files={"/app/seed.txt": "hello"}),
         ).start()
         raw = FakeSandbox.instances[0]
-        assert raw.file_write_calls == [{"path": "/app/seed.txt", "data": b"hello"}]
-        assert raw.files_written == {"/app/seed.txt": b"hello"}
+        spec_writes = [call for call in raw.file_write_calls if call["path"] != _LOGIN_ENV_HOOK_PATH]
+        assert spec_writes == [{"path": "/app/seed.txt", "data": b"hello"}]
+        assert raw.files_written["/app/seed.txt"] == b"hello"
         await sandbox.stop()
 
     async def test_async_sandbox_cleans_up_when_spec_file_upload_fails(
@@ -1811,10 +1817,17 @@ async def test_real_sdk_status_only_reads_control_plane(
     sandbox = {"templateID": "base", "sandboxID": "sbx-1", "clientID": "client", "envdVersion": "0.2.0"}
     requests: list[tuple[str, str]] = []
 
+    hook_uploads: list[dict[str, str]] = []
+
     async def fake_api(self, request: httpx.Request) -> httpx.Response:
         requests.append((request.method, request.url.path))
         if request.method == "POST" and request.url.path.endswith("/sandboxes"):
             return httpx.Response(201, json=sandbox, request=request)
+        if request.method == "POST" and request.url.path.endswith("/files"):
+            # The create's login-shell hook, uploaded to envd.
+            hook_uploads.append(dict(request.url.params))
+            entry = {"name": "zz-nemo-gym-env.sh", "type": "file", "path": request.url.params["path"]}
+            return httpx.Response(200, json=[entry], request=request)
         if request.method == "GET" and request.url.path.endswith("/sandboxes/sbx-1"):
             if state == "gone":
                 # Killed at its timeout: the SDK's 404 must read as STOPPED, not UNKNOWN.
@@ -1838,6 +1851,7 @@ async def test_real_sdk_status_only_reads_control_plane(
     monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", fake_api)
     provider = E2BProvider(connection={"api_key": "test-key", "validate_api_key": False}, create={"template": "base"})
     handle = await provider.create(_spec())
+    assert hook_uploads == [{"path": _LOGIN_ENV_HOOK_PATH, "username": "root"}]
     requests.clear()
 
     assert await provider.status(handle) is expected
@@ -2246,6 +2260,140 @@ async def test_only_unreachable_is_waited_out_after_a_create(monkeypatch: pytest
 async def test_without_a_reachable_timeout_create_runs_no_command() -> None:
     handle = await E2BProvider(create={"template": "base"}).create(_spec(ttl_s=60))
     assert handle.raw.exec_calls == []
+
+
+# --------------------------------------------------------------------------
+# Login-shell hook: commands keep the PATH their image declares
+# --------------------------------------------------------------------------
+
+
+_HOOK_WRITE = {"path": _LOGIN_ENV_HOOK_PATH, "data": _LOGIN_ENV_HOOK, "user": "root"}
+
+
+class TestLoginEnvHook:
+    async def test_create_writes_the_hook_as_root(self) -> None:
+        handle = await E2BProvider(create={"template": "base"}).create(_spec())
+        assert handle.raw.file_write_calls == [_HOOK_WRITE]
+
+    async def test_create_from_a_snapshot_writes_it_too(self) -> None:
+        provider = E2BProvider(create={"template": "base"})
+        source = await provider.create(_spec())
+        snapshot_id = await provider.snapshot(source)
+        restored = await provider.create_from_snapshot(snapshot_id, _spec())
+        assert restored.raw.file_write_calls == [_HOOK_WRITE]
+
+    async def test_it_is_written_after_the_sandbox_is_reachable(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        order: list[str] = []
+        original_run, original_write = FakeCommands.run, FakeFiles.write
+
+        async def run(self, **kwargs):
+            order.append("probe")
+            return await original_run(self, **kwargs)
+
+        async def write(self, path, data, **kwargs):
+            order.append("hook")
+            return await original_write(self, path, data, **kwargs)
+
+        monkeypatch.setattr(FakeCommands, "run", run)
+        monkeypatch.setattr(FakeFiles, "write", write)
+        await E2BProvider(create={"template": "base", "reachable_timeout_s": 30}).create(_spec())
+        assert order == ["probe", "hook"]
+
+    async def test_restore_login_env_false_writes_nothing(self) -> None:
+        handle = await E2BProvider(create={"template": "base", "restore_login_env": False}).create(_spec())
+        assert handle.raw.file_write_calls == []
+
+    async def test_a_transient_write_failure_is_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        failures = [FakeUnreachable("502: The sandbox could not be reached")]
+        original_write = FakeFiles.write
+
+        async def flaky_write(self, path, data, **kwargs):
+            if failures:
+                raise failures.pop(0)
+            return await original_write(self, path, data, **kwargs)
+
+        monkeypatch.setattr(FakeFiles, "write", flaky_write)
+        provider = E2BProvider(create={"template": "base"}, operations={"retry_delay_s": 0.0})
+        handle = await provider.create(_spec())
+        assert handle.raw.files_written == {_LOGIN_ENV_HOOK_PATH: _LOGIN_ENV_HOOK}
+        assert not handle.raw.killed
+
+    async def test_a_sandbox_whose_hook_cannot_be_written_is_killed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        async def failing_write(self, path, data, **kwargs):
+            raise FakeSdkError("500: envd crashed", status_code=500)
+
+        monkeypatch.setattr(FakeFiles, "write", failing_write)
+        provider = E2BProvider(
+            create={"template": "base", "lease_s": 60.0}, operations={"retries": 1, "retry_delay_s": 0.0}
+        )
+        try:
+            with pytest.raises(E2BCreateError, match="login-shell hook .* could not be written: 500: envd crashed"):
+                await provider.create(_spec())
+            sandbox = FakeSandbox.instances[-1]
+            assert sandbox.killed
+            assert provider._leases == {}
+        finally:
+            await provider.aclose()
+
+    @pytest.mark.parametrize("invalid", ["yes", 1, None])
+    def test_restore_login_env_must_be_a_boolean(self, invalid: object) -> None:
+        with pytest.raises(ValueError, match="restore_login_env must be a boolean"):
+            E2BProvider(create={"template": "base", "restore_login_env": invalid})
+
+
+def _source_hook(tmp_path: Path, shell: list[str], script: str, env: dict[str, str]) -> subprocess.CompletedProcess:
+    """Run ``script`` in ``shell`` started with exactly ``env``; ``$HOOK`` names the hook file."""
+    hook = tmp_path / "zz-nemo-gym-env.sh"
+    hook.write_text(_LOGIN_ENV_HOOK)
+    return subprocess.run(
+        ["env", "-i", *(f"{name}={value}" for name, value in env.items()), f"HOOK={hook}", *shell, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+
+_TRICKY_VALUE = "a b 'c' \"d\" $e `f` \\g\nline two"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+class TestLoginEnvHookScript:
+    """The hook itself, sourced by a real bash after a profile that reset PATH and changed variables."""
+
+    # What Debian's /etc/profile does to a root login shell, plus a variable the profile overrides.
+    _PROFILE = 'PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"; export PATH; IMG_VAR=profile; '
+    _PRINT = 'printf "%s\\0%s\\0%s" "$PATH" "$IMG_VAR" "${PROFILE_ONLY-unset}"'
+
+    def _run(self, tmp_path: Path, script: str) -> list[str]:
+        env = {"PATH": "/usr/local/go/bin:/usr/bin:/bin", "IMG_VAR": _TRICKY_VALUE, "GOPATH": "/go"}
+        result = _source_hook(tmp_path, ["bash"], script, env)
+        assert result.returncode == 0, result.stderr
+        assert result.stderr == ""
+        return result.stdout.split("\0")
+
+    def test_restores_the_starting_path_first_and_keeps_what_the_profile_added(self, tmp_path: Path) -> None:
+        path, _, _ = self._run(tmp_path, self._PROFILE + '. "$HOOK"; ' + self._PRINT)
+        assert path == "/usr/local/go/bin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/sbin"
+
+    def test_restores_variables_byte_for_byte_and_keeps_ones_the_profile_added(self, tmp_path: Path) -> None:
+        script = self._PROFILE + "export PROFILE_ONLY=kept; " + '. "$HOOK"; ' + self._PRINT
+        _, value, profile_only = self._run(tmp_path, script)
+        assert value == _TRICKY_VALUE
+        assert profile_only == "kept"
+
+    def test_sourcing_it_twice_changes_nothing(self, tmp_path: Path) -> None:
+        once = self._run(tmp_path, self._PROFILE + '. "$HOOK"; ' + self._PRINT)
+        twice = self._run(tmp_path, self._PROFILE + '. "$HOOK"; . "$HOOK"; ' + self._PRINT)
+        assert once == twice
+
+    def test_leaves_no_variables_of_its_own(self, tmp_path: Path) -> None:
+        assert self._run(tmp_path, '. "$HOOK"; compgen -v __ng_ || true') == [""]
+
+
+@pytest.mark.skipif(shutil.which("dash") is None, reason="needs dash")
+def test_login_env_hook_returns_quietly_in_a_shell_that_is_not_bash(tmp_path: Path) -> None:
+    result = _source_hook(tmp_path, ["dash"], '. "$HOOK"; echo "rc=$? PATH=$PATH"', {"PATH": "/usr/bin:/bin"})
+    assert (result.returncode, result.stdout, result.stderr) == (0, "rc=0 PATH=/usr/bin:/bin\n", "")
 
 
 # --------------------------------------------------------------------------
