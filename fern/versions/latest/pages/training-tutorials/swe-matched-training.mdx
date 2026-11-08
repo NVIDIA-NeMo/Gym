@@ -53,13 +53,13 @@ The output contains `source.jsonl`, `train.jsonl`, `config.yaml` and `provenance
 
 ## Build and identify the runtime
 
-Use RL's official `docker/Dockerfile`, its selected dependency lock and initialized submodules. Build a Linux ARM64 release image from the reviewed local checkout:
+Use RL's official `docker/Dockerfile`, its selected dependency lock and initialized submodules. Current Gym requires `uv >=0.13.4`; select `0.13.6` through the Dockerfile's supported build argument and use that version to check the lock. Build a Linux ARM64 release image from the reviewed local checkout:
 
 ```bash
 cd "$NEMO_RL_ROOT"
 git submodule update --init --recursive
 docker buildx build --platform linux/arm64 --target release \
-  --build-context nemo-rl=. \
+  --build-context nemo-rl=. --build-arg UV_VERSION=0.13.6 \
   -f docker/Dockerfile --tag "$IMAGE_TAG" --push .
 ```
 
