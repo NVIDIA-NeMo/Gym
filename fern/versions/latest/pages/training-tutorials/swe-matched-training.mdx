@@ -59,7 +59,7 @@ Use RL's official `docker/Dockerfile`, its selected dependency lock and initiali
 cd "$NEMO_RL_ROOT"
 git submodule update --init --recursive
 docker buildx build --platform linux/arm64 --target release \
-  --build-context nemo-rl=. --build-arg NEMO_RL_COMMIT="$RL_REVISION" \
+  --build-context nemo-rl=. \
   -f docker/Dockerfile --tag "$IMAGE_TAG" --push .
 ```
 
