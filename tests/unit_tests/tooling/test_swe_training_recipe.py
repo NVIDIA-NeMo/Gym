@@ -9,6 +9,7 @@ import os
 import pprint
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -24,6 +25,41 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.rollouts.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 from tests.unit_tests.tooling.test_swe_rows_to_harbor import REBENCH_ROW, parser_cache  # noqa: F401
+
+
+@pytest.mark.parametrize("route", ["old-run", "single-agent-turn", "harbor"])
+@pytest.mark.parametrize("model", ["4b", "30b"])
+def test_disabled_wandb_passes_actual_rl_schema(tmp_path, monkeypatch, route, model):
+    rl = pytest.importorskip("nemo_rl", reason="Run typed RL validation in the prepared RL driver environment")
+    import ray
+    import wandb
+    from pydantic import ValidationError
+
+    monkeypatch.setattr(ray, "init", lambda *args, **kwargs: pytest.fail("Schema validation must not start Ray"))
+    monkeypatch.setattr(wandb, "init", lambda *args, **kwargs: pytest.fail("Schema validation must not start W&B"))
+    config = recipe.load_rl_config(Path(rl.__file__).resolve().parent.parent)
+    config.policy.model_name = str(tmp_path / recipe.MODELS[model][1])
+    config.policy.megatron_cfg.expert_model_parallel_size = recipe.MODELS[model][2]
+    recipe.configure_gym(
+        config,
+        harnesses=["opencode"],
+        route=route,
+        output=tmp_path,
+        parser_cache=tmp_path / "parsers",
+        prepared=SimpleNamespace(tasks=[], folder=tmp_path / "tasks"),
+    )
+    config.data.train.data_path = str(tmp_path / "train.jsonl")
+    config.checkpointing.checkpoint_dir = str(tmp_path / "checkpoints")
+    config.logger.log_dir = str(tmp_path / "logs")
+    config.logger.wandb.name = "schema-check"
+    assert config.logger.wandb_enabled is False
+    OmegaConf.save(config, tmp_path / "config.yaml")
+    check.check_rl_config(tmp_path)
+    # Reproduce the real startup failure even with logging disabled.
+    config.logger.wandb.project = None
+    OmegaConf.save(config, tmp_path / "config.yaml")
+    with pytest.raises(ValidationError, match=r"logger\.wandb\.project"):
+        check.check_rl_config(tmp_path)
 
 
 @pytest.fixture
@@ -559,6 +595,8 @@ def test_preparation_materializes_the_requested_update_budget(
     config = OmegaConf.load(args.output_dir / "config.yaml")
     # The RL driver resolves the whole prepared config before Gym injects any aliases.
     resolved_config = OmegaConf.to_container(config, resolve=True, throw_on_missing=True)
+    assert resolved_config["logger"]["wandb_enabled"] is False
+    assert resolved_config["logger"]["wandb"]["project"] == "grpo-dev"
     if route == "old-run":
         for harness in set(harnesses) & {"hermes", "pi"}:
             name = recipe.OLD_AGENTS[harness]

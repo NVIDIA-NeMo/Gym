@@ -188,6 +188,6 @@ logger:
   log_dir: ???
   wandb_enabled: false
   wandb:
-    project: null
+    project: grpo-dev
     name: ???
     log_nemo_gym_full_result_tables: true

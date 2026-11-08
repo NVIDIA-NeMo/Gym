@@ -99,6 +99,21 @@ def check_files(prepared: Path, roots: dict[str, Path], manifest: dict) -> None:
         raise ValueError("Verifier parser source changed")
 
 
+def check_rl_config(prepared: Path) -> None:
+    """Validate the complete controller schema in the selected RL driver environment.
+
+    This does not start Ray, create a logger, load model weights, or allocate workers.
+    Run it inside the prepared runtime before submitting training; the Gym-only host
+    environment need not contain RL's dependencies.
+    """
+    from nemo_rl.algorithms.single_controller_utils import MasterConfig
+    from nemo_rl.utils.config import load_config, register_omegaconf_resolvers
+
+    register_omegaconf_resolvers()
+    config = OmegaConf.to_container(load_config(prepared / "config.yaml"), resolve=True, throw_on_missing=True)
+    MasterConfig.model_validate(config)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--prepared", type=Path, required=True)
@@ -107,11 +122,20 @@ def main() -> None:
     parser.add_argument("--container", type=Path)
     parser.add_argument("--container-provenance", type=Path)
     parser.add_argument("--runtime", action="store_true")
+    parser.add_argument(
+        "--rl-config-only",
+        action="store_true",
+        help="Validate the full controller schema in the RL driver environment without starting training",
+    )
     parser.add_argument("--shared-root", type=Path)
     parser.add_argument(
         "--print-gpus-per-node", action="store_true", help="Print the checked allocation size for Slurm"
     )
     args = parser.parse_args()
+    if args.rl_config_only:
+        check_rl_config(args.prepared)
+        print("RL_CONFIG_SCHEMA_PASSED")
+        return
     manifest = json.loads((args.prepared / "provenance.json").read_text())
     # Older preparations used the four-B300 recipe without an explicit profile.
     profile_name = manifest.get("hardware_profile", DEFAULT_HARDWARE_PROFILE)
