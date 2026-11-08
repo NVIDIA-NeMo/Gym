@@ -100,6 +100,9 @@ def tool_response_text(reply: Dict[str, Any]) -> str:
     return f"<tool_response>\n{body}\n</tool_response>"
 
 
+START_TIMEOUT_S = 300
+
+
 class _Server:
     """One sandbox server process (line protocol)."""
 
@@ -127,11 +130,21 @@ class _Server:
             env=env,
             limit=1 << 26,
         )
-        ready = await asyncio.wait_for(self.proc.stdout.readline(), timeout=120)
+        # A fresh interpreter imports numpy/scipy/networkx; on a node busy with hundreds of rollouts that can take
+        # minutes, so allow START_TIMEOUT_S before giving up.
+        ready = await asyncio.wait_for(self.proc.stdout.readline(), timeout=START_TIMEOUT_S)
         if b'"ready"' not in ready:
             raise RuntimeError(f"sandbox server failed to start: {ready!r}")
 
     async def call(self, req: Dict[str, Any], wait_s: float) -> Dict[str, Any]:
+        """One request; a failure (or a server that could not be restarted) comes back as an error reply, never as
+        an exception, so one bad sandbox never ends the rollout or poisons the pool."""
+        if self.proc is None:  # an earlier restart failed: try again now
+            try:
+                await self.start()
+            except Exception as exc:
+                await self.close()
+                return {"output": "", "timed_out": False, "error": f"sandbox unavailable ({type(exc).__name__}: {exc})"}
         assert self.proc is not None and self.proc.stdin is not None and self.proc.stdout is not None
         try:
             self.proc.stdin.write((json.dumps(req) + "\n").encode())
@@ -139,10 +152,15 @@ class _Server:
             line = await asyncio.wait_for(self.proc.stdout.readline(), timeout=wait_s)
             if not line:
                 raise RuntimeError("sandbox server closed")
-            return json.loads(line)
+            reply = json.loads(line)
+            reply.setdefault("output", "")
+            return reply
         except Exception as exc:  # restart the server and report to the model
             await self.close()
-            await self.start()
+            try:
+                await self.start()
+            except Exception:
+                await self.close()  # left stopped; the next call starts it again
             return {"output": "", "timed_out": False, "error": f"sandbox restarted ({type(exc).__name__}: {exc})"}
 
     async def close(self) -> None:
@@ -190,7 +208,11 @@ class SandboxPool:
             if self._idle is None:
                 idle: asyncio.Queue = asyncio.Queue()
                 servers = [_Server(self.python, self.command_prefix) for _ in range(self.num_workers)]
-                await asyncio.gather(*(s.start() for s in servers))
+                # A server that fails to start stays stopped; its first call starts it again.
+                started = await asyncio.gather(*(s.start() for s in servers), return_exceptions=True)
+                for s, result in zip(servers, started):
+                    if isinstance(result, BaseException):
+                        await s.close()
                 self._servers = servers
                 for s in servers:
                     idle.put_nowait(s)
@@ -225,7 +247,7 @@ class SandboxPool:
         if reply.get("error") or reply.get("timed_out"):
             return None
         try:
-            grid = json.loads(reply["output"].strip().splitlines()[-1])
+            grid = json.loads((reply.get("output") or "").strip().splitlines()[-1])
         except (ValueError, IndexError):
             return None
         # The function may return anything (an int, a flat list, ragged rows): only a valid grid is an answer.

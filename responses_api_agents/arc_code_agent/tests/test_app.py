@@ -570,3 +570,34 @@ async def test_predict_answer_returns_only_valid_grids(printed, expected) -> Non
 
     pool.run = fake_run
     assert await pool.predict_answer("", [], "transform") == expected
+
+
+@pytest.mark.asyncio
+async def test_sandbox_call_reports_a_failed_restart_instead_of_raising() -> None:
+    from responses_api_agents.arc_code_agent import arc_sandbox
+
+    server = arc_sandbox._Server("python", [])
+    starts = []
+
+    async def failing_start():
+        starts.append(1)
+        raise TimeoutError()
+
+    server.start = failing_start
+    # No process (an earlier restart failed): the call tries to start one and reports the failure.
+    reply = await server.call({"id": 0}, wait_s=1)
+    assert reply["output"] == "" and "sandbox unavailable" in reply["error"] and server.proc is None
+    assert len(starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_predict_answer_without_output_is_no_answer() -> None:
+    from responses_api_agents.arc_code_agent.arc_sandbox import SandboxPool
+
+    pool = SandboxPool.__new__(SandboxPool)
+
+    async def fake_run(header, codes, code, out_chars=None):
+        return {"timed_out": False}  # a reply that lacks "output"
+
+    pool.run = fake_run
+    assert await pool.predict_answer("", [], "transform") is None
