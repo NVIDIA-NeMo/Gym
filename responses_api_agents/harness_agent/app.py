@@ -21,6 +21,7 @@ import subprocess
 import tempfile
 from asyncio import Semaphore
 from contextvars import ContextVar
+from functools import cache
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import urlsplit, urlunsplit
@@ -55,11 +56,27 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
 )
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
+from nemo_gym.utils import is_nemo_gym_fastapi_worker
 from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
 
 LOG = logging.getLogger(__name__)
 _RUN_CONTEXT: ContextVar[dict[str, Any]] = ContextVar("harness_agent_run_context", default={})
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: harness_agent runs each episode through its own legacy /run path and will be removed after the "
+    "environment-server migration. Use the harness's own agent (claude_code_agent, codex_agent, hermes_agent, "
+    "pi_agent, opencode_agent and so on) with sandbox sessions under an environment server instead, as the job_bench "
+    "and workspace_bench configs do. The swe_atlas_qa and rna_design configs still run on this agent and keep "
+    "working until they move. See responses_api_agents/harness_agent/README.md."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOG.warning(DEPRECATION_WARNING)
 
 
 _AGENTS = {
@@ -228,6 +245,7 @@ class HarnessAgent(SimpleResponsesAPIAgent):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     def model_post_init(self, __context: Any) -> None:
+        _warn_deprecated_once()
         self.sem = Semaphore(self.config.concurrency)
         global_config = self.server_client.global_config_dict
         provider_config = resolve_provider_config(

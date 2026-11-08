@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,8 @@ from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxSpec,
 )
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from responses_api_agents.harness_agent import app
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,
@@ -107,6 +110,21 @@ def _make_agent(**cfg_kwargs) -> HarnessAgent:
         patch.object(HarnessAgent, "_build_gym_tar", return_value=None),
     ):
         return HarnessAgent(config=_config(**cfg_kwargs), server_client=server_client)
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            _make_agent()
+
+    warnings = [record.getMessage() for record in caplog.records if record.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("harness_agent", "legacy /run", "claude_code_agent", "swe_atlas_qa", "harness_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
 
 
 def test_config_defaults():
