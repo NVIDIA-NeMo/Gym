@@ -15,8 +15,8 @@ and trajectory records before the workspace is cleaned up.
 For session-based evaluation, use a Gym sandbox provider and a Linux sandbox
 image containing Bash. Install Python, Pillow, numpy, scipy and OpenCV in the
 image when tasks need those tools. Gym installs the pinned OpenCode runtime during
-session seed. Restricted sessions also install an adapter-owned Python interpreter
-for the network wrapper; `inherit` sessions use the provider boundary directly.
+session seed. All sessions also install an adapter-owned Python interpreter
+for the mandatory network/procfs wrapper, including `inherit` sessions.
 The wrapper never uses the task image's interpreter or Python environment. No host OpenCode installation
 or Bubblewrap is required for this path.
 
@@ -113,10 +113,9 @@ for archive layout and checksum generation. The paths are inside the task image,
 not paths on the Gym host. Bash, tar/gzip, checksum tools, and util-linux `unshare`
 must also be available in the image.
 
-The private Python helper is prepared on the Gym host and uploaded. Restricted
-seed then runs the actual network wrapper to verify namespace creation, private
-procfs, and proxy setup before activation. A request that narrows an `inherit`
-session performs this check before its first restricted activation. Setup failure
+The private Python helper is prepared on the Gym host and uploaded. Every
+seed runs the actual network wrapper to verify namespace creation, private
+procfs, proxy setup, and model/tool/control origin separation before activation. Setup failure
 closes the owned sandbox and remains an infrastructure failure. This check does
 not prove that an OpenSandbox deployment's outer egress policy is configured
 correctly; qualify the deployment with a real rollout and network-denial probes.
@@ -130,8 +129,9 @@ One activation is supported per session; continuation inputs are rejected.
 The session path implements the **Observability** capability level: evaluation,
 model-call and tool observations. MCP task grants reuse the parent adapter.
 `model_and_tools` permits their endpoints in owned sessions; `model_only` rejects
-required MCP grants. With `inherit`, grants use the sandbox's existing network
-policy. Set
+required MCP grants. Grants must not share an origin with a protected Gym control
+service; use a separate tool-only MCP endpoint. With `inherit`, public destinations
+are also permitted through the wrapper, subject to the provider policy. Set
 `tool_rewards: null` and disable token-ID capture for these sessions; unsupported
 training requests are rejected. Training capture and auxiliary rewards remain
 available on the compatibility path. Qualification requires the conformance
@@ -188,7 +188,9 @@ can give that wildcard precedence over specific denies.
 Set `network_access` to `model_only`, `model_and_tools`, or `inherit` to control harness and tool
 network access. The adapter default is `inherit`; the shipped offline training
 recipe and non-search benchmark profiles explicitly select `model_only`.
-`inherit` preserves the sandbox’s existing network policy without granting extra access.
+`inherit` allows public destinations through a proxy while excluding private/local
+addresses and registered Gym control services. Native WebFetch/WebSearch remain
+available; the provider's outer restrictions still apply.
 Restricted modes keep the configured model API reachable; `model_and_tools` also permits
 the accepted MCP tool-grant endpoints in owned sessions. Without such grants it allows only the model. These controls apply to owned Linux sandbox sessions and
 the local Bubblewrap training path. They require nested Linux namespaces.
@@ -327,7 +329,7 @@ the [conformance instructions](../../scripts/harness_conformance/README.md).
 
 ## Private runtime installation
 
-Restricted owned sessions seed the network wrapper's stdlib-only Python runtime using
+All sessions seed the network wrapper's stdlib-only Python runtime using
 Gym's `SandboxPythonRuntime`. Installation probes the sandbox platform, verifies
 the pinned interpreter archive, and reuses an installed runtime only after its
 health check passes. The agent host needs access to the pinned Python release or
@@ -337,8 +339,8 @@ The interpreter is launched by absolute path with `-I`; task Python libraries an
 environment variables remain available to the tools. Session close leaves the
 shared runtime intact. Failed installation closes the session, retaining the
 handle if cleanup must be retried.
-An `inherit` session does not install or probe this helper unless its request
-narrows network access; that setup then completes before restricted execution.
+`inherit` has the same namespace and private-procfs requirements as the restricted
+modes. Namespace failure stops setup; there is no host-network fallback.
 
 
 ### Shared-code compatibility

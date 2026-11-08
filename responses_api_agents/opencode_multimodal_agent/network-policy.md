@@ -4,7 +4,7 @@ The adapter uses Gym's `SandboxNetworkAccess` values and defaults to `inherit`.
 
 | Value | Allowed network access | Native WebFetch / WebSearch |
 | --- | --- | --- |
-| `inherit` | Existing sandbox network policy, unchanged | Independently configurable |
+| `inherit` | Public destinations plus model/MCP grants, excluding control services | Independently configurable |
 | `model_only` | Configured model API origin only | Disabled |
 | `model_and_tools` | Model API and accepted MCP tool-grant origins | Disabled |
 
@@ -17,7 +17,9 @@ non-MCP grants do not add network destinations.
 Native WebFetch and WebSearch are not MCP grants. To use them, select `inherit`
 and enable each tool explicitly. Tool permissions control advertisement and
 execution; they do not prevent Bash or Python from using permitted networking.
-`inherit` neither opens nor removes an outer sandbox restriction.
+`inherit` neither opens nor removes an outer sandbox restriction. In this adapter,
+it additionally excludes local/private destinations and Gym control services;
+it no longer launches directly on the provider's inherited host network.
 
 ## Benchmark configuration
 
@@ -80,28 +82,41 @@ OpenSandbox uses the shared `restrict_sandbox_network` helper with model and MCP
 grant URLs. Do not combine a restricted mode with an explicit provider
 `network_policy`; that conflicting configuration is rejected.
 
-Enroot and local providers lack that egress API. The multimodal adapter retains
-its namespace/proxy wrapper: OpenCode and its child tools run with loopback only
-and a Unix-socket bridge to approved HTTP(S) origins. The outer process opens
-connections; direct TCP/UDP connections cannot bypass the proxy. Namespace setup
-failure stops execution without an unrestricted fallback. In owned sessions the
-wrapper also enforces per-request narrowing of the seed policy.
+All sandbox launches use the namespace/proxy wrapper, including `inherit`.
+OpenCode and its child tools run with loopback only, private PID and mount
+namespaces, and fresh procfs. A Unix-socket bridge reaches the outer proxy;
+direct TCP/UDP cannot bypass it. The compatibility Bubblewrap path binds the
+wrapper's private procfs, not the host's. Namespace failure stops execution;
+there is no unrestricted fallback.
 
-The wrapper permits exact host/port origins, including all paths on those origins.
-It is not an API-method filter. Code can contact any allowed origin, not only the
-tool that introduced it. OpenSandbox's outer host policy may allow more ports;
-the wrapper still enforces the configured ports. The model endpoint must not
-provide an unrestricted forwarding service.
+The proxy admits exact model/MCP host-and-port origins. In `inherit`, it also
+admits public IP destinations after DNS resolution. It rejects loopback, private,
+link-local, multicast, reserved and IPv6 transition addresses, local interface
+addresses, and every registered Gym server except the selected policy model.
+Head, agent, other model/judge, verifier/resources and environment server origins
+are collected from Gym configuration automatically. Add deployment ingress aliases
+not represented there using `protected_control_urls` on the agent configuration.
 
-Restricted owned Linux sessions need Bash, tar/gzip and util-linux `unshare`. The private,
+Every connection refreshes model/tool/control DNS and local interface addresses.
+Previously resolved protected addresses remain blocked for the activation.
+Unresolvable control origins fail closed. Mixed public/private DNS answers are
+rejected; the proxy connects to the checked numeric address without resolving it
+again. Explicit model/tool grants are rejected if they share a protected control
+IP and port, including under another hostname. Separate tool-only MCP services
+from verification/control routes: an MCP path on the same origin is insufficient.
+
+The proxy allows all paths on an explicitly granted origin. It is not an
+API-method filter, and CONNECT tunnels carry opaque bytes. The policy model and
+tool services must not expose credentials, privileged control routes or an
+unrestricted forwarding service. A shared reverse-proxy address may be rejected
+because protecting control services takes precedence over granting web access.
+
+All Linux sessions need Bash, tar/gzip and util-linux `unshare`. The private,
 checksum-verified stdlib Python runtime is prepared on the host and uploaded at
-seed. Restricted seed runs the actual wrapper, checking user, network, mount and
-PID namespaces, private procfs, loopback and proxy listeners. Per-request narrowing
-of an `inherit` session checks these before its first restricted activation.
-An unchanged `inherit` session does not install this helper or require nested
-namespaces; execution and isolation use the configured provider directly.
-The local training path uses its Bubblewrap filesystem sandbox. Restricted
-borrowed sessions and unsupported providers fail closed.
+seed. Seed runs the actual wrapper, checking user, network, mount and PID
+namespaces, private procfs, loopback, proxy listeners and control-origin conflicts.
+This applies to `inherit` too. Restricted borrowed sessions remain unsupported.
+The local training path additionally uses its Bubblewrap filesystem sandbox.
 
 OpenSandbox's provider policy is already active during seed. Restricted
 OpenSandbox sessions require pinned, preinstalled OpenCode, plugin dependencies
@@ -113,38 +128,29 @@ OpenSandbox policy to permit package downloads throughout an evaluation.
 
 Filesystem isolation remains necessary: do not mount host service sockets or
 credentials into the task sandbox. Outer provider restrictions always remain in
-force. Other Gym agents and their sandbox policies are unchanged.
+force. The local subprocess provider is for trusted conformance tests; it does
+not supply a filesystem isolation boundary. Use Enroot/OpenSandbox or the
+Bubblewrap compatibility path for untrusted task code. Other Gym agents and
+their sandbox policies are unchanged.
 
-## Provider execution and host service isolation
+## Provider execution and deployment qualification
 
-The recommended `<benchmark>/opencode.yaml` recipes execute OpenCode inside a
-Gym provider-managed sandbox. This follows the execution model of the merged
-[BrowseComp OpenCode pairing](../../benchmarks/browsecomp/configs/browsecomp_opencode.yaml):
-the provider supplies the process/filesystem boundary, and `inherit` retains its
-network policy. The multimodal adapter uses the shared agent's session lifecycle;
-it does not copy BrowseComp's Exa tools or change benchmark network settings.
-Provider selection alone does not prove a deployment's network separation. The
-following checks apply to any `inherit` benchmark, including Agent-X.
+The recommended `<benchmark>/opencode.yaml` recipes use Gym provider-managed
+sandboxes and the shared OpenCode session lifecycle. The multimodal wrapper
+adds the process/network boundary described above to both provider execution
+and compatibility Bubblewrap execution. This applies to every `inherit`
+benchmark, including Agent-X, and preserves its native web-tool interface.
+Other OpenCode agents, including BrowseComp's pairing, are unchanged.
 
-Agent-X needs public web access. Its `inherit` pairing must run inside a provider
-boundary that isolates task processes from the Gym host. The local compatibility
-Bubblewrap path currently shares host procfs and host networking; it is not a
-credential-isolation boundary. A read-only procfs mount can expose host command
-lines, and switching only that mount to private procfs still leaves host services
-reachable through inherited networking.
+Keep head, agent, judge and verifier control services off public ingress where
+possible. Configure every additional ingress alias in `protected_control_urls`;
+a wrapper cannot discover an unlisted public reverse proxy that forwards to a
+control service. Do not expose the head's unauthenticated
+`/global_config_dict_yaml` endpoint through a granted model/tool origin.
 
-For a remote sandbox deployment, keep the Gym head, agent control endpoints,
-judge and verifier services on host loopback or a network inaccessible to task
-sandboxes. Expose only the model gateway and explicitly granted task services.
-The OpenSandbox overlay binds the head and agent to loopback; also configure
-any judge/verifier instances and external firewall rules for the deployment.
-Do not expose the head's unauthenticated `/global_config_dict_yaml` endpoint on
-the sandbox-facing address. Do not mount host procfs, service sockets, runtime
-configurations or credentials into the task image.
-
-This arrangement preserves web tools and `inherit` policy. To qualify an
-isolation claim for a deployment, use synthetic sentinels to check process/file
-isolation, confirm public web and model access, and confirm head/judge/control
-services are unreachable by hostname and IP. Local Enroot or Bubblewrap with
-inherited host networking does not establish that separation. No remote
-OpenSandbox qualification is claimed by the overlay alone.
+For each deployment, use synthetic sentinels to confirm host process entries and
+control services are inaccessible by hostname, IP and redirects, while model
+and public-web access work. Qualify the actual container and namespace policy:
+Pyxis/Enroot configurations can differ. OpenSandbox still needs a live deployment
+qualification; neither configuration resolution nor local Linux tests establish
+its isolation or offline setup behavior.

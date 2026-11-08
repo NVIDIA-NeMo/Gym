@@ -66,7 +66,7 @@ def test_restricted_borrowed_session_fails_before_connect(visual_setup, mode):
     sandbox.launch.assert_not_awaited()
 
 
-@pytest.mark.parametrize("mode", ["model_only", "model_and_tools"])
+@pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
 def test_namespace_failure_never_falls_back_to_open_network(tmp_path, mode):
     launcher = tmp_path / "unshare"
     launcher.write_text("#!/bin/sh\nexit 37\n")
@@ -384,19 +384,34 @@ def test_inherit_preserves_existing_provider_restrictions(monkeypatch, provider_
 
 @pytest.mark.parametrize("mode", ["inherit", "all"])
 @pytest.mark.skipif(sys.platform != "linux", reason="requires Linux network namespaces")
-def test_inherit_runner_preserves_outer_network_namespace_and_proxy(tmp_path, mode):
+def test_inherit_runner_uses_private_network_namespace_and_proxy(tmp_path, mode):
     runner = Path(__file__).parents[1] / "network_runner.py"
     expected_ns = os.readlink("/proc/self/ns/net")
     probe = "import os,json; print(json.dumps([os.readlink('/proc/self/ns/net'),os.environ['HTTPS_PROXY']]))"
     result = subprocess.run(
-        [sys.executable, str(runner), "--mode", mode, "--", sys.executable, "-c", probe],
+        [
+            sys.executable,
+            str(runner),
+            "--mode",
+            mode,
+            "--model-url",
+            "http://127.0.0.1:9",
+            "--",
+            sys.executable,
+            "-c",
+            probe,
+        ],
         env=os.environ | {"HTTPS_PROXY": "http://existing-proxy.example:8080"},
         capture_output=True,
         text=True,
-        timeout=10,
-        check=True,
+        timeout=15,
     )
-    assert json.loads(result.stdout) == [expected_ns, "http://existing-proxy.example:8080"]
+    if result.returncode and "Operation not permitted" in result.stderr:
+        pytest.skip("Host forbids required namespaces")
+    assert result.returncode == 0, result.stderr
+    namespace, proxy = json.loads(result.stdout)
+    assert namespace != expected_ns
+    assert proxy.startswith("http://127.0.0.1:")
 
 
 @pytest.mark.parametrize("overrides", [{"tools": {"websearch": False}}, {"permission": {"websearch": "deny"}}])
@@ -461,8 +476,8 @@ def test_unknown_provider_cannot_silently_skip_restriction(monkeypatch, mode):
         )
 
 
-@pytest.mark.parametrize("mode", ["model_only", "model_and_tools"])
-def test_restricted_launch_always_uses_model_network_wrapper(monkeypatch, tmp_path, mode):
+@pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
+def test_sandbox_launch_always_uses_model_network_wrapper(monkeypatch, tmp_path, mode):
     from responses_api_agents.opencode_multimodal_agent import app as module
 
     obj = evaluation(monkeypatch, tmp_path)

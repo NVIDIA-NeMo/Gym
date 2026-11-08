@@ -206,7 +206,9 @@ def _config(
             cleanup_timeout_seconds=10,
         )
     config = {
-        "head_server": {"host": "127.0.0.1", "port": ports["policy_model"]},
+        # Offline probes need no live head. Never alias its protected origin to
+        # the model endpoint: sandbox control-origin checks must still apply.
+        "head_server": {"host": "127.0.0.1", "port": ports.get("head_server", ports["probe_environment"])},
         "observability_enabled": True,
         "model_call_capture_dir": str(directory / "capture"),
         "policy_model": {"responses_api_models": {"probe": {**server(ports["policy_model"]), "name": "policy_model"}}},
@@ -261,7 +263,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     tasks = []
     servers = []
     with ExitStack() as stack:
-        names = ["policy_model", "probe_resources", "probe_agent", "probe_environment"]
+        names = ["policy_model", "probe_resources", "probe_agent", "probe_environment", "head_server"]
         if scenario.judge_verifier:
             names.append("judge_model")
         sockets = {name: stack.enter_context(socket.socket()) for name in names}

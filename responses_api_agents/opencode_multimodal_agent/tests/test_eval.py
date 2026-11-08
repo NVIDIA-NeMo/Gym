@@ -43,7 +43,7 @@ def evaluation(monkeypatch, tmp_path, prompt="Exact combined prompt\n"):
             "sandbox": {"bwrap_command": ["bwrap"], "python_env": str(tmp_path), "plugin_dependencies": str(tmp_path)},
         }
     )
-    return OpenCodeMultimodalEvalAgent(config=cfg, server_client=MagicMock(spec=ServerClient))
+    return OpenCodeMultimodalEvalAgent(config=cfg, server_client=native.server_client)
 
 
 def test_eval_keeps_budget_and_matches_original_prompt_image_tools(monkeypatch, tmp_path):
@@ -82,6 +82,9 @@ def test_sandbox_command_stages_image_in_cwd(monkeypatch, tmp_path, prefix, abso
     second_source.write_bytes(b"exact PNG bytes")
     workspace = tmp_path / "episode"
     workspace.mkdir()
+    (workspace / "opencode.json").write_text(
+        json.dumps({"provider": {"nemo": {"options": {"baseURL": "http://policy:9000/v1"}}}})
+    )
     captured = {}
 
     def sandbox(cfg, wd, binary, env, cmd):
@@ -108,8 +111,11 @@ def test_sandbox_command_stages_image_in_cwd(monkeypatch, tmp_path, prefix, abso
     assert captured["binary"] == binary.resolve()
     assert (workspace / f"{prefix}0.jpg").read_bytes() == source.read_bytes()
     assert (workspace / f"{prefix}1.png").read_bytes() == second_source.read_bytes()
-    assert sorted(path.name for path in workspace.iterdir()) == [f"{prefix}0.jpg", f"{prefix}1.png"]
-    assert result == [
+    assert sorted(path.name for path in workspace.iterdir() if path.suffix in {".jpg", ".png"}) == [
+        f"{prefix}0.jpg",
+        f"{prefix}1.png",
+    ]
+    assert result[result.index("--") + 1 :] == [
         "/agent-bin/opencode",
         "run",
         "--dir",

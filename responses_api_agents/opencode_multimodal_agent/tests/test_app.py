@@ -74,7 +74,9 @@ def agent(monkeypatch, **updates):
         "_resolve_model_base_url",
         lambda self, rollout_id=None: f"http://policy/ng-rollout/{rollout_id}/training-token-capture/v1",
     )
-    return OpenCodeMultimodalAgent(config=config(**updates), server_client=MagicMock(spec=ServerClient))
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {}
+    return OpenCodeMultimodalAgent(config=config(**updates), server_client=client)
 
 
 def database(tmp_path, *, tool=True, child=False):

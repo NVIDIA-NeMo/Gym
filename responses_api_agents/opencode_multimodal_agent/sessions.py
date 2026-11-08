@@ -92,8 +92,7 @@ class MultimodalSessionMixin:
             raise AgentSeedRejectedError("Multimodal sessions accept one initial task, not continuation inputs")
         state = await super()._seed_agent_session_state(body)
         try:
-            if self.config.network_access != "inherit":
-                await self._check_session_network(state)
+            await self._check_session_network(state)
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -106,8 +105,8 @@ class MultimodalSessionMixin:
     async def _check_session_network(self, state: MultimodalSandboxSession) -> None:
         if state.network_checked:
             return
-        # Inherit uses the provider's existing execution boundary. Only install
-        # this helper when enforcing a restriction, including request narrowing.
+        # All modes need private processes/procfs and isolated task networking.
+        # Inherit admits public destinations but never bypasses this boundary.
         if not await _NETWORK_RUNTIME.is_installed(state.session.sandbox):
             await _NETWORK_RUNTIME.install(
                 state.session.sandbox, timeout_s=self.config.sandbox_install_timeout_seconds
@@ -116,16 +115,27 @@ class MultimodalSessionMixin:
         await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), runner)
         # Run the actual wrapper: this exercises util-linux, all four namespaces,
         # private procfs, loopback setup, and the Unix/TCP proxy listeners. No
-        # request is sent to the placeholder origin and no model call is made.
+        # HTTP request or model call is made. DNS/control collisions are checked.
         command = shlex.join(
             [
                 _NETWORK_RUNTIME.python,
                 "-I",
                 runner,
                 "--mode",
-                "model_only",
+                self.config.network_access,
                 "--model-url",
-                "http://127.0.0.1:9",
+                self.resolve_model_base_url(self.config.model_server.name, trace_context=False),
+                *[arg for url in self._protected_control_urls() for arg in ("--protect-url", url)],
+                *(
+                    [
+                        arg
+                        for access in self.effective_tool_accesses(state.request)
+                        if isinstance(access, MCPToolAccess)
+                        for arg in ("--tool-url", str(access.connection.url))
+                    ]
+                    if self.config.network_access != "model_only"
+                    else []
+                ),
                 "--",
                 _NETWORK_RUNTIME.python,
                 "-I",
@@ -219,9 +229,7 @@ class MultimodalSessionMixin:
         ]
         if network_access == "model_only" and any(access.required for access in grants):
             raise HTTPException(422, "model_only blocks required MCP tool grants")
-        if network_access != "inherit":
-            # An inherit session may first request restricted execution here.
-            await self._check_session_network(state)
+        await self._check_session_network(state)
         with TemporaryDirectory(prefix="gym-visual-session-") as temporary:
             directory = Path(temporary)
             try:
@@ -289,23 +297,22 @@ class MultimodalSessionMixin:
             payload["command"].extend(
                 ["--model", runner._effective_model(), "--agent", "build", "--file", *image_paths, "--"]
             )
-            if network_access != "inherit":
-                network_runner = f"{state.session.session_dir}/network_runner.py"
-                await state.session.sandbox.upload(Path(__file__).with_name("network_runner.py"), network_runner)
-                payload["command"] = [
-                    _NETWORK_RUNTIME.python,
-                    "-I",
-                    network_runner,
-                    "--mode",
-                    network_access,
-                    *(
-                        [arg for access in grants for arg in ("--tool-url", str(access.connection.url))]
-                        if network_access == "model_and_tools"
-                        else []
-                    ),
-                    "--",
-                    *payload["command"],
-                ]
+            network_runner = f"{state.session.session_dir}/network_runner.py"
+            payload["command"] = [
+                _NETWORK_RUNTIME.python,
+                "-I",
+                network_runner,
+                "--mode",
+                network_access,
+                *[arg for url in self._protected_control_urls() for arg in ("--protect-url", url)],
+                *(
+                    [arg for access in grants for arg in ("--tool-url", str(access.connection.url))]
+                    if network_access != "model_only"
+                    else []
+                ),
+                "--",
+                *payload["command"],
+            ]
             # Keep adapter-owned files out of a borrowed task repository.
             payload["prompt"] = "Image files: " + ", ".join(image_paths) + "\n\n" + payload["prompt"]
 

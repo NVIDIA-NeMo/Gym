@@ -44,6 +44,8 @@ from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession
 from responses_api_agents.opencode_multimodal_agent.eval_sandbox import EvalSandboxConfig, sandbox_command
 from responses_api_agents.opencode_multimodal_agent.media import final_answer, parse_visual_session, stage_inputs
+from responses_api_agents.opencode_multimodal_agent.network_config import control_service_urls, server_origin
+from responses_api_agents.opencode_multimodal_agent.network_runner import origin
 from responses_api_agents.opencode_multimodal_agent.rewards import (
     OpenCodeToolReward,
     OpenCodeToolRewardConfig,
@@ -93,6 +95,10 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     sandbox: EvalSandboxConfig | None = None
     # Benchmark and training profiles can explicitly restrict the inherited network.
     network_access: SandboxNetworkAccess = "inherit"
+    protected_control_urls: list[str] = Field(
+        default_factory=list,
+        description="Additional control-service origins, including public ingress aliases absent from Gym config.",
+    )
     # Optional run allowlist; request metadata may select a subset. None retains native tools.
     allowed_tools: list[str] | None = None
     max_source_pixels: int = Field(default=150_000_000, gt=0)
@@ -115,6 +121,13 @@ class OpenCodeMultimodalAgentConfig(OpenCodeAgentConfig):
     @classmethod
     def normalize_network_alias(cls, value: Any) -> Any:
         return normalize_network_access(value) if isinstance(value, str) else value
+
+    @field_validator("protected_control_urls")
+    @classmethod
+    def validate_control_urls(cls, urls: list[str]) -> list[str]:
+        for url in urls:
+            origin(url)
+        return urls
 
     @model_validator(mode="after")
     def validate_episode_config(self) -> "OpenCodeMultimodalAgentConfig":
@@ -390,6 +403,15 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
     def _web_tool_environment(self) -> dict[str, str]:
         return {"OPENCODE_ENABLE_EXA": "0"}
 
+    def _protected_control_urls(self) -> list[str]:
+        return sorted(
+            set(
+                control_service_urls(self.server_client.global_config_dict, model_server=self.config.model_server.name)
+            )
+            | set(self.config.protected_control_urls)
+            | {server_origin(self.config.host, self.config.port)}
+        )
+
     def _input_image_name(self, source: Path, index: int) -> str:
         return source.name
 
@@ -416,8 +438,6 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
         executable = Path(executable_path).resolve()
         mapped[0] = "/agent-bin/opencode"
         launch = sandbox_command(self.config.sandbox, project_dir, executable, env, mapped)
-        if self.config.network_access == "inherit":
-            return launch
         config = json.loads((project_dir / "opencode.json").read_text())
         return [
             sys.executable,
@@ -426,6 +446,7 @@ class OpenCodeMultimodalAgent(MultimodalSessionMixin, OpenCodeAgent):
             self.config.network_access,
             "--model-url",
             config["provider"]["nemo"]["options"]["baseURL"],
+            *[arg for url in self._protected_control_urls() for arg in ("--protect-url", url)],
             "--bubblewrap",
             "--",
             *launch,

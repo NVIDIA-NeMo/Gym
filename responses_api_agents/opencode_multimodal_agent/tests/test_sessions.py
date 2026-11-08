@@ -401,18 +401,13 @@ def test_owned_session_network_and_websearch_policy(visual_setup, monkeypatch, m
         policy = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         assert policy["tools"]["websearch"] is enabled
         assert policy["permission"]["websearch"] == ("allow" if enabled else "deny")
-        if mode != "inherit":
-            install.assert_awaited_once()
-            assert payload["command"][:2] == [_NETWORK_RUNTIME.python, "-I"]
-            assert payload["command"][3:5] == ["--mode", mode]
-            probes = [c for c in sandbox.exec.call_args_list if "--model-url" in c.args[0]]
-            assert len(probes) == 1
-            assert probes[0].kwargs["timeout_s"] == 30
-        else:
-            installed.assert_not_awaited()
-            install.assert_not_awaited()
-            assert all("network_runner.py" not in c.args[0] for c in sandbox.exec.call_args_list)
-            assert all("network_runner.py" not in arg for arg in payload["command"])
+        install.assert_awaited_once()
+        assert payload["command"][:2] == [_NETWORK_RUNTIME.python, "-I"]
+        assert payload["command"][3:5] == ["--mode", mode]
+        assert "--protect-url" in payload["command"]
+        probes = [c for c in sandbox.exec.call_args_list if "--model-url" in c.args[0]]
+        assert len(probes) == 1
+        assert probes[0].kwargs["timeout_s"] == 30
         assert (
             client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).status_code
             == 200
@@ -420,14 +415,14 @@ def test_owned_session_network_and_websearch_policy(visual_setup, monkeypatch, m
 
 
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-@pytest.mark.parametrize("narrow_at_activation", [False, True])
-def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch, cleanup_fails, narrow_at_activation):
+@pytest.mark.parametrize("mode", ["model_only", "inherit"])
+def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch, cleanup_fails, mode):
     from unittest.mock import AsyncMock, patch
 
     from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
 
     agent, sandbox = visual_setup
-    agent.config.network_access = "inherit" if narrow_at_activation else "model_only"
+    agent.config.network_access = mode
     agent.config.sandbox_provider = "agent-provider"
     agent.config.sandbox_config = {"image": "test-image", "workdir": "/agent-workspace"}
     sandbox.expected_workdir = "/agent-workspace"
@@ -446,17 +441,7 @@ def test_private_runtime_setup_failure_never_activates(visual_setup, monkeypatch
         TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
     ):
         created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
-        if narrow_at_activation:
-            assert created.status_code == 200, created.text
-            install.assert_not_awaited()
-            result = client.post(
-                "/ng-rollout/opencode-smoke-a2/v1/responses",
-                json=request_body() | {"metadata": {"network_access": "model_only"}},
-            )
-            assert result.status_code >= 400
-            client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
-        else:
-            assert created.status_code >= 400
+        assert created.status_code >= 400
         install.assert_awaited_once()
         sandbox.launch.assert_not_awaited()
         sandbox.stop.assert_awaited()
@@ -487,7 +472,7 @@ def test_session_wrapper_uses_only_effective_mcp_grants(visual_setup, monkeypatc
     ):
         created = client.post("/v1/agent_sessions", json=request)
         assert created.status_code == 200, created.text
-        install.assert_not_awaited()
+        install.assert_awaited_once()
         body = request_body() | {"metadata": {"network_access": mode}}
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=body)
         assert response.status_code == 200, response.text

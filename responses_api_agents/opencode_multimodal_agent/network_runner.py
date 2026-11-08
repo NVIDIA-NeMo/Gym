@@ -89,18 +89,57 @@ def public_address(address: str) -> bool:
 
 
 class PublicWebPolicy:
-    """Prototype public-web boundary; explicitly admitted model/tool origins are trusted."""
+    """Resolve and check each connection before opening a numeric destination."""
 
-    def __init__(self, allowed: set[tuple[str, int]], protected_addresses: set[str]):
+    def __init__(
+        self,
+        allowed: set[tuple[str, int]],
+        protected_addresses: set[str],
+        *,
+        protected_origins: set[tuple[str, int]] | None = None,
+        allow_public: bool = True,
+    ):
         self.allowed = allowed
-        self.protected_addresses = protected_addresses
+        self.protected_addresses = set(protected_addresses)
+        self.protected_origins = protected_origins or set()
+        self.protected_endpoints: set[tuple[str, int]] = set()
+        self.allow_public = allow_public
 
-    async def connect(self, destination: tuple[str, int]):
-        addresses = await resolved_addresses(destination)
+    async def refresh(self) -> dict[tuple[str, int], list[tuple[int, str]]]:
+        """Refresh protected DNS before every connection; retain earlier addresses too.
+
+        DNS failure is an error, never permission to bypass a protected origin.
+        Explicit grants may use a control host on a different port, but cannot
+        share a control endpoint even under a different hostname.
+        """
+        if self.allowed & self.protected_origins:
+            raise PermissionError("Protected control service shares an explicitly allowed origin")
+        self.protected_addresses.update(local_addresses())
+        origins = sorted(self.allowed | self.protected_origins)
+        records = dict(
+            zip(origins, await asyncio.gather(*(resolved_addresses(item) for item in origins)), strict=True)
+        )
+        if any(not addresses for addresses in records.values()):
+            raise OSError("Cannot resolve all model/tool/control origins")
+        for endpoint, addresses in records.items():
+            self.protected_addresses.update(address for _, address in addresses)
+            if endpoint in self.protected_origins:
+                self.protected_endpoints.update((address, endpoint[1]) for _, address in addresses)
+        for endpoint in self.allowed:
+            if any((address, endpoint[1]) in self.protected_endpoints for _, address in records[endpoint]):
+                raise PermissionError("Model/tool grant resolves to a protected control endpoint")
+        return records
+
+    async def connect(self, destination: tuple[str, int]) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
+        records = await self.refresh()
+        addresses = records.get(destination)
+        if addresses is None:
+            addresses = await resolved_addresses(destination)
         if not addresses:
             raise OSError("Destination has no usable addresses")
-        if destination not in self.allowed and any(
-            not public_address(address) or address in self.protected_addresses for _, address in addresses
+        if destination not in self.allowed and (
+            not self.allow_public
+            or any(not public_address(address) or address in self.protected_addresses for _, address in addresses)
         ):
             raise PermissionError("Destination is not an admitted public-web origin")
         # Connect to a validated numeric address, never resolve the hostname again.
@@ -241,8 +280,6 @@ async def run_child(command: list[str], env: dict[str, str] | None = None) -> in
 
 
 async def run(args: argparse.Namespace) -> int:
-    if args.mode == "inherit" and not args.public_web:
-        os.execvp(args.command[0], args.command)
     if args.inside:
         loopback_up()
         server = await asyncio.start_server(lambda r, w: bridge(r, w, args.inside), "127.0.0.1", 0)
@@ -274,19 +311,15 @@ async def run(args: argparse.Namespace) -> int:
         async with server:
             return await run_child(args.command, env)
     allowed = {origin(args.model_url)}
-    if args.mode == "model_and_tools" or args.public_web:
+    if args.mode in {"model_and_tools", "inherit"}:
         allowed.update(origin(url) for url in args.tool_url)
-    public_web = None
-    if args.public_web:
-        protected_origins = {origin(url) for url in args.protect_url}
-        if protected_origins & allowed:
-            raise ValueError("Protected control service shares an explicitly allowed origin")
-        addresses = local_addresses()
-        # Prevent another hostname/port reaching a model/tool/control host through
-        # the public-web allowance. Only exact explicit origins receive exceptions.
-        for endpoint in allowed | protected_origins:
-            addresses.update(address for _, address in await resolved_addresses(endpoint))
-        public_web = PublicWebPolicy(allowed, addresses)
+    public_web = PublicWebPolicy(
+        allowed,
+        local_addresses(),
+        protected_origins={origin(url) for url in args.protect_url},
+        allow_public=args.mode == "inherit",
+    )
+    await public_web.refresh()
     # /tmp keeps Unix socket addresses below Linux's length limit.
     with tempfile.TemporaryDirectory(prefix="gym-net-", dir="/tmp") as directory:
         path = str(Path(directory) / "proxy.sock")
@@ -309,7 +342,6 @@ async def run(args: argparse.Namespace) -> int:
                     str(Path(__file__).resolve()),
                     "--mode",
                     args.mode,
-                    *(["--public-web"] if args.public_web else []),
                     "--inside",
                     path,
                     *(["--bubblewrap"] if args.bubblewrap else []),
@@ -327,7 +359,6 @@ def main() -> int:
         required=True,
     )
     parser.add_argument("--model-url")
-    parser.add_argument("--public-web", action="store_true", help="Prototype isolated public HTTP(S) egress")
     parser.add_argument("--protect-url", action="append", default=[], help="Control-service origin to deny")
     parser.add_argument("--tool-url", action="append", default=[], help="Accepted MCP grant URL (repeatable)")
     parser.add_argument("--inside", help=argparse.SUPPRESS)
@@ -342,7 +373,7 @@ def main() -> int:
         args.command.pop(0)
     if not args.command:
         parser.error("A command is required")
-    if (args.mode != "inherit" or args.public_web) and not args.inside and not args.model_url:
+    if not args.inside and not args.model_url:
         config = json.loads(os.environ.get("OPENCODE_CONFIG_CONTENT") or Path("opencode.json").read_text())
         args.model_url = config["provider"]["nemo"]["options"]["baseURL"]
     return asyncio.run(run(args))

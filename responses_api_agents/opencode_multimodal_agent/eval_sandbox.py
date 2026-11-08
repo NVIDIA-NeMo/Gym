@@ -96,10 +96,8 @@ def sandbox_command(
         "--bind",
         str(workspace),
         "/testbed",
-        # Pyxis masks parts of procfs, so nested user namespaces cannot mount
-        # a fresh instance. Share its read-only view; /tmp and /testbed remain
-        # episode-local. This prevents filename collisions, not hostile access
-        # through another process's procfs entries.
+        # The mandatory outer network_runner mounts private procfs first. Bind
+        # that view read-only; never launch this command outside the wrapper.
         "--ro-bind",
         "/proc",
         "/proc",

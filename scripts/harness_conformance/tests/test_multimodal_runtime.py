@@ -86,3 +86,4 @@ def test_scripted_multimodal_probe_does_not_claim_an_enforcing_gateway(monkeypat
     assert agent["max_turns"] == 65
     assert not agent.get("turn_budget")
     assert "probe" in config["policy_model"]["responses_api_models"]
+    assert config["head_server"]["port"] != config["policy_model"]["responses_api_models"]["probe"]["port"]
