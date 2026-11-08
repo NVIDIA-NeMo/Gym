@@ -163,3 +163,28 @@ async def test_retry_does_not_replace_a_verifier_that_cannot_be_stopped(tmp_path
         assert created == [first] and not second.stopped
         assert result.mask_sample and not result.evaluation_completed
         assert "previous turn's verifier sandbox could not be stopped" in result.failure_reason
+
+
+@pytest.mark.parametrize("fail_stop", [False, True])
+async def test_cleanup_receipt_reports_provider_acknowledgement(tmp_path, monkeypatch, fail_stop):
+    class ReceiptSandbox(FakeSandbox):
+        teardown_confirmed = None
+        cleanup_errors = ()
+
+        async def stop(self):
+            if fail_stop:
+                self.teardown_confirmed = False
+                self.cleanup_errors = ("close:RuntimeError",)
+                raise RuntimeError("provider did not acknowledge teardown")
+            await super().stop()
+            self.teardown_confirmed = True
+
+    verifier = ReceiptSandbox(verifier_files={"reward.json": '{"reward":1,"evaluation_completed":1}'})
+    server, task, agent, _ = prepared(tmp_path, monkeypatch, [verifier], retries=1)
+    result = (await run_episode(server, task)).result
+    receipt = json.loads(
+        (Path(result.verification_attempts[0].verifier_logs_dir) / "verifier-cleanup.json").read_text()
+    )
+    assert receipt["teardown_confirmed"] is (not fail_stop)
+    assert receipt["cleanup_errors"] == (["close:RuntimeError"] if fail_stop else [])
+    assert agent.stopped

@@ -653,6 +653,7 @@ class HarborVerificationMixin:
             # The episode key stays reserved until the episode's final cleanup, which releases it without
             # stopping the agent side again.
             await session.stop_agent_side()
+            self._write_cleanup_receipt(logs_dir, "agent", session.sandbox)
             if died is not None:
                 return self._masked(ENTRYPOINT_FAILED_KIND, died) | {"verifier_logs_dir": str(logs_dir.resolve())}
         except HTTPException:
@@ -885,9 +886,24 @@ class HarborVerificationMixin:
                     # Still owned: the next separate turn retries the stop before it reuses the key (above), and
                     # the episode cleanup and shutdown retry it after.
                     LOGGER.exception(f"Could not stop the verifier sandbox for {task.task_id}")
+            if verifier is not None:
+                self._write_cleanup_receipt(logs_dir, "verifier", verifier)
         return self._score(
             task, settings, result, logs_dir, started, timed_out=timed_out, rewards=rewards, problem=problem
         )
+
+    @staticmethod
+    def _write_cleanup_receipt(logs_dir: Path, role: str, sandbox: AsyncSandbox) -> None:
+        """Preserve the provider's teardown acknowledgement beside the verifier artifacts."""
+        receipt = {
+            "sandbox_id": getattr(getattr(sandbox, "_handle", None), "sandbox_id", None),
+            "teardown_confirmed": getattr(sandbox, "teardown_confirmed", None),
+            "cleanup_errors": list(getattr(sandbox, "cleanup_errors", ())),
+        }
+        try:
+            (logs_dir / f"{role}-cleanup.json").write_text(json.dumps(receipt) + "\n")
+        except OSError:
+            LOGGER.exception("Could not record %s sandbox cleanup under %s", role, logs_dir)
 
     async def _reset_shared_verifier_dirs(self, sandbox: AsyncSandbox, *, keep: Sequence[str] = ()) -> None:
         """Empty ``/tests`` and ``/logs/verifier`` and remove the server's ``/logs/agent/trajectory.json`` in the

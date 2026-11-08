@@ -24,7 +24,10 @@ scoring an agent against it is measuring noise.
 """
 
 import asyncio
+import json
+import logging
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -79,6 +82,9 @@ from resources_servers.swebench.patch_capture import (
 from resources_servers.swebench.sandbox_sessions import SandboxSessionResourcesServer
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 # Gradle only auto-loads init scripts from $GRADLE_USER_HOME/init.d, so the mirror script
 # shipped by verification._mirror_files() is invisible unless this points at the same home.
 # Maven needs no equivalent: it reads ~/.m2/settings.xml by default.
@@ -103,6 +109,7 @@ class SWERebenchResourcesServerConfig(BaseResourcesServerConfig):
     inconclusive_verification_retries: int = 1
     # Where the upstream log-parser repo is cloned. Empty uses the shared nemo_gym cache.
     log_parser_cache_dir: str = ""
+    verification_log_dir: Path | None = None
     apply_anti_cheating: bool = True
     # Write the Maven Central mirror to ~/.m2/settings.xml in the eval sandbox. Turn off for providers
     # that mount their own read-only settings.xml, e.g. one that already mirrors Maven Central.
@@ -144,6 +151,7 @@ class SWERebenchVerifyRequest(SWERebenchInstanceRequest, BaseVerifyRequest):
 
 class SWERebenchVerifyResponse(BaseVerifyResponse):
     evaluation_completed: bool
+    verification_attempts: int = 0
     resolved: bool
     patch_applied: bool
     instance_id: str
@@ -369,7 +377,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
         patch = capture.patch
 
         inputs = self._inputs(body, patch)
-        log_dir = Path(__file__).parent / "logs" / body.instance_id
+        log_dir = (self.config.verification_log_dir or (Path(__file__).parent / "logs")) / body.instance_id
 
         # Resolve the parser before spending a sandbox on the run: an unknown parser name means
         # this row can never be graded, and finding that out after the tests have run wastes the
@@ -405,7 +413,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                     inputs=inputs,
                     parser=parser,
                     timeout_s=self.config.evaluation_timeout,
-                    log_dir=log_dir,
+                    log_dir=log_dir / f"attempt-{attempt}" if self.config.verification_log_dir else log_dir,
                 )
                 verification_time_taken = time() - verification_started
             except asyncio.CancelledError:
@@ -429,6 +437,8 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 # Keep the last verifier owned until the wrapper saves the result and cleans it up.
                 if not result.completed and attempt < attempts:
                     await self._stop_verifier_sandbox(session_id)
+                if self.config.verification_log_dir:
+                    await asyncio.to_thread(self._write_attempt_result, log_dir / f"attempt-{attempt}", result)
             if result.completed:
                 break
             if attempt < attempts:
@@ -445,6 +455,7 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 # evaluation_completed distinguishes them so a broken row is not read as a hard task.
                 "reward": 1.0 if result.resolved else 0.0,
                 "evaluation_completed": result.completed,
+                "verification_attempts": attempt,
                 "resolved": result.resolved,
                 "patch_applied": result.patch_applied,
                 "instance_id": body.instance_id,
@@ -463,6 +474,15 @@ class SWERebenchResourcesServer(SandboxSessionResourcesServer):
                 ),
             }
         )
+
+    @staticmethod
+    def _write_attempt_result(log_dir: Path, result: VerificationResult) -> None:
+        """Retain each retry's outcome next to its raw test output when logging is requested."""
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+            (log_dir / "verification.json").write_text(json.dumps(asdict(result)) + "\n")
+        except OSError:
+            LOGGER.exception("Could not record verification outcome under %s", log_dir)
 
 
 if __name__ == "__main__":

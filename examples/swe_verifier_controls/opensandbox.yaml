@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Overlay the shipped OpenSandbox provider defaults. Both variables are required.
+# Select the deployment's shared router with OPENSANDBOX_DOMAIN (including https://).
+# Keep the per-person API key in the process environment, never in this file.
+sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY}
