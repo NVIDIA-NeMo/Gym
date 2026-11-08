@@ -141,7 +141,7 @@ def test_import_probe_uses_real_interpreter_and_rejects_wrong_source(tmp_path):
 @pytest.mark.parametrize("entrypoint", ["check_swe_training_recipe.py", "prepare_swe_single_agent_turn_recipe.py"])
 def test_normal_entrypoint_does_not_create_snapshot_bytecode(tmp_path, entrypoint):
     source = Path(__file__).resolve().parents[3]
-    for name in (entrypoint, "swe_source_mount.py"):
+    for name in (entrypoint, "swe_source_mount.py", "swe_verification_cache.py"):
         (tmp_path / name).write_bytes((source / "scripts" / name).read_bytes())
     env = os.environ | {"PYTHONPATH": str(source)}
     env.pop("PYTHONDONTWRITEBYTECODE", None)
@@ -275,6 +275,7 @@ def test_launcher_mounts_at_editable_paths_and_keeps_external_environments(tmp_p
         "1",
     ]
     assert "uv run --no-sync" in lines[5] and "--runtime" in lines[5]
+    assert f"--verification-cache {tmp_path.parent}/.swe-verification-cache" in lines[5]
     assert "test-key" not in result.stdout
     assert f"--chdir={tmp_path}" in lines[6:]
     assert f"--output={tmp_path}/slurm/slurm-%j.out" in lines[6:]

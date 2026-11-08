@@ -978,3 +978,53 @@ def test_host_checks_profile_image_and_config_before_reporting_allocation(
     else:
         check.main()
         assert capsys.readouterr().out == f"{expected_gpus}\n"
+
+
+def test_host_cache_reuses_large_files_but_rechecks_changed_inputs(hardware_assets, tmp_path, monkeypatch):
+    prepared, root, manifest = hardware_assets
+    write_hardware_assets(prepared, manifest, "arm64-b300")
+    container = prepared / "image.sqsh"
+    container.write_bytes(b"immutable test image")
+    image = {key: manifest[key] for key in ("gym_commit", "rl_commit", "gym_lock_sha256", "rl_lock_sha256")}
+    image.update(
+        platform="linux/arm64", image="example/image@sha256:" + "b" * 64, squashfs_sha256=check.file_sha256(container)
+    )
+    image_path = prepared / "image.json"
+    image_path.write_text(json.dumps(image))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "check",
+            "--prepared",
+            str(prepared),
+            "--rl-root",
+            str(root),
+            "--gym-root",
+            str(root),
+            "--container",
+            str(container),
+            "--container-provenance",
+            str(image_path),
+            "--verification-cache",
+            str(tmp_path / "cache"),
+        ],
+    )
+    check.main()
+    weights = Path(manifest["model"]["path"]) / "model.safetensors"
+    original_open = Path.open
+
+    def open_file(path, *args, **kwargs):
+        if path in (weights, container):
+            raise AssertionError("unchanged large artifact was read again")
+        return original_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as context:
+        context.setattr(Path, "open", open_file)
+        check.main()
+        receipt = json.loads((prepared / "host-verification.json").read_text())
+        assert len(receipt["checks"]) == 3
+        assert all(x["evidence"] == "reused_unchanged_file_identity" for x in receipt["checks"])
+        (prepared / "config.yaml").write_text("changed configuration")
+        with pytest.raises(ValueError, match="Prepared file changed"):
+            check.main()

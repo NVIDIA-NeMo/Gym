@@ -21,8 +21,10 @@ from omegaconf import DictConfig, OmegaConf
 
 if __package__:
     from .swe_source_mount import check_image_binding, check_runtime_imports, check_snapshot
+    from .swe_verification_cache import VerificationCache
 else:
     from swe_source_mount import check_image_binding, check_runtime_imports, check_snapshot
+    from swe_verification_cache import VerificationCache
 
 
 @dataclass(frozen=True)
@@ -74,7 +76,9 @@ def check_image_identity(image: dict[str, object], *, expected_platform: str) ->
         raise ValueError(f"Container provenance requires an immutable {expected_platform} image or base image")
 
 
-def check_files(prepared: Path, roots: dict[str, Path], manifest: dict) -> None:
+def check_files(
+    prepared: Path, roots: dict[str, Path], manifest: dict, *, cache: VerificationCache | None = None
+) -> None:
     """Check exact prepared bytes and production sources, independent of Git metadata in images."""
     for name, expected in manifest["files_sha256"].items():
         if file_sha256(prepared / name) != expected:
@@ -94,6 +98,9 @@ def check_files(prepared: Path, roots: dict[str, Path], manifest: dict) -> None:
         raise ValueError("Pinned model snapshot is missing weight shards")
     for name, expected in manifest["model"]["files"].items():
         path = model / name
+        if cache is not None:
+            cache.verify(path, algorithm=expected["algorithm"], expected=expected["digest"])
+            continue
         if expected["algorithm"] == "sha256":
             actual = file_sha256(path)
         elif expected["algorithm"] == "git_blob_sha1":
@@ -159,6 +166,7 @@ def main() -> None:
         help="Validate the full controller schema in the RL driver environment without starting training",
     )
     parser.add_argument("--shared-root", type=Path)
+    parser.add_argument("--verification-cache", type=Path, help="Reuse hash receipts for unchanged model/image files")
     parser.add_argument(
         "--print-gpus-per-node", action="store_true", help="Print the checked allocation size for Slurm"
     )
@@ -176,11 +184,14 @@ def main() -> None:
         raise ValueError(f"Unsupported hardware profile: {profile_name}")
     profile = HARDWARE_PROFILES[profile_name]
     roots = {"rl": args.rl_root.resolve(), "gym": args.gym_root.resolve()}
+    cache = VerificationCache(args.verification_cache) if args.verification_cache else None
+    if cache is not None and any(cache.directory.resolve().is_relative_to(root) for root in roots.values()):
+        raise ValueError("Keep verification receipts outside the source snapshot")
     if args.shared_root:
         for path in (manifest["model"]["path"], manifest["parser"]["path"]):
             if not Path(path).resolve().is_relative_to(args.shared_root.resolve()):
                 raise ValueError(f"Runtime asset lies outside the shared mount: {path}")
-    check_files(args.prepared, roots, manifest)
+    check_files(args.prepared, roots, manifest, cache=cache)
     if manifest.get("source_mount"):
         check_snapshot(roots["rl"], json.loads((args.prepared / "source-mount.json").read_text()))
     config = OmegaConf.load(args.prepared / "config.yaml")
@@ -239,8 +250,14 @@ def main() -> None:
         image = json.loads(args.container_provenance.read_text())
         check_image_binding(manifest, image)
         check_image_identity(image, expected_platform=profile.image_platform)
-        if file_sha256(args.container) != image["squashfs_sha256"]:
+        if cache is not None:
+            cache.verify(args.container, algorithm="sha256", expected=image["squashfs_sha256"])
+        elif file_sha256(args.container) != image["squashfs_sha256"]:
             raise ValueError("Container SquashFS bytes differ from the build provenance")
+    if cache is not None:
+        (args.prepared / ("runtime-verification.json" if args.runtime else "host-verification.json")).write_text(
+            json.dumps({"checks": cache.events}, indent=2) + "\n"
+        )
     print(
         profile.gpus_per_node
         if args.print_gpus_per_node

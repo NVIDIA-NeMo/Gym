@@ -34,10 +34,17 @@ for path in "$NEMO_RL_ROOT" "$gym_root" "$output_dir" "$CONTAINER" "$CONTAINER_P
 done
 source_args=()
 if (( source_mount )); then source_args+=(--source-mount); fi
+# Share unchanged model/image proofs across preparations and launches.
+export SWE_VERIFICATION_CACHE="${SWE_VERIFICATION_CACHE:-${SHARED_ROOT%/}/.swe-verification-cache}"
+case "$SWE_VERIFICATION_CACHE" in
+    "${SHARED_ROOT%/}/"*) ;;
+    *) printf 'Verification cache must be under SHARED_ROOT.\n' >&2; exit 2 ;;
+esac
+verification_args=(--verification-cache "$SWE_VERIFICATION_CACHE")
 gpus_per_node=$(uv run --project "$gym_root" --no-sync python "$gym_root/scripts/check_swe_training_recipe.py" \
     --prepared "$output_dir" --rl-root "$NEMO_RL_ROOT" --gym-root "$gym_root" \
     --container "$CONTAINER" --container-provenance "$CONTAINER_PROVENANCE" --shared-root "$SHARED_ROOT" \
-    --print-gpus-per-node ${source_args[@]+"${source_args[@]}"})
+    --print-gpus-per-node ${source_args[@]+"${source_args[@]}"} "${verification_args[@]}")
 
 export GPUS_PER_NODE="$gpus_per_node"
 export BASE_LOG_DIR="$output_dir/slurm"
@@ -69,6 +76,8 @@ export NRL_VLLM_ASYNC_TIMEOUT_SECONDS=1800
 image_gym=/opt/nemo-rl/3rdparty/Gym-workspace/Gym
 check=(uv run --no-sync python "$image_gym/scripts/check_swe_training_recipe.py"
     --prepared "$output_dir" --rl-root /opt/nemo-rl --gym-root "$image_gym" --runtime)
+# A baked fallback image may contain a checker predating cache support.
+if (( source_mount )); then check+=("${verification_args[@]}"); fi
 driver=(uv run --no-sync examples/run_grpo_single_controller.py --config "$CONFIG_PATH")
 printf -v check_command '%q ' "${check[@]}"
 printf -v driver_command '%q ' "${driver[@]}"
