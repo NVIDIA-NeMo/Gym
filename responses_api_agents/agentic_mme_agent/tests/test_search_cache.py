@@ -172,6 +172,7 @@ def test_entries_are_shared_readable_under_a_strict_umask(tmp_path) -> None:
         assert stat.S_IMODE(directory.stat().st_mode) & 0o775 == 0o775
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write a read-only directory")
 def test_unwritable_cache_never_fails_the_caller(tmp_path) -> None:
     import os
 
