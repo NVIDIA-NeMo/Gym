@@ -34,6 +34,9 @@ def _runtime() -> SandboxPythonRuntime:
             f"hermes-agent[mcp] @ https://github.com/{repository.removesuffix('.git')}/archive/{commit}.tar.gz",
             "mcp>=1.28.1,<2",
         ),
+        # This host adapter does not install Hermes; its Rich 15 pin cannot
+        # satisfy the pinned sandbox harness's Rich 14 dependency.
+        overrides=("rich>=14.3.3,<15",),
         import_check=(
             "import os; os.environ['HERMES_HOME'] = os.path.join(os.environ['HOME'], '.hermes'); "
             "import run_agent; from mcp.client.streamable_http import streamablehttp_client"
