@@ -18,6 +18,7 @@ import json
 import logging
 import multiprocessing
 import signal
+import threading
 import time
 from contextlib import redirect_stderr, redirect_stdout
 from typing import Dict, Optional
@@ -138,6 +139,7 @@ class _SessionHandle:
         context.set_forkserver_preload(["__main__", __name__])
         parent_conn, child_conn = context.Pipe()
         self._conn = parent_conn
+        self._exec_lock = threading.Lock()
         self._proc = context.Process(
             target=_session_worker,
             args=(child_conn, max_execution_time),
@@ -147,12 +149,17 @@ class _SessionHandle:
         self.last_used = time.time()
 
     def exec(self, code: str):
-        self._conn.send({"cmd": "exec", "code": code})
-        reply = self._conn.recv()
-        self.last_used = time.time()
-        if reply["ok"]:
-            return reply["out"], reply["err"], reply["res"]
-        raise RuntimeError(reply["error"])
+        # A Connection has one reply stream: parallel tool calls must not consume each other's replies.
+        # Keep the lock in the executor thread so cancelling its HTTP waiter cannot release it mid-execution.
+        with self._exec_lock:
+            if not self._proc.is_alive():
+                raise RuntimeError("Python worker has already stopped")
+            self._conn.send({"cmd": "exec", "code": code})
+            reply = self._conn.recv()
+            self.last_used = time.time()
+            if reply["ok"]:
+                return reply["out"], reply["err"], reply["res"]
+            raise RuntimeError(reply["error"])
 
     async def close(self) -> None:
         """Stop the worker, escalating to terminate and then kill; raise if it is still alive.
@@ -160,10 +167,15 @@ class _SessionHandle:
         It waits on the event loop rather than in an executor thread: execs hold executor threads for as long as the
         model's code runs, and a close queued behind them could never stop the workers that would free them.
         """
-        try:
-            self._conn.send({"cmd": "close"})
-        except (BrokenPipeError, EOFError, OSError):
-            pass
+        # Do not write into a concurrent exec's pipe frame or wait behind its blocking recv.
+        # A busy worker is stopped below even if its executor thread cannot make progress.
+        if self._exec_lock.acquire(blocking=False):
+            try:
+                self._conn.send({"cmd": "close"})
+            except (BrokenPipeError, EOFError, OSError):
+                pass
+            finally:
+                self._exec_lock.release()
         await self._wait_for_exit(1)
         if self._proc.is_alive():
             # Still running user code, which the alarm stops only after max_execution_time.

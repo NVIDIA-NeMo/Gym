@@ -135,6 +135,10 @@ libraries; later calls reuse the same worker and variables.
 Cancelling the first tool request does not abandon a worker still starting in a thread. The server keeps that
 startup owned; close and checkpoint retirement wait for it, then stop the worker.
 
+Concurrent Python calls on the same session execute serially, so each receives its own result. Cancelling a request
+does not release the pipe while its execution is still running. Cleanup can stop a busy worker even when Python
+calls occupy every executor thread.
+
 Under an Environment Server, such as `math_with_code_environment_server` (`single_agent_turn_legacy`),
 `/seed_session` binds the cookie to the `resources_session_id`. `/close_session` stops the worker, even when
 `/verify` never ran, escalating to SIGTERM and then SIGKILL for a worker still running code. A worker that survives

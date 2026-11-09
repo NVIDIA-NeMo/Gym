@@ -464,6 +464,56 @@ class TestResourcesSessions:
         assert server._sessions == {}
         assert "rs-1" not in server._session_episodes
 
+    @pytest.mark.parametrize("cancel_first", [False, True])
+    async def test_parallel_calls_keep_their_own_pipe_replies(self, monkeypatch, cancel_first: bool) -> None:
+        handle = _SessionHandle(max_execution_time=10)
+        first_receiving, finish_first = threading.Event(), threading.Event()
+        second_started, first_done = threading.Event(), threading.Event()
+        real_recv = handle._conn.recv
+        calls = 0
+
+        def delayed_recv():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_receiving.set()
+                assert finish_first.wait(10)
+            return real_recv()
+
+        def first_exec():
+            try:
+                return handle.exec("1")
+            finally:
+                first_done.set()
+
+        def second_exec():
+            second_started.set()
+            return handle.exec("2")
+
+        monkeypatch.setattr(handle._conn, "recv", delayed_recv)
+        first = asyncio.create_task(asyncio.to_thread(first_exec))
+        second = None
+        try:
+            assert await asyncio.to_thread(first_receiving.wait, 10)
+            if cancel_first:
+                first.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await first
+            second = asyncio.create_task(asyncio.to_thread(second_exec))
+            assert await asyncio.to_thread(second_started.wait, 10)
+            # The second call cannot read the first response while its original caller is paused or cancelled.
+            await asyncio.sleep(0.05)
+            assert not second.done()
+            finish_first.set()
+            assert (await asyncio.wait_for(second, 10))[2] == "2"
+            if not cancel_first:
+                assert (await first)[2] == "1"
+        finally:
+            finish_first.set()
+            assert await asyncio.to_thread(first_done.wait, 10)
+            await asyncio.gather(first, *([second] if second else []), return_exceptions=True)
+            await handle.close()
+
     async def test_worker_busy_in_user_code_is_terminated(self) -> None:
         handle = _SessionHandle(max_execution_time=60)
         assert handle.exec("2 + 2")[2] == "4"
