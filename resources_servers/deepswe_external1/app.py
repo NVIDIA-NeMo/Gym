@@ -217,7 +217,13 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
         return options
 
     async def _create_sandbox(
-        self, task: InlineTask, *, phase: str, files: dict[str, str] | None = None
+        self,
+        task: InlineTask,
+        *,
+        phase: str,
+        files: dict[str, str] | None = None,
+        session_id: str | None = None,
+        verifier_session_id: str | None = None,
     ) -> AsyncSandbox:
         global_config = get_global_config_dict()
         definition = task.data
@@ -241,6 +247,11 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
             provider_options=self._provider_options(phase=phase),
         )
         sandbox = AsyncSandbox(resolve_provider_config(self.config.sandbox_provider, global_config))
+        # Register before startup awaits so cancelled setup remains reachable by session cleanup.
+        if session_id is not None:
+            self._session_id_to_sandbox[session_id] = sandbox
+        if verifier_session_id is not None:
+            self._verifier_sandboxes[verifier_session_id] = sandbox
 
         async def setup(started: AsyncSandbox) -> None:
             command = (
@@ -340,9 +351,7 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
         """Start and set up the agent sandbox for a task row, and return the repository the agent works in."""
         data = TaskData.model_validate(task)
         self._forget_task_sandbox_state(session_id)
-        sandbox = await self._create_sandbox(InlineTask(data), phase="agent")
-        # Own the sandbox before anything else can fail, so a failed seed still stops it.
-        self._session_id_to_sandbox[session_id] = sandbox
+        sandbox = await self._create_sandbox(InlineTask(data), phase="agent", session_id=session_id)
         descriptor = dict(await sandbox.serialize())
         self._seeded_agent_sandboxes[session_id] = SeededAgentSandbox(
             data.task_id, data.image, str(descriptor["sandbox_id"]), descriptor
@@ -370,12 +379,22 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
         task = InlineTask(body)
         if self.config.is_verifying_golden_patch or self.config.is_verifying_null_patch:
             return await self._verify_task(request, body, task)
-        return await self.verify_task_sandbox_session(
+        response = await self.verify_task_sandbox_session(
             request,
             body,
             verify=lambda: self._verify_task(request, body, task),
             lost_response=lambda reason, failure_kind: self._lost_session_response(body, task, reason, failure_kind),
         )
+        # The wrapper makes a final cleanup attempt after _verify_task builds and persists the verdict.
+        # Its saved replay references this same response, so reconcile both copies before returning to HTTP.
+        session_id = request.session[SESSION_ID_KEY]
+        if "verifier" in response.cleanup_errors and session_id not in self._verifier_sandboxes:
+            response.cleanup_errors.remove("verifier")
+            if response.log_dir and not self.config.clear_verifier_logs:
+                (Path(response.log_dir) / "result.json").write_text(
+                    response.model_dump_json(indent=2) + "\n", encoding="utf-8"
+                )
+        return response
 
     def _check_seeded_agent_sandbox(
         self, session_id: str, body: DeepsweExternal1VerifyRequest, task: InlineTask
@@ -547,11 +566,11 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
             failure_stage = "verifier_setup"
             started = monotonic()
             verifier_sandbox = await self._create_sandbox(
-                task, phase="verifier", files=task.data.files.verification_files(model_patch)
+                task,
+                phase="verifier",
+                files=task.data.files.verification_files(model_patch),
+                verifier_session_id=session_id if mode == "agent" else None,
             )
-            if mode == "agent":
-                # Registered with the session, so close or shutdown stops a verifier this request cannot release.
-                self._verifier_sandboxes[session_id] = verifier_sandbox
             verifier_id = str((await verifier_sandbox.serialize())["sandbox_id"])
             if verifier_id == agent_id:
                 raise RuntimeError("Provider reused the agent sandbox as the verifier")

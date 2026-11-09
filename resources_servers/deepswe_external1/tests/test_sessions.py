@@ -3,6 +3,7 @@
 """Episode sessions and the agent-run seed, through the server's HTTP routes with fake sandboxes."""
 
 import asyncio
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -45,11 +46,17 @@ def make_server(*, mode: str = "agent") -> tuple[DeepsweExternal1ResourcesServer
     sandboxes: list[AsyncMock] = []
     phases: list[str] = []
 
-    async def create(_task: InlineTask, *, phase: str, files=None) -> AsyncMock:
+    async def create(
+        _task: InlineTask, *, phase: str, files=None, session_id=None, verifier_session_id=None
+    ) -> AsyncMock:
         box = AsyncMock()
         box.serialize.return_value = {"sandbox_id": f"sb-{len(sandboxes) + 1}"}
         sandboxes.append(box)
         phases.append(phase)
+        if session_id is not None:
+            server._session_id_to_sandbox[session_id] = box
+        if verifier_session_id is not None:
+            server._verifier_sandboxes[verifier_session_id] = box
         return box
 
     server._create_sandbox = AsyncMock(side_effect=create)
@@ -157,18 +164,20 @@ def _fail_verifier_stops(server: DeepsweExternal1ResourcesServer, outcomes: list
     server._create_sandbox.side_effect = create_with_failing_verifier_stop
 
 
-def test_verifier_whose_first_stop_fails_is_stopped_before_the_verdict(task: InlineTask) -> None:
+@pytest.mark.parametrize("failed_stops", [1, 2])
+def test_verifier_released_before_return_has_consistent_diagnostics(task: InlineTask, failed_stops: int) -> None:
     server, sandboxes, _ = make_server()
-    _fail_verifier_stops(server, [RuntimeError("delete unavailable"), None])
+    _fail_verifier_stops(server, [RuntimeError("delete unavailable")] * failed_stops + [None])
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=seed(task).model_dump(mode="json")).status_code == 200
         result = client.post("/verify", json=verify_body(task)).json()
-        # The second stop runs before the verdict, so the saved verdict reports no cleanup error.
+        # Include success in the shared wrapper, after _verify_task has persisted its verdict.
         assert result["reward"] == 1.0 and not result["mask_sample"]
         assert result["cleanup_errors"] == []
-        assert sandboxes[1].stop.await_count == 2
+        assert sandboxes[1].stop.await_count == failed_stops + 1
         assert not server._verifier_sandboxes
-        assert client.post("/verify", json=verify_body(task)).json()["cleanup_errors"] == []
+        assert client.post("/verify", json=verify_body(task)).json() == result
+        assert json.loads((Path(result["log_dir"]) / "result.json").read_text()) == result
 
 
 def test_verifier_whose_stops_keep_failing_stays_owned_until_close(task: InlineTask) -> None:
@@ -177,7 +186,10 @@ def test_verifier_whose_stops_keep_failing_stays_owned_until_close(task: InlineT
     with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
         assert client.post("/seed_session", json=seed(task).model_dump(mode="json")).status_code == 200
         result = client.post("/verify", json=verify_body(task)).json()
-        assert result["reward"] == 1.0 and result["cleanup_errors"] == ["verifier"]
+        assert result["reward"] == 1.0 and not result["mask_sample"]
+        assert result["cleanup_errors"] == ["verifier"]
+        assert client.post("/verify", json=verify_body(task)).json() == result
+        assert json.loads((Path(result["log_dir"]) / "result.json").read_text()) == result
         # Two stops in the request and one in the verify wrapper failed; the session still owns the verifier.
         assert "resources-session" in server._verifier_sandboxes
         assert client.post("/close_session", json=CLOSE).status_code == 200
@@ -365,3 +377,89 @@ def test_session_conformance(task: InlineTask) -> None:
         holds_state=lambda session_id: session_id in server._session_id_to_sandbox,
         verify_body=verify_body(task),
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["agent", "verifier"])
+@pytest.mark.parametrize("failure", ["cancel", "error"])
+async def test_setup_failure_keeps_real_sandbox_owned_until_cleanup(
+    task: InlineTask, monkeypatch: pytest.MonkeyPatch, phase: str, failure: str
+) -> None:
+    """Exercise real startup ownership when setup or its first teardown cannot complete."""
+    from types import SimpleNamespace
+
+    import resources_servers.deepswe_external1.app as module
+    from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+    from nemo_gym.sandbox.providers import SandboxHandle
+    from nemo_gym.server_runtime import ResourcesCloseSessionRequest
+
+    server, _, _ = make_server()
+    request = Request({"type": "http", "session": {}})
+    if phase == "verifier":
+        await server.seed_session(request, seed(task))
+    # Restore the production allocator: only the provider transport is a fake.
+    server._create_sandbox = DeepsweExternal1ResourcesServer._create_sandbox.__get__(server)
+    entered_setup = asyncio.Event()
+    closed: list[str] = []
+    fail_close = failure == "error"
+    handle = SandboxHandle(sandbox_id="setup-box", provider_name="fake", raw=None)
+
+    async def setup_exec(*_args, **_kwargs) -> SandboxExecResult:
+        entered_setup.set()
+        if failure == "cancel":
+            await anyio.sleep_forever()
+        raise RuntimeError("setup failed")
+
+    async def close(box: SandboxHandle) -> None:
+        await anyio.sleep(0)  # An unshielded cleanup cannot complete inside a cancelled scope.
+        if fail_close:
+            raise RuntimeError("stop failed")
+        closed.append(box.sandbox_id)
+
+    provider = SimpleNamespace(
+        name="fake",
+        create=AsyncMock(return_value=handle),
+        exec=setup_exec,
+        close=close,
+        aclose=AsyncMock(),
+        upload_file=AsyncMock(),
+    )
+    monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
+    monkeypatch.setattr(module, "resolve_provider_config", lambda *_args: provider)
+    monkeypatch.setattr(module, "resolve_provider_metadata", lambda *_args: {})
+
+    async def run() -> None:
+        if phase == "agent":
+            await server.seed_session(request, seed(task))
+        else:
+            await server.verify(request, DeepsweExternal1VerifyRequest.model_validate(verify_body(task)))
+
+    if failure == "cancel":
+        async with anyio.create_task_group() as group:
+            scope = anyio.CancelScope()
+
+            async def cancel_request() -> None:
+                with scope:
+                    await run()
+
+            group.start_soon(cancel_request)
+            await entered_setup.wait()
+            owned = server._session_id_to_sandbox if phase == "agent" else server._verifier_sandboxes
+            assert isinstance(owned["resources-session"], AsyncSandbox)
+            scope.cancel()
+        assert closed == ["setup-box"]
+        assert "resources-session" not in owned
+    else:
+        if phase == "agent":
+            with pytest.raises(RuntimeError, match="stop failed"):
+                await run()
+        else:
+            await run()
+        owned = server._session_id_to_sandbox if phase == "agent" else server._verifier_sandboxes
+        assert isinstance(owned["resources-session"], AsyncSandbox)
+        assert not closed
+        fail_close = False
+        await server.close_resources_session(request, ResourcesCloseSessionRequest.model_validate(CLOSE))
+        assert closed == ["setup-box"]
+        assert "resources-session" not in owned
+    provider.create.assert_awaited_once()

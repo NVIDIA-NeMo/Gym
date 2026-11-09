@@ -9,7 +9,8 @@
 # On providers that enforce the sandbox network policy, the agent sandbox denies network except the model host, so
 # OpenCode cannot download its runtime there. Pin opencode_agent's offline bundle (sandbox_executable_*,
 # sandbox_ripgrep_* and sandbox_plugin_dependencies_*) to files already in the sandbox, or use images that ship the
-# runtime at /tmp/nemo-gym-opencode-runtime-<opencode_version> and rg on PATH (see the README).
+# runtime at /tmp/nemo-gym-opencode-runtime-<opencode_version> and rg on PATH. Both choices still require
+# sandbox_plugin_dependencies_path and sandbox_plugin_dependencies_sha256 for each private config (see the README).
 #
 #   gym env start --config resources_servers/deepswe_external1/configs/deepswe_external1_opencode.yaml
 

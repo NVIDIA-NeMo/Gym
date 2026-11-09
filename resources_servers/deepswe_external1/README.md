@@ -41,7 +41,8 @@ Pin the whole offline bundle in `opencode_agent`: the binary
 (`sandbox_plugin_dependencies_path`, `sandbox_plugin_dependencies_sha256`), each a
 file already inside the sandbox, for example on a mounted cache. Alternatively, use
 task images that hold the runtime at `/tmp/nemo-gym-opencode-runtime-<opencode_version>`
-and `rg` on `PATH`. See the `opencode_agent` README's
+and `rg` on `PATH`; still set `sandbox_plugin_dependencies_path` and
+`sandbox_plugin_dependencies_sha256` to populate each session's private config directory. See the `opencode_agent` README's
 [Pinned offline runtime bundle](../../responses_api_agents/opencode_agent/README.md#pinned-offline-runtime-bundle).
 The hosted-inference example normalizes structured reasoning for Gym's chat
 contract. Select the model adapter appropriate for your endpoint; training that

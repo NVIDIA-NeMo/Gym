@@ -290,7 +290,7 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(
     events = []
     agent, verifier = sandbox("A", events), sandbox("B", events)
 
-    async def create(_task: InlineTask, *, phase: str, files=None) -> AsyncMock:
+    async def create(_task: InlineTask, *, phase: str, files=None, verifier_session_id=None) -> AsyncMock:
         events.append("create-" + phase)
         if phase == "verifier":
             assert files == task.data.files.verification_files(b"" if mode == "null" else b"committed patch")
@@ -298,6 +298,8 @@ async def test_entire_lifecycle_uses_distinct_sandboxes(
         else:
             assert files == (task.data.files.solution_files() if mode == "golden" else {})
             assert not any(path.startswith("/tests/") for path in files)
+        if verifier_session_id is not None:
+            server._verifier_sandboxes[verifier_session_id] = verifier
         return agent if phase == "agent" else verifier
 
     server._create_sandbox = AsyncMock(side_effect=create)
@@ -345,7 +347,7 @@ async def test_verification_does_not_impose_an_eight_request_limit(task: InlineT
     started = 0
     sandboxes = []
 
-    async def create(_task: InlineTask, *, phase: str, files=None) -> AsyncMock:
+    async def create(_task: InlineTask, *, phase: str, files=None, verifier_session_id=None) -> AsyncMock:
         box = sandbox(f"{phase}-{len(sandboxes)}", [])
         sandboxes.append(box)
         return box
@@ -617,7 +619,12 @@ async def test_seed_session_preserves_descriptor(task: InlineTask) -> None:
     server = make_server(task, mode="agent")
     box = sandbox("A", [])
     box.serialize.return_value = {"sandbox_id": "A", "workdir": "/app"}
-    server._create_sandbox = AsyncMock(return_value=box)
+
+    async def create(*_args, session_id: str, **_kwargs) -> AsyncMock:
+        server._session_id_to_sandbox[session_id] = box
+        return box
+
+    server._create_sandbox = AsyncMock(side_effect=create)
     seeded = await server.seed_session(
         request(), DeepsweExternal1SeedSessionRequest(**task_row(task.data, "original instruction\n"))
     )
