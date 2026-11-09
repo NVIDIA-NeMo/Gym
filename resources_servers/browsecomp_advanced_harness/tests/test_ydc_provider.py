@@ -478,3 +478,16 @@ class TestYdcBrowse:
 
         assert resp.results_string == "Error: no URLs provided."
         mock.get_contents.assert_not_called()
+
+
+class TestPageWriterPeek:
+    def test_peek_matches_the_next_write_without_writing(self, tmp_path) -> None:
+        writer = app_module._PageWriter(tmp_path / "session")
+
+        first = writer.peek_search_path("q", 1)
+        assert writer.peek_search_path("q", 1) == first
+        assert not list(writer.pages_dir.iterdir())
+
+        written = writer.write_search_result("q", 1, "T", "https://x.com", "content")
+        assert written == first
+        assert writer.peek_search_path("q", 1) != first
