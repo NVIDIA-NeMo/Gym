@@ -45,20 +45,28 @@ from resources_servers.equivalence_llm_judge.app import (
 
 
 def test_aggregation_hook_excludes_masked_and_preserves_headline_score():
-    server = SimpleNamespace(config=SimpleNamespace(report_hle_domains=True))
+    server = SimpleNamespace(
+        config=SimpleNamespace(
+            report_slice_fields=["category", "raw_subject", "modality"],
+            report_slice_cross_fields=[("modality", "category")],
+        )
+    )
     rows = [
         {"_ng_task_index": 0, "_ng_rollout_index": 0, "category": "Math", "reward": 1},
         {"_ng_task_index": 1, "_ng_rollout_index": 0, "category": "Math", "reward": 0},
         {"_ng_task_index": 2, "_ng_rollout_index": 0, "category": "Math", "reward": 1, "mask_sample": True},
     ]
+    for row in rows:
+        row["judge_evaluations"] = [{"verdict_label": "equal", "judgement_parsing_issues": []}]
     result = compute_aggregate_metrics(
         rows, compute_metrics_fn=lambda tasks: LLMJudgeResourcesServer.compute_metrics(server, tasks)
     )
-    assert result.agent_metrics["domains/category/Math/mean/reward"] == 0.5
-    assert result.agent_metrics["domains/category/Math/question_count"] == 2
+    assert result.agent_metrics["slices/category/Math/mean/reward"] == 0.5
+    assert result.agent_metrics["slices/category/Math/question_count"] == 2
     assert result.key_metrics["mean/reward"] == 0.5
-    server.config.report_hle_domains = False
-    assert LLMJudgeResourcesServer.compute_metrics(server, [[rows[0]]]) == {}
+    server.config.report_slice_fields = []
+    server.config.report_slice_cross_fields = []
+    assert not any(key.startswith("slices/") for key in LLMJudgeResourcesServer.compute_metrics(server, [[rows[0]]]))
 
 
 async def test_hle_verified_fixture() -> None:
@@ -841,7 +849,8 @@ async def test_verify_response_preserves_domain_labels_through_aggregation(has_i
         host="127.0.0.1",
         port=8080,
         entrypoint="",
-        report_hle_domains=True,
+        report_slice_fields=["category", "raw_subject", "modality"],
+        report_slice_cross_fields=[("modality", "category")],
         judge_prompt_template_fpath=str(
             Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
         ),
@@ -859,7 +868,7 @@ async def test_verify_response_preserves_domain_labels_through_aggregation(has_i
         expected_answer="answer",
         category="Math",
         raw_subject="Algebra/Geometry",
-        has_image=has_image,
+        modality=modality,
     )
     verified = await server.verify(request)
     payload = json.loads(verified.model_dump_json())
@@ -877,15 +886,26 @@ async def test_verify_response_preserves_domain_labels_through_aggregation(has_i
     assert reverified.category == "Math"
     payload.update(_ng_task_index=0, _ng_rollout_index=0)
     result = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[payload]))
-    assert result.agent_metrics[f"domains/{modality}/category/Math/question_count"] == 1
-    assert result.agent_metrics["domains/category/missing_label_rollouts"] == 0
-    assert result.agent_metrics["domains/modality/missing_label_rollouts"] == 0
+    assert result.agent_metrics[f"slices/modality/category/{modality}/Math/question_count"] == 1
+    assert result.agent_metrics["slices/category/missing_label_rollouts"] == 0
+    assert result.agent_metrics["slices/modality/missing_label_rollouts"] == 0
     assert "mean/has_image" not in result.key_metrics
     assert "mean/has_image" not in result.agent_metrics
-    config.report_hle_domains = False
+    # A non-HLE user keeps arbitrary labels and gets generic category slices.
+    config.report_slice_fields = ["category"]
+    config.report_slice_cross_fields = []
     disabled = json.loads((await server.verify(request)).model_dump_json())
-    assert not {"category", "raw_subject", "modality"} & disabled.keys()
-    assert disabled["has_image"] is has_image
+    assert disabled["category"] == "Math"
+    assert disabled["raw_subject"] == "Algebra/Geometry"
+    assert disabled["modality"] == modality
+    disabled.update(_ng_task_index=0, _ng_rollout_index=0)
+    generic = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[disabled]))
+    assert generic.agent_metrics["slices/category/Math/mean/reward"] == 1
+    assert generic.agent_metrics["slices/category/missing_label_rollouts"] == 0
+    config.report_slice_fields = []
+    unsliced = json.loads((await server.verify(request)).model_dump_json())
+    assert unsliced["category"] == "Math"
+    assert unsliced["modality"] == modality
 
 
 async def test_domain_aggregation_runs_off_event_loop():
@@ -899,7 +919,8 @@ async def test_domain_aggregation_runs_off_event_loop():
         host="127.0.0.1",
         port=8080,
         entrypoint="",
-        report_hle_domains=True,
+        report_slice_fields=["category", "raw_subject", "modality"],
+        report_slice_cross_fields=[("modality", "category")],
         judge_prompt_template_fpath=str(
             Path(__file__).resolve().parents[1] / "prompt_templates/equivalence_llm_judge.txt"
         ),

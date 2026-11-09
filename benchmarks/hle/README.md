@@ -130,24 +130,25 @@ guarantee that every answer-bearing page is excluded.
 
 ### Domain metrics
 
-Text and vision preparation retain `category`, `raw_subject` and explicit
-`has_image` metadata. The HLE and HLE-Verified judge configurations enable `report_hle_domains`; existing cached
-HLE datasets need to be prepared again to retain these labels.
+Text and vision preparation write `category`, `raw_subject`, and `modality`
+(`text` or `vision`). Re-prepare older cached datasets to include these labels.
+The shared equivalence judge uses generic configuration:
 
-Aggregation emits flat `domains/<field>/<URL-encoded-label>/...` keys in
-`agent_metrics`: question/rollout counts, `mean/reward` (accuracy as a fraction),
-`mean/output_tokens`, `ci_low_95_across_repeats/<metric>` /
-`ci_high_95_across_repeats/<metric>`.
-Modality slices use `domains/modality/text/...` and `domains/modality/vision/...`
-with the same metrics. Missing `has_image` metadata is counted and never assumed
-to be text. The overall headline includes the full evaluated set; its score and
-grading are unchanged.
-Missing labels are counted; incomplete token usage suppresses the token mean and
-interval rather than silently averaging a subset. Masked outcomes are excluded
-by the normal aggregation pipeline.
+```yaml
+report_slice_fields: [category, raw_subject, modality]
+report_slice_cross_fields: [[modality, category], [modality, raw_subject]]
+```
 
-Each slice reuses Gym's public `compute_aggregate_metrics` function for means and
-Student-t intervals across repeat-level means, with at least two repeats covering
-the same questions. `ci_available/<metric>` indicates
-availability; single-repeat evaluations have no default interval. Bounds are not
-clipped. These intervals measure generation variability on a fixed benchmark.
+Metrics use `slices/<field>/<URL-encoded-label>/...`; cross-slices use
+`slices/<field1>/<field2>/<label1>/<label2>/...`. For example,
+`slices/modality/category/text/Math/mean/reward` reports text-only Math accuracy.
+Other benchmarks can configure any row labels with the same statistics.
+
+Each slice reports question/rollout counts, `mean/reward`, `mean/output_tokens`,
+and Student-t intervals across repeat-level means from Gym's public aggregator.
+Intervals require at least two repeats covering the same questions;
+`ci_available/<metric>` and `ci_unavailable_reason/<metric>` explain omissions.
+Bounds are not clipped. These intervals measure generation variability on a
+fixed benchmark. Missing labels are counted, and incomplete token observations
+suppress their mean and interval. Masked rows are excluded by normal aggregation.
+The overall reward is unchanged; configured slice accuracies also appear in key metrics.

@@ -26,9 +26,7 @@ import re
 from collections import Counter
 from contextlib import nullcontext
 from pathlib import Path
-from statistics import fmean
-from typing import Any, ClassVar, Literal, Optional
-from urllib.parse import quote
+from typing import Any, ClassVar, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
 
@@ -49,7 +47,7 @@ from nemo_gym.server_runtime import (
     observe_llm_judge_grading,
 )
 from nemo_gym.verification import VerifierFixture, call_judge, record_parsed_judge_verdict
-from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
+from resources_servers.equivalence_llm_judge.slice_metrics import compute_slice_metrics
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 
 
@@ -127,38 +125,6 @@ def _parse_judge_verdict(
     return matches[-1] if matches else None, issues
 
 
-def _compute_slice_metrics(tasks: list[list[dict[str, Any]]], fields: list[str]) -> dict[str, Any]:
-    """Accuracy per label of each configured row field, e.g. HLE-Diamond's reasoning/knowledge partition.
-
-    Emits ``slices/<field>/<label>/{question_count,rollout_count,mean/reward}`` plus the number of
-    rollouts whose label is missing. Masked rollouts never reach here, so slices share the headline's
-    denominator semantics. Empty ``fields`` emits nothing, and a run in which no rollout was judged
-    emits no metrics at all (``compute_metrics`` returns early, as it did before this hook).
-    """
-    metrics: dict[str, Any] = {}
-    for field in fields:
-        rows_by_label: dict[str, list[dict[str, Any]]] = {}
-        questions_by_label: Counter[str] = Counter()
-        missing = 0
-        for task in tasks:
-            labels_in_task: set[str] = set()
-            for rollout in task:
-                label = rollout.get(field)
-                if label is None or (isinstance(label, str) and not label.strip()):
-                    missing += 1
-                    continue
-                rows_by_label.setdefault(str(label), []).append(rollout)
-                labels_in_task.add(str(label))
-            questions_by_label.update(labels_in_task)
-        metrics[f"{SLICES_PREFIX}{field}/missing_label_rollouts"] = missing
-        for label, rows in sorted(rows_by_label.items()):
-            prefix = f"{SLICES_PREFIX}{field}/{quote(label, safe='')}/"
-            metrics[prefix + "question_count"] = questions_by_label[label]
-            metrics[prefix + "rollout_count"] = len(rows)
-            metrics[prefix + "mean/reward"] = fmean(float(rollout.get("reward") or 0.0) for rollout in rows)
-    return metrics
-
-
 class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     """Configuration for the LLM judge server.
 
@@ -174,7 +140,6 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
 
     # Default logical name for this resources server
     name: str = "equivalence_llm_judge"
-    report_hle_domains: bool = False
     judge_model_server: ModelServerRef
     judge_responses_create_params: NeMoGymResponseCreateParamsNonStreaming
 
@@ -210,10 +175,12 @@ class LLMJudgeResourcesServerConfig(BaseResourcesServerConfig):
     # Reward to assign if the second (swap) pass fails. Defaults to 0.0; can be set to -1.0.
     reward_if_swap_fails: float = 0.0
 
-    # Row fields to slice accuracy by (e.g. ["partition"] for HLE-Diamond). Each configured field adds
-    # slices/<field>/<label>/{question_count,rollout_count,mean/reward} to agent_metrics and promotes the
-    # slice means to key_metrics. Empty by default: metrics are unchanged.
+    # Row fields to slice by (e.g. ["partition"]). Each slice adds counts, reward/token means,
+    # and repeat intervals under slices/<field>/<label>/; reward means also appear in key_metrics.
+    # Empty by default: metrics are unchanged.
     report_slice_fields: list[str] = Field(default_factory=list)
+    # Optional pairs of row fields, e.g. [["modality", "category"]].
+    report_slice_cross_fields: list[tuple[str, str]] = Field(default_factory=list)
 
     # ========================================================================
     # Per-Record Regex Features (OpenQA support)
@@ -264,10 +231,6 @@ class LLMJudgeRunRequest(BaseRunRequest):
 
     model_config = ConfigDict(extra="allow")
 
-    category: Optional[str] = None
-    raw_subject: Optional[str] = None
-    has_image: Optional[bool] = None
-    modality: Optional[Literal["text", "vision"]] = None
     uuid: Optional[str | int] = None
     expected_answer: Optional[str] = None
     options: Optional[list[dict[str, str]]] = None
@@ -310,18 +273,6 @@ class LLMJudgeVerifyResponse(BaseVerifyResponse):
 
     expected_answer: str
     judge_evaluations: list[JudgeEvaluation]
-    category: Optional[str] = None
-    raw_subject: Optional[str] = None
-    # A boolean would become mean/has_image in RewardProfiler's headline metrics.
-    modality: Optional[Literal["text", "vision"]] = None
-
-    @model_serializer(mode="wrap")
-    def _omit_absent_domain_labels(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        data = handler(self)
-        for field in ("category", "raw_subject", "modality"):
-            if data.get(field) is None:
-                data.pop(field, None)
-        return data
 
 
 def _extract_last_assistant_text(
@@ -521,16 +472,6 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         """Create verification response with reward and evaluations."""
         payload = body.model_dump()
         payload.pop("expected_answer", None)
-        if self.config.report_hle_domains:
-            has_image = payload.pop("has_image", None)
-            payload["modality"] = (
-                ("vision" if has_image else "text") if type(has_image) is bool else payload.get("modality")
-            )
-        else:
-            if payload.get("has_image") is None:
-                payload.pop("has_image", None)
-            for field in ("category", "raw_subject", "modality"):
-                payload.pop(field, None)
         return LLMJudgeVerifyResponse(
             **payload, reward=reward, expected_answer=expected, judge_evaluations=evaluations
         )
@@ -719,9 +660,9 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         return equal_label != not_equal_label and eval_record.verdict_label == equal_label, eval_record
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
-        if not self.config.report_hle_domains:
+        if not (self.config.report_slice_fields or self.config.report_slice_cross_fields):
             return await super().aggregate_metrics(body)
-        # HLE's many domain slices are CPU work; keep request handling responsive.
+        # Slice aggregation is CPU work; keep request handling responsive.
         return await asyncio.to_thread(
             compute_aggregate_metrics,
             body.verify_responses,
@@ -776,13 +717,12 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
                     rollouts_with_issues += bool(issues)
                     kind_counts.update(issues)
 
-        metrics = compute_domain_metrics(tasks) if self.config.report_hle_domains else {}
         if not judged:
-            return metrics
+            return {}
+        metrics = compute_slice_metrics(tasks, self.config.report_slice_fields, self.config.report_slice_cross_fields)
         metrics[JUDGEMENT_PARSING_ISSUE_RATE] = rollouts_with_issues / judged
         for kind, count in sorted(kind_counts.items()):
             metrics[f"{JUDGEMENT_PARSING_ISSUE_RATE}/{kind}"] = count / judged
-        metrics.update(_compute_slice_metrics(tasks, self.config.report_slice_fields))
         return metrics
 
     def get_key_metrics(self, agent_metrics: dict[str, Any]) -> dict[str, Any]:

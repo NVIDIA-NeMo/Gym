@@ -528,8 +528,8 @@ class TestConfigs:
             get_first_server_config_dict(resolved, "hle_diamond_judge_model")["openai_model"] == "vendor/other-judge"
         )
 
-    def test_judge_knobs_default_off_and_only_hle_diamond_enables_them(self):
-        """The shared judge server's slice hook and case-insensitive labels stay off for hle and hle_verified."""
+    def test_judge_knobs_default_off_and_benchmarks_opt_in(self):
+        """Benchmarks choose slice fields independently of verdict-label matching."""
         fields = LLMJudgeResourcesServerConfig.model_fields
         assert fields["report_slice_fields"].default_factory() == []
         assert fields["judge_labels_case_insensitive"].default is False
@@ -539,7 +539,8 @@ class TestConfigs:
         assert not {"report_slice_fields", "judge_labels_case_insensitive"} & set(base)
         for sibling in ("hle", "hle_verified"):
             sibling_text = (REPO_ROOT / "benchmarks" / sibling / "config.yaml").read_text(encoding="utf-8")
-            assert "judge_labels_case_insensitive" not in sibling_text and "report_slice_fields" not in sibling_text
+            assert "judge_labels_case_insensitive" not in sibling_text
+            assert "report_slice_fields: [category, raw_subject, modality]" in sibling_text
 
         shipped = yaml.safe_load((HLE_DIAMOND_DIR / "config.yaml").read_text())[JUDGE_SERVER]["resources_servers"][
             "equivalence_llm_judge"

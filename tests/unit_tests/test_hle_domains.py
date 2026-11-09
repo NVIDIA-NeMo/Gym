@@ -4,40 +4,98 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
-from resources_servers.equivalence_llm_judge.domain_metrics import compute_domain_metrics
+from nemo_gym.metrics import compute_aggregate_metrics
+from resources_servers.equivalence_llm_judge.slice_metrics import compute_slice_metrics
 
 
-def row(task, repeat, reward, tokens=100, category="Math"):
+def row(task, repeat, reward, tokens=100, **labels):
     return {
         "_ng_task_index": task,
         "_ng_rollout_index": repeat,
-        "category": category,
-        "raw_subject": "Algebra/Geometry",
         "reward": reward,
         "response": {"usage": {"output_tokens": tokens}},
+        **labels,
     }
 
 
-def test_domain_means_intervals_and_encoded_labels():
-    result = compute_domain_metrics([[row(0, 0, 1, 100), row(0, 1, 1, 200)], [row(1, 0, 0, 300), row(1, 1, 0, 400)]])
-    prefix = "domains/category/Math/"
-    assert result[prefix + "mean/reward"] == 0.5
-    assert result[prefix + "mean/output_tokens"] == 250
-    assert result[prefix + "question_count"] == 2
-    assert result[prefix + "rollout_count"] == 4
-    assert result["domains/raw_subject/Algebra%2FGeometry/mean/reward"] == 0.5
+def test_generic_slices_and_cross_slices_match_shared_statistics():
+    tasks = [
+        [
+            row(q, r, (q + r) % 2, 100 + 20 * q + 10 * r, sector="Finance/Tax", language="en" if q < 2 else "fr")
+            for r in (0, 1)
+        ]
+        for q in range(3)
+    ]
+    result = compute_slice_metrics(tasks, ["sector", "language"], [("language", "sector")])
+    for prefix, selected in [
+        ("slices/sector/Finance%2FTax/", tasks),
+        ("slices/language/sector/en/Finance%2FTax/", tasks[:2]),
+        ("slices/language/fr/", tasks[2:]),
+    ]:
+        native = compute_aggregate_metrics([r for task in selected for r in task]).agent_metrics
+        assert result[prefix + "question_count"] == len(selected)
+        assert result[prefix + "rollout_count"] == 2 * len(selected)
+        for metric in ("reward", "output_tokens"):
+            assert result[prefix + f"mean/{metric}"] == native[f"mean/{metric}"]
+            assert result[prefix + f"ci_available/{metric}"] is True
+            assert result[prefix + f"repeat_count/{metric}"] == 2
+            for bound in ("low", "high"):
+                assert (
+                    result[prefix + f"ci_{bound}_95_across_repeats/{metric}"]
+                    == native[f"ci_{bound}_95_across_repeats/mean/{metric}"]
+                )
+    assert not any(k.startswith("domains/") for k in result)
+    assert compute_slice_metrics(tasks, []) == {}
 
 
-def test_missing_labels_tokens_and_single_question():
-    result = compute_domain_metrics([[row(0, 0, 1, None)], [row(1, 0, 0, category=None)]])
-    prefix = "domains/category/Math/"
-    assert result["domains/category/missing_label_rollouts"] == 1
+def test_missing_labels_and_values_do_not_silently_change_denominators():
+    tasks = [[row(0, 0, 1, None, sector="Finance")], [row(1, 0, 0, sector="")]]
+    result = compute_slice_metrics(tasks, ["sector"], [("sector", "language")])
+    prefix = "slices/sector/Finance/"
+    assert result["slices/sector/missing_label_rollouts"] == 1
+    assert result["slices/sector/language/missing_label_rollouts"] == 2
     assert result[prefix + "missing/output_tokens"] == 1
     assert prefix + "mean/output_tokens" not in result
     assert result[prefix + "ci_available/reward"] is False
-    with pytest.raises(ValueError, match="Inconsistent"):
-        compute_domain_metrics([[row(0, 0, 1), row(0, 1, 1, category="Physics")]])
+    assert prefix + "ci_low_95_across_repeats/reward" not in result
+
+
+@pytest.mark.parametrize("repeats,reason", [([0, 0], "Duplicate"), ([0, None], "invalid"), ([0, -1], "invalid")])
+def test_invalid_repeat_identity_suppresses_interval(repeats, reason):
+    result = compute_slice_metrics([[row(0, r, 1, label="x") for r in repeats]], ["label"])
+    assert result["slices/label/x/ci_available/reward"] is False
+    assert reason in result["slices/label/x/ci_unavailable_reason/reward"]
+
+
+def test_varying_labels_keep_generic_row_slicing_without_invalid_ci():
+    tasks = [[row(0, 0, 1, label="a"), row(0, 1, 0, label="b")], [row(1, 0, 0, label="a"), row(1, 1, 1, label="a")]]
+    result = compute_slice_metrics(tasks, ["label"])
+    assert result["slices/label/a/question_count"] == 2
+    assert result["slices/label/a/rollout_count"] == 3
+    assert result["slices/label/a/mean/reward"] == pytest.approx(2 / 3)
+    assert result["slices/label/a/ci_available/reward"] is False
+    assert "coverage" in result["slices/label/a/ci_unavailable_reason/reward"]
+    assert result["slices/label/b/mean/reward"] == 0
+
+
+def test_field_and_label_paths_are_encoded_without_cross_slice_collisions():
+    tasks = [[row(0, 0, 1, **{"a/b": "c/d", "a": "b/c", "b": "d"})]]
+    result = compute_slice_metrics(tasks, ["a/b"], [("a", "b")])
+    assert result["slices/a%2Fb/c%2Fd/mean/reward"] == 1
+    assert result["slices/a/b/b%2Fc/d/mean/reward"] == 1
+
+
+def test_numeric_labels_are_still_supported():
+    result = compute_slice_metrics([[row(0, 0, 1, partition=2)]], ["partition"])
+    assert result["slices/partition/2/mean/reward"] == 1
+
+
+def test_configured_negative_rewards_are_not_treated_as_missing():
+    # The shared grader allows reward_if_swap_fails=-1.
+    result = compute_slice_metrics([[row(0, 0, -1, label="x"), row(0, 1, 1, label="x")]], ["label"])
+    assert result["slices/label/x/missing/reward"] == 0
+    assert result["slices/label/x/mean/reward"] == 0
+    assert result["slices/label/x/ci_available/reward"] is True
 
 
 @pytest.mark.parametrize("include_vision", [False, True])
@@ -70,7 +128,8 @@ def test_hle_preparation_preserves_domain_labels(monkeypatch, tmp_path, include_
     monkeypatch.setattr(prepare, "OUTPUT_FPATH", tmp_path / "text.jsonl")
     monkeypatch.setattr(prepare, "OUTPUT_VISION_FPATH", tmp_path / "vision.jsonl")
     record = json.loads(prepare.prepare(include_vision=include_vision).read_text())
-    assert record["has_image"] is include_vision
+    assert record["modality"] == ("vision" if include_vision else "text")
+    assert "has_image" not in record
     assert {key: record[key] for key in ("uuid", "category", "raw_subject")} == {
         "uuid": "q1",
         "category": "Math",
@@ -94,112 +153,7 @@ def test_hle_verified_preserves_domain_labels(vision, monkeypatch):
         },
         prompt_config={} if vision else None,
     )
-    assert record["has_image"] is vision
+    assert record["modality"] == ("vision" if vision else "text")
+    assert "has_image" not in record
     assert record["category"] == "Math"
     assert record["raw_subject"] == "Algebra"
-
-
-def test_repeat_ci_requires_matching_repeated_questions():
-    prefix = "domains/category/Math/"
-    tasks = [[row(q, 0, 0, 100), row(q, 1, 1, 300)] for q in (0, 1)]
-    result = compute_domain_metrics(tasks)
-    assert result[prefix + "repeat_count/reward"] == 2
-    assert result[prefix + "ci_available/reward"] is True
-    assert result[prefix + "ci_low_95_across_repeats/reward"] == pytest.approx(-5.853102368)
-    assert result[prefix + "ci_high_95_across_repeats/reward"] == pytest.approx(6.853102368)
-    assert result[prefix + "ci_low_95_across_repeats/output_tokens"] < 100
-    single = compute_domain_metrics([[row(q, 0, q)] for q in (0, 1)])
-    assert single[prefix + "ci_available/reward"] is False
-    assert prefix + "ci_low_95_across_repeats/reward" not in single
-    incomplete = compute_domain_metrics([tasks[0], tasks[1][:1]])
-    assert incomplete[prefix + "ci_available/reward"] is False
-    assert "coverage" in incomplete[prefix + "ci_unavailable_reason/reward"]
-
-
-def test_text_vision_slices_match_shared_aggregation():
-    tasks = [
-        [
-            {
-                **row(q, repeat, float(q != 3) if repeat == 0 else float(q != 0), 100 + 20 * q + 10 * repeat),
-                "has_image": q == 3,
-            }
-            for repeat in (0, 1)
-        ]
-        for q in range(4)
-    ]
-    result = compute_domain_metrics(tasks)
-    assert result["domains/modality/missing_label_rollouts"] == 0
-    for label, has_image, count in (("text", False, 3), ("vision", True, 1)):
-        prefix = f"domains/modality/{label}/"
-        subset = [r for task in tasks for r in task if r["has_image"] is has_image]
-        native = compute_aggregate_metrics(subset).agent_metrics
-        assert result[prefix + "question_count"] == count
-        assert result[prefix + "rollout_count"] == 2 * count
-        for metric in ("reward", "output_tokens"):
-            assert result[prefix + f"mean/{metric}"] == native[f"mean/{metric}"]
-            assert (
-                result[prefix + f"ci_low_95_across_repeats/{metric}"]
-                == native[f"ci_low_95_across_repeats/mean/{metric}"]
-            )
-            assert (
-                result[prefix + f"ci_high_95_across_repeats/{metric}"]
-                == native[f"ci_high_95_across_repeats/mean/{metric}"]
-            )
-    assert result["domains/modality/text/mean/reward"] == pytest.approx(5 / 6)
-    assert result["domains/modality/vision/mean/reward"] == 0.5
-    assert compute_aggregate_metrics([r for task in tasks for r in task]).key_metrics["mean/reward"] == 0.75
-
-
-def test_unknown_modality_is_not_assumed_text_and_single_repeat_has_no_interval():
-    tasks = [[row(0, 0, 1)], [{**row(1, 0, 0), "has_image": False}]]
-    result = compute_domain_metrics(tasks)
-    assert result["domains/modality/missing_label_rollouts"] == 1
-    assert result["domains/modality/text/question_count"] == 1
-    assert result["domains/modality/text/mean/reward"] == 0
-    assert result["domains/modality/text/ci_available/reward"] is False
-    assert "domains/modality/vision/mean/reward" not in result
-    with pytest.raises(ValueError, match="Inconsistent modality"):
-        compute_domain_metrics([[{**row(0, 0, 1), "has_image": True}, {**row(0, 1, 1), "has_image": False}]])
-
-
-@pytest.mark.parametrize("has_image,modality", [(False, "text"), (True, "vision")])
-def test_domain_metrics_within_modality_reuse_repeat_intervals(has_image, modality):
-    matching = [
-        [{**row(0, repeat, 1, 100), "has_image": has_image} for repeat in (0, 1)],
-        [{**row(1, repeat, 0, 300), "has_image": has_image} for repeat in (0, 1)],
-    ]
-    other = [[{**row(2, repeat, 1, 900), "has_image": not has_image} for repeat in (0, 1)]]
-    result = compute_domain_metrics(matching + other)
-    prefix = f"domains/{modality}/category/Math/"
-    assert result[prefix + "mean/reward"] == 0.5
-    assert result[prefix + "mean/output_tokens"] == 200
-    assert result[prefix + "question_count"] == 2
-    assert result[prefix + "rollout_count"] == 4
-    expected = compute_aggregate_metrics([r for task in matching for r in task]).agent_metrics
-    assert result[prefix + "ci_low_95_across_repeats/reward"] == expected["ci_low_95_across_repeats/mean/reward"]
-    assert (
-        result[prefix + "ci_high_95_across_repeats/output_tokens"]
-        == expected["ci_high_95_across_repeats/mean/output_tokens"]
-    )
-    assert result[f"domains/{modality}/raw_subject/Algebra%2FGeometry/mean/reward"] == 0.5
-    assert result["domains/category/Math/question_count"] == 3
-
-
-def test_scoped_missing_labels_and_unequal_repeat_coverage():
-    result = compute_domain_metrics(
-        [
-            [{**row(0, repeat, 1, None), "has_image": False} for repeat in (0, 1)],
-            [{**row(1, 0, 0, category=None), "has_image": False}],
-            [{**row(2, 0, 1), "has_image": True}],
-            [row(3, 0, 1)],
-        ]
-    )
-    assert result["domains/text/category/missing_label_rollouts"] == 1
-    assert result["domains/vision/category/missing_label_rollouts"] == 0
-    assert result["domains/modality/missing_label_rollouts"] == 1
-    assert result["domains/text/category/Math/missing/output_tokens"] == 2
-    assert result["domains/text/raw_subject/Algebra%2FGeometry/ci_available/reward"] is False
-    assert (
-        result["domains/text/raw_subject/Algebra%2FGeometry/ci_unavailable_reason/reward"]
-        == "Repeat question coverage differs"
-    )

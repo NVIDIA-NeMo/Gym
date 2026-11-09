@@ -1,20 +1,13 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""HLE domain and modality summaries using Gym's shared aggregation."""
+"""Configured label and cross-label summaries using Gym's shared aggregation."""
 
 import math
+from statistics import fmean
 from typing import Any
 from urllib.parse import quote
 
 from nemo_gym.metrics import compute_aggregate_metrics
-
-
-def _modality(row: dict[str, Any]) -> str | None:
-    value = row.get("modality")
-    if value in ("text", "vision"):
-        return value
-    has_image = row.get("has_image")
-    return ("vision" if has_image else "text") if type(has_image) is bool else None
 
 
 def repeat_coverage_reason(questions: list[list[dict[str, Any]]]) -> str | None:
@@ -34,47 +27,45 @@ def repeat_coverage_reason(questions: list[list[dict[str, Any]]]) -> str | None:
     return None
 
 
-def compute_domain_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:
-    """Aggregate category, raw subject and text/vision slices of scored responses.
+def compute_slice_metrics(
+    tasks: list[list[dict[str, Any]]],
+    fields: list[str],
+    cross_fields: tuple[tuple[str, str], ...] | list[tuple[str, str]] = (),
+) -> dict[str, Any]:
+    """Summarize configured labels using the public aggregator's repeat statistics.
 
-    The parent aggregator has already excluded masked outcomes. Each slice calls
-    the same public aggregator without this custom hook, so its means and CIs use
-    Gym's normal repeat machinery, without recursive slicing or separate CI math.
+    Masked rows are excluded by the parent aggregator. Each question contributes
+    its matching rows to a slice; labels may differ across repeats, but a CI is
+    only available when the slice covers the same questions in each repeat.
     """
-    metrics = _compute_slices(tasks, ("category", "raw_subject", "modality"))
-    for modality in ("text", "vision"):
-        questions = [task for task in tasks if task and _modality(task[0]) == modality]
-        scoped = _compute_slices(questions, ("category", "raw_subject"))
-        metrics.update({key.replace("domains/", f"domains/{modality}/", 1): value for key, value in scoped.items()})
-    metrics["domains/ci_method"] = "Gym Student t interval across repeat-level estimates"
-    return metrics
-
-
-def _compute_slices(tasks: list[list[dict[str, Any]]], fields: tuple[str, ...]) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
-    for field in fields:
-        namespace = field
-        groups: dict[str, list[list[dict[str, Any]]]] = {}
+    dimensions = [(field,) for field in fields] + [tuple(pair) for pair in cross_fields]
+    for columns in dict.fromkeys(dimensions):
+        namespace = "/".join(quote(field, safe="") for field in columns)
+        groups: dict[tuple[str, ...], list[list[dict[str, Any]]]] = {}
         missing = 0
         for task in tasks:
-            labels = [_modality(row) if field == "modality" else row.get(field) for row in task]
-            if not labels:
-                continue
-            if any(label != labels[0] or type(label) is not type(labels[0]) for label in labels):
-                raise ValueError(f"Inconsistent {field} labels across repeats of a question")
-            label = labels[0]
-            if not isinstance(label, str) or not label.strip():
-                missing += len(task)
-                continue
-            groups.setdefault(label, []).append(task)
-        metrics[f"domains/{namespace}/missing_label_rollouts"] = missing
-        for label, questions in sorted(groups.items()):
-            prefix = f"domains/{namespace}/{quote(label, safe='')}/"
+            by_label: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+            for row in task:
+                values = [row.get(field) for field in columns]
+                if any(value is None or (isinstance(value, str) and not value.strip()) for value in values):
+                    missing += 1
+                    continue
+                labels = tuple(str(value) for value in values)
+                by_label.setdefault(labels, []).append(row)
+            for labels, rows in by_label.items():
+                groups.setdefault(labels, []).append(rows)
+        metrics[f"slices/{namespace}/missing_label_rollouts"] = missing
+        for labels, questions in sorted(groups.items()):
+            label_path = "/".join(quote(label, safe="") for label in labels)
+            prefix = f"slices/{namespace}/{label_path}/"
             rows = [row for task in questions for row in task]
             metrics[prefix + "question_count"] = len(questions)
             metrics[prefix + "rollout_count"] = len(rows)
             coverage_reason = repeat_coverage_reason(questions)
-            aggregate = compute_aggregate_metrics(rows).agent_metrics
+            # Invalid repeat identities cannot be passed to Gym's repeat grouper.
+            # Row means remain meaningful, but no interval is available.
+            aggregate = compute_aggregate_metrics(rows).agent_metrics if coverage_reason is None else {}
             for metric in ("reward", "output_tokens"):
                 values = [
                     row.get("reward")
@@ -86,8 +77,7 @@ def _compute_slices(tasks: list[list[dict[str, Any]]], fields: tuple[str, ...]) 
                     isinstance(value, bool)
                     or not isinstance(value, (int, float))
                     or not math.isfinite(value)
-                    or value < 0
-                    or (metric == "reward" and value > 1)
+                    or (metric == "output_tokens" and value < 0)
                     for value in values
                 )
                 metrics[prefix + f"missing/{metric}"] = missing_values
@@ -95,7 +85,7 @@ def _compute_slices(tasks: list[list[dict[str, Any]]], fields: tuple[str, ...]) 
                 if missing_values:
                     metrics[prefix + f"ci_unavailable_reason/{metric}"] = "Missing or invalid observations"
                     continue
-                metrics[prefix + f"mean/{metric}"] = aggregate[f"mean/{metric}"]
+                metrics[prefix + f"mean/{metric}"] = fmean(values)
                 low = aggregate.get(f"ci_low_95_across_repeats/mean/{metric}")
                 high = aggregate.get(f"ci_high_95_across_repeats/mean/{metric}")
                 if coverage_reason or low is None or high is None:
