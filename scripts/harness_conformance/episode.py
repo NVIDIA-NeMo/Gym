@@ -12,6 +12,7 @@ import io
 import json
 import math
 import os
+import shlex
 import shutil
 import socket
 import subprocess
@@ -126,12 +127,21 @@ def _config(
             raise RuntimeError("Set GYM_MULTIMODAL_SANDBOX_CONFIG to JSON with command and sandbox fields")
         runtime = json.loads(Path(runtime_path).read_text())
         if use_agent_sessions:
+            command = shlex.split(runtime["command"])
+            if len(command) != 1:
+                raise RuntimeError("The session runtime requires a single pinned executable")
+            executable = Path(command[0])
+            expected_digest = runtime.get("executable_sha256")
+            if not expected_digest or digest_file(executable) != expected_digest:
+                raise RuntimeError(
+                    "Reprovision the multimodal runtime: missing or mismatched executable integrity pin"
+                )
             profile_agent.update(
                 command="opencode",
                 sandbox=None,
                 env={},
-                sandbox_executable_path=runtime["command"],
-                sandbox_executable_sha256=digest_file(Path(runtime["command"])),
+                sandbox_executable_path=str(executable),
+                sandbox_executable_sha256=expected_digest,
                 sandbox_path_prefix=[str(Path(runtime["sandbox"]["python_env"]) / "bin")],
             )
         else:

@@ -4,6 +4,7 @@
 """Provision a disposable Linux runtime for the multimodal conformance probes."""
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -16,6 +17,30 @@ from pathlib import Path
 import yaml
 
 from .ci import ROOT
+
+
+def runtime_pins(version: str, architecture: str) -> dict:
+    """Return reviewed publisher pins; changing the configured release requires repinning."""
+    pins = json.loads(Path(__file__).with_name("multimodal_runtime_pins.json").read_text())
+    if pins["version"] != version:
+        raise RuntimeError(f"Update multimodal runtime pins before provisioning OpenCode {version}")
+    return pins["runtimes"][architecture] | {"version": version, "plugin": pins["plugin"]}
+
+
+def verify_runtime_assets(executable: Path, dependencies: Path, pins: dict) -> None:
+    """Check installed assets against expected pins, independently of observed file hashes."""
+    packages = json.loads((dependencies / "package-lock.json").read_text())["packages"]
+    for package, integrity in (
+        (pins["package"], pins["npm_integrity"]),
+        (pins["plugin"]["package"], pins["plugin"]["integrity"]),
+    ):
+        installed = packages[f"node_modules/{package}"]
+        if installed.get("version") != pins["version"] or installed.get("integrity") != integrity:
+            raise RuntimeError(f"Installed package does not match reviewed integrity pin: {package}")
+    with executable.open("rb") as handle:
+        actual = hashlib.file_digest(handle, "sha256").hexdigest()
+    if actual != pins["executable_sha256"]:
+        raise RuntimeError("Installed OpenCode executable does not match reviewed SHA-256 pin")
 
 
 def provision(directory: Path, *, bwrap_command: list[str] | None = None) -> Path:
@@ -38,7 +63,8 @@ def provision(directory: Path, *, bwrap_command: list[str] | None = None) -> Pat
     version = defaults["opencode_multimodal_agent"]["responses_api_agents"]["opencode_multimodal_agent"][
         "opencode_version"
     ]
-    package = f"opencode-linux-{architecture}"
+    pins = runtime_pins(str(version), architecture)
+    package = pins["package"]
     dependencies = directory / "dependencies"
     subprocess.run(
         [
@@ -60,6 +86,7 @@ def provision(directory: Path, *, bwrap_command: list[str] | None = None) -> Pat
     with executable.open("rb") as handle:
         if handle.read(4) != b"\x7fELF":
             raise RuntimeError("The sandbox requires the native OpenCode executable, not its npm launcher")
+    verify_runtime_assets(executable, dependencies, pins)
     python_env = directory / "python"
     if not (python_env / "pyvenv.cfg").is_file():
         subprocess.run(["uv", "venv", "--python", sys.executable, str(python_env)], check=True)
@@ -101,7 +128,15 @@ def provision(directory: Path, *, bwrap_command: list[str] | None = None) -> Pat
         raise RuntimeError(f"Sandbox OpenCode version mismatch: {result.stdout!r}")
     config = directory / "sandbox.json"
     config.write_text(
-        json.dumps({"command": shlex.quote(str(executable)), "sandbox": runtime.model_dump(mode="json")}, indent=2)
+        json.dumps(
+            {
+                "command": shlex.quote(str(executable)),
+                "executable_sha256": pins["executable_sha256"],
+                "runtime_provenance": pins,
+                "sandbox": runtime.model_dump(mode="json"),
+            },
+            indent=2,
+        )
         + "\n"
     )
     return config

@@ -1,0 +1,23 @@
+{
+  "version": "1.17.11",
+  "plugin": {
+    "package": "@opencode-ai/plugin",
+    "integrity": "sha512-mE6SR1tVxL98zbZrlneqF/+dpIKLeZHKzWZy35Hq54uEnuCM1gKq3LK8F2PG2zMBDKQtz2fahEIksJ7svoPLLw=="
+  },
+  "runtimes": {
+    "x64": {
+      "package": "opencode-linux-x64-baseline",
+      "npm_integrity": "sha512-y0sibv7zg0KDLD7hdMCLe4+YYP6t5PQmqTV88KR7jWIU7qvl1hyuIAI84QLCt+7DACpNsFsUfofu6Hib051jZw==",
+      "executable_sha256": "0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded",
+      "release_url": "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-x64-baseline.tar.gz",
+      "release_sha256": "36064327d5a3fba662264f5726f517eafa26d1aefb0d59bc95e66bddccf3497b"
+    },
+    "arm64": {
+      "package": "opencode-linux-arm64",
+      "npm_integrity": "sha512-CN3LSlqSrC1LbYHXZs21B8hIB951ebCRowwC+p4SDwPPUKknRzGYi5V7FjXAp8xq5hx27/QGgmGjfauv6RbAiA==",
+      "executable_sha256": "e51b4a9c0e8dfa90c3387f0aa41e7c362d56b1939eec102ae76c1aac0d911186",
+      "release_url": "https://github.com/anomalyco/opencode/releases/download/v1.17.11/opencode-linux-arm64.tar.gz",
+      "release_sha256": "6c0ae8212401c78f9dcddead35d385953c7a44eb1616309365b58503dbd1b4cd"
+    }
+  }
+}

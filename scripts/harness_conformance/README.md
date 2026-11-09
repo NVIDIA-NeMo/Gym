@@ -102,16 +102,51 @@ them locally on Linux with `bwrap`, `npm`, and `uv` installed:
 python -m scripts.harness_conformance.ci install --harness opencode_multimodal
 python -m scripts.harness_conformance.multimodal_runtime --directory /tmp/gym-multimodal-runtime
 export GYM_MULTIMODAL_SANDBOX_CONFIG=/tmp/gym-multimodal-runtime/sandbox.json
-export PATH="/tmp/gym-multimodal-runtime/dependencies/node_modules/opencode-linux-x64/bin:$PATH"
+export PATH="/tmp/gym-multimodal-runtime/dependencies/node_modules/opencode-linux-x64-baseline/bin:$PATH"
 python scripts/run_harness_conformance.py --harness opencode_multimodal --output /tmp/multimodal-probes
 ```
 
-Use `opencode-linux-arm64` in the PATH on aarch64. Provisioning pins the native
+Use `opencode-linux-arm64` in the PATH on aarch64. On x64 the baseline package
+matches the production installer's artifact variant. Expected pins are recorded in
+`multimodal_runtime_pins.json`: npm archive integrity for the executable/plugin,
+the GitHub release archive SHA-256, and the executable SHA-256 after confirming
+both publisher archives contain identical executable bytes. Sources are the
+[npm registry](https://registry.npmjs.org/opencode-linux-x64-baseline/1.17.11) and
+[release metadata](https://api.github.com/repos/anomalyco/opencode/releases/tags/v1.17.11).
+Provisioning rejects mismatched package versions/integrity or executable bytes
+before sandbox setup. The exported config carries the expected executable digest;
+session probes verify that pin instead of manufacturing one from the installed file.
+Release changes require reviewing and updating the manifest. These pins do not
+make every production auto-download path integrity-pinned; deployment-owned
+offline assets still require their own matching pins.
+
+Provisioning pins the native
 OpenCode executable and plugin to the agent's configured release, installs the
 image libraries in a separate virtualenv, and checks their imports and OpenCode's
 version **inside the actual agent sandbox** before writing its config. A host
 that disallows Bubblewrap/user namespaces fails setup; it never falls back to
 unsandboxed execution. Existing harness entries do not run this setup.
+
+Multimodal qualification has several independent layers:
+
+| Path or capability | Automated coverage | Scope |
+| --- | --- | --- |
+| Catalog/session composition | `test_catalog.py` | All four retained benchmarks, compatibility and owned-session/OpenSandbox overlays; no live provider |
+| Restricted seed, policy and cleanup | `test_sessions.py` | Owned/borrowed lifecycle, required offline pins and policy propagation with a fake sandbox |
+| Wrapper enforcement | `test_network_policy.py`, `test_network_runner.py` | Launch arguments and a real Linux wrapper denying direct host TCP; requires permitted namespaces |
+| Filesystem isolation | `test_eval_sandbox.py` | Real concurrent Bubblewrap processes; provisioning variable must be set |
+| Initial/tool-image embedding | `test_sessions.py`, media tests | Actual conversion/parsing of retained image attachments using controlled exports |
+| Compatibility `/run` grading | `test_eval.py` | Typed model versus infrastructure failures; real-model benchmark runs are separate evidence |
+| Scripted conformance | `episode.py`, runner tests | Controlled policy/judge endpoints, initial image, inherited-network Local provider or explicit compatibility path; not the shipped restricted owned-provider recipe |
+| Gateway budgets | `responses_api_models/vllm_model/tests/test_visual_turn_budget.py` | Separate model-adapter tests; the scripted model is not an enforcing gateway |
+
+Real provider deployment checks, including OpenSandbox egress/control-service
+separation, remain separate qualification evidence. This workflow does not run a
+credentialed OpenSandbox deployment, prove arbitrary deployment isolation, or
+establish full authenticated MCP-tool qualification. A local arm64 pass also does
+not establish x64 execution. Record the exact revision, provider, architecture,
+and skipped tests with each result. Shared legacy-environment behavior still
+requires owner review; observational probes are not owner approval.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
