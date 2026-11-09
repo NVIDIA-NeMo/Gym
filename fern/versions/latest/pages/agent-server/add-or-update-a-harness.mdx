@@ -787,8 +787,8 @@ The current adapters:
 | `simple_agent` | Sent to the model unchanged, as Responses input. | `direct_http`: the images leave the tool output and follow the turn's tool outputs, one user message each. |
 | `opencode_agent` (agent sessions) | Staged with `stage_media()` and attached with `opencode run --file`, in the user message only. Image input is always declared. | `mcp`: OpenCode passes MCP image content to the model. |
 | `pi_agent` (agent sessions) | Staged with `stage_media()` and passed as `@<path>` arguments, in the user message only. Pi sends the images after all of the prompt text and, by default, resizes any image over 2000 px on a side or 4.5 MB of base64. Image input is always declared. | No tool grants in agent sessions. |
-| `opencode_sandboxed_agent` | Attached to the user turn. Image input is declared only for a turn with images. | `mcp`: images reach the model only on a turn whose prompt also has images, because only that turn declares image input. |
-| Codex, Hermes, OpenClaw, Kilo | Rejected with HTTP 422. | Codex's `view_image` returns images in its tool output; see [Tool-reply images](#tool-reply-images) for the Model Server setting this needs. |
+| `opencode_sandboxed_agent` | **Deprecated:** it runs the legacy `/run` path and will be removed after the Environment Server migration, so add image support to `opencode_agent`, not here. Attached to the user turn. Image input is declared only for a turn with images. | `mcp`: images reach the model only on a turn whose prompt also has images, because only that turn declares image input. |
+| Codex, Hermes, OpenClaw, Kilo | Rejected with HTTP 422. **To do:** these adapters do not take prompt images yet; add them by following [Prompt images](#prompt-images), with OpenCode and Pi as the references. | Codex's `view_image` returns images in its tool output; see [Tool-reply images](#tool-reply-images) for the Model Server setting this needs. |
 
 ### Prompt images
 
