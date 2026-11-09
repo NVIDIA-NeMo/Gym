@@ -1,0 +1,54 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Runtime built from ehosseiniasl/opencode spatialclaw-integration at
+# a2acc05f2aab51e574c46fecbe09c4b7e97a6c8d. External source remains separately licensed.
+
+# Explicit local development execution, matching the native resource kernel's
+# shared-filesystem contract. LocalProvider does not provide isolation.
+spatialclaw_harness_sandbox:
+  local:
+    concurrency: 1
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      resources_server: null
+      num_workers: 1
+      opencode_version: 1.18.34
+      context_window: 131072
+      timeout: 1800
+      mcp_tool_timeout_seconds: 1800
+      max_output_tokens: ${oc.env:SPATIALCLAW_MAX_OUTPUT_TOKENS,16384}
+      sandbox_provider: null
+      network_access: inherit
+      sandbox_executable_path: ${oc.env:SPATIALCLAW_OPENCODE_BIN}
+      sandbox_executable_sha256: 9ca0b9953d49997601655e54f846a3efa464f237e47c6f1b04716d0f2e64c4c2  # pragma: allowlist secret
+      sandbox_model_id: ${policy_model_name}
+      system_prompt: >-
+        Solve the provided SpatialClaw question using the benchmark's granted
+        get_context and execute tools. Call get_context before reasoning about
+        the media; follow its native system instructions, image mappings and
+        execution protocol. The execute tool runs Python in one persistent
+        benchmark kernel. Use InputImages, RefImages, Metadata, tools, vlm and
+        show there. Submit the answer by executing ReturnAnswer(value).
+        The benchmark grades only that explicit submission. Built-in host tools,
+        other agents and web access are not part of this task.
+      opencode_config:
+        compaction:
+          auto: false
+        agent:
+          build:
+            steps: 30
+        # No inherited host-tool permission map; later matching rules win.
+        permission:
+          '*': deny
+          '*_get_context': allow
+          '*_execute': allow
+
+# Native base template is unused when all benchmark agents inherit OpenCode.
+spatialclaw_agent: null

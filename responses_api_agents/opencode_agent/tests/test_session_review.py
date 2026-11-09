@@ -16,6 +16,10 @@ from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import format_error_message
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
+    JPEG,
+    JPEG_URI,
+    PNG,
+    PNG_URI,
     active_sessions,
     capture_observations,
     close_body,
@@ -82,13 +86,96 @@ def test_request_allowlist_rejects_future_fields_but_accepts_defaults(setup):
         future_control: str | None = None
 
     agent, sandbox = setup
-    assert agent._session_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "")
+    assert agent._session_input(ExtendedRequest(input="task", stream=False, background=False)) == ("task", "", [])
     with pytest.raises(HTTPException, match="future_control") as error:
         agent._session_input(ExtendedRequest(input="task", future_control="unsupported"))
     assert error.value.status_code == 422
     with pytest.raises(HTTPException, match="metadata"):
         agent._session_input(ExtendedRequest(input="task", metadata={"ignored": "value"}))
     sandbox.launch.assert_not_awaited()
+
+
+@pytest.mark.parametrize("leading_role", [None, "system", "developer"])
+def test_session_input_combines_user_task_and_resource_observation(setup, leading_role):
+    agent, sandbox = setup
+    agent.config.system_prompt = "configured instructions"
+    items = [
+        {"role": "user", "content": "original task"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "initial resource observation"},
+                {"type": "input_text", "text": "call get_context before starting"},
+            ],
+        },
+    ]
+    if leading_role:
+        items.insert(0, {"role": leading_role, "content": "leading instructions"})
+    prompt, system, media = agent._session_input(
+        NeMoGymResponseCreateParamsNonStreaming(input=items, instructions="request instructions")
+    )
+    assert prompt == "original task\n\ninitial resource observation\ncall get_context before starting"
+    assert system == "configured instructions\n\nrequest instructions" + (
+        "\n\nleading instructions" if leading_role else ""
+    )
+    assert media == []
+    sandbox.launch.assert_not_awaited()
+
+
+def test_session_input_accumulates_media_from_all_user_messages(setup):
+    agent, _ = setup
+    items = [
+        {"role": "system", "content": "instructions"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_text", "text": "first image"},
+                {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "input_image", "image_url": JPEG_URI, "detail": "auto"},
+                {"type": "input_text", "text": "second image"},
+            ],
+        },
+    ]
+    prompt, system, media = agent._session_input(NeMoGymResponseCreateParamsNonStreaming(input=items))
+    assert (prompt, system) == ("first image\n\nsecond image", "instructions")
+    assert [image.data for image in media] == [PNG, JPEG]
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [],
+        [{"role": "system", "content": "instructions"}],
+        [{"role": "user", "content": "task"}, {"role": "assistant", "content": "history"}],
+        [{"role": "user", "content": "task"}, {"role": "system", "content": "late instructions"}],
+        [{"role": "system", "content": "one"}, {"role": "developer", "content": "two"}],
+        [
+            {"role": "user", "content": "task"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "tool history"},
+        ],
+    ],
+)
+def test_session_input_still_rejects_history_and_misplaced_instructions(setup, items):
+    agent, sandbox = setup
+    with pytest.raises(HTTPException, match="consecutive user messages") as error:
+        agent._session_input(NeMoGymResponseCreateParamsNonStreaming(input=items))
+    assert error.value.status_code == 422
+    sandbox.launch.assert_not_awaited()
+
+
+def test_session_input_rejects_multiple_empty_user_messages(setup):
+    agent, _ = setup
+    with pytest.raises(HTTPException, match="nonempty user prompt"):
+        agent._session_input(
+            NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": " "}, {"role": "user", "content": "\n"}]
+            )
+        )
 
 
 @pytest.mark.parametrize(

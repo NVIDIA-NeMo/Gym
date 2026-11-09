@@ -1,0 +1,24 @@
+spatialclaw_resources_server:
+  resources_servers:
+    spatialclaw:
+      entrypoint: app.py
+      num_workers: 1
+      expose_tools_over_mcp: true
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ${policy_model_name}
+      model_config_path: ${oc.env:SPATIALCLAW_MODEL_CONFIG,nemotron-3-nano-omni-30b-a3b-reasoning-spatialclaw-think65536}
+      gpu_server_registry: ${oc.env:SPATIALCLAW_GPU_SERVER_REGISTRY,null}
+      workspace_root: ${oc.env:SPATIALCLAW_RESOURCE_WORKSPACE_ROOT,outputs/spatialclaw_resources}
+      frame_cache_root: ${oc.env:SPATIALCLAW_FRAME_CACHE_ROOT,outputs/spatialclaw_frame_cache}
+      domain: other
+      verified: false
+      description: Score prepared rows with the pinned SpatialClaw benchmark evaluator.
+      value: Preserve SpatialClaw-native extraction and aggregate metrics in NeMo Gym.
+      spatialclaw_url: ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git
+      spatialclaw_commit: 946ac114dfcabf9df997629bfa8b6f2f66da1425  # pragma: allowlist secret
+      spatialclaw_root: ${oc.env:SPATIALCLAW_ROOT,null}
+      source_cache_root: null
+      dataset_config: ???
+      data_root: ${oc.env:SPATIALCLAW_DATA_ROOT,null}

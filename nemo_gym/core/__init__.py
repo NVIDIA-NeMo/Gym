@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The definitions every package and every environment shares: Responses API types, episode identity, and failure kinds."""
+"""The definitions every package and every environment shares: Responses API types, episode identity, failure kinds,
+and images in tool replies."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
         reply_failure_report,
         report_for_current_request,
     )
+    from nemo_gym.core.media import MediaFile, UnsupportedContentError, split_text_and_media
     from nemo_gym.core.operation_timing import OperationTiming, TimingBoundary
     from nemo_gym.core.outcome_policy import (
         OutcomeAction,
@@ -146,6 +148,7 @@ if TYPE_CHECKING:
         NeMoGymSummary,
         accumulate_response_usage,
     )
+    from nemo_gym.core.tool_output_images import TOOL_OUTPUT_IMAGES_KEY, ToolOutputImage, split_tool_output_images
     from nemo_gym.core.typed_exceptions import (
         NgFailureEvent,
         agent_route_failure,
@@ -158,6 +161,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "MediaFile": "media",
+    "UnsupportedContentError": "media",
+    "split_text_and_media": "media",
     "OperationTiming": "operation_timing",
     "TimingBoundary": "operation_timing",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
@@ -256,7 +262,9 @@ _PUBLIC_API = {
     "SdkErrorDetails": "failure_records",
     "StreamFailureReportReader": "failure_transport",
     "TOKEN_METADATA_FIELDS": "responses_api_types",
+    "TOOL_OUTPUT_IMAGES_KEY": "tool_output_images",
     "TaskId": "episode_types",
+    "ToolOutputImage": "tool_output_images",
     "VERIFIER_ERROR": "failure_kinds",
     "accumulate_response_usage": "responses_api_types",
     "agent_route_failure": "typed_exceptions",
@@ -273,6 +281,7 @@ _PUBLIC_API = {
     "report_for_current_request": "failure_transport",
     "rollout_context": "episode_context",
     "sdk_error_details": "typed_exceptions",
+    "split_tool_output_images": "tool_output_images",
     "validate_failure_kind": "failure_kinds",
     "verifier_invocation_context": "episode_context",
 }

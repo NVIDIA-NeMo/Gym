@@ -1,0 +1,27 @@
+{
+  "gym_source_commit": "e5d891b592f8663d3c6983127ceee3572ff55a6e",
+  "native_source_commit": "946ac114dfcabf9df997629bfa8b6f2f66da1425",
+  "model": "nemotron-3-nano-omni-30b-a3b-reasoning",
+  "num_key_frames": 256,
+  "video_max_fps": 2,
+  "num_repeats": 1,
+  "sample_ids": [
+    "301-3",
+    "301-2",
+    "001-2",
+    "301-1",
+    "001-1"
+  ],
+  "elapsed_seconds": 212,
+  "correct": 2.0,
+  "samples": 5,
+  "health": {
+    "healthy": 5,
+    "unhealthy": 0,
+    "unobserved": 0
+  },
+  "evidence_profile": "gym-p0/v1",
+  "evidence_verdict": "fulfilled",
+  "source_sha256": "3853139ed0bbd9dd07c4e047ef7ea514377c065424bc2ceaaeecb29d412a7db2",
+  "fixture_scope": "Compact real rollout examples; model-call payloads and native traces are retained separately with the run. This subset is not a full benchmark parity result or a behavioral conformance certificate."
+}

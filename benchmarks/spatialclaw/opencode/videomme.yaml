@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/spatialclaw/videomme.yaml
+- benchmarks/spatialclaw/harnesses/opencode.yaml
+spatialclaw_videomme_benchmark_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    _delete_key: spatialclaw_agent
+    opencode_agent: {}
+spatialclaw_videomme_benchmark_environment_server:
+  environment_servers:
+    single_agent_turn:
+      resources_tool_transports:
+      - mcp
+spatialclaw_videomme_benchmark_resources_server:
+  resources_servers:
+    spatialclaw:
+      sandbox_provider: spatialclaw_harness_sandbox
+      sandbox_workdir: ${oc.env:SPATIALCLAW_SANDBOX_ROOT,/tmp/spatialclaw-harness-tasks}
+      sandbox_config:
+        ttl_s: 2700
+      sandbox_network_access: inherit

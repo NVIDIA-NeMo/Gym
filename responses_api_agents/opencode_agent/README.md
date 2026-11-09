@@ -142,9 +142,23 @@ its private HOME. The adapter requires a fresh successful-initialization receipt
 the task environment hook before accepting a gradable result. A missing or invalid
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
-The session path accepts one text task, optional system/developer text and
-`instructions`. Request `temperature` and `top_p` are applied to every OpenCode agent
-(see [Owner extensions](#owner-extensions)). Other controls, images, history replay and
+The session path accepts consecutive user messages, optional leading system/developer text and
+`instructions`. User text is joined in order with blank lines, including a resource's initial observation.
+The user messages may include images as base64 data-URI `input_image` parts,
+alongside nonempty text. The adapter writes each image to `/tmp/nemo-gym-media/<sha256>.<ext>`
+with `nemo_gym.sandbox.stage_media` and attaches it with `opencode run --file`. OpenCode shows
+that path to the model, so naming the file by its content keeps the prompt the same across
+rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
+not use the `detail` setting. Sessions always declare image input on the Gym model, so OpenCode
+also passes on images its read tool returns; a text-only deployment rejects such requests.
+Sessions also lift OpenCode's `attachment.image` limits, which would otherwise shrink and re-encode
+any image over 2000 px on a side or 5 MiB of base64, so the model gets images at the size the
+environment sent. Images outside the user task and image URLs are rejected. Saved trajectories keep only the
+text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
+on the qualified versions 1.17.11 and 1.18.34; other versions reject request sampling controls
+(see [Owner extensions](#owner-extensions)). A request `max_output_tokens` passes when it is at
+least the configured `max_output_tokens`, because OpenCode's limit for each model call already
+stays within it. NeMo RL sets it on every row. A smaller value returns 422. Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
 timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
@@ -156,11 +170,21 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Request-level overrides
 are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits only `permission`, `tools`, `compaction.auto` and
+`agent.build.steps`, preserving Gym capture. With token capture on, a session refuses
+`agent.build.steps` (see below).
 OpenCode turns a `tools` map into base permission rules and merges `permission` on top,
 so a later `permission` rule such as `"*": "allow"` re-enables tools that `tools`
 disabled. Set `tools: null` (or `{}`) to make `permission` the only rule source; the
 adapter then omits `tools` and passes `permission` exactly as given.
+Setting `compaction.auto: false` keeps OpenCode from
+summarizing the session and continuing from the summary, in model calls that training cannot join
+to the scored call; a run that fills the context then ends with a context-limit error.
+`agent.build.steps` sets the step limit of the `build` agent, which the session runs, for each
+prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
+asks for a text answer. It still offers the tools, so a model that keeps calling them runs past
+the limit. Token capture cannot join a call that carries this message to the earlier calls of the
+rollout, so with token capture on a session refuses `agent.build.steps`.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
@@ -210,7 +234,7 @@ stricter, single-activation contract described above. The intentional difference
 | System text | Prepended to the user prompt; request `instructions` is not applied | Config/system/developer text and request `instructions` form an instructions file |
 | Provider name | `nemo` | `nemo_gym` (internal alias for the same Gym model server) |
 | `env`, `extra_args`, custom `command` | Applied | Rejected at seed, not silently ignored |
-| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; other controls rejected explicitly |
+| Request controls | Existing local compatibility behavior | `temperature` and `top_p` applied with OpenCode 1.17.11; `max_output_tokens` accepted when at least the configured limit; other controls rejected explicitly |
 
 Both paths honor configured `thinking` and declare interleaved `reasoning_content`.
 Different prompt placement can affect results; this integration does not establish
@@ -263,11 +287,12 @@ confirmation. A final negative termination receipt fails the activation and skip
 verification; close releases the borrowed connection with `cleanup_confirmed: false`.
 The task sandbox remains available to its owner for verification or teardown.
 
-Ordinary single-turn sessions keep their existing protocol. With `return_session_trajectory:
-true`, their close also returns the session's trajectory (one turn per saved assistant reply,
-compaction summaries excluded), so rollout collection joins captured calls to those turns and
-the summary call stays on the compaction record. Without it, collection builds one turn per
-captured call, and the summary call of a compaction is counted as a step too.
+By default (`return_session_trajectory: true`), the close of an ordinary single-turn session also
+returns the session's trajectory (one turn per saved assistant reply, compaction summaries
+excluded), so rollout collection joins captured calls to those turns, the harness evidence checks
+match each model call to its step, and the summary call stays on the compaction record. With
+`false`, collection builds one turn per captured call with no message ID, so every call is reported
+as an unmatched assistant message and the summary call of a compaction is counted as a step too.
 
 ### Offline sandbox runtimes and native model identity
 
