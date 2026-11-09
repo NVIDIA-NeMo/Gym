@@ -61,7 +61,7 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 | `serp_url_patterns` | 12 | every URL | regexes anchored at the start of the scheme-less URL; `www.` is kept, the patterns allow subdomains themselves; tried on the URL as written and on its canonical form |
 | `url_patterns` | 22 | queries, URLs, result titles and snippets, fetched titles and Markdown | case-insensitive regexes |
 | `patterns_case_sensitive` | 4 | the same | regexes as written (`\bHLE\b ...`) |
-| `answer_title_patterns` | 5 | result titles | case-insensitive; tried on the title as shown (cut at 1,000 characters) and on the title with each trailing ` \| Site`, ` - Site`, ` – Site`, ` · Site`, ` » Site`, ` :: Site` segment removed whose separator starts within those 1,000 characters, however far the segment runs; an answer phrase that lies wholly past the cut is neither shown nor checked |
+| `answer_title_patterns` | 5 | result titles | case-insensitive; tried on the title as shown (cut at 1,000 characters, with and without the cut marker) and on the title with each trailing ` \| Site`, ` - Site`, ` – Site`, ` · Site`, ` » Site`, ` :: Site` segment removed whose separator starts within those 1,000 characters, however far the segment runs; an answer phrase that lies wholly past the cut is neither shown nor checked |
 | `answer_title_allow_hosts` | 7 | result titles | hosts (and subdomains) exempt from `answer_title_patterns` only; every other family still applies |
 
 The canonical form is the URL as a fetcher resolves it: the host UTS #46-mapped and IDNA-encoded, lower-cased and without a

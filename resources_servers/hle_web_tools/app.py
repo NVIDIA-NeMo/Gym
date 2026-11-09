@@ -492,13 +492,17 @@ def _query_prefix_matches(form: str, path: str, pairs: List[Tuple[str, str]]) ->
 
 
 def title_variants(title: str) -> List[str]:
-    """The title as shown (``cap_title``), then the title with each trailing ``| Site``-style segment removed.
+    """The title as shown (``cap_title``), the shown text without its cut marker when the title is capped, then
+    the title with each trailing ``| Site``-style segment removed.
 
-    Only a separator that starts within the shown title is tried, so each variant is at most ``MAX_TITLE_CHARS``
-    long however long the title is, and a separator after a long blank run (``Quiz answers<5,000 blanks>| Site``)
-    is still found.
+    The shown text itself is checked, so an end-anchored answer phrase that ends exactly at the cut is caught
+    whether or not a separator follows it. Only a separator that starts within the shown title is tried, so each
+    variant is at most ``MAX_TITLE_CHARS`` long however long the title is, and a separator after a long blank run
+    (``Quiz answers<5,000 blanks>| Site``) is still found.
     """
     variants = [cap_title(title)]
+    if len(title) > MAX_TITLE_CHARS:
+        variants.append(title[:MAX_TITLE_CHARS])
     for match in _TITLE_SEPARATOR_RE.finditer(title):
         if match.start() >= MAX_TITLE_CHARS:
             break

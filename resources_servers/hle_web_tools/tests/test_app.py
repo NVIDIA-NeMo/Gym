@@ -190,6 +190,13 @@ async def test_case_sensitive_patterns_apply_to_fetched_content_as_written(serve
         ("https://example.com/q", "Daily quiz answers | Example Times", False),
         ("https://example.com/r", "Answers to the Riemann hypothesis critics", True),
         pytest.param("https://example.com/s", "Quiz answers" + " " * 5_000 + "| Site", False, id="padded-separator"),
+        # The answer phrase is shown whole and the separator starts exactly at the cut.
+        pytest.param(
+            "https://example.com/t",
+            "x" * (module.MAX_TITLE_CHARS - 13) + " Quiz answers | Site",
+            False,
+            id="separator-at-cut",
+        ),
     ],
 )
 async def test_answer_title_rule_exempts_allowed_hosts_and_strips_trailing_site_names(server, url, title, kept):
