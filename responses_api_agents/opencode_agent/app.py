@@ -15,6 +15,7 @@
 
 import asyncio
 import copy
+import importlib.resources
 import json
 import logging
 import math
@@ -322,6 +323,19 @@ def _serialize_replacement_config(config: dict[str, Any]) -> str:
     return _dump_with_serialized_member(config, "agent", agent_json)
 
 
+def _capture_joins_opencode_step_limit() -> bool:
+    """Whether Gym's token capture joins the calls that OpenCode's step-limit note follows.
+
+    The capture fix for OpenCode's step-limit note and renamed tool calls (Gym #5833) adds
+    ``nemo_gym/models/token_capture/harness_notes.py``. Without it, the note turns the next call into a poisoned
+    capture, so a seed with token capture refuses ``agent.build.steps``. The check reads the installed package's
+    files and imports nothing.
+
+    TODO: remove this check once #5833 is on main, and allow ``agent.build.steps`` with token capture always.
+    """
+    return importlib.resources.files("nemo_gym").joinpath("models", "token_capture", "harness_notes.py").is_file()
+
+
 def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | None:
     """Return why a sandbox session cannot use ``opencode_config``, or ``None``.
 
@@ -336,8 +350,8 @@ def _session_opencode_config_error(opencode_config: Mapping[str, Any]) -> str | 
     - ``agent.build.steps`` (a positive integer): the step limit of OpenCode's ``build`` agent, which the session
       runs, for each prompt. From the call at the limit on, OpenCode adds an assistant message to each request that
       asks for a text answer. It still offers the tools, so a model that keeps calling them runs past the limit.
-      Other agent fields would replace the adapter's prompt, model or sampling. The seed refuses it with token
-      capture on.
+      Other agent fields would replace the adapter's prompt, model or sampling. With token capture on, the seed
+      refuses it unless Gym's capture fix for the step-limit note is installed (Gym #5833).
     """
     unsupported = sorted(opencode_config.keys() - {"permission", "tools", "attachment", "compaction", "agent"})
     if unsupported:
@@ -1025,10 +1039,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             config_error is None
             and self._token_id_capture_enabled()
             and "steps" in self.config.opencode_config.get("agent", {}).get("build", {})
+            and not _capture_joins_opencode_step_limit()
         ):
-            # OpenCode sends its last-step prompt as an assistant message, so capture cannot join that call to the
-            # earlier calls of the rollout.
-            config_error = "agent.build.steps cannot be used with token capture"
+            # OpenCode sends its last-step prompt as an assistant message. Without Gym #5833, capture cannot join
+            # that call to the earlier calls of the rollout. TODO: remove this check once #5833 is on main.
+            config_error = "agent.build.steps cannot be used with token capture without Gym #5833's capture fix"
         if config_error is not None:
             raise HTTPException(422, f"OpenCode sandbox config: {config_error}")
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
