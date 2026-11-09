@@ -475,15 +475,17 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
     def _run_evidence(self, output: Mapping[str, Any]) -> RunEvidence:
         """Read the sandbox runner's report into the outcome ladder's evidence.
 
-        The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stopped Stirrup, and
-        ends the invocation ``incomplete`` without a stop reason when Stirrup ran out of turns. A run that ended on
-        the model's error or on unusable compaction summaries is ``failed``; ``classify_outcome`` names the error.
+        The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stopped Stirrup,
+        ``cancelled`` when the session's close did, and ends the invocation ``incomplete`` without a stop reason when
+        Stirrup ran out of turns. A run that ended on the model's error or on unusable compaction summaries is
+        ``failed``; ``classify_outcome`` names the error.
         """
         status = output["observations"]["status"]
         ended_on_error = bool(output.get("model_error") or output.get("invalid_output"))
         return RunEvidence(
             has_result=status == "completed" and output.get("error") is None,
             timed_out=output.get("stop_reason") == "wall_time",
+            stopped=output.get("stop_reason") == "cancelled",
             model_replied=bool(output["observations"]["model_response_ids"]),
             model_limit="turns" if status == "incomplete" and output.get("stop_reason") is None else None,
             error=self.classify_outcome(output) if ended_on_error else None,

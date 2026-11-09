@@ -365,9 +365,10 @@ class HermesAgent(SimpleResponsesAPIAgent):
     def _run_evidence(self, result: Mapping[str, Any], *, n_input: int) -> RunEvidence:
         """Read a Hermes 26bb847a result into the outcome ladder's evidence.
 
-        The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stops Hermes, and
-        ``max_iterations`` at the turn limit. Hermes marks the error a run ended on with ``error`` or ``failed``;
-        ``classify_outcome`` names it. A reply is an assistant message after the request's own messages.
+        The runner records ``stop_reason="wall_time"`` when the supervisor's deadline signal stops Hermes,
+        ``cancelled`` when the session's close does, and ``max_iterations`` at the turn limit. Hermes marks the error
+        a run ended on with ``error`` or ``failed``; ``classify_outcome`` names it. A reply is an assistant message
+        after the request's own messages.
         """
         outcome = self.classify_outcome(result)
         stop_reason = result.get("stop_reason")
@@ -383,6 +384,7 @@ class HermesAgent(SimpleResponsesAPIAgent):
         return RunEvidence(
             has_result=not ended_on_error,
             timed_out=stop_reason == "wall_time",
+            stopped=stop_reason == "cancelled",
             model_replied=any(
                 isinstance(item, dict) and item.get("role") == "assistant" for item in messages[n_input:]
             ),

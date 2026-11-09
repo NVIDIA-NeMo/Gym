@@ -1323,6 +1323,13 @@ _REPLIED = [*_ASKED, {"role": "assistant", "content": "Partial answer"}]
             None,
             "timeout",
         ),
+        # The session's close cancelled the run: stopped, without the rollout-stop marker.
+        (
+            {"completed": False, "interrupted": True, "stop_reason": "cancelled", "messages": _REPLIED},
+            "incomplete",
+            None,
+            "stopped",
+        ),
         (
             {"completed": False, "stop_reason": "max_iterations", "messages": _REPLIED},
             "incomplete",
@@ -1372,6 +1379,7 @@ async def test_each_hermes_result_reaches_its_outcome_ladder_row(agent, state, r
     assert episode.response.metadata["ng_agent_stop_reason"] == stop_reason
     raw = episode.response.metadata.get("ng_agent_outcome")
     assert (json.loads(raw) if raw else None) == outcome
+    assert "ng_rollout_stop" not in episode.response.metadata
     if stop_reason == "output_limit":
         assert episode.response.incomplete_details.reason == "max_output_tokens"
 

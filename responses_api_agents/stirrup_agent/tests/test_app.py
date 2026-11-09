@@ -368,6 +368,13 @@ class TestApp:
                 None,
                 "agent_limit",
             ),
+            # The session's close cancelled the run: stopped, without the rollout-stop marker.
+            (
+                _report(stop_reason="cancelled", observations={"status": "incomplete", "model_response_ids": ["c"]}),
+                "incomplete",
+                None,
+                "stopped",
+            ),
             (
                 {
                     "error": "HTTPStatusError('Server error 500')",
@@ -390,6 +397,7 @@ class TestApp:
         raw = response.metadata.get(AGENT_OUTCOME_METADATA_KEY)
         assert (json.loads(raw) if raw else None) == outcome
         assert response.metadata["ng_agent_stop_reason"] == stop_reason
+        assert "ng_rollout_stop" not in response.metadata
         if outcome == {"failure_kind": "agent_run_error"}:
             # main answered a runner that failed with a 500; now it is a failed response, retried by default.
             assert response.error.message == "Stirrup sandbox runner failed: HTTPStatusError('Server error 500')"
