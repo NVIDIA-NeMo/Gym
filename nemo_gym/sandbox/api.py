@@ -62,6 +62,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_sandbox_exec_duration,
     record_sandbox_startup,
 )
+from nemo_gym.telemetry.setup import is_span_group_or_metrics_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
 
@@ -512,7 +513,7 @@ class AsyncSandbox:
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
 
-        if is_span_group_enabled(GymSpanGroup.SANDBOX):
+        if is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
             started = time.perf_counter()
             self._resource_attributes = {
@@ -597,7 +598,7 @@ class AsyncSandbox:
         must redirect stdout and stderr. Per-command ``env`` and ``user``
         overrides apply to the service-preserving execution too.
         """
-        if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+        if not is_span_group_or_metrics_active(GymSpanGroup.SANDBOX):
             return await self._exec_uninstrumented(
                 command,
                 cwd=cwd,

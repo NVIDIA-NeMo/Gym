@@ -11,7 +11,7 @@ It is intentionally **synchronous** because it is meant to run inside a
 FastAPI side and dispatches one Ray task per rollout.
 
 OSWorld is an optional runtime dependency — it is heavy
-(torch + paddleocr + …) and only needed when actually executing rollouts.
+(torch + …) and only needed when actually executing rollouts.
 The imports are gated so unit tests and module-level introspection don't
 trigger them.
 """
