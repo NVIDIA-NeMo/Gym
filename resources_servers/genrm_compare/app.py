@@ -115,15 +115,6 @@ def _output_budget_exhausted(raw_response: Any) -> bool:
     return isinstance(details, dict) and details.get("reason") == "max_output_tokens"
 
 
-# Each cohort coordinate a verify request reads: its RolloutCoordinates field and the row key that carries it.
-_COORDINATE_KEYS = {
-    "task_index": TASK_INDEX_KEY_NAME,
-    "rollout_index": ROLLOUT_INDEX_KEY_NAME,
-    "group_id": GROUP_ID_KEY_NAME,
-    "group_attempt": GROUP_ATTEMPT_KEY_NAME,
-}
-
-
 @lru_cache(maxsize=1)
 def _warn_legacy_attempt() -> None:
     logger.warning("GenRM group attempt omitted; treating legacy requests as group attempt zero")
@@ -343,7 +334,7 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
             coordinates = coordinates.model_dump(exclude_none=True)
         if isinstance(coordinates, dict):
             data = dict(data)
-            for name, key in _COORDINATE_KEYS.items():
+            for name, key in RolloutCoordinates.row_keys().items():
                 value = coordinates.get(name)
                 if value is None:
                     continue

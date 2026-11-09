@@ -77,11 +77,19 @@ class EnvironmentParticipant(CheckpointParticipant):
                 )
 
     def begin(
-        self, episode_id: EpisodeId, task: Any, deadline: Optional[asyncio.Timeout], *, restart: bool = False
+        self,
+        episode_id: EpisodeId,
+        task: Any,
+        deadline: Optional[asyncio.Timeout],
+        *,
+        restart: bool = False,
+        task_alone: Any = None,
     ) -> None:
         """Register a starting episode, attaching its restored boundary if it continues one.
 
         A ``restart`` episode is never exported: it starts over from its input after a crash.
+        ``task_alone`` is the episode's task when ``task`` also names its comparison group: a checkpoint recorded
+        before groups were recorded holds the task's digest alone, and the episode still continues it.
         """
         self.retired.check(episode_id)
         key = episode_id.capture_key
@@ -92,8 +100,14 @@ class EnvironmentParticipant(CheckpointParticipant):
         # The restored record stays until a replacement actually starts.
         if self.steps.closed and (restored is None or self._awaiting_resume):
             raise AdmissionClosedError("episode admission is closed for a checkpoint")
-        if restored is not None and restored.task_digest != digest:
-            raise ControlError(f"episode {key} continues a checkpoint recorded for a different task")
+        if (
+            restored is not None
+            and restored.task_digest != digest
+            and (task_alone is None or restored.task_digest != task_digest(task_alone))
+        ):
+            raise ControlError(
+                f"episode {key} continues a checkpoint recorded for a different task or comparison group"
+            )
         try:
             self.steps.begin(
                 key, continuation=restored.boundary if restored else None, deadline=deadline, restart=restart

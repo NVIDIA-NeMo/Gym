@@ -44,9 +44,11 @@ from environment_servers.single_agent_turn_legacy.app import (
 )
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, RolloutCoordinates
+from nemo_gym.data import materialize_task
 from nemo_gym.metrics import RewardProfiler
 from nemo_gym.rollouts import RolloutFailureRecord
-from nemo_gym.server_runtime import BaseVerifyResponse, RolloutContextMiddleware
+from nemo_gym.server_runtime import BaseVerifyResponse, RolloutContextMiddleware, SingleAgentTurnRequest
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import comparison_result, member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
@@ -743,6 +745,51 @@ async def test_single_agent_turn_legacy_forms_the_cohort_the_relay_forms(service
     # One judged cohort per path: a circular comparison of four members compares four pairs.
     assert services.resource._run_single_comparison.await_count == 8
     assert services.policy_calls == 8
+
+
+async def test_episode_requests_from_materialized_rows_form_the_cohort_the_relay_forms(services):
+    """The typed path: rollout collection sends a materialized row as an episode request with its coordinates."""
+    services.resource._run_single_comparison = AsyncMock(side_effect=member_0_wins)
+    async with turn_environment(services):
+        relay = await asyncio.gather(*(run(services, i, group="relay") for i in range(4)))
+        typed = await asyncio.gather(*(episode(services, i, group="typed") for i in range(4)))
+
+    assert [status for status, _ in relay + typed] == [200] * 8
+    relay_rewards = [body["reward"] for _, body in relay]
+    assert len(set(relay_rewards)) > 1
+    assert [body["result"]["reward"] for _, body in typed] == relay_rewards
+    for _, body in typed:
+        # Rollout collection refuses _ng_* keys in an episode result and stamps the coordinates itself.
+        assert not set(RolloutCoordinates.row_keys().values()) & body["result"].keys()
+    assert services.policy_calls == 8
+
+
+async def test_a_judge_failed_cohort_of_episode_requests_keeps_only_its_failure_markers(services):
+    services.judge_status = 500
+    async with turn_environment(services):
+        typed = await asyncio.gather(*(episode(services, i, group="typed") for i in range(4)))
+
+    for status, body in typed:
+        result = body["result"]
+        assert status == 200 and result["_ng_failure_class"] == "judge_failed" and result["mask_sample"] is True
+        # The judge markers rollout collection accepts stay; the coordinate echo it refuses is dropped.
+        assert not set(RolloutCoordinates.row_keys().values()) & result.keys()
+
+
+async def episode(services, index, *, group):
+    """Send member ``index`` as rollout collection sends a materialized row: an episode request with coordinates."""
+    row = member(index, group=group).model_dump(mode="json", by_alias=True)
+    del row["response"]
+    row["_ng_task_index"] = 0
+    request = SingleAgentTurnRequest(
+        episode_id=EpisodeId.from_capture_key(f"0-{index}"),
+        task=materialize_task(row, taskset="resource"),
+        rollout_coordinates=RolloutCoordinates.from_row(row),
+    )
+    reply = await services.client.post(
+        server_name="turn_environment", url_path="/run", json=request.model_dump(mode="json")
+    )
+    return reply.status, await reply.json()
 
 
 async def test_single_agent_turn_legacy_replaces_a_failed_group_under_a_newer_attempt(services):

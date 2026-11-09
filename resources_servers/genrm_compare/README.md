@@ -343,10 +343,16 @@ The shipped `genrm_environment_server` and `genrm_simple_agent_reasoning_off_env
 `single_agent_turn_legacy` servers. They pass these row keys, with the collector's `_ng_task_index`, to
 `/verify` as the typed `rollout_coordinates` field, because an episode's task data does not carry `_ng_*` keys.
 An Agent's `/run` behind the `legacy_agent` relay, and `gym eval reverify`, send the flat keys instead. The
-server reads either; when both arrive and disagree, `/verify` answers HTTP 422.
+server reads either; when both arrive and disagree, `/verify` answers HTTP 422. They must be integers and a
+nonempty string: the Environment Server refuses a row whose coordinates are malformed, such as
+`_ng_group_attempt: "1"`, with HTTP 422 before any session opens.
 
 All members must carry the same prompt and principle. Responses echo these coordinates; group attempt
-numbers and other private metadata are excluded from reward metrics. Shared judge calls run outside any
+numbers and other private metadata are excluded from reward metrics. The Environment Server drops that echo
+from an episode result, which rollout collection refuses with `_ng_*` keys in it, so cohorts also run from
+materialized rows; `single_agent_turn_legacy` puts a flat row's group keys back on its flat result.
+The shipped servers keep the relay's unbounded episode (`default_episode_timeout_seconds: null`), so a raised
+`cohort_collection_timeout_s` or `cohort_evaluation_timeout_s` is not cut short by the adapter's 6 h episode bound. Shared judge calls run outside any
 individual member's token capture context. This also drops the arriving member's OpenTelemetry parent;
 judge spans are separate traces until cohort-level tracing is implemented.
 

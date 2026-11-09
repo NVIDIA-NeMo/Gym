@@ -76,6 +76,8 @@ from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    GROUP_ATTEMPT_KEY_NAME,
+    GROUP_ID_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -1006,6 +1008,10 @@ def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, An
     result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
     for key in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
         if key in row:
+            result[key] = row[key]
+    # A caller's comparison group, as a flat result's verifier echo kept it, so an episode result carries it too.
+    for key in (GROUP_ID_KEY_NAME, GROUP_ATTEMPT_KEY_NAME):
+        if row.get(key) is not None:
             result[key] = row[key]
     if ROLLOUT_ID_KEY_NAME in row:
         # Capture readback recomputes the id from the finished record.

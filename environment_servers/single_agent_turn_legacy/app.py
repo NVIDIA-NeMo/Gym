@@ -3,9 +3,10 @@
 
 """Legacy flat-row adapter for the single-agent-turn environment server."""
 
+from contextvars import ContextVar
 from typing import Any
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from pydantic import ConfigDict, PositiveFloat
 
 from environment_servers.single_agent_turn.app import (
@@ -15,6 +16,7 @@ from environment_servers.single_agent_turn.app import (
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
@@ -33,6 +35,10 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+# Set while a flat row's episode runs, so its verification keeps what a flat result carried behind the relay.
+_FLAT_ROW_EPISODE: ContextVar[bool] = ContextVar("single_agent_turn_legacy_flat_row_episode", default=False)
 
 
 class SingleAgentTurnLegacyEnvironmentServerConfig(SingleAgentTurnEnvironmentServerConfig):
@@ -60,12 +66,31 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
         is_episode_request = "episode_id" in row and "task" in row
-        request = (
-            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
-        )
-        response = await self.run_request(request)
-        # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
-        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
+        try:
+            request = (
+                SingleAgentTurnRequest.model_validate(row)
+                if is_episode_request
+                else self._episode_request_from_row(row)
+            )
+        except ValueError as error:
+            # A row this server cannot run, such as malformed rollout coordinates, is the caller's error.
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if is_episode_request:
+            # An episode request is answered with the episode reply it asks for.
+            return (await self.run_request(request)).model_dump(mode="json")
+        token = _FLAT_ROW_EPISODE.set(True)
+        try:
+            response = await self.run_request(request)
+        finally:
+            _FLAT_ROW_EPISODE.reset(token)
+        return self._legacy_result(response)
+
+    def _without_coordinate_echo(self, request: SingleAgentTurnRequest, payload: Any) -> Any:
+        # A flat result keeps the verifier's echo of the row's coordinates, as the relay's did; collection keeps
+        # a flat result's group keys and drops the rest.
+        if _FLAT_ROW_EPISODE.get():
+            return payload
+        return super()._without_coordinate_echo(request, payload)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
@@ -91,9 +116,13 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
             raise ValueError(f"Invalid episode attempt: {attempt!r}")
         # Decode the identity the way the agent does.
         # An explicit id may carry the attempt suffix itself, as a restored attempt does.
-        capture_key = maybe_rollout_id_from_run_body(row) or (
-            f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
-        )
+        capture_key = maybe_rollout_id_from_run_body(row)
+        if capture_key is None:
+            if TASK_INDEX_KEY_NAME not in row or ROLLOUT_INDEX_KEY_NAME not in row:
+                raise ValueError(
+                    f"A flat row needs {ROLLOUT_ID_KEY_NAME} or both {TASK_INDEX_KEY_NAME} and {ROLLOUT_INDEX_KEY_NAME}"
+                )
+            capture_key = f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
         return SingleAgentTurnRequest(
             episode_id=EpisodeId.from_capture_key(capture_key),
             task=materialize_task(row, taskset=task_source),

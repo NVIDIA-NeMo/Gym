@@ -1090,7 +1090,7 @@ async def test_an_episode_restored_at_verify_verifies_with_its_coordinates() -> 
         [
             EpisodeRecord(
                 episode_id=request.episode_id.model_copy(update={"attempt": request.episode_id.attempt - 1}),
-                task_digest=task_digest(request.task.model_dump(mode="json")),
+                task_digest=task_digest(environment_server._checkpointed_input(request)),
                 boundary={
                     "next": "verify",
                     "handles": {"resources_session_id": "resources-session", "agent_session_id": "agent-session"},
@@ -1109,6 +1109,45 @@ async def test_an_episode_restored_at_verify_verifies_with_its_coordinates() -> 
     assert [path for _, path, _ in client.calls] == ["/verify", "/close_session"]
     assert client.calls[0][2]["json"]["rollout_coordinates"] == coordinates.model_dump(mode="json", exclude_none=True)
     assert response.result.reward == 1.0
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        {"_ng_task_index": 4, "_ng_rollout_index": 2, "_ng_group_id": "cohort", "_ng_group_attempt": 1},
+        # A verifier that defaults what it was not sent, as genrm_compare does for an ungrouped row.
+        {"_ng_rollout_index": 2, "_ng_group_id": None, "_ng_group_attempt": 0},
+    ],
+    ids=["sent_values", "defaults_for_unsent"],
+)
+async def test_the_episode_result_drops_the_verifiers_coordinate_echo(echo: dict[str, Any]) -> None:
+    environment_server, client = _environment_server()
+    verify_body = orjson.loads(client.responses[4].body)
+    client.responses[4] = _Response(verify_body | echo)
+    sent = (
+        RolloutCoordinates(task_index=4, rollout_index=2, group_id="cohort", group_attempt=1)
+        if echo.get("_ng_group_id")
+        else RolloutCoordinates(task_index=4, rollout_index=2)
+    )
+
+    response = await environment_server.run_request(_request().model_copy(update={"rollout_coordinates": sent}))
+
+    result = response.result.model_dump(mode="json")
+    assert result["reward"] == 1.0 and result["benchmark_field"] == "preserved"
+    assert not set(RolloutCoordinates.row_keys().values()) & result.keys()
+
+
+async def test_an_echo_that_contradicts_a_sent_coordinate_stays_for_collection_to_refuse() -> None:
+    environment_server, client = _environment_server()
+    verify_body = orjson.loads(client.responses[4].body)
+    client.responses[4] = _Response(verify_body | {"_ng_rollout_index": 3, "_ng_task_index": 4})
+    sent = RolloutCoordinates(task_index=4, rollout_index=2)
+
+    response = await environment_server.run_request(_request().model_copy(update={"rollout_coordinates": sent}))
+
+    result = response.result.model_dump(mode="json")
+    assert result["_ng_rollout_index"] == 3
+    assert "_ng_task_index" not in result
 
 
 async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:

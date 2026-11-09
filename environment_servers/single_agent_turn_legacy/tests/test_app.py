@@ -266,10 +266,61 @@ def test_a_flat_row_with_malformed_coordinates_is_refused_before_any_session(
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
     row = {"instance_id": "task", "responses_create_params": {"input": "task"}, "_ng_task_index": 5}
 
-    with pytest.raises(ValueError, match=field):
-        TestClient(adapter.setup_webserver()).post("/run", json={"_ng_rollout_index": 0} | row | coordinate)
+    response = TestClient(adapter.setup_webserver()).post("/run", json={"_ng_rollout_index": 0} | row | coordinate)
+
+    # The caller's error, so not a retryable 500.
+    assert response.status_code == 422 and field in response.json()["detail"]
     # Refused while the request is built: nothing was seeded and no agent session opened.
     assert client.calls == []
+
+
+@pytest.mark.parametrize(
+    ("row", "reason"),
+    [
+        (
+            {"task_source": "other", "_ng_task_index": 0, "_ng_rollout_index": 0},
+            "names none of this Environment Server's instances",
+        ),
+        ({"_ng_task_index": 0}, "needs _ng_rollout_id or both _ng_task_index and _ng_rollout_index"),
+    ],
+    ids=["another_instance", "no_rollout_identity"],
+)
+def test_a_row_the_server_cannot_run_is_answered_422_over_run(row: dict, reason: str) -> None:
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    response = TestClient(adapter.setup_webserver()).post("/run", json=row | {"responses_create_params": {}})
+
+    assert response.status_code == 422 and reason in response.text
+    assert client.calls == []
+
+
+@pytest.mark.parametrize("flat", [True, False], ids=["flat_row", "episode_request"])
+def test_only_a_flat_result_keeps_the_verifiers_coordinate_echo(flat: bool) -> None:
+    environment_server, client = _environment_server()
+    echo = {"_ng_rollout_index": 0, "_ng_group_id": "cohort", "_ng_group_attempt": 1}
+    verify_body = orjson.loads(client.responses[4].body)
+    client.responses[4] = _Response(verify_body | echo)
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    row = {
+        "instance_id": "task",
+        "responses_create_params": {"input": "task"},
+        "_ng_task_index": 5,
+        "_ng_rollout_index": 0,
+        "_ng_group_id": "cohort",
+        "_ng_group_attempt": 1,
+    }
+    body = row if flat else adapter._episode_request_from_row(row).model_dump(mode="json")
+
+    response = TestClient(adapter.setup_webserver()).post("/run", json=body)
+
+    assert response.status_code == 200
+    result = response.json() if flat else response.json()["result"]
+    assert result["reward"] == 1.0
+    # A flat result is what the relay returned, where collection keeps the group keys; an episode result is stored
+    # as returned, and collection stamps the coordinates on it itself.
+    coordinate_keys = {"_ng_task_index", *echo}
+    assert {key: value for key, value in result.items() if key in coordinate_keys} == (echo if flat else {})
 
 
 @pytest.mark.parametrize("task_id_field", ["task_id", "problem_id", "instance_id"])

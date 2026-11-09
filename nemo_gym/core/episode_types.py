@@ -89,9 +89,9 @@ class RolloutCoordinates(BaseModel):
         description="Shared by every member of a group; a replacement of the whole group raises it.",
     )
 
-    @classmethod
-    def from_row(cls, row: Mapping[str, object]) -> Self | None:
-        """Read the coordinates a flat dataset row carries as ``_ng_*`` keys, or None when it carries none."""
+    @staticmethod
+    def row_keys() -> dict[str, str]:
+        """Each field's ``_ng_*`` key in a flat dataset row, the form an Agent's ``/run`` sends to ``/verify``."""
         # Imported here because global_config imports feature modules that import the episode identity.
         from nemo_gym.config.global_config import (
             GROUP_ATTEMPT_KEY_NAME,
@@ -100,13 +100,17 @@ class RolloutCoordinates(BaseModel):
             TASK_INDEX_KEY_NAME,
         )
 
-        keys = {
+        return {
             "task_index": TASK_INDEX_KEY_NAME,
             "rollout_index": ROLLOUT_INDEX_KEY_NAME,
             "group_id": GROUP_ID_KEY_NAME,
             "group_attempt": GROUP_ATTEMPT_KEY_NAME,
         }
-        fields = {name: row[key] for name, key in keys.items() if row.get(key) is not None}
+
+    @classmethod
+    def from_row(cls, row: Mapping[str, object]) -> Self | None:
+        """Read the coordinates a flat dataset row carries as ``_ng_*`` keys, or None when it carries none."""
+        fields = {name: row[key] for name, key in cls.row_keys().items() if row.get(key) is not None}
         return cls.model_validate(fields) if fields else None
 
 

@@ -49,6 +49,7 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NgFailureEvent,
+    RolloutCoordinates,
     rebuild_failure,
 )
 from nemo_gym.server_runtime import (
@@ -673,7 +674,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
                 raise
             await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
-            return SingleAgentTurnResult.model_validate(payload)
+            return SingleAgentTurnResult.model_validate(self._without_coordinate_echo(request, payload))
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -703,6 +704,25 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         if request.rollout_coordinates is None:
             return {}
         return {"rollout_coordinates": request.rollout_coordinates.model_dump(mode="json", exclude_none=True)}
+
+    def _without_coordinate_echo(self, request: SingleAgentTurnRequest, payload: Any) -> Any:
+        """Drop the ``_ng_*`` coordinate keys the Resources Server echoed from the coordinates this server sent.
+
+        Rollout collection stamps a rollout's coordinates on its record itself and refuses ``_ng_*`` keys in an
+        episode result, so a verifier that echoes them, such as a GenRM cohort, could not be collected from
+        materialized rows. An echo that contradicts a coordinate this server sent stays, and collection refuses it.
+        """
+        if request.rollout_coordinates is None or not isinstance(payload, dict):
+            return payload
+        sent = request.rollout_coordinates.model_dump()
+        return {
+            key: value
+            for key, value in payload.items()
+            if not any(
+                key == row_key and (sent[name] is None or sent[name] == value)
+                for name, row_key in RolloutCoordinates.row_keys().items()
+            )
+        }
 
     @staticmethod
     def _agent_failure(response: NeMoGymResponse) -> NgFailureEvent | None:
