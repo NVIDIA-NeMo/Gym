@@ -783,6 +783,7 @@ class _CaptureMiddleware:
         delta_records: bool = False,
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
+        allow_system_suffix: bool = False,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -805,6 +806,7 @@ class _CaptureMiddleware:
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
         self._parent_resolution_mode = parent_resolution_mode
+        self._allow_system_suffix = allow_system_suffix
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -951,6 +953,7 @@ class _CaptureMiddleware:
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
                 parent_resolution_mode=self._parent_resolution_mode,
+                allow_system_suffix=self._allow_system_suffix,
                 admitted_at=time.time(),
                 agent_instance=agent_instance,
                 model_ref=self._model_ref,
@@ -1274,6 +1277,9 @@ def install_model_call_capture(
         external_staging=external_staging,
         parent_resolution_mode=(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
+        ),
+        allow_system_suffix=(
+            capture_settings.token_id_capture.allow_system_suffix if capture_settings is not None else False
         ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
