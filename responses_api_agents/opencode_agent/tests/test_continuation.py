@@ -1198,6 +1198,50 @@ def test_media_staging_spends_the_activation_budget(setup, tmp_path):
         close(client, request)
 
 
+@pytest.mark.parametrize(
+    "failing, result",
+    [
+        # The provider timed out: an outage, unlike the activation's own deadline, which ends it incomplete.
+        (
+            "mkdir -p -- /tmp/nemo-gym-media",
+            SimpleNamespace(return_code=None, stdout="", stderr="", error_type="timeout"),
+        ),
+        (
+            "mv -fT -- /tmp/nemo-gym-media/",
+            SimpleNamespace(return_code=1, stdout="", stderr="denied", error_type=None),
+        ),
+    ],
+    ids=["provider-timeout", "rename-refused"],
+)
+def test_media_staging_error_fails_the_activation(setup, tmp_path, failing, result):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    execute = sandbox.exec.side_effect
+
+    async def fail_staging(command, **kwargs):
+        if command.startswith(failing):
+            return result
+        return await execute(command, **kwargs)
+
+    prompt = [
+        {"type": "input_text", "text": "What is shown?"},
+        {"type": "input_image", "image_url": PNG_URI, "detail": "auto"},
+    ]
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        request = start(client)
+        sandbox.exec.side_effect = fail_staging
+        response = client.post(
+            "/v1/responses",
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+            json={"input": [{"role": "user", "content": prompt}], "metadata": {"agent_timeout_sec": "30"}},
+        )
+        assert response.status_code == 500, response.text
+        receipt = close(client, request)
+        [root] = roots(receipt["agent_observations"])
+        assert root["status"] == "failed" and root["error_type"] == "server_error"
+    sandbox.launch.assert_not_awaited()
+
+
 def test_continuation_decodes_each_activation_image_once(setup, tmp_path, monkeypatch):
     agent, sandbox = setup
     payloads = install_artifact_runner(sandbox, tmp_path)

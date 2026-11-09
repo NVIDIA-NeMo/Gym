@@ -249,8 +249,9 @@ Only the new user input is sent on each call. The adapter resumes the same OpenC
 session, retaining HOME, OpenCode history and compaction state. Runtime installation
 happens once at seed using the existing installer. Identical retries join or replay
 the original response; conflicting inputs, skipped indices and concurrent new
-activations fail. Input validation runs before an index is consumed. A timeout
-before the first process launch leaves the next activation able to start the conversation.
+activations fail. Input validation runs before an index is consumed. When the activation's
+budget runs out before the first process launch, the next activation can still start the
+conversation. A sandbox error while staging prompt images fails the activation instead.
 Retry state is process-local and retained for the session lifetime, without crash recovery.
 
 The existing `metadata.agent_timeout_sec` budget is capped by the configured timeout.
