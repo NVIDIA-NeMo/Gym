@@ -7,8 +7,9 @@ harness and judge unchanged: only the dataset and the excluded domains differ fr
 
 ## Provenance
 
-- **Source**: `data/MMBrowseComp_400.jsonl` of github.com/MMBrowseComp/MM-BrowseComp at commit
-  `cf82a2390aa7a7ed3d96f72969d22548eff3e101`, plus the question images the rows link to (251 files).
+- **Source**: `data/MMBrowseComp_400.jsonl` of github.com/MMBrowseComp/MM-BrowseComp, plus the 251
+  question images the rows name (`MMBC_images/`), both read at commit `cf82a239` (`REPO_REVISION` in
+  `prepare.py`). The rows link their images on `main`; `prepare.py` takes only the file name from them.
 - **License**: MIT, as the upstream README's badge states (the repository has no LICENSE file).
 - **Split and count**: the single 400-question set, no filtering.
 - **Encryption**: question, answer and checklist are XOR-encrypted with each row's canary;
@@ -51,4 +52,13 @@ file embeds the images (about 260 MB).
 
 ## Run
 
-As in `benchmarks/browsecomp/README.md`, with `--benchmark mm_browsecomp` and a vision-capable policy.
+Against a vision-capable vLLM endpoint, with the Exa key for search and the inference API key for the
+judge. `--benchmark mm_browsecomp` loads this config, which already includes `benchmarks/browsecomp`'s,
+so do not also pass the BrowseComp config.
+
+```bash
+gym eval run --benchmark mm_browsecomp --model-type vllm_model \
+    --model-url "$POLICY_BASE_URL" --model-api-key "$POLICY_API_KEY" --model "$POLICY_MODEL_NAME" \
+    --split benchmark --output results/mm_browsecomp.jsonl \
+    +exa_api_key="$EXA_API_KEY" +inference_api_key="$INFERENCE_API_KEY"
+```

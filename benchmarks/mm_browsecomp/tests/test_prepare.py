@@ -23,7 +23,7 @@ from pytest import raises
 from benchmarks.browsecomp.prepare import QUERY_SUFFIX, TOOLS
 from benchmarks.mm_browsecomp import prepare as mm
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.models.chat_completions_converter import ResponsesConverter
+from nemo_gym.models import ResponsesConverter
 
 
 CANARY = "mmbrowsecomp:test-canary"
@@ -95,6 +95,12 @@ def test_the_image_reaches_the_chat_request_unchanged():
     user = [m for m in chat.messages if m["role"] == "user"][0]
     assert [p["type"] for p in user["content"]] == ["text", "image_url"]
     assert user["content"][1]["image_url"]["url"] == PNG_URI
+
+
+def test_images_are_read_at_the_pinned_revision_not_the_branch_in_the_row():
+    row_url = "https://raw.githubusercontent.com/MMBrowseComp/MM-BrowseComp/refs/heads/main/MMBC_images/12.png"
+    assert mm.pinned_image_url(row_url) == f"{mm.REPO_RAW}/MMBC_images/12.png"
+    assert mm.REPO_REVISION in mm.pinned_image_url(row_url)
 
 
 def test_image_data_uri_follows_the_bytes_not_the_extension(tmp_path):

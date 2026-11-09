@@ -28,6 +28,7 @@ offline; otherwise both are downloaded from GitHub into ``data/cache``.
 import base64
 import json
 import os
+import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -46,10 +47,12 @@ BENCHMARK_DIR = Path(__file__).parent
 DATA_DIR = BENCHMARK_DIR / "data"
 OUTPUT_FPATH = DATA_DIR / "mm_browsecomp_benchmark.jsonl"
 
-# Pinned: the dataset file is read at this commit. Image URLs come from the rows themselves.
-REPO_REVISION = "cf82a2390aa7a7ed3d96f72969d22548eff3e101"
+# Pinned: the dataset file and the question images are read at this commit. The rows link their
+# images on the upstream `main` branch, so only the file name is taken from them.
+REPO_REVISION = "cf82a2390aa7a7ed3d96f72969d22548eff3e101"  # pragma: allowlist secret
 REPO_RAW = f"https://raw.githubusercontent.com/MMBrowseComp/MM-BrowseComp/{REPO_REVISION}"
 DATASET_FILE = "MMBrowseComp_400.jsonl"
+IMAGE_DIR = "MMBC_images"
 EXPECTED_ROWS = 400
 
 # The official gen_answer.py prompts with "Please answer ... roadmap. Question: <q>" and the official
@@ -64,7 +67,9 @@ IMAGE_MAGIC = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpe
 def _download(url: str, dest: Path, attempts: int = 5) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     last = None
-    for _ in range(attempts):
+    for attempt in range(attempts):
+        if attempt:
+            time.sleep(2**attempt)
         try:
             data = urllib.request.urlopen(url, timeout=120).read()
             dest.write_bytes(data)
@@ -84,10 +89,15 @@ def _source_dir() -> Path:
     return cache
 
 
+def pinned_image_url(row_url: str) -> str:
+    """The image a row links, read at REPO_REVISION instead of the branch the row names."""
+    return f"{REPO_RAW}/{IMAGE_DIR}/{row_url.rsplit('/', 1)[-1]}"
+
+
 def _image_path(source: Path, url: str) -> Path:
     path = source / "images" / url.rsplit("/", 1)[-1]
     if not path.exists() or path.stat().st_size == 0:
-        _download(url, path)
+        _download(pinned_image_url(url), path)
     return path
 
 
