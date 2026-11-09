@@ -1207,7 +1207,7 @@ def test_media_staging_spends_the_activation_budget(setup, tmp_path):
             SimpleNamespace(return_code=None, stdout="", stderr="", error_type="timeout"),
         ),
         (
-            "mv -fT -- /tmp/nemo-gym-media/",
+            "{ [ ! -d /tmp/nemo-gym-media/",
             SimpleNamespace(return_code=1, stdout="", stderr="denied", error_type=None),
         ),
     ],

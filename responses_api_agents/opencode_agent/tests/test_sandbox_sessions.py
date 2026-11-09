@@ -171,11 +171,13 @@ class Sandbox:
             return SimpleNamespace(return_code=0, stdout="opencode.db\n", stderr="", error_type=None)
         if "stop.request" in command:
             await self.request_stop()
-        if command.startswith("mv -fT -- /tmp/nemo-gym-media/"):
+        if command.startswith("{ [ ! -d /tmp/nemo-gym-media/"):
             # stage_media renames its partial uploads onto their content-named paths in one command.
-            for move in command.split(" && "):
-                _, _, _, source, destination = shlex.split(move)
-                self.files[destination] = self.files.pop(source)
+            words = shlex.split(command)
+            for index, word in enumerate(words):
+                if words[index : index + 3] == ["mv", "-f", "--"]:
+                    source, destination = words[index + 3 : index + 5]
+                    self.files[destination] = self.files.pop(source)
         return self.exec.return_value
 
     async def upload(self, source, destination):
