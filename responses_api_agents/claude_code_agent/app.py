@@ -58,6 +58,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -592,9 +593,12 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
 
         Claude Code reports a failed model request only as text, ``API Error: <HTTP status> <body>``, after its own
         retries. ``parse_stream_json`` keeps the status as ``api_error_status`` only when it is the error the run
-        ended on. Other ended-on errors carry no status and stay ``unknown``.
+        ended on. Other ended-on errors carry no status and stay ``unknown``. A 400 whose body carries the OpenAI code
+        ``context_length_exceeded`` (the model server propagating a context overflow) is a context limit.
         """
         status = native_result.get("api_error_status")
+        if status == 400 and native_result.get("api_error_code") == "context_length_exceeded":
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
         if type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         return AgentOutcome(failure_kind="unknown")

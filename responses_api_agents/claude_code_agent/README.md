@@ -338,7 +338,8 @@ release; the owner must destroy that sandbox and leave the activation ungraded.
 The shared outcome ladder decides a sandbox activation's status from its stream-json result (see the harness
 guide). A model request that failed after Claude Code's own retries ends the run with its `API Error: <status>`
 message (tested on 2.1.108): `model_request_error` with that status, or `model_request_rejected` for a 4xx other
-than 408, 425 and 429 before any model reply. A usage-policy refusal is `completed` and graded as the answer;
+than 408, 425 and 429 before any model reply. A 400 whose body keeps the OpenAI code `context_length_exceeded`
+(the model server propagating a context overflow) is a context limit: `incomplete` and graded. A usage-policy refusal is `completed` and graded as the answer;
 `error_max_turns` is `incomplete`; another error result is `failed` with `unknown`. A nonzero exit or a missing
 result is `failed` with `agent_run_error`, retried by default. A timeout is `incomplete`.
 

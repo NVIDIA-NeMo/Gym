@@ -19,6 +19,16 @@ REFUSAL = (
     "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage Policy "
     "(https://www.anthropic.com/legal/aup). Try rephrasing the request."
 )
+# Claude Code 2.1.108's exact texts from a scripted-model smoke through Gym's vLLM model server (propagate flag on).
+CONTEXT_OVERFLOW = (
+    'API Error: 400 {"error":{"message":"This model\'s maximum context length is 32768 tokens. However, you '
+    "requested 40000 tokens (39000 in the messages, 1000 in the completion). Please reduce the length of the "
+    'messages or completion.","type":"invalid_request_error","param":null,"code":"context_length_exceeded"}}'
+)
+AUTH_FAILURE = (
+    'Failed to authenticate. API Error: 401 {"error":{"message":"Incorrect API key provided",'
+    '"type":"invalid_request_error","param":null,"code":"invalid_api_key"}}'
+)
 
 
 def reply(text: str = "working", **event) -> dict:
@@ -92,6 +102,31 @@ def test_http_text_that_did_not_end_the_run_is_not_its_status(case):
     assert agent().classify_outcome(metadata).failure_kind == "unknown"
 
 
+@pytest.mark.parametrize(
+    ("text", "status", "code"),
+    [
+        (AUTH_FAILURE, 401, "invalid_api_key"),
+        (CONTEXT_OVERFLOW, 400, "context_length_exceeded"),
+        ("API Error: 400 Request validation failed: malformed message sequence", 400, None),
+        ("API Error: 503 Service Unavailable · check status.claude.com", 503, None),
+        ('API Error: 400 ["context_length_exceeded"]', 400, None),
+    ],
+)
+def test_parser_finds_the_status_after_a_prefix_and_keeps_a_raw_json_error_code(text, status, code):
+    _, metadata = parse_stream_json("\n".join(map(json.dumps, [api_error(text), error_result(text)])))
+    assert metadata["api_error_status"] == status
+    assert metadata.get("api_error_code") == code
+
+
+def test_only_a_400_with_the_context_length_code_is_a_context_limit():
+    classify = agent().classify_outcome
+    assert classify({"api_error_status": 400, "api_error_code": "context_length_exceeded"}).failure_kind == (
+        "model_context_limit"
+    )
+    assert classify({"api_error_status": 400, "api_error_code": "invalid_request"}).status_code == 400
+    assert classify({"api_error_status": 413, "api_error_code": "context_length_exceeded"}).status_code == 413
+
+
 def test_a_subagent_reply_counts_as_a_model_reply_even_under_capture():
     raw = "\n".join(map(json.dumps, [reply(parent_tool_use_id="task"), api_error("API Error: 400 x")]))
     assert parse_stream_json(raw, fold_thinking=False)[1]["model_replied"] is True
@@ -119,8 +154,8 @@ async def run(monkeypatch, events: list[dict], *, timed_out: bool = False, code:
     return await instance._sandbox_response(state, body, prompt="Question", system=None)
 
 
-def api_failure(status: int, *, after_reply: bool) -> list[dict]:
-    text = f'API Error: {status} {{"error":{{"message":"upstream {status}"}}}}'
+def api_failure(status: int | str, *, after_reply: bool) -> list[dict]:
+    text = status if isinstance(status, str) else f'API Error: {status} {{"error":{{"message":"upstream {status}"}}}}'
     return [*([reply()] if after_reply else []), api_error(text), error_result(text)]
 
 
@@ -128,8 +163,25 @@ def api_failure(status: int, *, after_reply: bool) -> list[dict]:
 # Before the outcome ladder, every failed row below was failed without ng_agent_outcome (graded), and the
 # missing-result row was incomplete (graded).
 EVENTS = {
-    # (a) With the model server's propagate flag on, a context overflow reaches Claude Code as an HTTP 400.
-    "context_overflow_400_after_reply": (
+    # (a) With the model server's propagate flag on, a context overflow reaches Claude Code as an HTTP 400 whose
+    # body keeps the code context_length_exceeded. It is a context limit before or after a reply (decision 1).
+    "context_overflow_after_reply": (
+        api_failure(CONTEXT_OVERFLOW, after_reply=True),
+        False,
+        1,
+        "incomplete",
+        None,
+        OutcomeAction.VERIFY,
+    ),
+    "context_overflow_first_request": (
+        api_failure(CONTEXT_OVERFLOW, after_reply=False),
+        False,
+        1,
+        "incomplete",
+        None,
+        OutcomeAction.VERIFY,
+    ),
+    "400_after_reply": (
         api_failure(400, after_reply=True),
         False,
         1,
@@ -157,8 +209,9 @@ EVENTS = {
         {"failure_kind": "model_request_error", "status_code": 429},
         OutcomeAction.RETRY,
     ),
+    # Claude Code 2.1.108 prefixes a 401's API Error text with "Failed to authenticate. ".
     "401_before_reply": (
-        api_failure(401, after_reply=False),
+        api_failure(AUTH_FAILURE, after_reply=False),
         False,
         1,
         "failed",

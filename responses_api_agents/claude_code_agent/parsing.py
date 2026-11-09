@@ -31,10 +31,21 @@ from nemo_gym.core import (
 # Claude Code reports a model stop_reason "refusal" as an is_error result with subtype "success" and this text.
 USAGE_POLICY_REFUSAL = "appears to violate our Usage Policy"
 # Claude Code 2.1.108 reports a model request that failed after its own retries as a local assistant message (model
-# "<synthetic>", with an ``error`` field) whose text starts "API Error: <HTTP status> <body>", then ends with an
-# is_error result carrying the same text.
+# "<synthetic>", with an ``error`` field) whose text holds "API Error: <HTTP status> <body>", then ends with an
+# is_error result carrying the same text. Most texts start with it; a 401's starts "Failed to authenticate. ". A body
+# Claude Code could not parse as an Anthropic error stays the endpoint's raw JSON, which keeps its OpenAI ``code``.
 _API_ERROR_STATUS = re.compile(r"API Error: ([45]\d{2})(?:\s|$)")
 _SYNTHETIC_MODEL = "<synthetic>"
+
+
+def _openai_error_code(body: str) -> Optional[str]:
+    """The ``error.code`` of an ``API Error`` body that is the endpoint's raw OpenAI error JSON, else None."""
+    try:
+        error = json.loads(body).get("error")
+    except (ValueError, AttributeError):
+        return None
+    code = error.get("code") if isinstance(error, dict) else None
+    return code if isinstance(code, str) else None
 
 
 def _extract_text(content: list[Any]) -> str:
@@ -260,9 +271,11 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         terminal_api_error is not None
         and metadata.get("is_error") is True
         and metadata.get("error_message") == terminal_api_error[:2000]
-        and (match := _API_ERROR_STATUS.match(terminal_api_error))
+        and (match := _API_ERROR_STATUS.search(terminal_api_error))
     ):
         metadata["api_error_status"] = int(match[1])
+        if (code := _openai_error_code(terminal_api_error[match.end() :])) is not None:
+            metadata["api_error_code"] = code
     return output_items, metadata
 
 
