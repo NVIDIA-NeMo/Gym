@@ -164,8 +164,8 @@ What still differs:
   (nonzero exit, no result) is retried and then reported as a failed rollout. The deprecated preset scored both
   as 0 (`execution_failure_reward_zero`).
 - Prompt: `pi_agent`'s runtime guard adds a short note on sandbox execution to the system prompt.
-- Requests: `pi_agent` refuses request fields other than the input and model, such as `temperature`, with 422; the
-  deprecated agent ignored them.
+- Requests: `pi_agent` refuses request fields other than the input, `instructions` and `model`, such as
+  `temperature` or `reasoning`, with 422; the deprecated agent ignored them.
 - Artifacts: there is no host artifact directory (`PI_ARTIFACTS_DIR`); the rollout rows carry the agent's
   observations.
 

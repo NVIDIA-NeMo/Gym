@@ -7,6 +7,9 @@
 # (responses_api_agents/pi_sandboxed_agent/offline_science_image), which reaches only the model server. The settings
 # follow pi_sandboxed_agent's configs/benchmark.yaml where pi_agent has them; the benchmark READMEs list what differs.
 use_absolute_ip: true
+# A sandbox allowed to reach the model server's host reaches every port on it, so only the model server leaves
+# loopback. A search preset adds resources_servers for its tool server.
+absolute_ip_server_types: [responses_api_models]
 # The head server's config endpoint is unauthenticated, so keep it off the address sandboxes reach.
 head_server:
   host: 127.0.0.1
@@ -18,8 +21,8 @@ pi_agent:
     pi_agent:
       # An unseeded request runs the harness on the Gym host, so keep the agent off the address sandboxes reach.
       host: 127.0.0.1
-      # pi_agent serves from one process (its module exposes no app for extra workers, and session state is
-      # process-local); the deprecated preset's four workers would not start. Concurrency stays per process.
+      # pi_agent's module exposes no app for extra workers, so it serves from one process and the deprecated
+      # preset's four workers would not start. Concurrency stays per process: at most 512 sessions at once.
       num_workers: 1
       concurrency: 512
       model: benchmark-model
