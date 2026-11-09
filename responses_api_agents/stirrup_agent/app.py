@@ -59,7 +59,7 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -486,9 +486,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Stirrup sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
-
-    async def run(self, request: Request, body: BaseRunRequest = Body()):
-        raise HTTPException(409, "Stirrup runs only in agent sessions; use an environment server")
 
 
 if __name__ == "__main__":

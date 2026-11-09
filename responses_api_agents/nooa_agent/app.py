@@ -20,7 +20,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, HTTPException, Request
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
@@ -84,14 +84,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         ):
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
         return AgentOutcome(failure_kind="unknown")
-
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.router.routes = [route for route in app.router.routes if getattr(route, "path", None) != "/run"]
-        return app
-
-    async def run(self, body: object) -> None:
-        raise NotImplementedError("Use the single_agent_turn Environment Server")
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> NOOASessionState:
         accesses = self.effective_tool_accesses(body)

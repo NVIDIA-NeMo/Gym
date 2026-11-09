@@ -98,7 +98,9 @@ class SandboxSession[Artifacts]:
     """Execute, stop, capture, then release an owned or borrowed sandbox.
 
     Runtime installation belongs in the adapter's seed hook. ``stage_activation``
-    stages input and returns a command; ``collect`` copies harness artifacts
+    stages input and returns a command. Every sandbox write an activation needs
+    belongs there: close cancels staging before it releases the sandbox, but it
+    cannot stop a write made before ``execute``. ``collect`` copies harness artifacts
     to the agent server after cleanup is confirmed. It may run a bounded snapshot
     command, but must not restart the harness. Parsing responses stays in the adapter.
 
