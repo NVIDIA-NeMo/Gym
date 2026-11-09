@@ -1176,6 +1176,9 @@ def _add_completion_token_metrics(
     if not perf_by_repeat:
         return
 
+    if any(ROLLOUT_INDEX_KEY_NAME not in row for row in repeat_level_metrics):
+        # Custom resources server rows cannot be matched to a repeat; keep them as published.
+        return
     repeat_rows = {row[ROLLOUT_INDEX_KEY_NAME]: row for row in repeat_level_metrics}
     token_repeat_rows = []
     for repeat_idx, records in perf_by_repeat.items():
@@ -1186,7 +1189,6 @@ def _add_completion_token_metrics(
         row = repeat_rows.get(repeat_idx)
         if row is None:
             row = {
-                AGENT_REF_KEY_NAME: {"name": "agent"},
                 ROLLOUT_INDEX_KEY_NAME: repeat_idx,
             }
             repeat_level_metrics.append(row)
@@ -1200,7 +1202,7 @@ def _add_completion_token_metrics(
         agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
 
 
-def _summarize_execution(verify_responses: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def _summarize_perf(verify_responses: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Summarize ``ng_perf`` over every supplied row; rows without one count toward coverage only."""
     return compute_perf_summary(
         [row["ng_perf"] for row in verify_responses if isinstance(row.get("ng_perf"), dict)],
@@ -1208,30 +1210,27 @@ def _summarize_execution(verify_responses: List[Dict[str, Any]]) -> Optional[Dic
     )
 
 
-def add_execution_metrics(
+def add_perf_metrics(
     metrics: AggregateMetrics,
     verify_responses: List[Dict[str, Any]],
 ) -> AggregateMetrics:
-    """Return benchmark metrics enriched with execution statistics from ``ng_perf``.
+    """Return benchmark metrics enriched with performance statistics from ``ng_perf``.
 
     Account for every supplied rollout, including masked samples, without running
     benchmark scoring or requiring unique task/repeat identities. Merge token statistics
     into the corresponding repeat rows and compute their across-repeat confidence intervals.
     Missing observations do not imply zero usage. Neither input is modified.
 
-    This function owns the execution statistics: when any row carries ``ng_perf`` it replaces
-    ``perf_summary`` rather than merging into one already in ``metrics`` (a summary Resources
-    published itself is kept only when nothing was observed), and it removes ``agent_ref`` from
-    every repeat row. When any row carries ``ng_perf``, the repeat rows already in ``metrics`` must
-    carry ``_ng_rollout_index``.
+    This function owns the performance statistics: when any row carries ``ng_perf`` it replaces
+    ``perf_summary`` rather than merging into one already in ``metrics`` (a summary the resources server
+    published itself is kept only when nothing was observed). If existing repeat rows lack
+    ``_ng_rollout_index``, preserve them and skip the per-repeat token merge.
     """
     result = metrics.model_copy(deep=True)
-    result.perf_summary = _summarize_execution(verify_responses) or result.perf_summary
+    result.perf_summary = _summarize_perf(verify_responses) or result.perf_summary
     _add_completion_token_metrics(
         RewardProfiler(), verify_responses, result.repeat_level_metrics, result.agent_metrics
     )
-    for row in result.repeat_level_metrics:
-        row.pop(AGENT_REF_KEY_NAME, None)
     return result
 
 
@@ -1265,11 +1264,11 @@ def compute_aggregate_metrics(
 
     if not scored:
         # Every rollout was masked. Publishing means over an empty set would invent a
-        # zero; preserve the coverage-only shape for direct Resources/Agent callers.
+        # zero; preserve the coverage-only shape for direct resources server or agent callers.
         return AggregateMetrics(
             agent_metrics=dict(coverage),
             key_metrics=dict(coverage),
-            perf_summary=_summarize_execution(verify_responses),
+            perf_summary=_summarize_perf(verify_responses),
         )
 
     rp = RewardProfiler()
@@ -1352,7 +1351,7 @@ def compute_aggregate_metrics(
         {k: v for k, v in entry.items() if k != AGENT_REF_KEY_NAME} for entry in repeat_level_metrics
     ]
 
-    return add_execution_metrics(
+    return add_perf_metrics(
         AggregateMetrics(
             group_level_metrics=serialized_group,
             agent_metrics=serialized_agent,

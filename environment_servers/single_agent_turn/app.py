@@ -51,7 +51,7 @@ from nemo_gym.core import (
     NgFailureEvent,
     rebuild_failure,
 )
-from nemo_gym.metrics import add_execution_metrics
+from nemo_gym.metrics import add_perf_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
@@ -182,16 +182,16 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return [server.name for server in servers]
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Combine Resources benchmark metrics with execution metrics for the whole batch.
+        """Combine the resources server's benchmark metrics with performance metrics for the whole batch.
 
-        Collector supplies persisted ``ng_perf`` summaries derived from agent observations
-        and model captures. Execution accounting includes masked and unverified rollouts;
-        Resources owns scoring, task-specific weighting, and headline metric selection.
+        Rollout collection derives each row's ``ng_perf`` from agent observations and model-call captures.
+        Performance metrics count every supplied rollout, including masked and unverified ones.
+        The resources server owns scoring, task-specific weighting, and headline metric selection.
         """
         metrics = AggregateMetrics()
         if self._skipped_verification_reward() is None:
             # Keep benchmark evidence (including response.usage) intact. The reserved
-            # execution summary is reduced here once, independently of Resources filtering.
+            # performance summary is reduced here once, independently of resources server filtering.
             benchmark_body = body.model_copy(
                 update={
                     "verify_responses": [
@@ -207,7 +207,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             await raise_boundary_failure(response)
             metrics = AggregateMetrics.model_validate(await get_response_json(response))
         # The reduction is CPU-bound over every row, so keep it off the server's event loop.
-        return await asyncio.to_thread(add_execution_metrics, metrics, body.verify_responses)
+        return await asyncio.to_thread(add_perf_metrics, metrics, body.verify_responses)
 
     async def run(
         self,

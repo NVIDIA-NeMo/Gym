@@ -745,9 +745,27 @@ async def test_aggregation_preserves_benchmark_hooks_and_existing_execution_stat
         assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
 
 
+@pytest.mark.parametrize("indexed", [False, True])
+async def test_aggregation_preserves_custom_repeat_rows_without_indices(indexed: bool) -> None:
+    environment_server, client = _environment_server()
+    repeat_rows = [{"sample_count": 2, "mean/reward": 0.5}]
+    if indexed:
+        repeat_rows.append({ROLLOUT_INDEX_KEY_NAME: 1, "sample_count": 1})
+    benchmark = AggregateMetrics(repeat_level_metrics=repeat_rows, key_metrics={"custom_score": 0.5})
+    client.responses = [_Response(benchmark.model_dump())]
+    rows = [{ROLLOUT_INDEX_KEY_NAME: 0, "ng_perf": {"completion_tokens": 10}}]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.repeat_level_metrics == repeat_rows
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.perf_summary["total_completion_tokens"] == 10
+    assert "mean_across_repeats/mean_completion_tokens" not in result.agent_metrics
+
+
 async def test_aggregation_counts_execution_before_resources_filters_quality() -> None:
     environment_server, client = _environment_server()
-    # A Resources override may select a stage with repeated task/repeat identities.
+    # A resources server override may select a stage with repeated task/repeat identities.
     rows = [
         {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": reward, "ng_perf": perf}
         for reward, perf in ((0.0, {"completion_tokens": 10}), (1.0, {"completion_tokens": 30}))
