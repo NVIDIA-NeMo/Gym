@@ -14,7 +14,13 @@ from pathlib import Path
 sys.dont_write_bytecode = True
 
 from omegaconf import OmegaConf
-from scripts.prepare_swe_single_agent_turn_recipe import configure_gym, materialize_training_rows
+from scripts.prepare_swe_single_agent_turn_recipe import (
+    HARNESSES,
+    configure_gym,
+    harness_assets,
+    materialize_training_rows,
+    validate_harnesses,
+)
 from scripts.swe_rows_to_harbor.convert import convert
 
 from nemo_gym.data.tasks.harbor.prepare import prepare_target
@@ -29,6 +35,8 @@ def retarget(
     source_server: str,
     wandb_project: str,
     wandb_entity: str,
+    harness: str | None = None,
+    harness_assets_from: Path | None = None,
 ) -> dict:
     """Keep the existing arm's science while replacing its tasks and resources binding.
 
@@ -42,6 +50,20 @@ def retarget(
     if not rows:
         raise ValueError("The selected task rows are empty")
     harnesses, route = original["harnesses"], original["route"]
+    assets = {}
+    if harness is not None:
+        if len(harnesses) != 1:
+            raise ValueError("Compose a single harness from a single-harness template to retain its concurrency")
+        harnesses = [harness]
+        validate_harnesses(harnesses, route=route)
+        if harness == "codex":
+            asset_root = (harness_assets_from or prepared) / "codex"
+            assets = {
+                f"codex/{name}": (asset_root / name).read_bytes()
+                for name in ("models.json", "fallback.json", "provenance.json")
+            }
+        else:
+            assets = harness_assets(harnesses, codex_catalog=None)
     config = OmegaConf.create(
         json.loads(
             json.dumps(OmegaConf.to_container(OmegaConf.load(prepared / "config.yaml"), resolve=False)).replace(
@@ -58,6 +80,12 @@ def retarget(
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes((prepared / name).read_bytes().replace(str(prepared).encode(), str(output).encode()))
         copied.append(name)
+    for name, data in assets.items():
+        destination = output / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(data)
+        if name not in copied:
+            copied.append(name)
     (output / "source.jsonl").write_bytes(source_bytes)
     (output / "dataset-manifest.json").write_bytes(dataset_manifest.read_bytes())
     harbor = None
@@ -120,6 +148,7 @@ def retarget(
         result.pop(key, None)
     result.update(
         reused_preparation=str(prepared),
+        harnesses=harnesses,
         source_server=source_server,
         dataset_manifest="dataset-manifest.json",
         tasks=[{"instance_id": row["instance_id"]} for row in rows],
@@ -150,6 +179,10 @@ def main() -> None:
     parser.add_argument("--source-server", choices=("swe_next", "swe_rebench"), required=True)
     parser.add_argument("--wandb-project", required=True)
     parser.add_argument("--wandb-entity", required=True)
+    parser.add_argument("--harness", choices=HARNESSES, help="Compose one harness using a single-harness template")
+    parser.add_argument(
+        "--harness-assets-from", type=Path, help="Existing prepared directory containing codex/ assets"
+    )
     print(json.dumps(retarget(**vars(parser.parse_args()))))
 
 
