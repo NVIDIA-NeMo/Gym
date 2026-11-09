@@ -109,7 +109,8 @@ async function discoverTools(serverName, server, registered, terminal, replyCutO
   let protocolVersion = "2025-03-26";
   async function rpc(method, params, signal, notification = false) {
     const id = ++requestId;
-    const timeout = method === "tools/call" ? server.timeout : Math.min(server.timeout, 30000);
+    // Discovery waits its own deadline, 30 s unless the configuration sets one, and never longer than a tool call.
+    const timeout = method === "tools/call" ? server.timeout : Math.min(server.timeout, server.discovery_timeout ?? 30000);
     const deadline = AbortSignal.timeout(timeout);
     const response = await fetch(server.url, {
       method: "POST",
