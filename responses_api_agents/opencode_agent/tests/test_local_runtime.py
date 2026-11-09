@@ -15,6 +15,7 @@ from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY
 from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
+from nemo_gym.models import OPENCODE_MAX_STEPS_PROMPT_VERSIONS
 from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, OpenCodeAgentRunRequest
 from responses_api_agents.opencode_agent.runtime import OPENCODE_VERSION
@@ -182,3 +183,8 @@ async def test_invalid_session_never_falls_back_to_local(marker: str | None) -> 
             await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert error.value.status_code == 409
     local.assert_not_awaited()
+
+
+def test_token_capture_knows_the_step_limit_text_of_the_default_opencode_version() -> None:
+    """Token capture recognizes OpenCode's step-limit note by its exact text, which is checked per release."""
+    assert OPENCODE_VERSION in OPENCODE_MAX_STEPS_PROMPT_VERSIONS
