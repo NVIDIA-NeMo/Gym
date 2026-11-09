@@ -17,12 +17,29 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from aiohttp import ClientResponseError, RequestInfo
 from fastapi.testclient import TestClient
+from multidict import CIMultiDict, CIMultiDictProxy
 from pydantic import BaseModel
+from yarl import URL
 
-from nemo_gym.agents import AgentSeedSessionRequest, check_agent_seed_rejected
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedSessionRequest,
+    OutcomeAction,
+    agent_outcome_policy,
+    check_agent_seed_rejected,
+)
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.core import (
+    EpisodeId,
+    FailureBoundary,
+    FailureEvent,
+    FailureHeader,
+    FailureReport,
+    NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
+)
 from nemo_gym.server_runtime import BaseSeedSessionRequest, ResourcesSeedSessionRequest
 from resources_servers.math_formal_lean.app import (
     CheckProofRequest,
@@ -65,6 +82,38 @@ class _FakeErrorResp(_FakeResp):
 
     def raise_for_status(self) -> None:
         raise RuntimeError(f"HTTP {self.status}")
+
+
+class _FakeModelErrorResp(_FakeErrorResp):
+    """A model server reply with an HTTP error status, raised as aiohttp raises it, with an optional failure report."""
+
+    def __init__(self, status: int, payload: dict[str, Any], *, report: FailureReport | None = None) -> None:
+        super().__init__(status, payload)
+        self.report = report
+
+    def raise_for_status(self) -> None:
+        url = URL("http://policy:8000/v1/responses")
+        raise ClientResponseError(
+            RequestInfo(url=url, method="POST", headers=CIMultiDictProxy(CIMultiDict()), real_url=url),
+            (),
+            status=self.status,
+            message="Bad Request" if self.status < 500 else "Service Unavailable",
+            headers=FailureHeader.encode(self.report) if self.report is not None else None,
+        )
+
+
+def _model_report(http_status: int | None) -> FailureReport:
+    """A model server's report whose selected failure is a model request that ended with ``http_status``."""
+    event = FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="model request failed",
+        operation="model_request",
+        operation_id="op",
+        attempt_id="op-1",
+        http_status=http_status,
+    )
+    return FailureReport(failure_id=event.event_id, events={event.event_id: event})
 
 
 def _usage(input_tokens: int, output_tokens: int, *, cached: int = 0, reasoning: int = 0) -> dict[str, Any]:
@@ -358,7 +407,18 @@ class TestAgentSessions:
             assert call.kwargs["cookies"] == {"lean_cookie": "episode"}
         assert closed.status_code == 200, closed.text
         assert closed.json()["resources_cookies"] is None
-        assert closed.json()["agent_observations"]["gaps"][0]["code"] == "observation_capture_failed"
+        # Close returns what the activation did: its two model calls and the two checks between them.
+        observations = closed.json()["agent_observations"]
+        invocation, *checks = observations["records"]
+        assert invocation["kind"] == "agent_invocation"
+        assert invocation["status"] == "completed"
+        assert [call["response_id"] for call in invocation["model_calls"]] == ["resp-0", "resp-1"]
+        assert [(c["tool_call_id"], c["tool_name"], c["status"]) for c in checks] == [
+            ("check_proof-0", "check_proof", "completed"),
+            ("check_proof-1", "check_proof", "completed"),
+        ]
+        assert all(c["completed_at"] >= c["started_at"] for c in checks)
+        assert observations["gaps"] == []
 
     @pytest.mark.parametrize(
         ("check_reply", "status"),
@@ -382,10 +442,147 @@ class TestAgentSessions:
         ):
             assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
             result = client.post(path, json={"input": "Prove it."})
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
 
         assert result.status_code == status, result.text
         if status == 422:
             assert "pair only with math_formal_lean" in result.text
+        # The failed activation and its refused check still come back at close.
+        invocation, check = closed.json()["agent_observations"]["records"]
+        assert (invocation["status"], invocation["error_type"]) == ("failed", check["error_type"])
+        assert check["status"] == "failed"
+
+    def test_a_session_closed_before_its_activation_reports_a_gap(self) -> None:
+        agent = _agent()
+        seed = _agent_seed(_GRANT)
+        with TestClient(agent.setup_webserver()) as client:
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            close = {"agent_session_id": seed.agent_session_id, "episode_id": seed.episode_id.model_dump()}
+            closed = client.post("/v1/agent_sessions/close", json=close)
+
+        observations = closed.json()["agent_observations"]
+        assert observations["records"] == []
+        assert [gap["code"] for gap in observations["gaps"]] == ["observation_capture_failed"]
+
+    @pytest.mark.parametrize(
+        ("status", "action"),
+        [
+            # The environment server's default outcome policy grades a refused request and retries an outage.
+            (400, OutcomeAction.VERIFY),
+            (503, OutcomeAction.RETRY),
+        ],
+    )
+    async def test_a_failed_model_call_returns_its_outcome_and_the_earlier_attempts(
+        self, status: int, action: OutcomeAction
+    ) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(
+            side_effect=[
+                _FakeResp(_model_response("resp-0", "bad proof", _usage(10, 20))),
+                _FakeModelErrorResp(status, {"error": {"message": "prompt is too long"}}),
+            ]
+        )
+        agent = _agent(server_client=server_client)
+        state = await agent._seed_agent_session_state(_agent_seed(_GRANT))
+        check = AsyncMock(return_value=_FakeResp(_check(needs_correction=True)))
+        with patch("responses_api_agents.proof_refinement_agent.app.http_request", check):
+            response = await agent._refine(
+                state,
+                NeMoGymResponseCreateParamsNonStreaming(input="Prove it.", metadata={"row": "7"}),
+                model_url_path="/v1/responses",
+            )
+
+        assert response.status == "failed"
+        assert response.output == []
+        assert f"Model HTTP {status}" in response.error.message and "prompt is too long" in response.error.message
+        assert response.metadata["row"] == "7"
+        assert json.loads(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == {
+            "failure_kind": "model_request_error",
+            "status_code": status,
+        }
+        assert agent_outcome_policy(response) == action
+        # The usage of the call that answered.
+        assert response.usage.model_dump() == _usage(10, 20)
+        refinement = getattr(response, PROOF_REFINEMENT_RESPONSE_KEY)
+        assert refinement["total_turns"] == 2
+        first, failed = refinement["all_attempts"]
+        assert (first["generation"], first["proof_status"]) == ("bad proof", "error")
+        assert failed["input"]["input"] == [{"role": "user", "content": "Fix the proof."}]
+        assert failed["generation"] == "" and failed["response"]["status"] == "failed"
+        # No check of the failed turn; close reports the failed invocation with the call that answered.
+        assert check.await_count == 1
+        invocation, checked = state.observations.records
+        assert (invocation.status, invocation.error_type) == ("failed", "model_request_error")
+        assert [call.response_id for call in invocation.model_calls] == ["resp-0"]
+        assert checked.status == "completed"
+
+    async def test_a_refused_first_call_reports_zero_usage(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=_FakeModelErrorResp(400, {"error": {"message": "too long"}}))
+        agent = _agent(server_client=server_client)
+        state = await agent._seed_agent_session_state(_agent_seed(_GRANT))
+        check = AsyncMock()
+        with patch("responses_api_agents.proof_refinement_agent.app.http_request", check):
+            response = await agent._refine(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="Prove it."), model_url_path="/v1/responses"
+            )
+
+        assert response.status == "failed"
+        assert response.usage.model_dump() == _usage(0, 0)
+        refinement = getattr(response, PROOF_REFINEMENT_RESPONSE_KEY)
+        assert refinement["total_turns"] == 1
+        assert [attempt["generation"] for attempt in refinement["all_attempts"]] == [""]
+        assert check.await_count == 0
+        assert state.observations.records[0].model_calls == []
+
+    @pytest.mark.parametrize(
+        "report",
+        [
+            # The model's headers came back 2xx and its body failed: it may already have answered.
+            _model_report(200),
+            # A report that was too large to send: what it selected cannot be read.
+            FailureReport(omitted=True),
+        ],
+    )
+    async def test_a_reply_that_may_hold_an_answer_propagates(self, report: FailureReport) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(
+            side_effect=[
+                _FakeResp(_model_response("resp-0", "bad proof", _usage(1, 1))),
+                _FakeModelErrorResp(500, {"error": {"message": "body read failed"}}, report=report),
+            ]
+        )
+        agent = _agent(server_client=server_client)
+        state = await agent._seed_agent_session_state(_agent_seed(_GRANT))
+        check = AsyncMock(return_value=_FakeResp(_check(needs_correction=True)))
+        with (
+            patch("responses_api_agents.proof_refinement_agent.app.http_request", check),
+            pytest.raises(ClientResponseError) as raised,
+        ):
+            await agent._refine(
+                state, NeMoGymResponseCreateParamsNonStreaming(input="Prove it."), model_url_path="/v1/responses"
+            )
+
+        # The error goes on with the model server's report, which the agent's reply forwards.
+        assert FailureHeader.decode(raised.value.headers) == report
+        invocation = state.observations.records[0]
+        assert (invocation.status, invocation.error_type) == ("failed", "ClientResponseError")
+
+    async def test_a_reported_provider_refusal_still_returns_its_outcome(self) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(
+            return_value=_FakeModelErrorResp(400, {"error": {"message": "too long"}}, report=_model_report(400))
+        )
+        agent = _agent(server_client=server_client)
+        state = await agent._seed_agent_session_state(_agent_seed(_GRANT))
+
+        response = await agent._refine(
+            state, NeMoGymResponseCreateParamsNonStreaming(input="Prove it."), model_url_path="/v1/responses"
+        )
+
+        assert response.status == "failed"
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     async def test_last_allowed_attempt_is_left_to_verify(self) -> None:
         server_client = MagicMock(spec=ServerClient)
@@ -436,8 +633,10 @@ def _wire(value: Any) -> Any:
 class _Episode:
     """A scripted policy and Lean compiler. The policy answers its calls in order; Lean passes `good_tactic`."""
 
-    def __init__(self, proofs: list[str]) -> None:
+    def __init__(self, proofs: list[str], *, refused_at: int | None = None) -> None:
         self.proofs = proofs
+        # The policy call that the model server refuses with HTTP 400, if any.
+        self.refused_at = refused_at
         self.model_requests: list[dict[str, Any]] = []
         self.compiled: list[str] = []
         self.lean = MathFormalLeanResourcesServer(
@@ -461,6 +660,8 @@ class _Episode:
         if server_name == "policy_model":
             index = len(self.model_requests)
             self.model_requests.append(body)
+            if index == self.refused_at:
+                return _FakeModelErrorResp(400, {"error": {"message": "prompt is too long"}})
             proof = f"```lean4\ntheorem t : True := by\n  {self.proofs[index]}\n```"
             return _FakeResp(_model_response(f"resp-{index}", proof, _usage(100 * (index + 1), 10)))
         if server_name == "proof_refinement_agent":  # /run's call to the agent's own /v1/responses
@@ -537,6 +738,22 @@ class TestRewardParity:
         assert session.model_requests == legacy.model_requests
         # Lean compiled the same files: /verify reuses a pass that /check_proof compiled instead of compiling it again.
         assert session.compiled == legacy.compiled
+
+
+async def test_a_graded_model_refusal_scores_zero_and_keeps_the_attempts() -> None:
+    """A correction turn the model server refuses with HTTP 400, graded as the default outcome policy says."""
+    episode = _Episode(["bad_tactic", "good_tactic"], refused_at=1)
+
+    result = await episode.session()
+
+    assert result["reward"] == 0.0
+    assert result["response"]["status"] == "failed"
+    assert result["total_turns"] == 2
+    first, refused = result["all_attempts"]
+    assert first["proof_status"] == "error"
+    # /verify grades the refused turn as an empty generation, without compiling anything.
+    assert (refused["generation"], refused["proof_status"], refused["reward"]) == ("", "empty_generation", 0.0)
+    assert len(episode.compiled) == 1
 
 
 def test_attempt_records_keep_the_last_messages_text_as_run_always_did() -> None:

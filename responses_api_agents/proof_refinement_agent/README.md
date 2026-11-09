@@ -16,6 +16,12 @@ feedback and correction prompt. The response's `usage` covers every turn's model
   final response to `/verify`, which grades the last attempt and reports `total_turns` and `all_attempts`.
   The seed is refused without a direct HTTP grant when `max_correction_turns > 0`. A crash restarts the episode
   from its input.
+  A model call that answers with an HTTP error ends the loop with a failed response that names the status
+  (`ng_agent_outcome`) and keeps the earlier attempts. With the Environment Server's default outcome policy, a 400,
+  413 or 422 is graded (that attempt scores 0), a 408, 425, 429 or 5xx restarts the episode, and any other status
+  fails it. An error whose failure report says the model may already have answered propagates instead, so the
+  Environment Server does not give the model another chance. Closing the session returns the activation's model
+  calls and `/check_proof` calls as observations.
   This path pairs only with `math_formal_lean`. Composed onto another environment (for example with
   `--agent-type proof_refinement_agent`), the agent runs in agent sessions too, and the episode fails with a 422:
   at the seed without a direct HTTP grant, or at the first check when the resources server has no `/check_proof`.
