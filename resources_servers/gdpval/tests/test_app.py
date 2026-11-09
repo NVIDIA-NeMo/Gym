@@ -22,13 +22,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
+    JUDGE_FAILED,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import judge_failsafe
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
     GDPValResourcesServer,
@@ -51,7 +54,7 @@ def _server(reward_mode: str = "rubric", **extra) -> GDPValResourcesServer:
         name="",
         reward_mode=reward_mode,
         judge_model_server={"type": "responses_api_models", "name": "judge"},
-        tavily_api_key="test-key",
+        tavily_api_key="test-key",  # pragma: allowlist secret
         sandbox_provider="test",
         sandbox_config={},
         persist_deliverables_dir="unused",
@@ -360,8 +363,9 @@ class TestStrictComparisonTrials:
             assert response.model_dump()["_ng_failure_terminal"] is True
             assert "manual_imputation" not in response.judge_response
         else:
-            with pytest.raises(RuntimeError, match="all 1 judge matchup"):
+            with pytest.raises(NgFailureEvent, match="all 1 judge matchup") as raised:
                 await self._verify_with_trials(server, body, [RuntimeError("judge API unavailable")])
+            assert raised.value.failure_kind == JUDGE_FAILED
 
     @pytest.mark.asyncio
     async def test_a_permanent_judge_error_is_a_masked_terminal_failure(self, tmp_path) -> None:
@@ -1277,7 +1281,7 @@ class TestApp:
         assert resp.judge_response["raw_responses"] == ["FINAL_SCORE[7]\nMAX_POSSIBLE_SCORE[10]"]
 
     def test_aggregate_metrics_comparison_elo(self) -> None:
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1317,7 +1321,7 @@ class TestApp:
         """When verify responses carry ``total_wins``/``total_losses``/
         ``total_ties`` (multi-ref-repeat path), they're summed as raw judge
         votes rather than treated as one matchup each."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1609,7 +1613,7 @@ class TestMultiReference:
     @pytest.mark.asyncio
     async def test_verify_all_references_fail_raises(self, tmp_path) -> None:
         """When every matchup fails the rollout is genuinely unjudgeable and
-        verify raises (surfacing as a failure) rather than faking a reward."""
+        verify raises a judge_failed event rather than faking a reward."""
         server, body = self._two_ref_server_and_body(tmp_path)
 
         def always_fail(**_kwargs):
@@ -1621,11 +1625,40 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match="all .* judge matchup"):
+            with pytest.raises(NgFailureEvent, match="all .* judge matchup") as raised:
                 await server.verify(_NO_SESSION, body)
+        assert raised.value.failure_kind == JUDGE_FAILED
 
     @pytest.mark.asyncio
-    async def test_a_permanent_and_a_transient_matchup_error_together_stay_retryable(self, tmp_path) -> None:
+    async def test_a_judge_outage_is_a_masked_judge_failed_row_that_keeps_the_answer(self, tmp_path) -> None:
+        """Through the failsafe every verify call runs under, the row is typed and masked, so recovery grades
+        the saved answer again instead of an HTTP 500 that reruns the whole episode."""
+        server, body = self._two_ref_server_and_body(tmp_path)
+
+        def timed_out(**_kwargs):
+            raise TimeoutError("Request timed out.")
+
+        with (
+            patch("resources_servers.gdpval.comparison.run_trials", side_effect=timed_out),
+            patch("resources_servers.gdpval.app.get_server_url", return_value="http://localhost:9999"),
+            patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
+            patch("openai.OpenAI", return_value=MagicMock()),
+        ):
+            reply = await judge_failsafe(server.verify)(_NO_SESSION, body=body)
+
+        row = json.loads(reply.body)
+        assert reply.status_code == 200
+        assert (row["_ng_failure_class"], row["failure_kind"], row["mask_sample"]) == (
+            JUDGE_FAILED,
+            JUDGE_FAILED,
+            True,
+        )
+        assert row["reward"] == 0.0
+        assert row["response"] == body.response.model_dump(mode="json")
+        assert "all 2 judge matchup(s) failed" in row["failure_reason"]
+
+    @pytest.mark.asyncio
+    async def test_a_permanent_and_a_transient_matchup_error_together_are_a_judge_failure(self, tmp_path) -> None:
         server, body = self._two_ref_server_and_body(tmp_path)
         errors = iter([RuntimeError("Error code: 413 - payload too large"), RuntimeError("500 Internal Server Error")])
 
@@ -1638,11 +1671,14 @@ class TestMultiReference:
             patch("resources_servers.gdpval.comparison.build_file_section", return_value=[]),
             patch("openai.OpenAI", return_value=MagicMock()),
         ):
-            with pytest.raises(RuntimeError, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"):
+            with pytest.raises(
+                NgFailureEvent, match=r"all 2 judge matchup\(s\) failed .*500 Internal Server Error"
+            ) as raised:
                 await server.verify(_NO_SESSION, body)
+        assert raised.value.failure_kind == JUDGE_FAILED
 
     def test_aggregate_metrics_mle_and_per_reference_stats(self) -> None:
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1698,7 +1734,7 @@ class TestMultiReference:
         """A one-stage run is a special case of the full run: tagging the same
         rollouts with a single ``stage_index`` must yield the same headline
         eval_elo as the untagged (legacy full-220-vs-all-refs) aggregation."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1741,7 +1777,7 @@ class TestMultiReference:
 
     @pytest.mark.asyncio
     async def test_imputed_loss_coverage_is_separate_from_judgments(self) -> None:
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
         from resources_servers.gdpval.comparison import calculate_mle_elo
 
         server = _server(
@@ -1777,10 +1813,12 @@ class TestMultiReference:
         assert metrics["comparison/stage_1/imputed_loss_votes"] == 4
         assert metrics["comparison/final_stage_complete"] == 1
         assert metrics["comparison/eval_elo"] == pytest.approx(calculate_mle_elo([(1000.0, 3, 5, 0)])[0])
+        # The headline fit used both final-stage rows, the judged one and the imputed loss, of the two planned.
+        assert (metrics["metric_coverage/trials"], metrics["metric_coverage/expected"]) == (2, 2)
 
     def test_aggregate_metrics_stage_aware_headline_is_expected_final_stage(self) -> None:
         """The declared final stage supplies the headline when its fit is usable."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1863,7 +1901,7 @@ class TestMultiReference:
         """An incomplete run exposes stage metrics but no misleading headline."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -1895,6 +1933,7 @@ class TestMultiReference:
         assert "comparison/stage_0/eval_elo" in metrics
         assert "comparison/eval_elo" not in metrics
         assert "comparison/headline_stage_index" not in metrics
+        assert "metric_coverage/trials" not in metrics and "metric_coverage/expected" not in metrics
         assert metrics["comparison/expected_final_stage_index"] == 1
         assert metrics["comparison/final_stage_present"] == 0
         assert metrics["comparison/final_stage_complete"] == 0
@@ -1909,8 +1948,8 @@ class TestMultiReference:
         """
         import asyncio as _asyncio
 
-        from nemo_gym.base_resources_server import lost_session_verification
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
+        from nemo_gym.server_runtime import lost_session_verification
 
         server = _server(
             reward_mode="comparison",
@@ -1954,7 +1993,7 @@ class TestMultiReference:
         """A present final stage with no judged games cannot borrow an earlier ELO."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -2011,7 +2050,7 @@ class TestMultiReference:
         """A drained final stage cannot publish an ELO from its surviving subset."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -2080,7 +2119,7 @@ class TestMultiReference:
         """A final stage accepted by its partial-completion policy is not degraded."""
         import asyncio as _asyncio
 
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",
@@ -2113,6 +2152,9 @@ class TestMultiReference:
         assert metrics["comparison/final_stage_partial_accepted"] == int(accepted)
         assert metrics["comparison/final_stage_degraded"] == int(not accepted)
         assert ("comparison/eval_elo" in metrics) is accepted
+        # An accepted partial final stage: the headline covers its one fit row of the two it planned.
+        coverage = (metrics.get("metric_coverage/trials"), metrics.get("metric_coverage/expected"))
+        assert coverage == ((1, 2) if accepted else (None, None))
 
     def test_aggregate_metrics_handles_repeated_task_across_stages(self) -> None:
         """The same ``(task_index, rollout_index)`` may recur across stages (one
@@ -2120,7 +2162,7 @@ class TestMultiReference:
         stage-aware aggregation must NOT trip RewardProfiler's duplicate-key
         guard — stages are distinguished by ``stage_index`` alone, with no
         per-stage index offset."""
-        from nemo_gym.config_types import AggregateMetricsRequest
+        from nemo_gym.config import AggregateMetricsRequest
 
         server = _server(
             reward_mode="comparison",

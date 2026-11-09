@@ -39,9 +39,9 @@ from environment_servers.harbor.tests.conftest import (
     write_image_config,
 )
 from environment_servers.harbor.verifier import _verifier_image, _verifier_runs_task_image, _verifier_start
-from nemo_gym import failure_kinds
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.tasks.harbor import load_task
+from nemo_gym.core import failure_kinds
+from nemo_gym.data.tasks.harbor import load_task
+from nemo_gym.sandbox import SandboxExecResult
 
 
 BUILT_IMAGE = "registry.example/ds-hello:abc"
@@ -204,8 +204,7 @@ def build_mode(task, *, record: dict | None = ENTRYPOINT_CONFIG, image: str = BU
     ``record`` is the built image's recorded configuration (``None``: nothing recorded, as for an image
     prepare did not inspect).
     """
-    from nemo_gym.tasks.harbor.digest import context_digest
-    from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+    from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
     (task.path / "environment" / "Dockerfile").write_text(
         'FROM ubuntu:24.04\nCOPY . /app\nENTRYPOINT ["/entrypoint.sh"]\n'
@@ -572,7 +571,8 @@ class TestEntrypoint:
     async def test_image_healthcheck_runs_before_the_task_healthcheck_as_the_image_user(self, tmp_path, monkeypatch):
         # Harbor's order: `up --wait` gates on the image HEALTHCHECK, then run_healthcheck() runs the task's, both
         # as the container's user (the agent user is set afterwards): the daemon runs the image check in the image
-        # WorkingDir, Harbor's exec runs the task check in the task workdir.
+        # WorkingDir, Harbor's exec runs the task check in the task workdir; the seed names both directories (the
+        # task's is the prepared workdir, the image's own /app for a task that declares none).
         record = ENTRYPOINT_CONFIG | {"Healthcheck": IMAGE_HEALTHCHECK}
         server, task, sandbox = self.entrypoint_server(
             tmp_path, monkeypatch, toml=AGENT_USER_HEALTH_TOML, record=record
@@ -584,7 +584,7 @@ class TestEntrypoint:
         task_probe = sandbox.index_of("test -f /app/ready.txt")
         assert sandbox.index_of(f"sh {ENTRYPOINT_DIR}/run.sh") < image < task_probe
         assert (sandbox.execs[image]["user"], sandbox.execs[image]["cwd"]) == ("app", "/app")
-        assert (sandbox.execs[task_probe]["user"], sandbox.execs[task_probe]["cwd"]) == ("app", None)
+        assert (sandbox.execs[task_probe]["user"], sandbox.execs[task_probe]["cwd"]) == ("app", "/app")
 
     @pytest.mark.parametrize(
         ("toml", "user"), [(HEALTHCHECK_TOML, None), (AGENT_USER_HEALTH_TOML, "root")], ids=["root", "agent-user"]
@@ -600,7 +600,7 @@ class TestEntrypoint:
         image = sandbox.execs[sandbox.index_of("test -f /tmp/healthy")]
         task_probe = sandbox.execs[sandbox.index_of("test -f /app/ready.txt")]
         assert (image["user"], image["cwd"]) == (user, "/app")
-        assert (task_probe["user"], task_probe["cwd"]) == (user, None)
+        assert (task_probe["user"], task_probe["cwd"]) == (user, "/app")
 
     async def test_slow_service_passes_when_the_image_healthcheck_absorbs_the_wait(self, tmp_path, monkeypatch):
         # domainbench-24's shape: no image USER, [agent] user = "agent", a task check with retries 3 and no start
@@ -913,6 +913,43 @@ class TestEntrypoint:
         assert (logs_dir / "entrypoint-exit.txt").read_text() == "1\n"
         assert agent.log_downloaded_before_stop is True and agent.stopped and not server._sandboxes
 
+    async def test_entrypoint_dying_during_the_rollout_masks_a_separate_step_before_its_verifier(
+        self, tmp_path, monkeypatch
+    ):
+        """Round 38 review (P2): a step verified in a sandbox of its own skipped the agent-entrypoint death check the
+        single-step paths run, so this fixture scored unmasked through it. The check runs before the collection pass
+        stops `main` or the step's verifier sandbox is created, while the agent's sandbox is still up, and masks the
+        turn as in shared mode, with the entrypoint log and exit status kept beside the turn's logs."""
+        from environment_servers.harbor.tests.test_multi_turn import request_for, wire_verifier_sandboxes, write_steps
+
+        agent = LateExitSandbox()
+        toml = TASK_TOML.replace("[verifier]\n", '[verifier]\nenvironment_mode = "separate"\n') + (
+            '[verifier.environment]\ndocker_image = "org/verifier:1"\n[[steps]]\nname = "plan"\n[[steps]]\nname = "build"\n'
+        )
+        write_steps(tmp_path / "datasets" / "ds" / "hello", {"plan": "P", "build": "B"})
+        server, task, _, _ = make_server(tmp_path, monkeypatch, agent, toml=toml)
+        task = build_mode(task)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.entrypoint == ("/entrypoint.sh",) and [t.verifier_mode for t in task.turns] == ["separate"] * 2
+        verifiers, _ = wire_verifier_sandboxes(server, monkeypatch)
+
+        response = await server.run_request(request_for(task))
+
+        result = response.result
+        assert result is not None, response.failure
+        (turn,) = result.turns  # the masked turn ends the episode
+        assert turn.mask_sample is True and turn.failure_kind == ENTRYPOINT_FAILED_KIND
+        assert turn.verifier_mode == "separate" and turn.response is not None
+        assert "ENTRYPOINT /entrypoint.sh exited 1 during the rollout" in turn.failure_reason
+        assert "database connection lost" in turn.failure_reason
+        assert result.mask_sample is True and result.stopped_after_turn == "plan"
+        # No verifier sandbox was created for the masked turn, and test.sh ran nowhere.
+        assert verifiers == [] and not any("test.sh" in c["command"] for c in agent.execs)
+        logs_dir = Path(turn.verifier_logs_dir)
+        assert (logs_dir / "entrypoint-stdout.txt").read_text() == agent.log
+        assert (logs_dir / "entrypoint-exit.txt").read_text() == "1\n"
+        assert agent.log_downloaded_before_stop is True and agent.stopped and not server._sandboxes
+
     # -- the exec that holds the entrypoint --------------------------------------------------
 
     async def test_launcher_capped_by_the_provider_is_logged_once_and_the_episode_goes_on(
@@ -1001,33 +1038,44 @@ class TestEntrypoint:
     async def test_numeric_image_user_without_a_name_stays_numeric_with_a_warning(self, tmp_path, monkeypatch, caplog):
         sandbox = EntrypointSandbox(passwd={"0": "root"})
         record = ENTRYPOINT_CONFIG | {"User": "1000"}
-        server, task, sandbox = self.entrypoint_server(tmp_path, monkeypatch, sandbox=sandbox, record=record)
+        server, task, sandbox = self.entrypoint_server(
+            tmp_path, monkeypatch, sandbox=sandbox, record=record, toml=HEALTHCHECK_TOML
+        )
         with caplog.at_level("WARNING", logger="environment_servers.harbor.users"):
             response = await run_episode(server, task)
         assert response.failure is None, response.failure
-        assert sandbox.launch()["user"] == "1000"
+        assert sandbox.launch()["user"] == 1000 and sandbox.default_user == 1000
+        (check,) = [r for r in sandbox.execs if r["command"] == "test -f /app/ready.txt"]
+        assert check["user"] == 1000
+        (seed,) = [kwargs["json"] for _, path, kwargs in server.server_client.calls if path == "/v1/agent_sessions"]
+        assert seed["sandbox_access"]["user"] == 1000
+        assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
         warnings = [r.getMessage() for r in caplog.records if "USER 1000 names no user" in r.getMessage()]
         assert len(warnings) == 1
 
-    async def test_resolved_dockerfile_workdir_is_created_for_the_entrypoint(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("image_user,startup_user", [("agent", "agent"), ("12345", 12345)])
+    async def test_resolved_dockerfile_workdir_is_created_for_the_entrypoint(
+        self, tmp_path, monkeypatch, image_user, startup_user
+    ):
         # A trailing WORKDIR with no RUN after it: `docker build` would have created it in the image, and so does
         # the overlay (after its last RUN line), before the task's workdir, which task.toml points elsewhere.
-        dockerfile = "FROM debian:bookworm-slim\nRUN useradd agent\nUSER agent\nWORKDIR /app\n"
+        dockerfile = f"FROM debian:bookworm-slim\nRUN useradd agent\nUSER {image_user}\nWORKDIR /app\n"
         config = {"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entrypoint.sh"]}
         toml = TASK_TOML.replace("storage_mb = 10240", 'storage_mb = 10240\nworkdir = "/work"')
         sandbox = EntrypointSandbox()
         server, task, _, _ = make_server(
             tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=config, toml=toml
         )
-        assert (task.workdir, task.entrypoint_workdir, task.entrypoint_user) == ("/work", "/app", "agent")
+        assert (task.workdir, task.entrypoint_workdir, task.entrypoint_user) == ("/work", "/app", image_user)
 
         response = await run_episode(server, task)
 
         assert response.failure is None, response.failure
-        made = sandbox.index_of("test -d /app || (mkdir -p /app && chown agent /app)")
+        made = sandbox.index_of(f"test -d /app || (mkdir -p /app && chown {image_user} /app)")
         assert made < sandbox.index_of("mkdir -p /work") < sandbox.index_of(f"sh {ENTRYPOINT_DIR}/run.sh")
         assert sandbox.execs[made]["user"] == "root"
-        assert sandbox.launch()["cwd"] == "/app" and sandbox.dirs["/app"] == "agent"
+        assert sandbox.launch()["cwd"] == "/app" and sandbox.dirs["/app"] == image_user
+        assert sandbox.launch()["user"] == startup_user and sandbox.default_user == startup_user
 
     # -- the separate verifier's start -------------------------------------------------------
 
@@ -1123,6 +1171,10 @@ class TestEntrypoint:
 
         monkeypatch.setattr(server, "_create_compose", start_compose)
         monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        # The seed checks the Compose document against the deployment's provider block before the (stubbed) start.
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
 
         response = await run_episode(server, task)
 

@@ -14,7 +14,6 @@ from time import monotonic, time
 from typing import Literal
 from uuid import uuid4
 
-from aiohttp import ClientResponseError
 from fastapi import FastAPI
 from pydantic import Field, PrivateAttr
 
@@ -23,13 +22,13 @@ from environment_servers.swe_together.context import INCREMENTAL_NOTICE, project
 from environment_servers.swe_together.egress import DependencyAccess, install_trust_bundle
 from environment_servers.swe_together.evaluation import PASS_THRESHOLD, interaction_metrics, run_judge
 from environment_servers.swe_together.guidance import session_analysis
+from environment_servers.swe_together.judge_evidence import collect_judge_evidence
 from environment_servers.swe_together.metrics import aggregate
-from environment_servers.swe_together.model_client import AuxiliaryModel
+from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
 from environment_servers.swe_together.repo_config import discover_repo_config_files
 from environment_servers.swe_together.runtime import PYTHON, RuntimeProvisioner
 from environment_servers.swe_together.schemas import (
     CandidateTurn,
-    SWETFailure,
     SWETRequest,
     SWETResponse,
     SWETResult,
@@ -39,38 +38,48 @@ from environment_servers.swe_together.schemas import (
 from environment_servers.swe_together.simulator import UserAgent
 from environment_servers.swe_together.submission import replicate_submission
 from environment_servers.swe_together.task import SOURCE_REVISION, TaskData, load_task
-from nemo_gym.agent_activation_types import (
-    AgentContinuationRequirements,
-)
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    HandledEpisodeError,
-)
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentContinuationRequirements,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
+    TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ModelServerRef,
+    get_first_server_config_dict,
 )
-from nemo_gym.episode_types import EpisodeFailure
-from nemo_gym.failure_kinds import JUDGE_FAILED
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    FailureBoundary,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    verifier_invocation_context,
+)
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxAccess,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import (
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    handled_episode_failure,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -188,7 +197,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         cookies = {}
         agent_id = "candidate-" + uuid4().hex
         agent_close = None
-        failure: SWETFailure | None = None
+        failure: NgFailureEvent | None = None
         activations = []
         steps = []
         stage = "seed"
@@ -224,11 +233,17 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
         async def persist_cleanup_evidence() -> None:
             (state.directory / "cleanup-receipts.json").write_text(json.dumps(state.cleanup_receipts, indent=2))
             if failure is not None:
-                failure.agent_close = agent_close
-                failure.agent_observations = agent_close.agent_observations if agent_close else None
-                failure.trajectory = request.trajectory_for_collection(agent_close.trajectory) if agent_close else None
-                failure.cleanup_receipts = state.cleanup_receipts
-                (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
+                failure.episode_evidence.update(
+                    agent_close=agent_close,
+                    agent_observations=agent_close.agent_observations if agent_close else None,
+                    trajectory=agent_close.trajectory if agent_close else None,
+                    cleanup_receipts=state.cleanup_receipts,
+                )
+                wire_reply = self.failure_response(request, failure)
+                (state.directory / "failure.json").write_text(wire_reply.failure.model_dump_json(indent=2))
+                if wire_reply.failure_report is not None:
+                    report_json = wire_reply.failure_report.model_dump_json(indent=2)
+                    (state.directory / "failure_report.json").write_text(report_json)
 
         async def release_dependency_access() -> None:
             if state.dependency_access is not None:
@@ -340,7 +355,14 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             stage = "cleanup"
             await agent_cleanup.close()
             stage = "verification"
-            verification = await self._verify(state, initial, activations)
+            # Interaction scoring is part of grading, so its captured calls belong to this verifier invocation.
+            with verifier_invocation_context(f"verify-{uuid4().hex}"):
+                verification = await self._verify(state, initial, activations)
+            trajectory = agent_close.trajectory
+            if verification.get("judge_capture_episode"):
+                trajectory = await collect_judge_evidence(
+                    trajectory, verification, self.server_client.global_config_dict, state.directory
+                )
             await judge_cleanup.close()
             await candidate_cleanup.close()
             await runtime_cleanup.close()
@@ -354,7 +376,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(agent_close.trajectory),
+                        "ng_trajectory": trajectory,
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -365,38 +387,34 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             return response
         except Exception as error:
             LOGGER.exception("SWE-Together episode failed at %s", stage)
-            dependency = {"type": type(error).__name__, "message": str(error)[:2000]}
-            if isinstance(error, ClientResponseError):
-                dependency["status_code"] = error.status
-                content = getattr(error, "response_content", b"")
-                dependency["body"] = (
-                    content.decode(errors="replace") if isinstance(content, bytes) else str(content)
-                )[:8000]
-            failure = SWETFailure(
+            dependency = error_evidence(error)
+            failure = handled_episode_failure(
+                boundary=FailureBoundary.ENVIRONMENT,
                 stage=stage,
-                terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
+                operation="episode",
                 failure_reason=(f"{type(error).__name__}: {error}")[:2000],
-                partial_response=activations[-1].response if activations else None,
-                activations=activations,
-                agent_close=agent_close,
-                agent_observations=agent_close.agent_observations if agent_close else None,
-                trajectory=request.trajectory_for_collection(agent_close.trajectory) if agent_close else None,
-                cleanup_receipts=state.cleanup_receipts,
-                artifact_directory=str(state.directory),
-                dependency_error=dependency,
+                terminal=activation_attempted or isinstance(error, (ValueError, FileNotFoundError)),
+                evidence={
+                    "partial_response": activations[-1].response if activations else None,
+                    "activations": activations,
+                    "agent_close": agent_close,
+                    "agent_observations": agent_close.agent_observations if agent_close else None,
+                    "trajectory": agent_close.trajectory if agent_close else None,
+                    "cleanup_receipts": state.cleanup_receipts,
+                    "artifact_directory": str(state.directory),
+                    "dependency_error": dependency,
+                },
             )
-            (state.directory / "failure.json").write_text(failure.model_dump_json(indent=2))
-            failure.cleanup_receipts = state.cleanup_receipts
-            raise HandledEpisodeError(failure) from error
-
-    def failure_response(self, request: SWETRequest, failure: EpisodeFailure) -> SWETResponse:
-        if isinstance(failure, SWETFailure):
-            # Final cleanup updates this same object before the base class serializes it.
-            return SWETResponse(episode_id=request.episode_id, task_id=request.task.task_id, failure=failure)
-        return super().failure_response(request, failure)
+            failure.__cause__ = error
+            wire_reply = self.failure_response(request, failure)
+            (state.directory / "failure.json").write_text(wire_reply.failure.model_dump_json(indent=2))
+            if wire_reply.failure_report is not None:
+                report_json = wire_reply.failure_report.model_dump_json(indent=2)
+                (state.directory / "failure_report.json").write_text(report_json)
+            raise failure from error
 
     def _activation_path(self, request: SWETRequest) -> str:
-        block = self.server_client.global_config_dict.get(TOKEN_ID_CAPTURE_BLOCK) or {}
+        block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}
         config = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
         capture = bool(block.get("enabled")) and (block.get("all_agents") or config.get("token_id_capture"))
         segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if capture else ""
@@ -442,7 +460,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                     env=proxy_env,
                     files=proxy_files,
                     provider_options=options,
-                    metadata=state.runtime.metadata()
+                    metadata=state.runtime.metadata(dict(sandbox_config.get("metadata", {})))
                     | {
                         "benchmark": "swe-together",
                         "task_id": state.task.task_id,
@@ -630,6 +648,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             evidence = {
                 "turn": turn + 1,
                 "error": str(error) or type(error).__name__,
+                "error_detail": error_evidence(error),
                 "simulator_messages": simulator.last_messages_sent,
                 "source_observation": activation.response.model_dump(mode="json"),
             }
@@ -724,12 +743,18 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             "protocol_profile": self.config.protocol_profile,
         }
         deadline = monotonic() + self.config.grading_timeout_seconds
+        grading = asyncio.timeout(self.config.grading_timeout_seconds)
         try:
-            async with asyncio.timeout(self.config.grading_timeout_seconds):
+            async with grading:
                 await state.snapshots.capture(state.sandbox, len(activations))
                 patch = state.snapshots.final_patch
                 if self.config.scoring_profile == "reference" and len(patch.strip()) < 100:
-                    result.update(judge_score=0.0, verdict={"judge_score": 0.0, "reason": "short_patch"})
+                    # A patch too short to judge is a measured zero, not a missing measurement.
+                    result.update(
+                        judge_score=0.0,
+                        verdict={"judge_score": 0.0, "reason": "short_patch"},
+                        evaluation_completed=True,
+                    )
                 else:
                     sandbox = await self._new_sandbox(state, judge=True)
                     result["submission"] = await replicate_submission(
@@ -761,13 +786,25 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         verdict=verdict,
                         judge_score=verdict["judge_score"],
                         reward=float(verdict["judge_score"] >= PASS_THRESHOLD),
+                        evaluation_completed=True,
                     )
         except Exception as error:
             LOGGER.exception("SWE-Together judge measurement failed")
             result.update(
                 mask_sample=True,
+                evaluation_completed=False,
                 failure_kind=JUDGE_FAILED,
                 failure_reason=f"{type(error).__name__}: {error}",
+                # Only this server's own grading deadline is a grading_timeout; a provider TimeoutError is not.
+                judge_failure_cause=getattr(
+                    error,
+                    "cause",
+                    "grading_timeout"
+                    if grading.expired()
+                    else "judge_transport_error"
+                    if result.get("judge_transport_error")
+                    else "judge_error",
+                ),
                 _ng_failure_class=JUDGE_FAILED,
                 _ng_failure_judge_error=str(error),
             )
@@ -806,6 +843,4 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 if __name__ == "__main__":
     SWETEnvironmentServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    from nemo_gym.server_utils import create_nemo_gym_fastapi_app
-
-    app = create_nemo_gym_fastapi_app(SWETEnvironmentServer)
+    app = SWETEnvironmentServer.run_webserver()  # noqa: F401

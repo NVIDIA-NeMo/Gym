@@ -13,6 +13,7 @@ import subprocess
 import tarfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -24,9 +25,11 @@ from yarl import URL
 
 import environment_servers.harbor.overlay as overlay
 import nemo_gym.sandbox.providers.base as sandbox_base
+import nemo_gym.server_runtime.base_environment_server as base_environment_server
 from environment_servers.harbor.app import (
     HarborEnvironmentServer,
     HarborEnvironmentServerConfig,
+    HarborEpisodeRequest,
 )
 from environment_servers.harbor.sandboxes import SEED_CREATE_GRACE_S, _is_image_pull_failure
 from environment_servers.harbor.tests.conftest import (
@@ -37,6 +40,7 @@ from environment_servers.harbor.tests.conftest import (
     OVERLAY_DOCKERFILE,
     SEPARATE_IN_TASK_IMAGE_TOML,
     SEPARATE_TOML,
+    SKILL_MD,
     SOLVE_SH,
     TASK_TOML,
     VERIFIER_TESTS_DOCKERFILE,
@@ -63,20 +67,26 @@ from environment_servers.harbor.verifier import (
     _verifier_start,
     parse_exit_record,
     parse_reward_file,
+    reward_components,
     select_reward,
+    summing_components,
     verifier_command,
 )
-from nemo_gym import failure_kinds
-from nemo_gym.base_environment_server import BaseEnvironmentServerConfig
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
-from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborEnvironment
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.core import NgFailureEvent, RequestFailureLog, failure_kinds
+from nemo_gym.data.tasks.harbor import (
+    BUILT_IMAGES_FILE,
+    DIGEST_KEY,
+    IMAGE_CONFIGS_FILE,
+    RECORD_VERSION,
+    HarborEnvironment,
+    HarborTaskError,
+    load_task,
+)
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle, SandboxSpec, cpu_cap_env
+from nemo_gym.server_runtime import BaseEnvironmentServerConfig
 
 
 def harness_trajectory(step_count: int) -> dict:
@@ -123,9 +133,22 @@ class TestRewardFile:
         (tmp_path / "reward.json").write_text(json.dumps({"accuracy": 1, "speed": 0.25}))
         rewards, problem = parse_reward_file(tmp_path)
         assert problem is None and rewards == {"accuracy": 1.0, "speed": 0.25}
-        assert select_reward(rewards) is None
-        assert select_reward({"accuracy": 0.25}) == 0.25
+        # Without a `reward` key every key is a component and the reward is their sum; with one, the other keys
+        # are metrics and there are no components to name.
+        assert select_reward(rewards) == 1.25 and reward_components(rewards) == rewards
+        assert select_reward({"accuracy": 0.25}) == 0.25 and reward_components({"accuracy": 0.25}) == {
+            "accuracy": 0.25
+        }
         assert select_reward({"reward": 1.0, "other": 0.0}) == 1.0
+        assert reward_components({"reward": 1.0, "other": 0.0}) is None
+        # Finite keys whose sum is not: no reward.
+        assert select_reward({"a": 1e308, "b": 1e308}) is None
+
+    def test_components_must_sum_to_the_reward(self):
+        assert summing_components(1.0, {"a": 0.5, "b": 0.5}) == {"a": 0.5, "b": 0.5}
+        assert summing_components(0.3, {"a": 0.1, "b": 0.2}) == {"a": 0.1, "b": 0.2}  # within tolerance
+        assert summing_components(1.0, {"a": 0.5}) is None
+        assert summing_components(1.0, None) is None
 
     @pytest.mark.parametrize(
         ("name", "text", "fragment"),
@@ -255,6 +278,36 @@ class TestEpisode:
         assert "sb-1" not in response.text and "sandbox" not in payload["result"]
         assert sandbox.stopped
 
+    async def test_a_flat_single_turn_row_runs_as_the_canonical_one(self, tmp_path, monkeypatch):
+        """Review (CI bot, round 34): a single-turn `/run` request with the task fields beside
+        `responses_create_params` (the flat shape `SingleAgentTurnTaskInput` accepted before `HarborTaskInput`
+        replaced it) was rejected by the request schema before execution. It is the canonical row once validated,
+        and runs as it does."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        canonical = episode(task)
+        flat = HarborEpisodeRequest.model_validate(
+            {
+                "episode_id": {"rollout_id": "r1", "attempt": 0},
+                "task": {
+                    "task_id": {"taskset": "ds", "task_id": "hello"},
+                    "task_input": {
+                        "responses_create_params": {"input": [{"role": "user", "content": "Create hello.txt"}]},
+                        DIGEST_KEY: task.digest,
+                    },
+                },
+            }
+        )
+        assert flat.task.task_input == canonical.task.task_input
+        assert flat.model_dump(mode="json", exclude_unset=True) == canonical.model_dump(
+            mode="json", exclude_unset=True
+        )
+
+        response = await server.run_request(flat)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.verifier_rewards == {"reward": 1.0}
+        assert any("test.sh" in call["command"] and "timeout" in call["command"] for call in sandbox.execs)
+
     async def test_episodes_parse_and_hash_the_task_once(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
         loads: list[Path] = []
@@ -348,6 +401,42 @@ class TestEpisode:
         assert "pull failed" in response.failure.failure_reason
         assert server.server_client.calls == []
 
+    @pytest.mark.parametrize("status", [401, 403, 500, None])
+    async def test_sandbox_credentials_refused_at_seed_are_named(self, tmp_path, monkeypatch, status):
+        """Provider credentials are classified on the cause, without reclassifying the environment outcome."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+
+        class SandboxApiException(Exception):  # the provider SDK's error, with its integer status_code
+            status_code = status
+            request_payload = {"secret": "must not be serialized"}
+
+        async def refused(task, workdir, *, episode_key):
+            raise SandboxApiException("Create sandbox failed: Authentication credentials are invalid.")
+
+        monkeypatch.setattr(server, "_create_sandbox", refused)
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert failure.stage == "seed" and not failure.terminal
+        assert "Could not set up sandbox for 'hello'" in failure.failure_reason
+        assert response.failure_report is not None
+        events = list(response.failure_report.events.values())
+        outer = response.failure_report.events[response.failure_report.failure_id]
+        assert outer.boundary == "environment"
+        assert outer.failure_kind == "environment_episode_failed" and failure.failure_kind is None
+        assert outer.foreign_error.http_status == 503
+        setup = response.failure_report.events[outer.cause_id]
+        assert len(events) == 2
+        assert setup.operation == "sandbox.setup"
+        assert setup.boundary == ("sandbox" if status in (401, 403) else "environment")
+        assert setup.foreign_error.exception_type.endswith("SandboxApiException")
+        assert setup.foreign_error.message == "Create sandbox failed: Authentication credentials are invalid."
+        assert setup.foreign_error.http_status == status
+        assert "must not be serialized" not in response.failure_report.model_dump_json()
+        assert setup.cause_id is None
+        assert setup.failure_kind == (
+            "provider_credentials_rejected" if status in (401, 403) else "environment_episode_failed"
+        )
+
     async def test_shutdown_refuses_new_episodes(self, tmp_path, monkeypatch):
         server, task, _, created = make_server(tmp_path, monkeypatch)
         await server.shutdown()
@@ -438,6 +527,21 @@ class TestDefaultUser:
         with caplog.at_level("WARNING"):
             assert (await run_episode(server, task, rollout="r2")).failure is None
         assert sandbox.default_user == 1000 and "USER 1000 names no user" in caplog.text
+
+    async def test_an_unnamed_numeric_agent_user_reaches_the_harness_as_the_integer_uid(self, tmp_path, monkeypatch):
+        """Review (CI bot, round 34): the harness was handed `[agent].user` as the task wrote it, the string
+        `"4242"`, while the seed had installed the integer uid (no passwd entry) as the sandbox's default; OpenSandbox
+        takes the string for an account name. The harness gets the user as installed: the integer."""
+        toml = TASK_TOML.replace("[agent]\ntimeout_sec = 300.0", "[agent]\ntimeout_sec = 300.0\nuser = 4242")
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml)
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {"opensandbox": {}}}
+        )
+        assert task.user == "4242"
+        assert (await run_episode(server, task)).failure is None
+        assert sandbox.default_user == 4242
+        (seed,) = server.server_client.seed_bodies()
+        assert seed["sandbox_access"]["user"] == 4242 and type(seed["sandbox_access"]["user"]) is int
 
     async def test_named_user_is_set_as_the_default_after_seed(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, dockerfile="FROM ubuntu:24.04\nUSER agent\n")
@@ -846,8 +950,7 @@ class TestSeedWorkdirAndResources:
         assert spec.env["CIRCLE_NODE_TOTAL"] == "3" and "X" not in spec.env
 
     async def test_build_mode_task_seeds_from_its_recorded_image(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         # A Dockerfile that needs a build resolves to the image prepare recorded beside the task folders.
@@ -994,6 +1097,11 @@ TASK_TOOL_CONTEXT_DECLARATIONS = {
     "mcp_servers": '[[environment.mcp_servers]]\nname = "playwright"\ntransport = "sse"\nurl = "http://api:3080/sse"\n',
     "skills_dir": 'skills_dir = "/app/.skills"\n',
 }
+# A Compose sidecar's MCP server, the kind `task_mcp_grants` can grant (SWE-Interact's simulated user).
+GRANTABLE_MCP_SERVER = (
+    '[[environment.mcp_servers]]\nname = "user-server"\ntransport = "streamable-http"\n'
+    'url = "http://user-server:8000/mcp"\n'
+)
 
 
 def http_error_with_body(status: int, body: bytes) -> ClientResponseError:
@@ -1068,6 +1176,69 @@ class TestAgentStage:
         assert response.result.reward == 1.0
         assert any("test.sh" in call["command"] for call in sandbox.execs)
 
+    async def test_a_task_whose_mcp_servers_are_all_granted_as_required_runs_on_a_harness_without_task_json(
+        self, tmp_path, monkeypatch
+    ):
+        """Hermes or Pi read no task.json, but take required MCP grants, or fail their seed when they cannot."""
+        server, task, sandbox, _ = make_server(
+            tmp_path, monkeypatch, toml=TASK_TOML + GRANTABLE_MCP_SERVER, task_mcp_grants="required"
+        )
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0
+        (seed,) = server.server_client.seed_bodies()
+        assert [(access["name"], access["required"]) for access in seed["tool_accesses"]] == [("user-server", True)]
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_a_grant_the_tool_access_schema_rejects_is_a_staged_terminal_failure(self, tmp_path, monkeypatch):
+        """The grant lookup runs inside the seed's try: a declaration the grant schema refuses (a name the session
+        contract does not accept) fails the episode at stage agent, terminal, instead of escaping as a 500."""
+        bad = GRANTABLE_MCP_SERVER.replace('name = "user-server"', 'name = "user server"')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=TASK_TOML + bad, task_mcp_grants="required")
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert not server.server_client.seed_bodies()
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+
+    @pytest.mark.parametrize(
+        ("grants", "declaration", "unreached"),
+        [
+            ("off", None, "MCP server 'user-server'"),
+            # An optional grant may be skipped by the harness without failing its seed.
+            ("optional", None, "MCP server 'user-server'"),
+            # Only streamable-http entries can be granted; an SSE server still needs task.json.
+            ("required", "mcp_servers", "MCP server 'playwright'"),
+            # A skills directory has no grant at all.
+            ("required", "skills_dir", "skills_dir"),
+        ],
+    )
+    async def test_task_tools_no_required_grant_covers_are_still_refused(
+        self, tmp_path, monkeypatch, grants, declaration, unreached
+    ):
+        extra = TASK_TOOL_CONTEXT_DECLARATIONS[declaration] if declaration else ""
+        # `skills_dir` belongs to the [environment] table, so it goes before the array-of-tables entry.
+        toml = TASK_TOML + extra + GRANTABLE_MCP_SERVER
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, task_mcp_grants=grants)
+        server.server_client.supports_task_tool_context = False
+
+        response = await run_episode(server, task)
+
+        failure = response.failure
+        assert response.result is None and failure.stage == "agent" and failure.terminal
+        assert unreached in failure.failure_reason
+        assert ("MCP server 'user-server'" in failure.failure_reason) is (grants != "required")
+        # The grant hint is offered only when it would help: an ungranted streamable-http server and grants not
+        # already required. An SSE server or a skills_dir under required grants gets no such advice.
+        assert ("task_mcp_grants: required" in failure.failure_reason) is (grants != "required")
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+
     async def test_a_task_without_tool_declarations_runs_on_any_harness(self, tmp_path, monkeypatch):
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         server.server_client.supports_task_tool_context = False
@@ -1109,7 +1280,7 @@ class TestAgentStage:
     @pytest.mark.parametrize(
         ("path", "status", "stage", "terminal"),
         [
-            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a final 422.
+            # An agent refuses a seed it cannot serve (AgentSeedRejectedError) with a terminal 422.
             ("/v1/agent_sessions", 422, "agent", True),
             ("/ng-rollout/r1/v1/responses", 422, "agent", True),
             ("/v1/agent_sessions/close", 503, "cleanup", False),
@@ -1171,6 +1342,58 @@ class TestAgentStage:
         assert server.server_client.paths()[-1] == "/v1/agent_sessions/close"
         assert not any("test.sh" in call["command"] for call in sandbox.execs)
         assert sandbox.stopped
+
+    @staticmethod
+    def failed_turn(outcome: str) -> dict:
+        response = agent_response().model_dump(mode="json")
+        response.update(
+            status="failed",
+            error={"code": "server_error", "message": "stream disconnected before completion"},
+            metadata={AGENT_OUTCOME_METADATA_KEY: outcome},
+        )
+        return response
+
+    @pytest.mark.parametrize(
+        ("outcome", "terminal"),
+        [('{"failure_kind":"unknown"}', False), ('{"failure_kind":"model_transport_error"}', False), ("{", True)],
+        ids=["unknown-retried", "transport-retried", "malformed-failed"],
+    )
+    async def test_failed_agent_response_is_not_scored(self, tmp_path, monkeypatch, outcome, terminal):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = self.failed_turn(outcome)
+        server.server_client.observations = {"source": "harness", "records": [], "gaps": []}
+
+        response = await run_episode(server, task)
+
+        assert response.result is None
+        assert response.failure.stage == "agent" and response.failure.terminal is terminal
+        assert response.failure.failure_reason == "stream disconnected before completion"
+        assert response.failure.partial_response.status == "failed"
+        assert response.failure.agent_observations is not None
+        assert not any("test.sh" in call["command"] for call in sandbox.execs)
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_failed_agent_response_with_a_verify_cause_is_scored(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.server_client.turn_response = self.failed_turn('{"failure_kind":"agent_limit"}')
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.reward == 1.0 and response.result.response.status == "failed"
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
+
+    async def test_agent_outcome_policy_is_configurable(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
+        server.config.agent_outcome_policy = AgentOutcomePolicyConfig(
+            by_failure_kind={"unknown": OutcomeAction.VERIFY}
+        )
+        server.server_client.turn_response = self.failed_turn('{"failure_kind":"unknown"}')
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert any("test.sh" in call["command"] for call in sandbox.execs)
 
     async def test_failed_close_is_a_cleanup_failure_with_the_turn_attached(self, tmp_path, monkeypatch):
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
@@ -1236,10 +1459,32 @@ class TestAgentStage:
         assert dumped["ng_agent_observations"]["source"] == "harness"
 
     async def test_episode_deadline_stops_the_sandbox(self, tmp_path, monkeypatch):
-        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=0.1)
-        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+        # The episode's own deadline expires while the harness turn is running. A short deadline also covered the
+        # task snapshot and the seed, and on a slow runner fired before the turn was reached, so the turn expires
+        # the real deadline itself instead.
+        bound = 3600.0
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, default_episode_timeout_seconds=bound)
+        deadlines = []
 
-        response = await run_episode(server, task)
+        def recording_timeout(delay):
+            timeout = asyncio.timeout(delay)
+            if delay == bound:
+                deadlines.append(timeout)
+            return timeout
+
+        monkeypatch.setattr(
+            base_environment_server, "asyncio", SimpleNamespace(**{**vars(asyncio), "timeout": recording_timeout})
+        )
+
+        def expire_the_episode_deadline():
+            (deadline,) = deadlines
+            deadline.reschedule(asyncio.get_running_loop().time())
+
+        server.server_client.turn_hooks = [expire_the_episode_deadline]
+        server.server_client.slow_path = "/ng-rollout/r1/v1/responses"
+        server.server_client.slow_seconds = bound
+
+        response = await asyncio.wait_for(run_episode(server, task), 10)
 
         assert response.failure is not None and "timed out" in response.failure.failure_reason
         assert not response.failure.terminal
@@ -1300,6 +1545,9 @@ class TestVerify:
         # After the roots exist as directories (a linked /logs/agent was unlinked and remade just before), and
         # before the wipe of the verifier's folders; nothing else under /logs/agent is deleted.
         assert steps[clear - 1] == "mkdir -p /tests /logs/verifier /logs/agent"
+        # The whole of /logs/verifier goes with /tests before test.sh (round 38 review, P1): keeping everything but
+        # the grader's four names kept an agent-planted test report too. A sidecar's input survives only when the
+        # task declares it (`[verifier].inputs`; `test_prepare_keeps_only_the_declared_sidecar_inputs`).
         assert steps[clear + 1] == "find /tests /logs/verifier -mindepth 1 -delete"
         assert not any("/logs/agent" in step and "delete" in step for step in steps)
         trajectory_upload = next(i for i, c in enumerate(commands) if "tar -xzf" in c and "-C /logs/agent" in c)
@@ -1313,9 +1561,11 @@ class TestVerify:
         root = tmp_path / "fs"
         agent_logs = root / "logs" / "agent"
         agent_logs.mkdir(parents=True)
-        for folder in ("tests", "logs/verifier"):
-            (root / folder).mkdir(parents=True)
-            (root / folder / "stale").write_text("old")
+        (root / "tests").mkdir(parents=True)
+        (root / "tests" / "stale").write_text("old")
+        (root / "logs" / "verifier").mkdir(parents=True)
+        (root / "logs" / "verifier" / "reward.json").write_text('{"reward": 1}')
+        (root / "logs" / "verifier" / "actions.jsonl").write_text("{}\n")  # an undeclared sidecar input: removed
         (agent_logs / "agent.log").write_text("kept")
         if planted == "dangling_symlink":
             (agent_logs / "trajectory.json").symlink_to(root / "nowhere")
@@ -1328,7 +1578,46 @@ class TestVerify:
         planted_path = agent_logs / "trajectory.json"
         assert not planted_path.exists() and not planted_path.is_symlink()
         assert (agent_logs / "agent.log").read_text() == "kept"
-        assert list((root / "tests").iterdir()) == [] and list((root / "logs" / "verifier").iterdir()) == []
+        assert list((root / "tests").iterdir()) == []
+        assert list((root / "logs" / "verifier").iterdir()) == []
+
+    @pytest.mark.parametrize("planted_as", ["directory", "symlink"])
+    async def test_prepare_keeps_only_the_declared_sidecar_inputs(self, tmp_path, monkeypatch, planted_as):
+        """Round 38 review (P1): the prepare line empties /logs/verifier except the task's declared sidecar inputs
+        (`[verifier].inputs`, from dataset.toml), each kept as a regular file at that name alone, run by a real shell
+        against a temporary root. An agent-planted all-pass results.xml, a reward.json and a subfolder go; a planted
+        directory or link under a declared name goes too."""
+        (tmp_path / "datasets" / "ds").mkdir(parents=True)
+        (tmp_path / "datasets" / "ds" / "dataset.toml").write_text(
+            '[gym.tasks."hello".verifier]\ninputs = ["actions.jsonl", "planner.log"]\n'
+        )
+        _, task, sandbox, response = await self.verified(tmp_path, monkeypatch)
+        assert task.config.verifier.inputs == ["actions.jsonl", "planner.log"] and response.result.reward == 1.0
+        prepare = next(call["command"] for call in sandbox.execs if "-mindepth 1 -delete" in call["command"])
+        assert "find /logs/verifier -mindepth 1 ! \\( \\( -path /logs/verifier/actions.jsonl -o " in prepare
+        assert "-path /logs/verifier/planner.log \\) -type f \\) -delete" in prepare
+        root = tmp_path / "fs"
+        verifier_dir = root / "logs" / "verifier"
+        verifier_dir.mkdir(parents=True)
+        (root / "logs" / "agent").mkdir()
+        (root / "tests").mkdir()
+        (verifier_dir / "actions.jsonl").write_text('{"action": "click"}\n')
+        (verifier_dir / "results.xml").write_text('<testsuite failures="0"/>')
+        (verifier_dir / "reward.json").write_text('{"reward": 1}')
+        (verifier_dir / "sub").mkdir()
+        (verifier_dir / "sub" / "actions.jsonl").write_text("nested, not a top-level input")
+        if planted_as == "directory":
+            (verifier_dir / "planner.log").mkdir()
+            (verifier_dir / "planner.log" / "x").write_text("x")
+        else:
+            (verifier_dir / "planner.log").symlink_to(root / "tests")
+        command = prepare.replace("/tests", str(root / "tests")).replace("/logs", str(root / "logs"))
+
+        subprocess.run(["sh", "-c", command], check=True)
+
+        assert [path.name for path in verifier_dir.iterdir()] == ["actions.jsonl"]
+        assert (verifier_dir / "actions.jsonl").read_text() == '{"action": "click"}\n'
+        assert not (verifier_dir / "planner.log").is_symlink() and (root / "tests").is_dir()
 
     async def test_prepare_runs_as_root_on_a_non_root_image(self, tmp_path, monkeypatch):
         class NonRootSandbox(FakeSandbox):
@@ -1362,20 +1651,43 @@ class TestVerify:
         run = next(call for call in sandbox.execs if "test.sh" in call["command"])
         assert task.config.verifier.user is None and run["user"] == "app"
 
-    async def test_json_reward_with_components(self, tmp_path, monkeypatch):
+    async def test_json_reward_key_makes_the_other_keys_metrics(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"reward": 0.5, "tests_passed": 3})})
         _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
         assert response.result.reward == 0.5
         assert response.result.verifier_rewards == {"reward": 0.5, "tests_passed": 3.0}
+        # `tests_passed` does not sum to the reward, so the row names no components at all (not a null).
+        assert response.result.reward_components is None
+        assert "reward_components" not in response.result.model_dump(mode="json")
 
-    async def test_ambiguous_reward_is_a_terminal_verification_failure(self, tmp_path, monkeypatch):
-        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 1, "b": 0})})
+    async def test_several_keys_without_reward_are_summed_components(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 0.75, "b": 0.25})})
         _, _, sandbox, response = await self.verified(tmp_path, monkeypatch, sandbox)
-        failure = response.failure
-        assert failure.stage == "verification" and failure.terminal
-        assert "several keys" in failure.failure_reason
-        assert failure.partial_response.id == "response"
+        result = response.result
+        assert response.failure is None and result.reward == 1.0 and result.failure_kind is None
+        assert result.reward_components == {"a": 0.75, "b": 0.25}
+        assert result.verifier_rewards == {"a": 0.75, "b": 0.25}
+        dumped = result.model_dump(mode="json")
+        assert sum(dumped["reward_components"].values()) == dumped["reward"]
         assert sandbox.stopped
+
+    async def test_one_key_without_reward_is_its_own_component(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"accuracy": 0.25})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        assert response.result.reward == 0.25 and response.result.reward_components == {"accuracy": 0.25}
+        # reward.txt is a `reward` key.
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, FakeSandbox(verifier_files={"reward.txt": "1"}))
+        assert response.result.reward == 1.0 and response.result.reward_components is None
+
+    async def test_components_that_overflow_are_an_invalid_reward(self, tmp_path, monkeypatch):
+        sandbox = FakeSandbox(verifier_files={"reward.json": json.dumps({"a": 1e308, "b": 1e308})})
+        _, _, _, response = await self.verified(tmp_path, monkeypatch, sandbox)
+        result = response.result
+        assert result.reward == 0.0 and result.mask_sample is False
+        assert (
+            result.failure_kind == "harbor:invalid_reward" and "do not sum to a finite reward" in result.failure_reason
+        )
+        assert result.reward_components is None and result.verifier_return_code == 0
 
     async def test_missing_reward_scores_zero_and_is_measured(self, tmp_path, monkeypatch):
         sandbox = FakeSandbox(
@@ -1588,7 +1900,15 @@ class TestSeparateVerification:
         # diagnostics and the archives are gone once restored.
         assert agent.archives["/logs/artifacts"] in verifier.uploaded_archives
         assert agent.archives["/app/output"] in verifier.uploaded_archives
-        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01"]
+        assert sorted(p.name for p in artifacts.iterdir()) == ["00", "01", "manifest.json"]
+        # The pass is recorded as Harbor's artifact handler records its own: every declared entry, in staging order.
+        manifest = json.loads((artifacts / "manifest.json").read_text())
+        assert [(e["index"], e["source"], e["origin"], e["status"], e["type"]) for e in manifest] == [
+            (0, "/logs/artifacts", "convention", "ok", "directory"),
+            (1, "/app/output/report.json", "task", "ok", "file"),
+            (2, "/var/log/api", "task", "skipped", None),
+        ]
+        assert manifest[1]["destination"] == "artifacts/01/app/output/report.json" and manifest[2]["service"] == "api"
         # A restored directory replaces what the image ships there and is world-writable, as Harbor leaves
         # it, so a verifier that drops privileges can still write scratch files next to the agent's output.
         assert any(
@@ -2106,8 +2426,8 @@ class StubProvider:
 
 
 class TestComposeAndRouting:
-    def compose_server(self, tmp_path, monkeypatch):
-        server, task, _, _ = make_server(tmp_path, monkeypatch)
+    def compose_server(self, tmp_path, monkeypatch, *, skills=False):
+        server, task, _, _ = make_server(tmp_path, monkeypatch, skills=skills)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
         (task.path / "environment" / "docker-compose.yaml").write_text(COMPOSE_YAML)
         (task.path.parent / "compose-images.json").write_text(json.dumps(IMAGE_CONFIGS))
@@ -2123,7 +2443,8 @@ class TestComposeAndRouting:
         verifier = FakeSandbox()
 
         async def start_compose(task, episode_key):
-            documents.append(server._compose_document(task))
+            compose.document = server._compose_document(task)
+            documents.append(compose.document)
             return compose
 
         async def create_verifier(task, *, episode_key=None):
@@ -2210,10 +2531,8 @@ class TestComposeAndRouting:
         recorded images stand in, so the ``build:`` and ``pull_policy: build`` keys that only describe those builds are
         dropped before the Compose adapter, which starts images only, and the sidecar's entrypoint, command and
         ports come from its recorded configuration like any pulled image's."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
-        from nemo_gym.tasks.harbor.task import built_service_images
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, built_service_images, context_digest
+        from nemo_gym.sandbox import AsyncSandboxCompose
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
@@ -2280,9 +2599,8 @@ class TestComposeAndRouting:
         """``load_task`` (once per task, in a thread) hashes ``environment/`` once and carries Harbor's context id
         and the build record on the task; ``_compose_document``, which runs per episode, hashes nothing, whatever
         the folder's size, and still substitutes the recorded images and defines ``COMPOSE_PROJECT_NAME``."""
-        import nemo_gym.tasks.harbor.digest as digest_module
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        import nemo_gym.data.tasks.harbor.digest as digest_module
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "Dockerfile").write_text("FROM ubuntu:24.04\nCOPY . /app\n")
@@ -2347,8 +2665,8 @@ class TestComposeAndRouting:
         """Harbor's own template already builds ``main`` from ``environment/Dockerfile`` with ``context: ${CONTEXT_DIR}``,
         so a task file that only restates that (orca-bench, terminal_bench_aai) changes nothing there. Gym runs the
         Dockerfile without a build in pull and overlay mode, so the section is dropped and the document starts."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
+        from nemo_gym.data.tasks.harbor import check_task_compose_fields, load_compose_document
+        from nemo_gym.sandbox import AsyncSandboxCompose
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, dockerfile=dockerfile)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2371,9 +2689,12 @@ class TestComposeAndRouting:
         """A ``target`` (or ``args``, ``dockerfile_inline``, another ``dockerfile`` or ``context``) would change the image
         Harbor builds; without a build Gym cannot honour it, so the task is an error naming the key, as prepare already
         reported it into ``skipped.json``, instead of starting on the wrong image."""
-        from nemo_gym.tasks.harbor.errors import HarborTaskError
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import (
+            HarborTaskError,
+            ImageConfigError,
+            check_task_compose_fields,
+            load_compose_document,
+        )
 
         server, task, _, _ = make_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
@@ -2399,9 +2720,8 @@ class TestComposeAndRouting:
         invalid value is the task's error, as prepare reports it (review: the key was dropped from every service
         before the field check, by prepare and again here, so the advertised support never saw a task's setting).
         Only ``pull_policy: build`` leaves, with the build it names (``test_built_images_stand_in...``)."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError, check_task_compose_fields, load_compose_document
+        from nemo_gym.sandbox import AsyncSandboxCompose
 
         class PullPolicyStubProvider(NetworkedStubProvider):
             def pull_policy_options(self, policy):
@@ -2454,9 +2774,8 @@ class TestComposeAndRouting:
         adapter and prepare's check normalizes it the same way; only ``pull_policy: build``, the policy naming that
         build, leaves with it (review: ``with_built_images`` dropped every policy of a built service, so with a
         recorded build preparation succeeded and the server and the adapter received no policy)."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.image_configs import check_task_compose_fields, load_compose_document
+        from nemo_gym.data.tasks.harbor import check_task_compose_fields, context_digest, load_compose_document
+        from nemo_gym.sandbox import AsyncSandboxCompose
 
         class PullPolicyStubProvider(NetworkedStubProvider):
             def pull_policy_options(self, policy):
@@ -2541,6 +2860,39 @@ class TestComposeAndRouting:
         )
         return captured
 
+    def test_a_sidecar_without_deploy_resources_is_warned_about_once_per_task(self, tmp_path, monkeypatch, caplog):
+        """G7 round 24, attempts 6 and 7: a Compose sidecar without `deploy.resources` gets the provider's default
+        sandbox size (`_sidecar_spec` hands the adapter no task resources), where Harbor's `docker compose` gives it
+        the host's, and the WebShop sidecar died at start for it. The default is unchanged; the seed now says, once
+        per task, which sidecars run at it and where a size goes, and a sized sidecar is not named."""
+        server, task, _, _ = make_server(tmp_path, monkeypatch)
+        (task.path / "environment" / "docker-compose.yaml").write_text(
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  api:\n    image: org/api:1\n    expose: ['8080']\n"
+            "  kafka:\n    image: org/kafka:1\n    deploy:\n      resources:\n        limits:\n          memory: 2g\n"
+            "  cache:\n    image: org/api:1\n    cpus: 1\n"
+        )
+        for image in ("org/api:1", "org/kafka:1"):
+            write_image_config(task.path.parent, image, **IMAGE_CONFIGS[image]["config"])
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        captured = self.capture_compose_specs(monkeypatch)
+
+        with caplog.at_level("WARNING", logger="environment_servers.harbor.sandboxes"):
+            asyncio.run(server._create_compose(task, "r1"))
+            asyncio.run(server._create_compose(task, "r2"))
+
+        warnings = [r.getMessage() for r in caplog.records if "deploy.resources" in r.getMessage()]
+        assert len(warnings) == 1
+        assert warnings[0].startswith("hello: Compose service(s) api declare no deploy.resources")
+        assert "sandbox provider's default size" in warnings[0] and "deploy.resources.limits" in warnings[0]
+        assert "kafka" not in warnings[0] and "cache" not in warnings[0]
+        # The sizes themselves are the adapter's to apply from the document: the specs still carry no task resources.
+        from nemo_gym.sandbox import SandboxResources
+
+        assert captured["specs"]["api"].resources == SandboxResources()
+        assert captured["specs"]["kafka"].resources == SandboxResources()
+
     def test_main_env_layers_image_env_under_the_compose_file_under_the_host_resolved_task_env(
         self, tmp_path, monkeypatch
     ):
@@ -2548,7 +2900,7 @@ class TestComposeAndRouting:
         the task) < the task's Compose file < the host-resolved ``[environment].env`` (its env override file). A key
         the file sets beats the Dockerfile's, a ``${FOO:-}`` that interpolated to empty at prepare does not hide the
         host value, and a sidecar keeps its file's environment."""
-        from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+        from nemo_gym.sandbox import AsyncSandboxCompose
 
         server, task, _, _ = make_server(
             tmp_path,
@@ -2587,8 +2939,7 @@ class TestComposeAndRouting:
     def test_a_built_images_recorded_env_sits_under_the_compose_file_too(self, tmp_path, monkeypatch):
         """Build mode: the recorded built image's whole ``Env`` is the image layer, under the file and under the
         host-resolved ``[environment].env``; a key only the image names survives."""
-        from nemo_gym.tasks.harbor.digest import context_digest
-        from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE
+        from nemo_gym.data.tasks.harbor import BUILT_IMAGES_FILE, context_digest
 
         server, task, _, _ = make_server(
             tmp_path, monkeypatch, toml=TASK_TOML + '\n[environment.env]\nTOK = "${TOK:-fromtoml}"\n'
@@ -2629,7 +2980,7 @@ class TestComposeAndRouting:
         ``[environment].env``; prepare could only use the dataset-time default. At seed the sidecars' ``environment``
         is read again with the host values (tau3 / hil-bench shape); a literal entry and the structure are untouched,
         and without the variable the default still applies."""
-        from nemo_gym.tasks.harbor.image_configs import load_compose_document
+        from nemo_gym.data.tasks.harbor import load_compose_document
 
         server, task, _, _ = make_server(
             tmp_path,
@@ -2674,7 +3025,7 @@ class TestComposeAndRouting:
         """The compose adapter's bootstrap execs run through the facade default before any overlay RUN line has
         created the task's user, so an overlay task starts with no default user and gets it afterwards."""
         import environment_servers.harbor.sandboxes as sandboxes_module
-        from nemo_gym.sandbox.providers.base import SandboxHandle
+        from nemo_gym.sandbox import SandboxHandle
 
         class DockerLikeProvider:
             """exec behaves like `docker exec --user <name>`: it fails until the user exists in the container."""
@@ -2758,7 +3109,7 @@ class TestComposeAndRouting:
         setup inside the start: RUN lines, then the uploads, then the command (Harbor's build, then `compose up`
         with the mounts). A failing RUN line is still the seed's 422 reason, and leaves no names behind."""
         import environment_servers.harbor.sandboxes as sandboxes_module
-        from nemo_gym.sandbox.providers.base import SandboxHandle
+        from nemo_gym.sandbox import SandboxHandle
 
         class RecordingProvider:
             name = "fake"
@@ -2990,6 +3341,56 @@ class TestComposeAndRouting:
         # Everything above happened before the harness got its session.
         seed = server.server_client.seed_bodies()[0]
         assert seed["sandbox_access"]["connection"]["provider_config_ref"] == "sandbox"
+
+    async def test_a_groups_skills_reach_main_after_the_group_started_and_before_the_harness(
+        self, tmp_path, monkeypatch
+    ):
+        """The adapter starts main, runs its command and waits for its image healthcheck before the seed uploads
+        the task's skills, so in a Compose group they reach the harness session, not main's own startup."""
+        server, task, compose, _, _ = self.compose_server(tmp_path, monkeypatch, skills=True)
+        main = compose.services["main"]
+        start_compose = server._create_compose
+        uploads_at_group_start: list[int] = []
+
+        async def start_compose_recording_uploads(*args, **kwargs):
+            group = await start_compose(*args, **kwargs)
+            uploads_at_group_start.append(len(TestTaskSkills.skills_uploads(main, "/app/.skills")))
+            return group
+
+        monkeypatch.setattr(server, "_create_compose", start_compose_recording_uploads)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert uploads_at_group_start == [0]
+        (upload,) = TestTaskSkills.skills_uploads(main, "/app/.skills")
+        assert upload["user"] == "root"
+        context_write = next(c for c in main.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert main.execs.index(upload) < main.execs.index(context_write)
+        assert len(server.server_client.seed_bodies()) == 1
+
+    @pytest.mark.parametrize("compose_user,expected_user", [("nobody", "nobody"), ("1000", 1000)])
+    async def test_task_healthcheck_uses_own_compose_user_without_job_overlay(
+        self, tmp_path, monkeypatch, compose_user, expected_user
+    ):
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
+        path = task.path / "environment" / "docker-compose.yaml"
+        document = yaml.safe_load(path.read_text())
+        document["services"]["main"]["user"] = compose_user
+        path.write_text(yaml.safe_dump(document))
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        assert task.needs_compose and server.config.compose_overlay is None
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert documents[0]["services"]["main"]["user"] == compose_user
+        checks = [record for record in compose.services["main"].execs if record["command"] == "test -f /tmp/ready"]
+        assert len(checks) == 3
+        assert all(record["user"] == expected_user for record in checks)
+        assert response.result.reward == 1.0
+        assert compose.stopped and not server._sandboxes
 
     async def test_separate_verifier_collects_from_sidecars_and_stops_the_group(self, tmp_path, monkeypatch):
         server, task, compose, _, verifier = self.compose_server(tmp_path, monkeypatch)
@@ -3260,7 +3661,7 @@ class TestComposeAndRouting:
         assert gpu.closed == ["1"] and sorted(cpu.closed) == ["1", "2"]
 
     def test_platform_at_seed_is_read_from_the_provider_options_as_at_prepare(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError
 
         server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
 
@@ -3289,26 +3690,35 @@ class TestComposeAndRouting:
         with pytest.raises(ImageConfigError, match="does not match the deployment platform linux/arm64"):
             server._compose_document(declaring("linux/amd64"))
 
-    def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.compose_fields import ComposeFieldError
-        from nemo_gym.tasks.harbor.image_configs import record_compose_images
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+    async def test_extra_hosts_on_a_non_root_sidecar_fail_prepare_and_seed_for_the_same_reason(
+        self, tmp_path, monkeypatch
+    ):
+        from nemo_gym.data.tasks.harbor import ImageConfigError, record_compose_images
 
-        server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
+        server, task, compose, documents, _ = self.compose_server(tmp_path, monkeypatch)
         (task.path / "environment" / "docker-compose.yaml").write_text(
             COMPOSE_YAML + "    extra_hosts: ['licence.example:198.51.100.7']\n"
         )
         task = load_task(task.path)
         server.config.tasksets["ds"].tasks["hello"] = task.digest
         reason = (
-            "service 'kafka' extra_hosts cannot be applied without host injection: the image runs as user 'appuser'"
+            "hello: environment/docker-compose.yaml: service 'kafka' extra_hosts cannot be applied without host "
+            "injection: the image runs as user 'appuser', so the sidecar takes no host entries"
         )
         # Prepare: the recorded configurations say kafka runs as appuser, so the task fails there, naming the service.
-        with pytest.raises(ImageConfigError, match="hello: environment/docker-compose.yaml: " + reason):
+        with pytest.raises(ImageConfigError) as excinfo:
             record_compose_images([task], task.path.parent, sandbox_provider="opensandbox")
-        # Seed: the server decides the host opt-out with the same predicate and refuses the same document.
-        with pytest.raises(ComposeFieldError, match=reason):
+        assert str(excinfo.value) == reason
+        # Seed: the server decides the host opt-out with the same predicate and refuses the same document with the
+        # same words, in its precheck: a terminal 422 before any group, not a failure inside the start retried per
+        # episode (the resolution path raises the same, as the last line).
+        with pytest.raises(ImageConfigError) as excinfo:
             server._compose_document(task)
+        assert str(excinfo.value) == reason
+        response = await run_episode(server, task)
+        assert response.result is None and response.failure.stage == "seed" and response.failure.terminal
+        assert response.failure.failure_reason == f"Compose group of task 'hello': {reason}"
+        assert documents == [] and not compose.stopped and not server._sandboxes
         # A root kafka image takes the entries on both paths.
         configs = {**IMAGE_CONFIGS, "org/kafka:1": {**IMAGE_CONFIGS["org/kafka:1"], "config": {"Cmd": ["kafka"]}}}
         (task.path.parent / "compose-images.json").write_text(json.dumps(configs))
@@ -3317,7 +3727,7 @@ class TestComposeAndRouting:
         assert kafka["extra_hosts"] == {"licence.example": "198.51.100.7"} and "x-sandbox" not in kafka
 
     def test_a_gpu_sidecars_options_are_checked_against_the_gpu_block_at_seed(self, tmp_path, monkeypatch):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError
 
         server, task = self.gpu_sidecar_server(tmp_path, monkeypatch, extra="    tmpfs: [/run]\n")
         # Docker task block, OpenSandbox GPU block: kafka runs on the GPU block, which applies no tmpfs.
@@ -3338,7 +3748,7 @@ class TestComposeAndRouting:
     def test_compose_document_normalizes_the_example_fields_and_names_what_the_provider_cannot_apply(
         self, tmp_path, monkeypatch
     ):
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
+        from nemo_gym.data.tasks.harbor import ImageConfigError
 
         server, task, _, _, _ = self.compose_server(tmp_path, monkeypatch)
         # alibaba-ctf style: restart always and a custom network, which need nothing else.
@@ -3618,6 +4028,7 @@ def test_server_config_holds_only_deployment_settings():
     own = set(HarborEnvironmentServerConfig.model_fields) - set(BaseEnvironmentServerConfig.model_fields)
     assert own == {
         "agent_server",
+        "agent_outcome_policy",
         "tasksets",
         "sandbox_provider",
         "sandbox_ready_timeout_s",
@@ -3632,11 +4043,172 @@ def test_server_config_holds_only_deployment_settings():
         "secrets",
         "enforce_task_timeouts",
         "harness_setup_allowance_s",
+        "step_setup_timeout_s",
         "image_pull_retries",
         "separate_verifier_for_artifacts",
+        "task_mcp_grants",
+        "turn_sessions",
+        "compose_variables",
+        "compose_overlay",
     }
     source = inspect.getsource(HarborEnvironmentServerConfig).lower()
     assert not any(word in source for word in ("terminal", "tb4", "tb2", "swe", "nextjs", "hello-world"))
+
+
+class TestTaskSkills:
+    """The seed uploads a task's ``environment/skills/`` to its ``skills_dir`` before the task's entrypoint runs.
+
+    Harbor expects the image to hold ``skills_dir`` already; a task that runs a prebuilt image ships its skills in
+    the build context only (SkillsBench), so the server puts them where the task says, for every harness, unless
+    the image already filled that folder.
+    """
+
+    SKILLS_TOML = TASK_TOML.replace(
+        "storage_mb = 10240\n", 'storage_mb = 10240\nskills_dir = "/root/.agents/skills"\n'
+    )
+
+    @staticmethod
+    def skills_uploads(sandbox, target: str = "/root/.agents/skills") -> list[dict]:
+        return [c for c in sandbox.execs if "tar -xzf" in c["command"] and f"-C {target}" in c["command"]]
+
+    async def test_skills_reach_skills_dir_before_anything_of_the_task_runs(self, tmp_path, monkeypatch):
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=self.SKILLS_TOML, skills=True)
+        uploads_at_seed: list[int] = []
+        uploads_at_entrypoint: list[int] = []
+        start_entrypoint = server._start_entrypoint
+
+        async def start_entrypoint_recording_uploads(*args, **kwargs):
+            uploads_at_entrypoint.append(len(self.skills_uploads(sandbox)))
+            return await start_entrypoint(*args, **kwargs)
+
+        monkeypatch.setattr(server, "_start_entrypoint", start_entrypoint_recording_uploads)
+        post = type(server.server_client).post
+
+        async def post_recording_uploads(client, server_name, url_path, **kwargs):
+            if url_path == "/v1/agent_sessions":
+                uploads_at_seed.append(len(self.skills_uploads(sandbox)))
+            return await post(client, server_name, url_path, **kwargs)
+
+        monkeypatch.setattr(type(server.server_client), "post", post_recording_uploads)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        # One archive, extracted as root into skills_dir, its skill folders opened to every user, before the task's
+        # entrypoint (and so its healthcheck) and the agent seed, as an image that copied them in would hold them.
+        (upload,) = self.skills_uploads(sandbox)
+        assert upload["user"] == "root"
+        assert "chmod" not in upload["command"]
+        (opened,) = [c for c in sandbox.execs if "chmod -R a+rX" in c["command"]]
+        assert opened["user"] == "root"
+        assert "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; true" in opened["command"]
+        assert uploads_at_entrypoint == [1]
+        assert uploads_at_seed == [1]
+        # The skill folder travels whole, without what the task digest ignores.
+        for data in sandbox.uploaded_archives:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
+                members = {m.name for m in tar.getmembers()}
+                if "pdf/SKILL.md" in members:
+                    names = members
+        assert names == {"pdf", "pdf/SKILL.md", "pdf/scripts", "pdf/scripts/extract.py"}
+        assert uploaded_file(sandbox, "SKILL.md") == [SKILL_MD.encode()]
+
+    async def test_a_relative_skills_dir_is_read_from_the_working_directory(self, tmp_path, monkeypatch):
+        toml = TASK_TOML.replace("storage_mb = 10240\n", 'storage_mb = 10240\nskills_dir = ".skills"\n')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(self.skills_uploads(sandbox, "/app/.skills")) == 1
+        # The harness reads the path the skills went to, absolute as Harbor asks for it.
+        context_write = next(c for c in sandbox.execs if "/tmp/.nemo-gym/task.json" in c["command"])
+        assert '"skills_dir": "/app/.skills"' in context_write["command"]
+
+    @pytest.mark.parametrize(
+        "probe,uploaded,opened",
+        [
+            pytest.param(1, False, None, id="filled-by-the-image"),
+            pytest.param(0, True, "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; true", id="empty"),
+            pytest.param(
+                2,
+                True,
+                "chmod -R a+rX -- /root/.agents/skills/pdf 2>/dev/null; chmod a+rX -- /root/.agents/skills 2>/dev/null; true",
+                id="missing",
+            ),
+        ],
+    )
+    async def test_an_image_that_filled_skills_dir_keeps_it_and_only_a_new_folder_is_opened(
+        self, tmp_path, monkeypatch, probe, uploaded, opened
+    ):
+        class Probed(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "ls -A /root/.agents/skills" in command:
+                    self.execs.append({"command": command, "cwd": cwd, "env": env, "user": user, "seen": None})
+                    return SandboxExecResult(stdout="", stderr="", return_code=probe)
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = Probed()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox, toml=self.SKILLS_TOML, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert len(self.skills_uploads(sandbox)) == int(uploaded)
+        assert [c["command"] for c in sandbox.execs if "chmod -R a+rX" in c["command"]] == ([opened] if opened else [])
+        # The harness is told where the skills are either way.
+        assert any("/tmp/.nemo-gym/task.json" in c["command"] for c in sandbox.execs)
+
+    @pytest.mark.parametrize("skills_dir", ["/", ".", "./", "/app", "/app/skills/..", "~/.skills", "$HOME/skills"])
+    async def test_a_skills_dir_the_upload_would_open_too_widely_is_refused(self, tmp_path, monkeypatch, skills_dir):
+        """The upload opens what it writes to every user: ``/`` or the working directory would open far more than
+        the skills, and the server cannot place a path only a shell resolves."""
+        toml = TASK_TOML.replace("storage_mb = 10240\n", f'storage_mb = 10240\nskills_dir = "{skills_dir}"\n')
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=toml, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and response.failure.terminal
+        assert f"skills_dir {skills_dir!r} names no folder" in response.failure.failure_reason
+        assert uploaded_file(sandbox, "SKILL.md") == [] and server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
+
+    async def test_a_task_without_skills_dir_uploads_nothing(self, tmp_path, monkeypatch):
+        """Skills in the build context alone are the Dockerfile's to copy; nothing names a place for them."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert uploaded_file(sandbox, "SKILL.md") == []
+
+    async def test_a_skills_dir_the_image_provides_is_left_as_built(self, tmp_path, monkeypatch):
+        """Without ``environment/skills/`` there is nothing to upload; the harness still reads task.json."""
+        server, task, sandbox, _ = make_server(tmp_path, monkeypatch, toml=self.SKILLS_TOML)
+
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert self.skills_uploads(sandbox) == []
+        assert any("/tmp/.nemo-gym/task.json" in c["command"] for c in sandbox.execs)
+
+    async def test_a_sandbox_that_cannot_take_the_skills_is_a_retryable_seed_failure(self, tmp_path, monkeypatch):
+        class RefusesSkills(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "-C /root/.agents/skills" in command:
+                    self.execs.append({"command": command, "cwd": cwd, "env": env, "user": user, "seen": None})
+                    return _fails("tar: /root/.agents/skills: Cannot mkdir: No space left on device")
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        sandbox = RefusesSkills()
+        server, task, _, _ = make_server(tmp_path, monkeypatch, sandbox, toml=self.SKILLS_TOML, skills=True)
+
+        response = await run_episode(server, task)
+
+        assert response.failure.stage == "seed" and not response.failure.terminal
+        assert "No space left on device" in response.failure.failure_reason
+        assert server.server_client.paths() == []
+        assert sandbox.stopped and not server._sandboxes
 
 
 class TestSeedGuards:
@@ -4027,7 +4599,7 @@ class TestGeneralization:
         assert "sk-from-the-process" not in str(sandbox.execs)
 
     async def test_failed_trajectory_export_masks_the_turn_before_test_sh(self, tmp_path, monkeypatch):
-        from nemo_gym.atif_export import AtifExportError
+        from nemo_gym.trajectory import AtifExportError
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch)
 
@@ -4219,7 +4791,7 @@ class TestGeneralization:
 
     def retrying_server(self, tmp_path, monkeypatch, failures):
         """A server whose real `_create_sandbox` runs against a provider that fails `failures` starts in turn."""
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, sandbox, _ = make_server(tmp_path, monkeypatch, image_pull_retries=2)
         monkeypatch.setattr(server, "_create_sandbox", HarborEnvironmentServer._create_sandbox.__get__(server))
@@ -4239,7 +4811,8 @@ class TestGeneralization:
             async def start(self, spec):
                 starts.append(spec.image)
                 if len(starts) <= len(failures):
-                    raise SandboxCreateError(failures[len(starts) - 1])
+                    failure = failures[len(starts) - 1]
+                    raise failure if isinstance(failure, BaseException) else SandboxCreateError(failure)
 
             def __getattr__(self, name):
                 return getattr(sandbox, name)
@@ -4262,6 +4835,30 @@ class TestGeneralization:
         assert "ErrImagePull" in response.failure.failure_reason and len(starts) == 3
         assert not server._sandboxes
 
+    @pytest.mark.parametrize("message, failures", [("ErrImagePull", 1), ("ErrImagePull", 3), ("quota exceeded", 1)])
+    async def test_shared_sandbox_failure_preserves_pull_retry_policy(self, tmp_path, monkeypatch, message, failures):
+        cause = RuntimeError(message)
+        error = NgFailureEvent(
+            boundary="sandbox",
+            failure_kind="provider_request_failed",
+            operation="create",
+            failure_reason="Sandbox create failed",
+        )
+        error.__cause__ = cause
+        server, task, sandbox, starts = self.retrying_server(tmp_path, monkeypatch, [error] * failures)
+        with RequestFailureLog.capture() as log:
+            response = await run_episode(server, task)
+        if message == "ErrImagePull" and failures == 1:
+            assert response.failure is None, response.failure
+            assert response.result.reward == 1.0
+            assert starts == ["ubuntu:24.04"] * 2
+            assert log.report.events[error.event_id].foreign_error.exception_type == "RuntimeError"
+        else:
+            assert response.failure is not None
+            assert len(starts) == failures
+        assert error.__cause__ is cause
+        assert not server._sandboxes
+
     async def test_seed_time_is_not_charged_against_the_task_deadline(self, tmp_path, monkeypatch):
         """A start that recovered on a pull retry begins the task with its whole budget (review fix).
 
@@ -4269,7 +4866,7 @@ class TestGeneralization:
         before the sandbox was ready would have expired, while the post-seed path keeps its full budget in real
         time. The second episode jumps the clock during the agent's turn instead and does hit the deadline.
         """
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         toml = TASK_TOML.replace("timeout_sec = 300.0", "timeout_sec = 10.0").replace(
             "timeout_sec = 120.0", "timeout_sec = 10.0"
@@ -4345,7 +4942,7 @@ class TestGeneralization:
         assert len(starts) == 1 and not server._sandboxes
 
     async def test_compose_group_pull_failures_are_retried_in_the_server(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=2)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
@@ -4366,6 +4963,7 @@ class TestGeneralization:
                 groups.append(self)
                 self.provider_config = provider_config
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = False
 
             async def start(self):
@@ -4394,7 +4992,7 @@ class TestGeneralization:
         assert [g.provider_config for g in groups] == [{"opensandbox": {}}] * 2
 
     async def test_exhausted_compose_pull_retries_are_a_retryable_seed_failure(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
@@ -4430,7 +5028,7 @@ class TestGeneralization:
 
     def test_pull_failure_is_found_inside_an_exception_group(self):
         """A Compose group whose cleanup failed too raises an ExceptionGroup; the pull failure is still found."""
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         pull = SandboxCreateError("create failed: ImagePullBackOff for org/kafka:1")
         cleanup = RuntimeError("Shared volume cleanup failed: no space left")
@@ -4448,7 +5046,7 @@ class TestGeneralization:
         assert not _is_image_pull_failure(ExceptionGroup("x", [RuntimeError("quota exceeded")]))
 
     async def test_compose_pull_failure_whose_cleanup_also_failed_is_retried(self, tmp_path, monkeypatch):
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
         (task.path / "task.toml").write_text(COMPOSE_TOML)
@@ -4468,6 +5066,7 @@ class TestGeneralization:
             ):
                 groups.append(self)
                 self.services: dict = {}
+                self.document = yaml.safe_load(path.read_text())
                 self.stopped = 0
 
             async def start(self):
@@ -4499,7 +5098,7 @@ class TestGeneralization:
     def verifier_retrying_server(self, tmp_path, monkeypatch, failures):
         """A separate-mode server whose real `_create_verifier_sandbox` runs against a provider that fails
         `failures` verifier starts in turn; the agent's sandbox is the usual fake."""
-        from nemo_gym.sandbox.providers.base import SandboxCreateError
+        from nemo_gym.sandbox import SandboxCreateError
 
         agent = AgentSandbox()
         server, task, _, _ = make_server(tmp_path, monkeypatch, agent, image_pull_retries=2)
@@ -4699,3 +5298,214 @@ class TestGeneralization:
             and escaped.failure.terminal
             and "invalid path" in escaped.failure.failure_reason
         )
+
+
+class TestVerifierNetwork:
+    """``[verifier].network_mode`` is the separate verifier sandbox's egress policy, applied when it is created.
+
+    OpenSandbox cannot switch a running sandbox from public to restricted (its egress API only patches rules
+    under the ``defaultAction`` the sandbox was created with), so the agent's sandbox stays as it is and the
+    phase policy shapes the verifier's own sandbox; any provider that cannot enforce it is refused at seed.
+    """
+
+    NO_NETWORK_TOML = SEPARATE_TOML.replace("[verifier]\n", '[verifier]\nnetwork_mode = "no-network"\n')
+    ALLOWLIST_TOML = SEPARATE_TOML.replace(
+        "[verifier]\n",
+        '[verifier]\nnetwork_mode = "allowlist"\nallowed_hosts = ["PyPI.org", "*.nvidia.com", "pypi.org", "10.0.0.7"]\n',
+    )
+
+    def prepared(self, tmp_path, monkeypatch, *, toml, provider="opensandbox", **config):
+        agent = AgentSandbox()
+        server, task, _, created = make_server(tmp_path, monkeypatch, agent, **config)
+        (task.path / "task.toml").write_text(toml)
+        task = load_task(task.path)
+        server.config.tasksets["ds"].tasks["hello"] = task.digest
+        monkeypatch.setattr(
+            "environment_servers.harbor.sandboxes.get_global_config_dict", lambda: {"sandbox": {provider: {}}}
+        )
+        verifier = FakeSandbox()
+        specs: list[SandboxSpec] = []
+
+        async def start_with_pull_retries(task, *, key, what, make, start):
+            # The real `_create_verifier_sandbox` built the spec; it reaches the provider through `start`.
+            class Starter:
+                async def start(self, spec):
+                    specs.append(spec)
+
+            assert agent.stopped, "the agent sandbox must be stopped before the verifier is created"
+            await start(Starter())
+            server._sandboxes[key] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_start_with_pull_retries", start_with_pull_retries)
+        return server, task, agent, verifier, specs, created
+
+    async def test_no_network_verifier_is_created_under_a_deny_all_policy(self, tmp_path, monkeypatch):
+        server, task, agent, verifier, specs, _ = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        response = await run_episode(server, task)
+        result = response.result
+        assert result is not None, response.failure
+        assert (result.reward, result.verifier_mode, result.verifier_network) == (1.0, "separate", "no-network")
+        (spec,) = specs
+        assert spec.image == "org/verifier:1"
+        assert spec.provider_options == {"network_policy": {"defaultAction": "deny", "egress": []}}
+        # The agent's own sandbox is created as before: public, with the deployment's options only.
+        assert "network_policy" not in server._sandbox_spec(task, "/app").provider_options
+        assert verifier.stopped and agent.stopped
+
+    async def test_allowlist_hosts_become_allow_rules_in_order_without_repeats(self, tmp_path, monkeypatch):
+        server, task, _, _, specs, _ = self.prepared(tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML)
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "allowlist"
+        assert specs[0].provider_options["network_policy"] == {
+            "defaultAction": "deny",
+            "egress": [
+                {"action": "allow", "target": "pypi.org"},
+                {"action": "allow", "target": "*.nvidia.com"},
+                {"action": "allow", "target": "10.0.0.7"},
+            ],
+        }
+
+    @pytest.mark.parametrize(
+        "deny",
+        [
+            {"defaultAction": "deny", "egress": [{"action": "allow", "target": "mirror.internal"}]},
+            # OpenSandbox reads a policy that names no defaultAction as deny.
+            {"egress": [{"action": "allow", "target": "mirror.internal"}]},
+            # Even a deployment that already allows every host the task names: the rule has no host matching.
+            {
+                "defaultAction": "deny",
+                "egress": [{"action": "allow", "target": t} for t in ("pypi.org", "*.nvidia.com", "10.0.0.7")],
+            },
+        ],
+        ids=["explicit-deny", "implicit-deny", "hosts-already-allowed"],
+    )
+    async def test_an_allowlist_cannot_widen_a_deny_by_default_deployment(self, tmp_path, monkeypatch, deny):
+        """The task's policy replaces the deployment's for the verifier sandbox, so under a deny-by-default
+        deployment a task allowlist would open hosts the operator closed; refused at seed, before any sandbox,
+        naming the hosts and the one remedy (an allow-by-default deployment), rather than intersected: there is
+        no host matching to get subtly wrong, so a deployment that happens to allow the same hosts is refused too."""
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "[verifier] network policy" in failure.failure_reason
+        assert "allowed_hosts pypi.org, *.nvidia.com, 10.0.0.7 would widen this deployment's deny-by-default" in (
+            failure.failure_reason
+        )
+        assert "run the task on an allow-by-default deployment" in failure.failure_reason
+        assert created == [] and specs == []
+        # The deployment's options are not mutated.
+        assert server.config.sandbox_provider_options["network_policy"] == deny
+
+    async def test_an_empty_allowlist_is_no_network_and_passes_under_a_deny_by_default_deployment(
+        self, tmp_path, monkeypatch
+    ):
+        toml = self.ALLOWLIST_TOML.replace('["PyPI.org", "*.nvidia.com", "pypi.org", "10.0.0.7"]', "[]")
+        assert "allowed_hosts = []" in toml, toml
+        deny = {"defaultAction": "deny", "egress": []}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=toml, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
+    async def test_an_empty_network_policy_is_deny_all_and_refuses_an_allowlist_but_not_no_network(
+        self, tmp_path, monkeypatch
+    ):
+        """Review (round 36): `network_policy: {}` is deny-all in the 0.1.15 SDK (no `defaultAction` reads as deny,
+        no rules), so it is a present deny-by-default policy, not an absent one: a task allowlist is refused with the
+        same message, and `no-network` only narrows it and passes."""
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, sandbox_provider_options={"network_policy": {}}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "allowed_hosts pypi.org, *.nvidia.com, 10.0.0.7 would widen this deployment's deny-by-default" in (
+            failure.failure_reason
+        )
+        assert created == [] and specs == []
+        assert server.config.sandbox_provider_options["network_policy"] == {}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path / "no-network",
+            monkeypatch,
+            toml=self.NO_NETWORK_TOML,
+            sandbox_provider_options={"network_policy": {}},
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "no-network"
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
+    async def test_a_network_policy_that_is_not_a_mapping_is_refused_at_seed(self, tmp_path, monkeypatch):
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.ALLOWLIST_TOML, sandbox_provider_options={"network_policy": "deny"}
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "sandbox_provider_options.network_policy must be a mapping, got str" in failure.failure_reason
+        assert created == [] and specs == []
+
+    async def test_no_network_only_narrows_a_deny_by_default_deployment_and_passes(self, tmp_path, monkeypatch):
+        deny = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "mirror.internal"}]}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, sandbox_provider_options={"network_policy": deny}
+        )
+        response = await run_episode(server, task)
+        assert response.result is not None, response.failure
+        assert response.result.verifier_network == "no-network"
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+
+    async def test_the_phase_policy_replaces_the_deployments_for_the_verifier_only(self, tmp_path, monkeypatch):
+        """Under an allow-by-default deployment (or none) the task's policy replaces the deployment's for the
+        verifier sandbox alone; a deny-by-default deployment admits only a narrowing policy (the tests above)."""
+        baseline = {"defaultAction": "allow", "egress": [{"action": "deny", "target": "evil.example"}]}
+        server, task, _, _, specs, _ = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, sandbox_provider_options={"network_policy": baseline}
+        )
+        assert (await run_episode(server, task)).result is not None
+        assert server._sandbox_spec(task, "/app").provider_options["network_policy"] == baseline
+        assert specs[0].provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
+        # The deployment's options are not mutated.
+        assert server.config.sandbox_provider_options["network_policy"] == baseline
+
+    @pytest.mark.parametrize("provider", ["docker", "daytona"])
+    async def test_providers_without_an_egress_policy_are_refused_at_seed(self, tmp_path, monkeypatch, provider):
+        server, task, _, _, specs, created = self.prepared(
+            tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML, provider=provider
+        )
+        response = await run_episode(server, task)
+        failure = response.failure
+        assert response.result is None and failure.stage == "seed" and failure.terminal
+        assert "[verifier] network policy" in failure.failure_reason
+        assert "requires the OpenSandbox network-policy provider" in failure.failure_reason
+        # Refused before anything was provisioned: no agent sandbox, no verifier.
+        assert created == [] and specs == []
+
+    async def test_hosts_the_policy_cannot_express_are_refused_at_seed(self, tmp_path, monkeypatch):
+        toml = self.ALLOWLIST_TOML.replace('"10.0.0.7"', '"10.0.0.0/8"')
+        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=toml)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal and created == []
+        assert "CIDR ranges are not supported" in response.failure.failure_reason
+
+    async def test_a_restricted_verifier_in_the_agents_sandbox_is_refused_at_seed(self, tmp_path, monkeypatch):
+        # The loader admits the policy for separate-mode tasks only; the seed keeps the invariant for a task
+        # object that did not come from it (here: separate mode switched off under the server).
+        server, task, _, _, _, created = self.prepared(tmp_path, monkeypatch, toml=self.NO_NETWORK_TOML)
+        monkeypatch.setattr(server, "_separate_verifier", lambda task: False)
+        response = await run_episode(server, task)
+        assert response.failure.stage == "seed" and response.failure.terminal and created == []
+        assert "network policy cannot be changed after it started" in response.failure.failure_reason
+
+    def test_public_verifier_phase_adds_no_policy(self, tmp_path, monkeypatch):
+        server, task, _, _, _, _ = self.prepared(tmp_path, monkeypatch, toml=SEPARATE_TOML)
+        assert server._verifier_network_policy(task) is None
+        spec = server._sandbox_spec(task, None, image="org/verifier:1", role="verifier", network_policy=None)
+        assert "network_policy" not in spec.provider_options

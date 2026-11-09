@@ -15,13 +15,16 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from omegaconf import OmegaConf
+from pydantic import ValidationError
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, OutcomeAction, agent_outcome_policy
+from nemo_gym.cli.env import validate_server_configs
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import AGENT_INVALID_OUTPUT, MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
@@ -58,6 +61,33 @@ def _make_config(**fields) -> StirrupAgentWrapperConfig:
 def test_removed_options_are_rejected(option):
     with pytest.raises(ValueError, match=rf"removed options that are no longer supported: `{option}`"):
         _make_config(**{option: "x"})
+
+
+def test_removed_options_are_each_located_at_their_own_key():
+    with pytest.raises(ValidationError) as error:
+        _make_config(judge_only=False, task="t")
+    assert [(detail["loc"], detail["type"]) for detail in error.value.errors()] == [
+        (("judge_only",), "removed_option"),
+        (("task",), "removed_option"),
+    ]
+
+
+def test_validate_server_configs_reports_a_removed_option_at_its_full_path():
+    block = {
+        "entrypoint": "app.py",
+        "host": "0.0.0.0",
+        "port": 8080,
+        "model_server": {"type": "responses_api_models", "name": "policy_model"},
+        "judge_only": False,
+    }
+    config = OmegaConf.create({"gdpval_agent": {"responses_api_agents": {"stirrup_agent": block}}})
+    [problem] = validate_server_configs(config, ["responses_api_agents"])
+    assert (problem.path, problem.config_class, problem.value) == (
+        "gdpval_agent.responses_api_agents.stirrup_agent.judge_only",
+        "StirrupAgentWrapperConfig",
+        False,
+    )
+    assert "removed options that are no longer supported: `judge_only`" in problem.message
 
 
 def _report(**fields) -> dict:
@@ -236,12 +266,15 @@ class TestApp:
 
         assert (response.status, response.usage) == ("completed", None)
         assert "stop_reason" not in response.metadata
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
 
     @pytest.mark.asyncio
-    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self) -> None:
+    @pytest.mark.parametrize("status", [400, 413, 422])
+    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self, status) -> None:
         report = _report(
             stop_reason="model_error",
-            model_error="Error code: 400 - rejected",
+            model_error="rejected",
+            model_error_status=status,
             observations={"status": "failed", "model_response_ids": []},
         )
 
@@ -250,11 +283,34 @@ class TestApp:
         )
 
         assert response.status == "failed"
-        assert (response.error.code, response.error.message) == ("server_error", "Error code: 400 - rejected")
+        assert (response.error.code, response.error.message) == ("server_error", "rejected")
         assert response.metadata["stop_reason"] == "model_error"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=MODEL_REQUEST_ERROR, status_code=status
+        )
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
+
+    @pytest.mark.asyncio
+    async def test_a_run_ended_by_unusable_compaction_summaries_is_the_models_invalid_output(self) -> None:
+        report = _report(
+            stop_reason="compaction_failed",
+            invalid_output="Compaction summarizer produced no usable text after 3 attempts",
+            observations={"status": "failed", "model_response_ids": ["chatcmpl-1"]},
+        )
+
+        response, _, _ = await _run_episode(
+            _make_config(), NeMoGymResponseCreateParamsNonStreaming(input="x", model="policy"), report
+        )
+
+        assert response.status == "failed"
+        assert response.error is None
+        assert response.metadata["stop_reason"] == "compaction_failed"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=AGENT_INVALID_OUTPUT
+        )
+        assert agent_outcome_policy(response) == OutcomeAction.VERIFY
 
     @pytest.mark.asyncio
     async def test_a_run_killed_before_any_model_response_has_unknown_usage_and_no_error(self) -> None:
@@ -280,6 +336,10 @@ class TestApp:
         )
 
         assert (response.status, response.usage) == ("failed", None)
+        # A report without a structured status must not guess from the error message.
+        assert (
+            AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]).failure_kind == "unknown"
+        )
 
     @pytest.mark.asyncio
     async def test_usage_without_detail_fields_has_no_cached_or_reasoning_counts(self) -> None:

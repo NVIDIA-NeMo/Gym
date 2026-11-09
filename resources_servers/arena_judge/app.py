@@ -48,25 +48,26 @@ import pandas as pd
 from pydantic import ConfigDict, Field
 from sklearn.linear_model import LogisticRegression
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+)
+from nemo_gym.data import PromptConfig, load_prompt_config
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-)
-from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
-)
+from nemo_gym.verification import call_judge, record_parsed_judge_verdict
 
 
 logger = logging.getLogger(__name__)
@@ -217,41 +218,44 @@ class ArenaJudgeServer(SimpleResourcesServer):
             )
             category = self.config.default_category
 
-        # Two judge calls in parallel — A=candidate/B=baseline (gen-base) and swapped (base-gen).
-        # ``return_exceptions`` so a JudgeError in one direction doesn't propagate out of
-        # gather while the sibling call is still in flight; both settle, then we surface it.
-        outcomes = await asyncio.gather(
-            self._judge_once(category, question, candidate_answer, baseline_answer),
-            self._judge_once(category, question, baseline_answer, candidate_answer),
-            return_exceptions=True,
-        )
-        for outcome in outcomes:
-            if isinstance(outcome, BaseException):
-                raise outcome
-        (gen_base_text, gen_base_verdict), (base_gen_text, base_gen_verdict) = outcomes
+        async def grade() -> ArenaJudgeVerifyResponse:
+            # Two judge calls in parallel — A=candidate/B=baseline (gen-base) and swapped (base-gen).
+            # ``return_exceptions`` so a JudgeError in one direction doesn't propagate out of
+            # gather while the sibling call is still in flight; both settle, then we surface it.
+            outcomes = await asyncio.gather(
+                self._judge_once(category, question, candidate_answer, baseline_answer),
+                self._judge_once(category, question, baseline_answer, candidate_answer),
+                return_exceptions=True,
+            )
+            for outcome in outcomes:
+                if isinstance(outcome, BaseException):
+                    raise outcome
+            (gen_base_text, gen_base_verdict), (base_gen_text, base_gen_verdict) = outcomes
 
-        # ``body.model_dump()`` already carries ``category`` (declared
-        # field). Drop it before spreading so the RESOLVED category
-        # (post-fallback) isn't a duplicate kwarg to the response constructor.
-        body_dict = body.model_dump()
-        body_dict.pop("category", None)
+            # ``body.model_dump()`` already carries ``category`` (declared
+            # field). Drop it before spreading so the RESOLVED category
+            # (post-fallback) isn't a duplicate kwarg to the response constructor.
+            body_dict = body.model_dump()
+            body_dict.pop("category", None)
 
-        # Per-rollout binary reward from the gen-base direction.
-        # Candidate wins (reward=1.0) if it strictly beats the baseline in
-        # the gen-base call; ties and losses both score 0.
-        reward = 1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0
+            # Per-rollout binary reward from the gen-base direction.
+            # Candidate wins (reward=1.0) if it strictly beats the baseline in
+            # the gen-base call; ties and losses both score 0.
+            reward = 1.0 if gen_base_verdict in ("A>>B", "A>B") else 0.0
 
-        return ArenaJudgeVerifyResponse(
-            **body_dict,
-            reward=reward,
-            judgement_gen_base=gen_base_text,
-            judgement_base_gen=base_gen_text,
-            verdict_gen_base=gen_base_verdict,
-            verdict_base_gen=base_gen_verdict,
-            category=category,
-            invalid_gen_base=gen_base_verdict is None,
-            invalid_base_gen=base_gen_verdict is None,
-        )
+            return ArenaJudgeVerifyResponse(
+                **body_dict,
+                reward=reward,
+                judgement_gen_base=gen_base_text,
+                judgement_base_gen=base_gen_text,
+                verdict_gen_base=gen_base_verdict,
+                verdict_base_gen=base_gen_verdict,
+                category=category,
+                invalid_gen_base=gen_base_verdict is None,
+                invalid_base_gen=base_gen_verdict is None,
+            )
+
+        return await observe_llm_judge_grading(grade)
 
     # ------------------------------------------------------------------
     # Judge dispatch
@@ -287,6 +291,8 @@ class ArenaJudgeServer(SimpleResourcesServer):
         )
         text = self._extract_chat_completion_text(judge_response)
         verdict = self._parse_verdict(text)
+        if verdict is not None:
+            record_parsed_judge_verdict()
         return text, verdict
 
     # ------------------------------------------------------------------

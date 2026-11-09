@@ -11,9 +11,10 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import JUDGE_FAILED, SESSION_LOST, VERIFIER_ERROR
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest
 from resources_servers.swe_atlas_qa import app as module
 
 
@@ -140,7 +141,8 @@ async def test_seed_uses_server_task_and_exposes_only_agent_access(server, body)
 
 
 @pytest.mark.parametrize(
-    ("reward", "scored", "passed", "agg"), [(1.0, 4, 3, 0.75), (1.0, 3, 3, 1.0), (0.0, 3, 1, 1 / 3)]
+    ("reward", "scored", "passed", "agg"),
+    [(1.0, 4, 3, 0.75), (1.0, 3, 3, 1.0), (0.0, 3, 1, 1 / 3), (0.0, 1, 0, 0.0)],
 )
 async def test_verify_preserves_upstream_scores_and_stages_only_after_agent_close(
     server, body, reward, scored, passed, agg
@@ -162,6 +164,7 @@ async def test_verify_preserves_upstream_scores_and_stages_only_after_agent_clos
     assert result.num_unscored == 4 - scored
     assert result.all_rubrics_scored is (scored == 4)
     assert result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None
     assert result.answer == "answer-placeholder"
     verifier = provider.close.await_args.args[0]
     assert verifier != agent
@@ -189,6 +192,18 @@ async def test_verify_preserves_upstream_scores_and_stages_only_after_agent_clos
     assert not server._sessions
 
 
+async def test_verify_masks_zero_scored_rubrics(server, body) -> None:
+    provider = server._provider
+    provider.results.update(reward=0.0, agg_score=0.0, num_scored=0, num_unscored=4, num_passed=0)
+    await server.seed_session(_request(), body)
+    result = await server.verify(_request(), body)
+    assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == JUDGE_FAILED
+    assert result.failure_reason == "SWE Atlas Q&A verification failed: RubricsUnscoredError"
+    assert provider.close.await_count == 2
+    assert not server._sessions and not server._sandboxes
+
+
 @pytest.mark.parametrize("answer", [None, "", " \n", "<<FINAL_ANSWER>>", "analysis<<FINAL_ANSWER>>   "])
 async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, answer) -> None:
     provider = server._provider
@@ -200,6 +215,7 @@ async def test_missing_or_empty_answer_scores_zero_without_judge(server, body, a
         provider.answers[agent.sandbox_id] = answer
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.evaluation_completed and not result.mask_sample
+    assert result.failure_kind is None
     assert provider.create.await_count == 1
     provider.upload_file.assert_not_awaited()
     provider.close.assert_awaited_once_with(agent)
@@ -218,11 +234,20 @@ async def test_answer_probe_failure_masks_sample(server, body, return_code, erro
     provider.exec.return_value = SandboxExecResult(None, "runtime failed", return_code, error_type=error_type)
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
     assert provider.create.await_count == 1
     provider.download_file.assert_not_awaited()
     provider.upload_file.assert_not_awaited()
     provider.close.assert_awaited_once_with(agent)
     assert not server._sessions
+
+
+async def test_verify_without_a_seeded_session_is_masked_as_lost(server, body) -> None:
+    result = await server.verify(_request(), body)
+    assert (result.reward, result.mask_sample, result.evaluation_completed) == (0.0, True, False)
+    assert (result.failure_kind, result.failure_reason) == (SESSION_LOST, "Task sandbox session is missing")
+    server._provider.exec.assert_not_awaited()
+    server._provider.create.assert_not_awaited()
 
 
 async def test_task_mismatch_closes_without_collecting_or_grading(server, body) -> None:
@@ -245,7 +270,10 @@ async def test_grader_failure_masks_sample_and_closes_both_sandboxes(server, bod
     ]
     result = await server.verify(_request(), body)
     assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
-    assert result.failure_reason
+    assert (result.failure_kind, result.failure_reason) == (
+        VERIFIER_ERROR,
+        "SWE Atlas Q&A verification failed: RuntimeError",
+    )
     assert server._provider.close.await_count == 2
     assert not server._sessions
 
@@ -299,6 +327,44 @@ async def test_lifespan_shutdown_closes_live_sessions_and_provider(server, body)
     assert server._provider.close.await_args_list == [call(handle) for handle in handles]
     assert not server._sessions and not server._sandboxes
     server._provider.aclose.assert_awaited_once()
+
+
+async def test_lifespan_shutdown_waits_for_all_deletions_after_failure(server, body) -> None:
+    app = server.setup_webserver()
+    provider = server._provider
+    entered, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    provider_closed_after_deletions = []
+    provider.aclose.side_effect = lambda: provider_closed_after_deletions.append(finished.is_set())
+
+    async def close(handle):
+        if handle == failed:
+            raise RuntimeError("close unavailable")
+        entered.set()
+        await release.wait()
+        finished.set()
+
+    async def shutdown():
+        async with app.router.lifespan_context(app):
+            pass
+
+    await asyncio.gather(*(server.seed_session(_request(s), body) for s in ("one", "two")))
+    failed = server._sessions["one"][1]
+    provider.close.side_effect = close
+    async with asyncio.timeout(2):
+        pending = asyncio.create_task(shutdown())
+        await entered.wait()
+        try:
+            done, _ = await asyncio.wait({pending}, timeout=0.01)
+            assert not done
+            provider.aclose.assert_not_awaited()
+        finally:
+            release.set()
+            with pytest.raises(RuntimeError, match="close unavailable"):
+                await pending
+            await finished.wait()
+    assert provider.close.await_count == 2
+    provider.aclose.assert_awaited_once()
+    assert provider_closed_after_deletions == [True]
 
 
 async def test_parallel_cookie_sessions_keep_answers_and_cleanup_isolated(server, body) -> None:
@@ -450,6 +516,28 @@ async def test_failed_close_retains_handle_for_retry(server, body) -> None:
     await server._close(handle)
     assert not server._sandboxes
     assert server._provider.close.await_args_list == [call(handle), call(handle)]
+
+
+async def test_verify_delete_failure_allows_explicit_close_retry(server, body) -> None:
+    await server.seed_session(_request(), body)
+    handle = server._sessions["session"][1]
+    provider = server._provider
+    provider.close.side_effect = [RuntimeError("close unavailable"), None]
+    result = await server.verify(_request(), body)
+    assert result.reward == 0 and result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == VERIFIER_ERROR
+    calls = list(provider.mock_calls)
+    duplicate = await server.verify(_request(), body)
+    assert duplicate.mask_sample and not duplicate.evaluation_completed
+    assert (duplicate.failure_kind, duplicate.failure_reason) == (SESSION_LOST, "Task sandbox session is missing")
+    assert provider.mock_calls == calls
+    assert provider.create.await_count == 1
+    provider.upload_file.assert_not_awaited()
+    close = ResourcesCloseSessionRequest(resources_session_id="session", episode_id={"rollout_id": "test"})
+    for _ in range(2):
+        assert (await server.close_resources_session(_request(), close)).resources_session_id == "session"
+    assert provider.close.await_args_list == [call(handle), call(handle)]
+    assert not server._sessions and not server._sandboxes
 
 
 @pytest.mark.parametrize("phase", ["seed", "collect", "judge"])

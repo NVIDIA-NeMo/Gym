@@ -23,17 +23,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxExecResult, SandboxSpec
-from nemo_gym.sandbox.providers.local import LocalProvider
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NgFailureEvent
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    LocalProvider,
+    SandboxCreateError,
+    SandboxExecResult,
+    SandboxSpec,
+)
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,
     HarnessAgentConfig,
     HarnessAgentRunRequest,
     resolve_agent,
+    sandbox_infra_failure_kind,
     stage_and_run_eval,
 )
 
@@ -398,6 +404,67 @@ async def test_resource_sandbox_survives_until_verification():
     assert json.loads(uploaded["/work/agent_config.json"])["repo_dir"] == "/testbed"
 
 
+async def test_mcp_tools_of_the_seed_reach_the_in_box_claude_code():
+    """The resources server serves its tools over MCP. The box gets this rollout's session, at a host it reaches."""
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True)
+    agent._gym_tar = None
+    agent._provider.create = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(
+        # mkdir, the model reachability probe, the runner, its log tail
+        side_effect=[SandboxExecResult("", "", 0)] * 3 + [SandboxExecResult("RUNNER_DONE", "", 0)]
+    )
+    uploaded = {}
+
+    async def upload(_, source, target):
+        uploaded[target] = source.read_text()
+
+    agent._provider.upload_file = AsyncMock(side_effect=upload)
+    agent._provider.close = AsyncMock()
+    agent._provider.download_file = AsyncMock(side_effect=lambda _, __, path: path.write_text(json.dumps(_response())))
+    seed = {"mcp": {"url_path": "/mcp", "transport": "http", "headers": {"X-NeMo-Gym-Session-Token": "tok-1"}}}
+    with patch("responses_api_agents.harness_agent.app.sandbox_server_url", return_value="http://10.0.0.5:9000"):
+        token = _RUN_CONTEXT.set({"mcp": agent._mcp_server_entry(seed)})
+    try:
+        with patch.object(agent, "_sandbox_model_url", return_value="http://10.0.0.5:8000"):
+            await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert json.loads(uploaded["/work/mcp.json"]) == {
+        "mcpServers": {
+            "rs": {
+                "type": "http",
+                "url": "http://10.0.0.5:9000/mcp",
+                "headers": {"X-NeMo-Gym-Session-Token": "tok-1"},
+            }
+        }
+    }
+    assert json.loads(uploaded["/work/agent_config.json"])["mcp_config"] == "__WORK_DIR__/mcp.json"
+
+
+async def test_forwarding_mcp_tools_does_not_silently_drop_a_users_mcp_config():
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True, agent_kwargs={"mcp_config": "/opt/mine.json"})
+    agent._gym_tar = None
+    agent._provider.create = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    seed = {"mcp": {"url_path": "/mcp", "transport": "http", "headers": {"X-NeMo-Gym-Session-Token": "tok-1"}}}
+    with patch("responses_api_agents.harness_agent.app.sandbox_server_url", return_value="http://10.0.0.5:9000"):
+        token = _RUN_CONTEXT.set({"mcp": agent._mcp_server_entry(seed)})
+    try:
+        with (
+            patch.object(agent, "_sandbox_model_url", return_value="http://10.0.0.5:8000"),
+            pytest.raises(ValueError, match="set only one of them"),
+        ):
+            await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    finally:
+        _RUN_CONTEXT.reset(token)
+    agent._provider.create.assert_not_awaited()
+
+
+def test_forwarding_mcp_tools_needs_a_server_that_serves_them():
+    agent = _make_agent(agent="claude_code", forward_mcp_tools=True)
+    with pytest.raises(ValueError, match="serve its tools over MCP"):
+        agent._mcp_server_entry({})
+
+
 @pytest.mark.parametrize(("agent_kwargs", "expected"), [({}, "/app"), ({"cwd": "/"}, "/")])
 async def test_task_workdir_does_not_override_explicit_agent_kwargs(agent_kwargs, expected):
     agent = _make_agent(agent="deepagents", agent_kwargs=agent_kwargs)
@@ -639,3 +706,208 @@ def test_gym_source_prebuilt_path_and_url():
         assert remote._gym_tar is None
         assert remote._gym_source_url == "https://example.com/gym.tar.gz"
         build.assert_not_called()
+
+
+def _sdk_exception(message: str) -> Exception:
+    """An exception shaped like opensandbox.exceptions.sandbox.SandboxApiException."""
+    cls = type("SandboxApiException", (Exception,), {"__module__": "opensandbox.exceptions.sandbox"})
+    return cls(message)
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (
+            _sdk_exception('HTTP 410: {"code":"SANDBOX::ENDED","message":"container sandbox exited with code 137"}'),
+            "provider_unavailable",
+        ),
+        (_sdk_exception('HTTP 410: {"code":"SANDBOX::ENDED","message":"pod evicted"}'), "provider_unavailable"),
+        (
+            NgFailureEvent(
+                boundary="sandbox", failure_kind="provider_unavailable", failure_reason="Backend unavailable"
+            ),
+            "provider_unavailable",
+        ),
+        (
+            NgFailureEvent(
+                boundary="sandbox", failure_kind="provider_oom_killed", failure_reason="Confirmed sandbox OOM"
+            ),
+            "provider_oom_killed",
+        ),
+        (SandboxCreateError("pod never scheduled"), "provider_unavailable"),
+        (TimeoutError(), "provider_unavailable"),
+        # Runner output and exit codes never decide it: the agent's own commands can produce either.
+        (RuntimeError('runner failed (1): Traceback ... {"code":"SANDBOX::ENDED"}'), None),
+        (RuntimeError("runner failed (137): Killed"), None),
+        (RuntimeError("runner failed (-1): signal: terminated"), None),
+        (ValueError("bad config"), None),
+    ],
+)
+def test_sandbox_infra_failure_kind(exc, expected):
+    assert sandbox_infra_failure_kind(exc) == expected
+
+
+async def test_sandbox_ending_mid_episode_masks_the_rollout_instead_of_failing_run():
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={})])
+    agent._provider.connect = AsyncMock(side_effect=TimeoutError())
+    body = HarnessAgentRunRequest(
+        responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        task_id="task-1",
+    )
+
+    async def responses(_, __, ___):
+        raise _sdk_exception(
+            'Get command status failed: HTTP 410: {"code":"SANDBOX::ENDED","message":"... exited with code 137 (Error)"}'
+        )
+
+    with (
+        patch.object(HarnessAgent, "responses", new=responses),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.mask_sample is True
+    assert result.reward == 0.0
+    assert result.evaluation_completed is False
+    assert result.failure_kind == "provider_unavailable"
+    assert "SANDBOX::ENDED" in result.failure_reason
+    # Where and on which sandbox it ended; the kind and the mask are unchanged.
+    assert result.failure_reason.startswith("[sandbox phase=agent sandbox=box-1 reason=SandboxApiException] ")
+    assert result.task_id == "task-1"
+
+
+async def test_non_infra_errors_still_fail_the_run():
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={})])
+    agent._provider.connect = AsyncMock(side_effect=TimeoutError())
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+    async def responses(_, __, ___):
+        raise RuntimeError("runner failed (1): agent crashed")
+
+    with (
+        patch.object(HarnessAgent, "responses", new=responses),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+        pytest.raises(RuntimeError, match="runner failed"),
+    ):
+        await agent.run(MagicMock(cookies={}), body)
+
+
+async def test_backend_loss_masks_the_rollout():
+    agent = _make_agent()
+    agent.server_client.post = AsyncMock(side_effect=[MagicMock(cookies={})])
+    agent._provider.connect = AsyncMock(side_effect=TimeoutError())
+    body = HarnessAgentRunRequest(responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+
+    async def responses(_, __, ___):
+        raise NgFailureEvent(
+            boundary="sandbox", failure_kind="provider_oom_killed", failure_reason="Confirmed sandbox OOM"
+        )
+
+    with (
+        patch.object(HarnessAgent, "responses", new=responses),
+        patch("responses_api_agents.harness_agent.app.raise_for_status", new=AsyncMock()),
+        patch(
+            "responses_api_agents.harness_agent.app.get_response_json",
+            new=AsyncMock(return_value={"sandbox_handle": "box-1"}),
+        ),
+    ):
+        result = await agent.run(MagicMock(cookies={}), body)
+    assert result.mask_sample is True and result.evaluation_completed is False and result.reward == 0.0
+    assert result.failure_kind == "provider_oom_killed"
+
+
+async def test_runner_killed_by_a_signal_is_still_a_runner_failure():
+    agent = _make_agent(agent="opencode")
+    agent._provision_box = AsyncMock(return_value=MagicMock(provider_name="opensandbox"))
+    agent._provider.exec = AsyncMock(
+        side_effect=[SandboxExecResult("", "signal: terminated", -1), SandboxExecResult("", "", 0)]
+    )
+    agent._provider.close = AsyncMock()
+    with (
+        patch.object(agent, "_sandbox_model_url", return_value="https://model.example"),
+        pytest.raises(RuntimeError, match=r"runner failed \(-1\)") as raised,
+    ):
+        await agent.responses(MagicMock(), NeMoGymResponseCreateParamsNonStreaming(input="hello"))
+    assert sandbox_infra_failure_kind(raised.value) is None
+
+
+_SEGMENT = "/ng-trace/00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+
+
+def test_sandbox_model_url_names_the_current_span_after_the_prefix(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harness_agent.app.trace_context_path_segment", lambda: _SEGMENT)
+    agent = _make_agent(model_server={"type": "responses_api_models", "name": "policy_model"})
+    agent.server_client._build_server_base_url = MagicMock(return_value="http://model-host:8000")
+    agent.server_client.global_config_dict = MagicMock()
+    with patch("responses_api_agents.harness_agent.app.get_first_server_config_dict", return_value={}):
+        bare = agent._sandbox_model_url(MagicMock())
+        token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1"})
+        try:
+            prefixed = agent._sandbox_model_url(MagicMock())
+        finally:
+            _RUN_CONTEXT.reset(token)
+    assert bare == f"http://model-host:8000{_SEGMENT}"
+    assert prefixed == f"http://model-host:8000/ng-rollout/rollout-1{_SEGMENT}"
+
+
+def test_sandbox_model_url_override_keeps_the_span(monkeypatch):
+    monkeypatch.setattr("responses_api_agents.harness_agent.app.trace_context_path_segment", lambda: _SEGMENT)
+    agent = _make_agent(sandbox_model_base_url="http://sandbox-gateway:8000/v1")
+    token = _RUN_CONTEXT.set({"url_prefix": "/ng-rollout/rollout-1"})
+    try:
+        url = agent._sandbox_model_url(MagicMock())
+    finally:
+        _RUN_CONTEXT.reset(token)
+    assert url == f"http://sandbox-gateway:8000/ng-rollout/rollout-1{_SEGMENT}"
+
+
+def test_gym_tar_ships_the_data_package_but_not_the_agents_datasets(monkeypatch: pytest.MonkeyPatch) -> None:
+    import tarfile
+
+    import responses_api_agents.harness_agent.app as harness_app
+
+    monkeypatch.setattr(
+        harness_app, "resolve_agent", lambda name: ("responses_api_agents.anyswe_agent.agent", "Agent", "Config")
+    )
+    agent = SimpleNamespace(config=SimpleNamespace(agent="anyswe"))
+    tar_path = harness_app.HarnessAgent._build_gym_tar(agent)
+    try:
+        with tarfile.open(tar_path) as archive:
+            names = archive.getnames()
+    finally:
+        tar_path.unlink()
+    assert "nemo_gym/data/__init__.py" in names
+    assert any(name.startswith("responses_api_agents/anyswe_agent/") for name in names)
+    assert not any(name.startswith("responses_api_agents/anyswe_agent/data") for name in names)
+
+
+@pytest.mark.parametrize("kind", ["provider_create_pending", "provider_setup_failed", "provider_pty_busy"])
+def test_typed_sandbox_failure_keeps_its_kind_without_message_inference(kind):
+    from nemo_gym.core import NgFailureEvent
+    from responses_api_agents.harness_agent.app import sandbox_infra_failure_kind
+
+    assert (
+        sandbox_infra_failure_kind(
+            NgFailureEvent(
+                boundary="sandbox",
+                failure_kind=kind,
+                failure_reason="OOMKilled text does not override the explicit kind",
+            )
+        )
+        == kind
+    )
+    assert (
+        sandbox_infra_failure_kind(
+            NgFailureEvent(boundary="harness", failure_kind="agent_run_error", failure_reason="OOMKilled")
+        )
+        is None
+    )

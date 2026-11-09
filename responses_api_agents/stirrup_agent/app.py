@@ -24,22 +24,25 @@ from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    sandbox_server_url,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
+    MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -47,19 +50,22 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -135,6 +141,17 @@ def _observations(output: Optional[dict[str, Any]], model_server: ModelServerRef
             records.append(ToolCallObservation.model_validate(tool))
         except Exception as error:
             failed(f"tool_calls[{index}]", error)
+    for index, compaction in enumerate(raw.get("compactions") or []):
+        try:
+            event = ContextCompactionObservation.model_validate(
+                {
+                    **compaction,
+                    "model_calls": [{**ref, "model_ref": model_server} for ref in compaction.get("model_calls", [])],
+                }
+            )
+            records.append(event)
+        except Exception as error:
+            failed(f"compactions[{index}]", error)
     return AgentObservationBundle(source="stirrup", records=records, gaps=gaps)
 
 
@@ -151,6 +168,10 @@ _REMOVED_OPTIONS = [
     "model_id",
     "task",
 ]
+_REMOVED_OPTION_MESSAGE = (
+    "Stirrup config includes removed options that are no longer supported: `{name}`\n"
+    "See migration guide for details: benchmarks/gdpval/README.md"
+)
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -159,11 +180,19 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_options(cls, data: Any) -> Any:
-        removed = [f"`{name}`" for name in _REMOVED_OPTIONS if name in (data or {})]
+        removed = [name for name in _REMOVED_OPTIONS if name in (data or {})]
         if removed:
-            raise ValueError(
-                f"Stirrup config includes removed options that are no longer supported: {', '.join(removed)}\n"
-                "See migration guide for details: benchmarks/gdpval/README.md"
+            # One error per option, located at its own key, so a config check names the exact field to delete.
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError("removed_option", _REMOVED_OPTION_MESSAGE, {"name": name}),
+                        loc=(name,),
+                        input=data[name],
+                    )
+                    for name in removed
+                ],
             )
         return data
 
@@ -331,6 +360,16 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             resources_cookies=state.resources_cookies,
         )
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Use the SDK HTTP status retained by the sandbox runner; never infer it from error text."""
+        status = native_result.get("model_error_status")
+        if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("invalid_output"):
+            # Output of the policy model the harness cannot use: graded as the model's result, never retried.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
+        return super().classify_outcome(native_result)
+
     async def _run_sandbox_episode(
         self, body: NeMoGymResponseCreateParamsNonStreaming, state: StirrupSessionState
     ) -> NeMoGymResponse:
@@ -397,7 +436,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # The only request was rejected before any processing: a known zero. A request killed in flight may
             # have used tokens, so that case stays unknown.
             usage = _zero_usage()
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
             model=model_name,
@@ -414,6 +453,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
             usage=usage,
         )
+        return self.report_outcome(response, output)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()
@@ -439,9 +479,6 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             raise HTTPException(409, "Stirrup sandbox sessions support one activation; retry the same request")
         # Session close owns cancellation; a disconnected waiter must not cancel the activation.
         return (await asyncio.shield(state.task)).model_copy(deep=True)
-
-    async def run(self, request: Request, body: BaseRunRequest = Body()):
-        raise HTTPException(409, "Stirrup runs only in agent sessions; use an environment server")
 
 
 if __name__ == "__main__":

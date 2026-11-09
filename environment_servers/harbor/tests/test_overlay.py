@@ -31,11 +31,8 @@ from environment_servers.harbor.tests.conftest import (
     write_image_config,
 )
 from environment_servers.harbor.verifier import _verifier_image
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
-from nemo_gym.sandbox.utils import cpu_cap_env
-from nemo_gym.tasks.harbor import load_task
-from nemo_gym.tasks.harbor.dockerfile import OverlayRun
-from nemo_gym.tasks.harbor.errors import HarborTaskError
+from nemo_gym.data.tasks.harbor import HarborTaskError, OverlayRun, load_task
+from nemo_gym.sandbox import SandboxExecResult, SandboxSpec, cpu_cap_env
 
 
 # The CPU-count hints every sandbox of a `cpus = 1` task (TASK_TOML) is created with, under the task's own variables.
@@ -279,6 +276,9 @@ class TestOverlay:
         # "4242" would be looked up as an account name by the su-backed providers and fail.
         assert lookup["command"] == "getent passwd 4242 | cut -d: -f1"
         assert run["user"] == 4242 and isinstance(run["user"], int) and run["seen"]["user"] == "4242"
+        assert sandbox.default_user == 4242
+        (seed,) = [kwargs["json"] for _, path, kwargs in server.server_client.calls if path == "/v1/agent_sessions"]
+        assert seed["sandbox_access"]["user"] == 4242
         # A uid:gid pair stays as written, on the line and as the default: only Docker's --user takes the pair.
         server, task, sandbox, _ = self.overlay_server(
             tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242:4242\nRUN id\n", provider="docker"
@@ -697,6 +697,50 @@ class TestOverlay:
         assert run["cwd"] == "/app"
         # The overlay's WORKDIR step made the directory in the verifier sandbox before test.sh ran there.
         assert verifier.run("echo ok > result.txt")["seen"]["cwd"] == "/app" and "/app" in verifier.dirs
+
+    async def test_forced_separate_verifier_of_an_overlay_task_makes_the_environment_workdir_before_test_sh(
+        self, tmp_path, monkeypatch
+    ):
+        """`task.workdir` is `[environment].workdir` when task.toml sets one and the Dockerfile's final WORKDIR only
+        otherwise, while the overlay makes the Dockerfile's directories alone. The agent's sandbox gets the task
+        workdir from the seed (`_prepare_workdir`); the verifier sandbox that replays the overlay has to make it the
+        same way before test.sh is sent there, since a Docker exec into a missing directory fails before test.sh
+        starts, where the base image's directory at least ran it."""
+        toml = TASK_TOML.replace("[verifier]\n", 'artifacts = ["/app/result.txt"]\n\n[verifier]\n', 1)
+        toml = toml.replace("[environment]\n", '[environment]\nworkdir = "/work"\n', 1)
+        dockerfile = "FROM img\nWORKDIR /app\nRUN echo ok > result.txt\n"
+        server, task, agent, _ = self.overlay_server(
+            tmp_path, monkeypatch, dockerfile=dockerfile, toml=toml, separate_verifier_for_artifacts=True
+        )
+        assert task.overlay and task.workdir == "/work" and server._separate_verifier(task)
+        assert [instruction.path for instruction in task.overlay_workdirs] == ["/app"]
+
+        class ExistingDirVerifier(OverlaySandbox):
+            """Scores as a test.sh started by `docker exec -w <cwd>` would: 1 from /work once it exists, else 0."""
+
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                if "test.sh" in command and "timeout" in command:
+                    self.verifier_files = {"reward.txt": "1\n" if cwd == "/work" and cwd in self.dirs else "0\n"}
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        verifier = ExistingDirVerifier()
+
+        async def create_verifier(task, *, episode_key=None):
+            server._sandboxes[f"{episode_key}/verifier"] = verifier
+            return verifier
+
+        monkeypatch.setattr(server, "_create_verifier_sandbox", create_verifier)
+        response = await run_episode(server, task)
+
+        assert response.failure is None, response.failure
+        assert response.result.verifier_mode == "separate" and response.result.reward == 1.0
+        (run,) = [c for c in verifier.execs if "test.sh" in c["command"] and "timeout" in c["command"]]
+        assert run["cwd"] == "/work"
+        # The seed made /work in the agent's sandbox; the verifier made it as root, the same way, before test.sh,
+        # next to the /app the overlay's WORKDIR step made.
+        (made,) = [c for c in verifier.execs if c["command"].startswith("mkdir -p /work")]
+        assert made["ran_as"] == "root" and verifier.execs.index(made) < verifier.execs.index(run)
+        assert "/work" in agent.dirs and verifier.dirs["/work"] == agent.dirs["/work"] and "/app" in verifier.dirs
 
     def separate_verifier(self, tmp_path, monkeypatch, *, toml=SEPARATE_IN_TASK_IMAGE_TOML, verifier=None):
         server, task, agent, _ = self.overlay_server(tmp_path, monkeypatch, toml=toml)

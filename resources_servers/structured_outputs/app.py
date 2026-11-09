@@ -26,7 +26,7 @@ import yaml
 from fastapi import FastAPI
 from openapi_schema_validator import validate as validate_against_schema_openapi
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

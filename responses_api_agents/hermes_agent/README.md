@@ -72,6 +72,21 @@ still depend on legacy Agent-to-Resources bindings; they are not equivalent to t
 Existing [Hermes SWE-Pro recipes](../../benchmarks/swebench/pro/hermes.yaml) remain supported
 for compatibility; a new pairing does not need another combined preset.
 
+`configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
+such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
+agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the
+model server by address, so the profile sets `use_absolute_ip: true` and keeps the head server and the agent itself
+on `127.0.0.1`: the head server's config endpoint is unauthenticated, and an unseeded request to the agent runs the
+harness on the Gym host. Hermes derives the sandbox's lifetime from its own timeouts. Supply the image in
+`sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
+`hermes_agent.responses_api_agents.hermes_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; a search preset
+overrides it with `model_and_tools`.
+
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
+
 ## Configuration example
 
 ```yaml
@@ -110,9 +125,10 @@ hermes_agent:
 | `terminal_timeout` | `60` | sets `TERMINAL_TIMEOUT` (process-global); per-command wall-clock seconds |
 | `sandbox_provider` | `null` | named provider used to create an agent-owned sandbox when Resources does not supply `sandbox_access` |
 | `sandbox_config` | `{}` | `SandboxSpec` fields used with `sandbox_provider`; ignored when Resources supplies a sandbox |
+| `network_access` | `inherit` | egress of an agent-owned sandbox: `inherit` (the provider's network), `model_only` (only the Model Server's host), or `model_and_tools` (also each MCP grant's host). OpenSandbox only; a session that borrows a sandbox rejects any other value than `inherit`. The Agent Server builds Hermes's runtime and uploads it, so a restricted sandbox needs no network for setup (see below). A borrowed sandbox relies on its owner's network policy. Under `model_only` a required MCP grant is refused at seed with a 422, since the policy would block its host; under `model_and_tools` a grant at an address the sandbox cannot reach, such as loopback, refuses the seed. A model URL the sandbox cannot reach (such as loopback without `use_absolute_ip`) also refuses the seed with a 422. The policy is only as strong as the OpenSandbox server's egress mode: in `dns` mode a hard-coded IP bypasses it, and full isolation needs `dns+nft`. |
 | `sandbox_runner_timeout_seconds` | `21600` | bounds one sandbox activation; the episode deadline still applies |
 | `system_prompt` | `null` | joined with request `instructions` and the first input system message, in that order; appended to Hermes' built-in prompt |
-| `session_close_retry_window_seconds` | `300` | session close receipt retention from successful cleanup; retries do not extend expiry |
+| `session_close_retry_window_seconds` | `300` | how long a successful close's fence and saved reply last; retries do not extend it |
 | `checkpoints_enabled` | `false` | turns on Hermes' own checkpoints (`checkpoints.enabled` in its config); unrelated to Gym's partial-rollout checkpoints, which this agent joins as restart-only |
 
 The model-server url is resolved at request time and passed to `AIAgent(base_url=..., api_key="gym")`. <!-- pragma: allowlist secret -->
@@ -121,7 +137,7 @@ Host and sandbox execution use the same request rules. User tasks remain user me
 Request `model` must match the configured model. Unsupported non-default controls return
 HTTP 422, including `top_p` (even `1.0`), `store`, `service_tier`, and request metadata.
 `max_output_tokens` also returns 422: Hermes does not enforce a total response token budget.
-Config `max_tokens` limits each model call. Only text input is supported; `developer` messages
+Config `max_tokens` limits each model call. `context_length` sets Hermes' `model.context_length`, the window context compression reads (at `compression_threshold` of it); unset, Hermes probes the endpoint, which the Gym model server does not answer, and assumes 128,000 tokens. Only text input is supported; `developer` messages
 are rejected.
 
 Compatibility: the host path previously let config `system_prompt` replace the dataset's
@@ -133,7 +149,7 @@ Remove unsupported fields that older versions silently ignored.
 
 Sandbox sessions live in the memory of the worker that seeded them. With several agent workers, session routing sends each session's requests to the worker that seeded it. Calling the agent's `/run` directly keeps no session.
 
-Each sandbox session installs the Hermes version pinned in `requirements.txt`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<commit>/venv`, for example because the image bakes it in or an earlier session in the same sandbox installed it. Installing needs outbound access to GitHub and the Python package index. Hermes calls the Model Server directly from the sandbox, so the sandbox must also reach the Model Server at its configured host and port. Its image must also match the host CPU architecture and C library because the host's `uv` executable is copied into the sandbox.
+Each sandbox session installs the Hermes version pinned in `pyproject.toml`, the same one this server runs, at seed time unless it already imports from `/tmp/nemo-gym-hermes-runtime-<key>/python`, for example because an earlier session in the same sandbox installed it. The key covers the Python build, the Hermes requirement and this server's package versions. The Agent Server builds the runtime for the sandbox's architecture and C library: a pinned standalone CPython plus Hermes and its dependencies at this server's versions, cached under `sandbox_python` in Gym's `cache_dir`. Building needs `uv` and outbound access to GitHub and the Python package index on the Agent Server; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python build can be given the file in that cache directory. The sandbox needs only x86_64 or aarch64 Linux, `bash`, `tar` with gzip and glibc 2.17 or musl, with no network or Python of its own. Hermes calls the Model Server directly from the sandbox, so the sandbox must reach the Model Server at its configured host and port.
 
 Sessions use MCP tool grants and reject other required grants. Each granted MCP server is added to that session's Hermes configuration, so the sandbox must reach it at the granted URL, usually the Resources Server's `/mcp` endpoint. An activation fails before its first model call when a required server does not connect. Hermes names MCP tools `mcp_<server>_<tool>`; the response reports them as `mcp__<server>__<tool>`, the form Gym strips before verification, while captured model calls keep Hermes' names. The session token in each grant is readable inside the sandbox and gives access only to that episode's tools.
 

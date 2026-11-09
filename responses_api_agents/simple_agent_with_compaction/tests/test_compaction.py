@@ -4,31 +4,31 @@
 import subprocess
 import sys
 
-from nemo_gym.context_management.config import (
+from nemo_gym.agents.context_management.config import (
     ContextGuardConfig,
     HistoryPolicyConfig,
     ImageRecencyConfig,
     ReasoningRecencyConfig,
     RecencyHistoryPolicyConfig,
 )
-from nemo_gym.context_management.controller import (
+from nemo_gym.agents.context_management.controller import (
     HistoryController,
     TurnChunkedHistoryController,
     build_guard_outcome_records,
     evaluate_context_guards,
 )
-from nemo_gym.context_management.history import (
+from nemo_gym.agents.context_management.history import (
     ContextMeasurements,
     SemanticHistory,
     normalize_semantic_items,
     register_semantic_part_kind,
     unregister_semantic_part_kind,
 )
-from nemo_gym.context_management.materialization import (
+from nemo_gym.agents.context_management.materialization import (
     descriptor_is_append_compatible,
     materialize_history_view,
 )
-from nemo_gym.context_management.policies import (
+from nemo_gym.agents.context_management.policies import (
     IdentityHistoryPolicy,
     RecencyHistoryPolicy,
     build_history_policy,
@@ -39,13 +39,13 @@ from nemo_gym.context_management.policies import (
 
 def test_context_compaction_modules_import_independently() -> None:
     for module_name in (
-        "nemo_gym.context_management",
-        "nemo_gym.context_management.config",
-        "nemo_gym.context_management.controller",
-        "nemo_gym.context_management.history",
-        "nemo_gym.context_management.materialization",
-        "nemo_gym.context_management.policies",
-        "nemo_gym.context_management.client",
+        "nemo_gym.agents.context_management",
+        "nemo_gym.agents.context_management.config",
+        "nemo_gym.agents.context_management.controller",
+        "nemo_gym.agents.context_management.history",
+        "nemo_gym.agents.context_management.materialization",
+        "nemo_gym.agents.context_management.policies",
+        "nemo_gym.agents.context_management.client",
     ):
         subprocess.run(
             [sys.executable, "-c", f"import {module_name}"],

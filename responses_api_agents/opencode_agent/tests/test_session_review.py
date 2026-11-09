@@ -11,7 +11,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import raises_agent_failure
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import format_error_message
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
@@ -46,7 +47,7 @@ def test_session_uploads_shared_plugin_only_with_model_capture(setup, enabled, t
         created.raise_for_status()
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         result.raise_for_status()
-        payload = json.loads(sandbox.files[f"{sandbox.directory}/input.json"])
+        payload = sandbox.params()
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
         plugin = Path(sandbox.directory) / OBSERVABILITY_PATCH.name
         task_env_plugin = Path(sandbox.directory) / "task_environment.mjs"
@@ -114,10 +115,12 @@ def test_observation_parse_failure_preserves_response(setup, caplog):
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         closed.raise_for_status()
     assert "observation_capture_failed" in {gap["code"] for gap in closed.json()["agent_observations"]["gaps"]}
+    # With no parsed session, close sends no trajectory, so collection keeps its call-built turns.
+    assert "trajectory" not in closed.json()
     assert "Failed to parse OpenCode observations" in caplog.text
 
 
-@pytest.mark.parametrize("failure", ["provider_timeout", "missing_export", "snapshot"])
+@pytest.mark.parametrize("failure", ["provider_timeout", "missing_database", "snapshot"])
 @pytest.mark.parametrize("model_rejected", [False, True])
 def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp_path, failure, model_rejected):
     agent, sandbox = setup
@@ -133,8 +136,6 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
             Path(destination).write_text("x" * 18000 + "ROOT CAUSE")
         elif source.endswith("/output.log"):
             Path(destination).write_text("output" * 6000 + "OUTPUT TAIL")
-        elif failure == "missing_export" and source.endswith("/export.json"):
-            raise FileNotFoundError("missing export")
         else:
             await download(source, destination)
 
@@ -142,8 +143,10 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         result = await execute(command, **kwargs)
         if failure == "provider_timeout" and "--receipt" in command:
             return SimpleNamespace(return_code=0, error_type="timeout", stdout="", stderr="deadline")
-        if failure == "snapshot" and "--snapshot" in command:
-            return SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="no root session")
+        if failure == "missing_database" and "opencode.db-wal" in command:
+            return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+        if failure == "snapshot" and "opencode.db-wal" in command:
+            return SimpleNamespace(return_code=1, error_type=None, stdout="", stderr="no session directory")
         return result
 
     sandbox.download = read
@@ -154,7 +157,7 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         session_id = created.json()["agent_session_id"]
         state = active_sessions(agent)[session_id]
         expected = TimeoutError if failure == "provider_timeout" else RuntimeError
-        with pytest.raises(expected) as error:
+        with raises_agent_failure(expected) as error:
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if failure == "provider_timeout":
             assert state.session.artifacts == sandbox.events
@@ -163,9 +166,11 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         else:
             assert "ROOT CAUSE" in str(error.value)
             assert len(str(error.value)) <= 16000
-            if failure == "missing_export":
+            if failure == "missing_database":
                 assert "returned no valid result" in str(error.value)
                 assert "OUTPUT TAIL" in str(error.value)
+            else:
+                assert "OpenCode transcript capture failed" in str(error.value)
         assert len(state.stderr) == 16000
         assert state.session.cleanup["cleanup_confirmed"] is True
         assert any(record.kind == "sandbox" for record in state.observations.records)
@@ -183,7 +188,7 @@ async def test_observation_parser_runs_off_event_loop(setup, tmp_path):
     capture_observations(sandbox, tmp_path)
     loop_thread = threading.get_ident()
     parser_threads = []
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
     from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import activate
 
     def parse(*args, **kwargs):
@@ -216,7 +221,7 @@ def test_malformed_capture_never_replaces_provider_failure(setup, artifact):
         created.raise_for_status()
         session_id = created.json()["agent_session_id"]
         state = active_sessions(agent)[session_id]
-        with pytest.raises(TimeoutError):
+        with raises_agent_failure(TimeoutError):
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert any(record.kind == "sandbox" for record in state.observations.records)
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
@@ -260,7 +265,7 @@ def test_model_error_502_uses_the_same_combined_diagnostic_bound(setup):
         client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"])).raise_for_status()
 
 
-@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_export", 500), ("malformed_export", 502)])
+@pytest.mark.parametrize("failure,status", [("receipt", 500), ("missing_database", 500), ("malformed_export", 502)])
 def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path, failure, status):
     agent, sandbox = setup
     capture_observations(sandbox, tmp_path)
@@ -268,14 +273,15 @@ def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path,
         sandbox.task_environment_receipt = None
     elif failure == "malformed_export":
         sandbox.events = "{malformed"
-    download = sandbox.download
+    elif failure == "missing_database":
+        execute = sandbox.run_exec
 
-    async def read(source, destination):
-        if failure == "missing_export" and source.endswith("/export.json"):
-            raise FileNotFoundError("missing export")
-        await download(source, destination)
+        async def run(command, **kwargs):
+            if "opencode.db-wal" in command:
+                return SimpleNamespace(return_code=0, error_type=None, stdout="", stderr="")
+            return await execute(command, **kwargs)
 
-    sandbox.download = read
+        sandbox.exec.side_effect = run
     with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         session_id = created.json()["agent_session_id"]
@@ -285,5 +291,10 @@ def test_single_turn_failure_preserves_observations_and_runtime(setup, tmp_path,
         assert state.runtime_info.hostname == "task-container"
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         closed.raise_for_status()
-        invocation = next(r for r in closed.json()["agent_observations"]["records"] if r["kind"] == "agent_invocation")
-        assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
+        observations = closed.json()["agent_observations"]
+        if failure == "missing_database":
+            # Without the session database only the observation gaps remain.
+            assert {gap["code"] for gap in observations["gaps"]} >= {"agent_artifact_unavailable"}
+        else:
+            invocation = next(r for r in observations["records"] if r["kind"] == "agent_invocation")
+            assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"

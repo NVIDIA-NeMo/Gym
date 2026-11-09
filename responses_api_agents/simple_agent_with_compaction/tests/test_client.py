@@ -11,11 +11,15 @@ import pytest
 from aiohttp import ClientConnectorError, ClientSession, ServerDisconnectedError
 from omegaconf import DictConfig
 
-import nemo_gym.server_utils
-from nemo_gym.config_types import BaseServerConfig, ModelServerRef
-from nemo_gym.context_management import ContextHistoryConfig, ContextManagedResponsesClient
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+import nemo_gym.client.http_client
+from nemo_gym.agents.context_management import (
+    ContextGuardRejected,
+    ContextHistoryConfig,
+    ContextManagedResponsesClient,
+)
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig, ModelServerRef
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 def answer(index, *, output=None, incomplete=None):
@@ -181,7 +185,7 @@ async def test_context_client_uses_real_transport_retry_controls(monkeypatch, me
         payload = {"prompt_token_count": 10} if url.endswith("/measure") else answer(1).model_dump(mode="json")
         return http_response(payload)
 
-    monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: MagicMock(request=send))
+    monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: MagicMock(request=send))
     client = ContextManagedResponsesClient(
         server_client=transport,
         model_server=ModelServerRef(name="policy", type="responses_api_models"),
@@ -237,6 +241,57 @@ async def test_retained_image_uses_original_source_and_history_survives_finish()
         first.output[0].id,
         second.output[0].id,
     ]
+
+
+async def test_initial_guard_rejection_never_generates_or_acknowledges() -> None:
+    client, _, calls, _ = make_client(
+        config=ContextHistoryConfig(enabled=True, guards={"max_active_images": 0}),
+        request=NeMoGymResponseCreateParamsNonStreaming(input=[observation("initial")]),
+    )
+    history = tuple(client.history.events)
+    with pytest.raises(ContextGuardRejected):
+        await client.create()
+    assert calls == []
+    assert tuple(client.history.events) == history
+    assert client.controller._completed_view_digest is None
+    with pytest.raises(RuntimeError, match="closed"):
+        await client.create()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.finish(answer(1))
+
+
+@pytest.mark.parametrize("compact", [False, True])
+async def test_chunk_guard_admits_only_after_a_sufficient_rewrite(compact: bool) -> None:
+    config = {
+        "enabled": True,
+        "schedule": {"type": "turn_chunked_recency", "actions_per_chunk": 3},
+        "guards": {"max_active_images": 1},
+    }
+    if compact:
+        config["policy"] = {"type": "recency", "config": {"images": {"enabled": True, "keep_last_groups": 1}}}
+    client, _, calls, _ = make_client(config=ContextHistoryConfig.model_validate(config))
+    first = await client.create()
+    client.append_observation([observation("a")])
+    second = await client.create()
+    acknowledged = client.controller._completed_view_digest
+    client.append_observation([observation("b")])
+    if compact:
+        third = await client.create()
+        assert third.id == "response-3" and len(calls) == 3
+        assert "a.png" not in calls[-1]["json"].model_dump_json()
+        assert "b.png" in calls[-1]["json"].model_dump_json()
+    else:
+        history = tuple(client.history.events)
+        with pytest.raises(ContextGuardRejected):
+            await client.create()
+        assert len(calls) == 2
+        assert tuple(client.history.events) == history
+        assert client.controller._completed_view_digest == acknowledged
+        with pytest.raises(RuntimeError, match="closed"):
+            client.finish(second)
+    chunk = client.controller.chunk_records[0]
+    assert chunk.eligible_action_ids == (first.id, second.id)
+    assert chunk.early_close_reason == "guard:active_images"
 
 
 async def test_only_definite_responses_are_resampled_from_the_accepted_parent():

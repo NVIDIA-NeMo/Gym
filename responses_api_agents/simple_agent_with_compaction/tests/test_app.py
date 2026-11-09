@@ -8,9 +8,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.context_management import ContextManagedResponsesClient
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage
-from nemo_gym.server_utils import ServerClient, get_response_json
+from nemo_gym.agents.context_management import ContextManagedResponsesClient
+from nemo_gym.client import ServerClient, get_response_json
+from nemo_gym.core import NeMoGymEasyInputMessage
 from responses_api_agents.simple_agent_with_compaction.app import (
     SimpleAgentWithCompaction,
     SimpleAgentWithCompactionConfig,

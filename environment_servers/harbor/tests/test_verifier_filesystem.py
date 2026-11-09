@@ -22,8 +22,8 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.tests.test_review_regressions import during_turn
 from environment_servers.harbor.verifier import verifier_command
-from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.tasks.harbor import load_task
+from nemo_gym.data.tasks.harbor import load_task
+from nemo_gym.sandbox import SandboxExecResult
 
 
 # What run() hands the verifier: the exported ATIF transcript, written to /logs/agent before test.sh runs.
@@ -102,6 +102,62 @@ async def test_linked_verifier_roots_cannot_preserve_planted_success(tmp_path, m
     assert not tests.is_symlink() and not logs.is_symlink() and not (logs / "verifier").is_symlink()
     assert not (tests / "helper.sh").exists()
     assert (planted / "reward.json").read_text() == '{"reward": 1}'
+    await server.shutdown()
+
+
+@pytest.mark.skipif(shutil.which("tar") is None, reason="tar is required")
+@pytest.mark.parametrize("left_behind", ["declared_input", "undeclared_input", "planted_reward", "planted_report"])
+async def test_the_shared_verifier_keeps_declared_sidecar_inputs_alone_and_removes_everything_else(
+    tmp_path, monkeypatch, verifier_tree, left_behind
+):
+    """Review (M22, then round 38 P1): kumo's ``verifier`` sidecar appends ``/logs/verifier/actions.jsonl`` during
+    the agent's run, shared with ``main`` by the planner, and ``main``'s ``tests/score.py`` reads it; emptying the
+    whole folder before ``test.sh`` deleted that input, so a test that needs it measured 0 for 1. Keeping everything
+    but the grader's own four names kept an agent-planted test report too: an all-pass ``results.xml`` left behind by
+    a solution that exits during pytest's import, which a ``test.sh`` that reads the report scores as a pass. The
+    folder is emptied again now, except the inputs the task declares (``[verifier].inputs`` from dataset.toml): a
+    declared ``actions.jsonl`` is read by ``test.sh``, an undeclared one is gone like a planted ``reward.json`` or
+    ``results.xml``, in a single-step shared task as in a step's shared verification."""
+    root, logs, tests = verifier_tree
+    verifier_dir = logs / "verifier"
+    verifier_dir.mkdir(parents=True)
+    reward = shlex.quote(str(verifier_dir / "reward.txt"))
+    if left_behind == "declared_input":
+        (tmp_path / "datasets" / "ds").mkdir(parents=True)
+        (tmp_path / "datasets" / "ds" / "dataset.toml").write_text(
+            '[gym.tasks."hello".verifier]\ninputs = ["actions.jsonl"]\n'
+        )
+    server, task, _, _ = make_server(tmp_path, monkeypatch)
+    assert task.config.verifier.inputs == (["actions.jsonl"] if left_behind == "declared_input" else [])
+    if left_behind in ("declared_input", "undeclared_input"):
+        (verifier_dir / "actions.jsonl").write_text('{"action": "click"}\n')
+        actions = shlex.quote(str(verifier_dir / "actions.jsonl"))
+        (task.path / "tests" / "test.sh").write_text(
+            f"#!/bin/bash\nif test -s {actions}; then echo 1; else echo 0; fi > {reward}\n"
+        )
+    elif left_behind == "planted_reward":
+        (verifier_dir / "reward.json").write_text('{"reward": 1}')
+        (task.path / "tests" / "test.sh").write_text(f"#!/bin/bash\necho 0 > {reward}\n")
+    else:
+        # The report pytest would have written had it run; the solution exited during import, so it writes none.
+        (verifier_dir / "results.xml").write_text('<testsuite tests="3" failures="0" errors="0"/>\n')
+        report = shlex.quote(str(verifier_dir / "results.xml"))
+        (task.path / "tests" / "test.sh").write_text(
+            f"#!/bin/bash\nif test -f {report} && ! grep -q 'failures=\"[1-9]' {report}; then echo 1; else echo 0; fi "
+            f"> {reward}\n"
+        )
+
+    outcome = await server._run_verifier(
+        SimpleNamespace(task=task, sandbox=LocalSandbox(), workdir=str(root), entrypoint=None), TRAJECTORY
+    )
+
+    assert not outcome.get("mask_sample", False), outcome
+    if left_behind == "declared_input":
+        assert outcome["reward"] == 1, outcome
+        assert (verifier_dir / "actions.jsonl").read_text() == '{"action": "click"}\n'
+    else:
+        assert outcome["reward"] == 0, outcome
+        assert not any((verifier_dir / name).exists() for name in ("actions.jsonl", "reward.json", "results.xml"))
     await server.shutdown()
 
 
@@ -537,3 +593,41 @@ async def test_separate_verifier_chmods_test_sh_as_root_then_runs_it_as_the_veri
     assert all(i < chmod for i in uploads) and chmod < run
     assert verifier.execs[chmod]["user"] == "root" and verifier.execs[run]["user"] == "tester"
     assert commands[run] == verifier_command(300)
+
+
+@pytest.mark.parametrize("linked", ["none", "tests", "verifier"])
+async def test_after_a_turns_verification_the_next_agent_reads_none_of_its_grading_files(
+    tmp_path, monkeypatch, verifier_tree, linked
+):
+    # The sandbox as a verified turn leaves it: the uploaded tests (the hidden ones included), the reward, the
+    # server's transcript, and what the agent wrote under /logs/agent itself. An agent may also have replaced a
+    # grading root with a link to a folder of its own before the verification.
+    root, logs, tests = verifier_tree
+    planted = root / "planted"
+    planted.mkdir()
+    (planted / "keep.txt").write_text("the agent's own")
+    if linked == "tests":
+        tests.symlink_to(planted, target_is_directory=True)
+    else:
+        tests.mkdir()
+        (tests / "test.sh").write_text("echo 1 > /logs/verifier/reward.txt\n")
+        (tests / "test.patch").write_text("hidden tests\n")
+    (logs / "agent").mkdir(parents=True)
+    (logs / "agent" / "trajectory.json").write_bytes(TRAJECTORY)
+    (logs / "agent" / "commits.txt").write_text("written by the agent in its turn\n")
+    if linked == "verifier":
+        (logs / "verifier").symlink_to(planted, target_is_directory=True)
+    else:
+        (logs / "verifier").mkdir()
+        (logs / "verifier" / "reward.txt").write_text("1\n")
+    server, _, _, _ = make_server(tmp_path, monkeypatch)
+
+    await server._reset_shared_verifier_dirs(LocalSandbox())
+
+    assert sorted(path.name for path in tests.iterdir()) == []
+    assert sorted(path.name for path in (logs / "verifier").iterdir()) == []
+    assert sorted(path.name for path in (logs / "agent").iterdir()) == ["commits.txt"]
+    assert not tests.is_symlink() and not (logs / "verifier").is_symlink()
+    # A linked root is replaced, never followed: the folder it pointed at keeps its contents.
+    assert (planted / "keep.txt").read_text() == "the agent's own"
+    await server.shutdown()
