@@ -178,8 +178,8 @@ Pi decides how to send each attached file:
   images after all the text, so the order of text and images in the request is not kept.
 - Pi recognizes an image from its leading bytes, not from the declared media type. Pi inlines a file it
   does not recognize as an image, such as an animated PNG, into the prompt as text.
-- Pi resizes an image larger than 2000 by 2000 pixels or 4.5 MB once base64-encoded, and replaces one it
-  cannot resize with a note saying the image was omitted.
+- Sessions turn off Pi's image resizing (`images.autoResize` in `settings.json`), so images reach the model
+  as the environment sent them, both prompt images and images the read tool returns.
 - The `detail` field of an `input_image` part has no effect.
 
 Saved trajectories record the user prompt's text but not its images.

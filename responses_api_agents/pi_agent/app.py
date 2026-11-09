@@ -994,7 +994,11 @@ class PiAgent(SimpleResponsesAPIAgent):
         # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
         files: dict[str, str | Path] = {
             "home/.pi/agent/models.json": json.dumps(models),
-            "home/.pi/agent/settings.json": json.dumps(self._build_settings_config()),
+            # Pi otherwise resizes large images, from @file arguments and its read tool alike, so the model would
+            # get different pixels than the environment sent.
+            "home/.pi/agent/settings.json": json.dumps(
+                {**self._build_settings_config(), "images": {"autoResize": False}}
+            ),
         }
         output_limit_extension = "output-limit.mjs"
         files[output_limit_extension] = Path(__file__).with_name(output_limit_extension)
@@ -1541,7 +1545,6 @@ class PiAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         session_id = self._agent_session_id_from_request(request)
         if session_id is not None:
-            body, media = self._validate_request(body)
             state = self._require_agent_session(session_id)
             assert isinstance(state, PiSandboxSession)
             rollout_id = request.path_params.get("rollout_id")
@@ -1549,12 +1552,15 @@ class PiAgent(SimpleResponsesAPIAgent):
                 raise HTTPException(409, "Pi activation does not match the seeded session and rollout route")
             if state.session.closing:
                 raise HTTPException(409, "Pi session is closing")
-            prompt, system = self._conversation_input(body)
             if state.task is None:
-                # Bind the request before the first await so retries join one invocation.
+                # Validate and decode only for a new activation: a retry is compared with the stored request, so
+                # its media are never decoded again. Bind the request before the first await so retries join one
+                # invocation.
+                validated, media = self._validate_request(body)
+                prompt, system = self._conversation_input(validated)
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
-                    self._sandbox_response(state, body, prompt=prompt, system=system, media=media)
+                    self._sandbox_response(state, validated, prompt=prompt, system=system, media=media)
                 )
             elif body != state.activation_request:
                 raise HTTPException(409, "Pi sandbox sessions support one activation; retry the same request")
