@@ -29,8 +29,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.verification import judge_failsafe
 from resources_servers.gdpval import persisted_layout
 from resources_servers.gdpval.app import (
