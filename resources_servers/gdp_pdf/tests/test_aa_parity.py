@@ -26,9 +26,8 @@ from pytest import approx
 
 from benchmarks.gdp_pdf import prepare
 from benchmarks.gdp_pdf.report_aa import failures_path, load_run, read_jsonl, summarize
+from nemo_gym.rollouts import RolloutStore, RunManifest
 from nemo_gym.rollouts.rollout_records import rejudge_predecessor_id
-from nemo_gym.rollouts.rollout_recovery import RunManifest
-from nemo_gym.rollouts.rollout_store import RolloutStore
 
 
 # ---------------------------------------------------------------------------
