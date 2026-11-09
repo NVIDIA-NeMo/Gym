@@ -845,6 +845,7 @@ async def test_judge_only_reads_selected_source_into_separate_output(
     monkeypatch.setattr(
         reverify, "_run_verification_payloads", lambda payloads, **kwargs: [verify(row) for row in payloads]
     )
+    monkeypatch.setattr(reverify, "setup_server_client", lambda: Mock(global_config_dict={}))
     config = reverify.RolloutReverificationConfig(
         materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
         rollouts_jsonl_fpath=str(output),
@@ -1576,24 +1577,106 @@ def test_rejudge_cold_binding_is_shared_and_read_only(prepared_run, mutation):
 
 
 def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run):
+    from nemo_gym.trajectory.trajectory_record import TrajectoryRecord
+
     output, prepare = prepared_run
-    old = {
-        "task_id": "t",
-        "rollout_id": "r",
-        "verifier_invocations": [
-            {"invocation_id": "old-verifier", "status": "failed", "failure_kind": "judge_failure"}
-        ],
+    answer = {
+        "object": "response",
+        "id": "saved",
+        "status": "completed",
+        "output": [{"type": "message", "role": "assistant", "content": "The saved policy answer."}],
     }
+    policy_call = {
+        "model_call_id": "policy-call",
+        "request": {"input": [{"role": "user", "content": "Original question"}]},
+        "response": answer,
+    }
+    old_judge_call = {
+        "model_call_id": "old-judge-call",
+        "request": {"input": [{"role": "user", "content": "Previous judge request"}]},
+        "response": {"id": "old-judge-response", "status": "failed", "output": []},
+    }
+    old = TrajectoryRecord.model_validate(
+        {
+            "task_id": "t",
+            "rollout_id": "r",
+            "invocations": [
+                {
+                    "invocation_id": "policy-invocation",
+                    "status": "completed",
+                    "model_calls": [{"model_call_id": "policy-call"}],
+                }
+            ],
+            "turns": [
+                {
+                    "invocation_id": "policy-invocation",
+                    "task_id": "t",
+                    "rollout_id": "r",
+                    "turn_no": 1,
+                    "timestamp": 1.0,
+                    "step_count": 1,
+                    "question": policy_call["request"]["input"],
+                    "answer": answer["output"],
+                    "model_calls": [{"model_call_id": "policy-call"}],
+                }
+            ],
+            "tool_calls": [
+                {
+                    "invocation_id": "policy-invocation",
+                    "tool_call_id": "original-tool-call",
+                    "tool_name": "lookup",
+                    "status": "completed",
+                    "output": {"evidence": "Original tool result"},
+                }
+            ],
+            "model_calls": [policy_call, old_judge_call],
+            "verifier_invocations": [
+                {
+                    "invocation_id": "old-verifier",
+                    "status": "failed",
+                    "failure_kind": "judge_failed",
+                    "model_calls": [{"model_call_id": "old-judge-call"}],
+                }
+            ],
+        }
+    ).model_dump(mode="json")
+    enriched = TrajectoryRecord.model_validate(
+        {
+            "task_id": "t",
+            "rollout_id": "r",
+            "verifier_invocations": [
+                {
+                    "invocation_id": "new-verifier",
+                    "status": "completed",
+                    "model_calls": [{"model_call_id": "new-judge-call"}],
+                },
+                {
+                    "invocation_id": "unrelated-verifier",
+                    "status": "completed",
+                    "model_calls": [{"model_call_id": "unowned-call"}],
+                },
+            ],
+            "model_calls": [
+                {
+                    "model_call_id": "new-judge-call",
+                    "request": {"input": [{"role": "user", "content": "Grade the original saved answer"}]},
+                    "response": {"id": "new-judge-response", "verdict": "SUPPORTED"},
+                },
+                {"model_call_id": "unowned-call", "request": {"input": "Unrelated capture"}},
+            ],
+        }
+    ).model_dump(mode="json")
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         row = store.pending(3)[0]
         store.record_dispatch(row)
         failure = row | {
             "_ng_failure_class": "judge_failed",
             "_ng_failure_id": "original",
-            "response": {"object": "response", "id": "saved", "status": "completed", "output": []},
+            "response": answer,
             "ng_trajectory": old,
         }
         store.record_outcome(failure)
+    failures_before = failures_path_for(output).read_bytes()
     with RolloutStore.open_for_rejudgment(output) as store:
         pending = store.admit_rejudgment(failure)
         result = {k: v for k, v in failure.items() if not k.startswith("_ng_failure") and k != "ng_trajectory"} | {
@@ -1611,14 +1694,31 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
             with pytest.raises(ConfigError, match="fresh observed verifier"):
                 store.record_rejudgment(failure, result | {"ng_verifier_invocations": invocations})
             assert snapshot(output) == before
-        result["ng_verifier_invocations"] = [{"invocation_id": "new-verifier", "status": "completed"}]
+        result["ng_verifier_invocations"] = [
+            {"invocation_id": "new-verifier", "status": "completed", "model_calls": []}
+        ]
+        result["ng_trajectory"] = enriched
+        failed_observation = {
+            **enriched,
+            "verifier_invocations": [
+                {**enriched["verifier_invocations"][0], "status": "failed", "failure_kind": "judge_failed"}
+            ],
+        }
+        with pytest.raises(ConfigError, match="fresh observed verifier"):
+            store.record_rejudgment(failure, result | {"ng_trajectory": failed_observation})
+        assert snapshot(output) == before
         assert store.record_rejudgment(failure, result)
         assert not store.record_rejudgment(failure, result)
     (selected,) = RolloutStore.read(output).selected("success")
     assert selected["_ng_rejudged_failure_observations"]["ng_trajectory"] == old
     assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
-    assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ["new-verifier"]
-    assert selected["response"] == failure["response"] and selected["reward"] == 0.0
+    trajectory = selected["ng_trajectory"]
+    assert trajectory["verifier_invocations"] == [enriched["verifier_invocations"][0]]
+    assert trajectory["model_calls"] == [old["model_calls"][0], enriched["model_calls"][0]]
+    for field in ("invocations", "turns", "tool_calls"):
+        assert trajectory[field] == old[field]
+    assert selected["response"] == answer and selected["reward"] == 0.0
+    assert failures_path_for(output).read_bytes() == failures_before
 
 
 def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepared_run):

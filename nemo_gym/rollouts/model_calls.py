@@ -157,7 +157,11 @@ def clear_model_call_captures_for_rollouts(records: list[Any], capture_dirs: lis
 
 
 def merge_model_call_capture_into_record(
-    record: dict[str, Any], capture_dirs: list[Path], *, include_payloads: bool = False
+    record: dict[str, Any],
+    capture_dirs: list[Path],
+    *,
+    include_payloads: bool = False,
+    excluded_verifier_invocation_ids: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Attach captured model-call observability data to a rollout record in place.
 
@@ -167,6 +171,8 @@ def merge_model_call_capture_into_record(
     records. Raw request and response payloads remain in the capture store and are omitted from the
     attachment unless ``include_payloads`` is true. Capture/read/join failures are attached as
     ``gaps``. The harness output and reward are not modified.
+    Reverification can exclude predecessor-owned verifier calls before their failure reports are rehydrated;
+    raw capture files remain unchanged, and calls with missing or new ownership are retained.
     """
     if not capture_dirs:
         return record
@@ -199,6 +205,18 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
+    excluded_calls = {
+        ref.model_call_id
+        for invocation_id, invocation in verifier_invocations.items()
+        if invocation_id in excluded_verifier_invocation_ids
+        for ref in invocation.model_calls
+    }
+    calls = [call for call in calls if call.model_call_id not in excluded_calls]
+    verifier_invocations = {
+        invocation_id: invocation
+        for invocation_id, invocation in verifier_invocations.items()
+        if invocation_id not in excluded_verifier_invocation_ids
+    }
     # Captured SSE preserves the terminal report even when an external client ignores the extension.
     # A model call's selected failure is only an observation of the enclosing episode.
     for call in calls:

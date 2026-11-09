@@ -16,7 +16,7 @@ from benchmarks.longfact.prepare import (
     build_rows,
     select_rows,
 )
-from nemo_gym.data import materialize_task
+from nemo_gym.data.task_materialization import materialize_task
 
 
 def test_source_path_uses_official_layout():

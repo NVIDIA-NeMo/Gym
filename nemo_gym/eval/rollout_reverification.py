@@ -24,6 +24,7 @@ import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import ExitStack, nullcontext
+from copy import deepcopy
 from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
@@ -53,6 +54,7 @@ from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
+    ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -63,11 +65,13 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
+from nemo_gym.rollouts.model_calls import model_call_capture_dirs_from_config, observability_enabled_from_config
 from nemo_gym.rollouts.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
     _rollout_request_debug_summary,
+    enrich_run_result,
     is_omitted_rollout_row,
     is_terminal_failure,
     matches_failure_class,
@@ -75,6 +79,7 @@ from nemo_gym.rollouts.rollout_collection import (
 from nemo_gym.rollouts.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
+    REJUDGED_OBSERVATIONS_KEY,
     RUN_ID_KEY,
     coverage_path_for,
     journal_path_for,
@@ -782,7 +787,13 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
         payload["saved_model_patch_sha256"] = pair.rollout["model_patch_sha256"]
     # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
     # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
-    for key in (*_IDENTITY_KEYS, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
+    for key in (
+        ROLLOUT_ID_KEY_NAME,
+        ATTEMPT_INDEX_KEY_NAME,
+        *_IDENTITY_KEYS,
+        _SOURCE_RUN_ID_KEY,
+        _SOURCE_ANSWER_KEY,
+    ):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
     return payload
@@ -936,6 +947,17 @@ def _prepare_atif_payloads(
         }
         for item in projected
     ]
+
+
+def _predecessor_verifier_ids(predecessor: Dict[str, Any]) -> frozenset[str]:
+    """The known verifier executions retained across earlier re-judgments of this saved answer."""
+    ids: set[str] = set()
+    observations = predecessor
+    while isinstance(observations, dict):
+        trajectory = observations.get("ng_trajectory") or {}
+        ids.update(item["invocation_id"] for item in trajectory.get("verifier_invocations", []))
+        observations = observations.get(REJUDGED_OBSERVATIONS_KEY)
+    return frozenset(ids)
 
 
 def _run_verification_payloads(
@@ -1975,6 +1997,9 @@ class RolloutReverificationHelper(BaseModel):
         failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
         sources_dropped = False
+        global_config = setup_server_client().global_config_dict
+        capture_dirs = model_call_capture_dirs_from_config(global_config)
+        observability_enabled = observability_enabled_from_config(global_config)
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
@@ -1995,6 +2020,26 @@ class RolloutReverificationHelper(BaseModel):
                 for key in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY, _SOURCE_ANSWER_KEY):
                     if key in row:
                         result[key] = row[key]
+
+                excluded_verifiers = frozenset()
+                if config.settle_into_source:
+                    predecessor = settle_binding["failures"][logical_rollout_id(row)]
+                    result["_ng_rejudge_verifier_invocation_ids"] = [
+                        item["invocation_id"] for item in result.get("ng_verifier_invocations", [])
+                    ]
+                    excluded_verifiers = _predecessor_verifier_ids(predecessor)
+                    for key in ("ng_agent_observations", "ng_trajectory"):
+                        if key in predecessor and key not in result:
+                            result[key] = deepcopy(predecessor[key])
+                # Reverification shares the source attempt's capture key. Keep the raw store and drain writes
+                # before either the recovery output or canonical settlement snapshots the new verifier evidence.
+                await enrich_run_result(
+                    row,
+                    result,
+                    capture_dirs=capture_dirs,
+                    observability_enabled=observability_enabled,
+                    excluded_verifier_invocation_ids=excluded_verifiers,
+                )
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)

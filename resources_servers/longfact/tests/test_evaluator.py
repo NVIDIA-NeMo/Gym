@@ -538,7 +538,7 @@ def test_known_retrieval_failure_recovers_the_saved_answer_without_policy_genera
     assert rows[0]["reward"] == pytest.approx(2 / 101)
     assert not rows[0]["mask_sample"]
     assert "_ng_failure_class" not in rows[0]
-    (invocation,) = rows[0]["ng_verifier_invocations"]
+    (invocation,) = rows[0]["ng_trajectory"]["verifier_invocations"]
     assert invocation["status"] == "completed"
     (operation,) = invocation["grading_operations"]
     assert operation["outcome"] == "completed"

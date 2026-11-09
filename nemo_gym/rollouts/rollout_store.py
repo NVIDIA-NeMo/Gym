@@ -453,13 +453,27 @@ class RolloutStore:
             # The selected view retains policy lineage but must describe the newly observed verifier.
             try:
                 prior = TrajectoryRecord.model_validate(failure["ng_trajectory"])
+                enriched = (
+                    TrajectoryRecord.model_validate(result["ng_trajectory"]) if "ng_trajectory" in result else None
+                )
+                observed = (
+                    {item.invocation_id: item for item in enriched.verifier_invocations}
+                    if enriched is not None
+                    else {}
+                )
                 actual = [
                     VerifierInvocation.model_validate(item) for item in result.get("ng_verifier_invocations", [])
                 ]
+                if "ng_verifier_invocations" not in result:
+                    actual = [observed[identity] for identity in result.get("_ng_rejudge_verifier_invocation_ids", [])]
                 ids = [item.invocation_id for item in actual]
                 old_ids = {item.invocation_id for item in prior.verifier_invocations}
                 if not actual or len(ids) != len(set(ids)) or old_ids.intersection(ids):
                     raise ValueError("missing or reused verifier invocation")
+                if enriched is not None:
+                    if (enriched.task_id, enriched.rollout_id) != (prior.task_id, prior.rollout_id):
+                        raise ValueError("rejudge trajectory identity differs from predecessor")
+                    actual = [observed[invocation_id] for invocation_id in ids]
                 if not result.get("_ng_failure_class") and any(item.status != "completed" for item in actual):
                     raise ValueError("successful rejudge lacks completed verifier evidence")
                 prior_judge_calls = {
@@ -470,9 +484,24 @@ class RolloutStore:
                 selected["model_calls"] = [
                     call for call in selected["model_calls"] if call.get("model_call_id") not in prior_judge_calls
                 ]
+                if enriched is not None:
+                    new_judge_calls = {ref.model_call_id for item in actual for ref in item.model_calls}
+                    retained_ids = {call.get("model_call_id") for call in selected["model_calls"]}
+                    selected["model_calls"].extend(
+                        call.model_dump(mode="json")
+                        for call in enriched.model_calls
+                        if call.model_call_id in new_judge_calls and call.model_call_id not in retained_ids
+                    )
+                    selected["gaps"] = [
+                        gap.model_dump(mode="json")
+                        for gap in {
+                            (gap.code, gap.invocation_id, gap.agent_instance, gap.span_id, gap.detail): gap
+                            for gap in [*prior.gaps, *enriched.gaps]
+                        }.values()
+                    ]
                 settled["ng_trajectory"] = TrajectoryRecord.model_validate(selected).model_dump(mode="json")
                 settled["_ng_rejudge_verifier_invocation_ids"] = ids
-            except (TypeError, ValueError) as error:
+            except (KeyError, TypeError, ValueError) as error:
                 raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
         saved = current.record.read()
         if saved == settled:

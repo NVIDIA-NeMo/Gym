@@ -2383,6 +2383,10 @@ class TestRolloutReverificationRunFromConfig:
             "nemo_gym.eval.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client",
+            lambda: MagicMock(global_config_dict={}),
+        )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
         # run_from_config resolves the input paths for real; the files don't exist in these tests, so stub it out.
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
@@ -2850,6 +2854,10 @@ class TestRunFromConfigForceFlag:
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
         )
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client",
+            lambda: MagicMock(global_config_dict={}),
+        )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._resolve_under_cwd_or_install", lambda p: Path(p))
 
@@ -2940,6 +2948,10 @@ class TestRunFromConfigResumeFromCache:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", AsyncMock(return_value=None))
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._call_aggregate_metrics", AsyncMock(return_value=None)
+        )
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client",
+            lambda: MagicMock(global_config_dict={}),
         )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
 
@@ -3394,6 +3406,10 @@ class TestRunFromConfigJudgeFailedOnly:
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._guard_reverify_mode", guard_mock)
         agg_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification._call_aggregate_metrics", agg_mock)
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification.setup_server_client",
+            lambda: MagicMock(global_config_dict={}),
+        )
         monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
         return guard_mock, agg_mock
 
