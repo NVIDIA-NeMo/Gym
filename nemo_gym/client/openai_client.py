@@ -70,6 +70,12 @@ PERMANENT_QUOTA_CODES = ("budget_exceeded", "insufficient_quota")
 PERMANENT_AUTH_CODES = ("invalid_api_key", "invalid_api_token", "authentication_error")
 # A provider that says it is busy is waited out on a time budget, not a count of tries.
 WAIT_OUT_ERROR_CODES = (429, 503)
+# The most of an error answer's body kept for a retry decision and on the final error: enough for the JSON error
+# ``code`` and ``type``, bounded so a provider's huge error page is not retained per attempt.
+ERROR_BODY_PREFIX_BYTES = 64 * 1024
+# OpenAI's error code for a prompt that does not fit the context window; the same value as
+# ``nemo_gym.models.token_capture.records.CONTEXT_LENGTH_EXCEEDED_ERROR_CODE``, which this lower package cannot import.
+CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
 RETRY_BACKOFF_BASE_SECONDS = 1.0
 RETRY_BACKOFF_MAX_SECONDS = 60.0
 # 2**6 = 64 s already passes the cap, so larger exponents only risk a float overflow on very long retry runs.
@@ -179,9 +185,14 @@ def _body_read_cause(response: ClientResponse, failure: Optional[NgFailureEvent]
 
 
 async def _read_error_body(response: ClientResponse, failure: Optional[NgFailureEvent]) -> bytes:
-    """Read an error reply's body once; a failed read names the attempt that returned it as its explicit cause."""
+    """Read an error reply's body once and keep its first ``ERROR_BODY_PREFIX_BYTES``.
+
+    Reading it all releases the connection; only the prefix is passed on, so the final error and its
+    retry decisions never hold a provider's huge error page. A failed read names the attempt that returned it
+    as its explicit cause.
+    """
     try:
-        return await response.content.read()
+        return (await response.content.read())[:ERROR_BODY_PREFIX_BYTES]
     except (ClientError, TimeoutError) as error:
         cause = _body_read_cause(response, failure)
         if cause is None:
@@ -229,6 +240,11 @@ def _error_body_is_permanent_quota(content: bytes | str) -> bool:
     return any(code in codes for code in PERMANENT_QUOTA_CODES)
 
 
+def _error_body_is_context_overflow(content: bytes | str) -> bool:
+    """True when an error body is a propagated context-length overflow, which no retry can fix."""
+    return CONTEXT_LENGTH_EXCEEDED_ERROR_CODE in {token.lower() for token in _parsed_error_codes(content)}
+
+
 def _error_body_is_permanent_auth(content: bytes | str) -> bool:
     """True when a 401/403 body is a revoked or invalid key, not a one-off denial."""
     codes = {token.lower() for token in _parsed_error_codes(content)}
@@ -269,7 +285,11 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
     internal: bool = Field(
         default=False,
-        description="Set this to true for internal NeMo Gym servers, which may retry indefinitely.",
+        description=(
+            "Set this to true for internal NeMo Gym servers. Their transport retries connection errors "
+            "without a try limit, and they wait out every 429/5xx answer that a provider sends until "
+            "max_rate_limit_wait_seconds is spent (max_http_attempts when that is 0), like external 429/503."
+        ),
     )
 
     max_connection_retries: Optional[int] = Field(
@@ -288,7 +308,8 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         description=(
             "Total time to wait out 429 and 503 answers before failing the request, instead of "
             "max_http_attempts tries; the request fails once the next wait would pass it. 0 keeps 429 and 503 "
-            "on the max_http_attempts count. Internal NeMo Gym servers keep retrying them without limit."
+            "on the max_http_attempts count. Internal NeMo Gym servers wait out every 429, 502, 503, 504 and 520 "
+            "answer on this budget."
         ),
     )
 
@@ -546,18 +567,28 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 )
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 
+            if _error_body_is_context_overflow(content):
+                # The prompt does not fit; resending it cannot succeed, whatever status a server re-emitted it with.
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=last_failure.attempt_id if last_failure else f"{operation_id}-{tries}",
+                    failure_id=last_failure.event_id if last_failure else None,
+                )
+                await _raise_exhausted(response, content, last_failure)
+
             wait = _retry_wait_seconds(tries, response)
-            # Internal NeMo Gym servers extend max tries for retryable errors unless
-            # the caller owns the complete retry schedule. A busy provider is waited
-            # out until max_rate_limit_wait_seconds is spent: a positive budget ends the
-            # request even when max_http_attempts allows more tries, and 0 leaves 429
-            # and 503 on the max_http_attempts count.
-            if resend and self.max_num_tries is None and response.status in RATE_LIMIT_ERROR_CODES and self.internal:
-                max_num_tries += 1
-            elif (
+            # One counter (``tries``) and one elapsed budget (``waited``) cover every retryable status, so a changing
+            # status sequence never resets them. A busy provider is waited out until max_rate_limit_wait_seconds is
+            # spent: a positive budget ends the request even when max_http_attempts allows more tries, and 0 leaves
+            # the busy statuses on the max_http_attempts count. Internal NeMo Gym servers wait out every
+            # rate-limit/transient status this way; external providers only 429 and 503. Neither extends its
+            # attempt cap without that budget.
+            wait_out_codes = RATE_LIMIT_ERROR_CODES if self.internal else WAIT_OUT_ERROR_CODES
+            if (
                 resend
                 and self.max_num_tries is None
-                and response.status in WAIT_OUT_ERROR_CODES
+                and response.status in wait_out_codes
                 and self.max_rate_limit_wait_seconds > 0
             ):
                 if waited + wait > self.max_rate_limit_wait_seconds:
