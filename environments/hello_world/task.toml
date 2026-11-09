@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+schema_version = "1.4"
+
+[task]
+name = "nemo-gym/hello-world"
+version = "1.0.0"
+description = "Create a text file containing a NeMo Gym greeting"
+authors = []
+keywords = ["tutorial"]
+
+[metadata]
+difficulty = "easy"
+category = "programming"
+tags = ["example"]
+
+[verifier]
+timeout_sec = 120.0
+
+[agent]
+timeout_sec = 120.0
+
+[environment]
+build_timeout_sec = 600.0
+workdir = "/workspace"
+cpus = 1
+memory_mb = 2048
+storage_mb = 10240
+gpus = 0
+mcp_servers = []
+
+[verifier.env]
+
+[environment.env]
+
+[solution.env]

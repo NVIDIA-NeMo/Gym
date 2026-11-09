@@ -35,7 +35,8 @@ from haystack import component
 from haystack.core.serialization import allow_deserialization_module, default_from_dict, default_to_dict
 from haystack.dataclasses import ChatMessage, ChatRole, TextContent, ToolCall
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient, get_response_json, raise_for_status
+from nemo_gym.core import (
     RESPONSES_TO_TRAIN,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -49,7 +50,6 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 
 # Allow this generator to be deserialized from a pipeline YAML (Haystack blocks non-allowlisted

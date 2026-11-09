@@ -24,14 +24,16 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest, job_name
 from nemo_gym.orchestration.executors.otel import otel_active
 from nemo_gym.orchestration.jobs import (
@@ -72,6 +74,28 @@ def _kubectl(compute: KubernetesComputeConfig, *args: str, input: str | None = N
 
 class KubernetesExecutor(BaseExecutor):
     """Kubernetes executor. One Job per benchmark; see `kubernetes_script.py` for the pod shape."""
+
+    name = "kubernetes"
+
+    def resubmit(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        keep_budget: bool = False,
+        accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
+        accounting_reconciled: bool = False,
+        repin: str | None = None,
+        repin_reason: str | None = None,
+        extend_retries: int = 0,
+        extend_attempts: int = 0,
+        max_walltime: str | None = None,
+        walltime_reason: str | None = None,
+        fresh_restart: bool = False,
+        rerun_masked: Mapping[str, Any] | None = None,
+    ) -> BenchmarkJob:
+        raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
@@ -129,11 +153,12 @@ class KubernetesExecutor(BaseExecutor):
             submitted_at=utc_timestamp(now),
             run_dir=str(base_run_dir),
             cluster=cluster,
-            executor="kubernetes",
+            executor=self.name,
             hostname=None,
             submitted_by=getpass.getuser(),
             benchmarks=benchmarks,
             executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
+            environment=self.submission_environment(config, required_env=[], forwarded_env=[]),
         )
         # The manifest/config write already happened in each Job's own apply (kubernetes_script.py),
         # so write_manifest is a no-op here; only persist()'s local index write matters.
@@ -162,11 +187,12 @@ class KubernetesExecutor(BaseExecutor):
                 submitted_at=utc_timestamp(now),
                 run_dir=str(run_dir),
                 cluster=next(iter(config.compute)),
-                executor="kubernetes",
+                executor=self.name,
                 hostname=None,
                 submitted_by=getpass.getuser(),
                 benchmarks=[BenchmarkJob(benchmark=name, job_dir=str(run_dir), job_id=name_in_cluster)],
                 executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
+                environment=self.submission_environment(config, required_env=[], forwarded_env=[]),
             )
             job = build_job_manifest(
                 config,

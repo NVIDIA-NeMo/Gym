@@ -28,17 +28,18 @@ from fastapi import Body, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+    accumulate_response_usage,
 )
-from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from responses_api_agents.conversational_tool_use_scenario_generation.assets import (
     ScenarioAssets,
     load_assets,
@@ -249,11 +250,16 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
         accepted: list[CustomerScenario] = []
         accepted_keys: set[tuple[str, str, str, Optional[str], str]] = set()
         last_artifact_completion: Optional[NeMoGymChatCompletion] = None
+        usage: Optional[NeMoGymResponseUsage] = None
 
         for completion_index, task in enumerate(asyncio.as_completed(tasks)):
             outcome = await task
             trace = outcome.trace
             trace.completion_index = completion_index
+            if outcome.chat_completion is not None:
+                usage = accumulate_response_usage(
+                    usage, chat_completion_usage_to_response_usage(outcome.chat_completion.usage)
+                )
 
             accepted_from_call = 0
             duplicate_from_call = 0
@@ -288,6 +294,8 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
             if last_artifact_completion is not None
             else self._empty_response()
         )
+        # The response text is one artifact call; usage covers every completion the rollout received.
+        response.usage = usage
         return ScenarioGenerationVerifyResponse.model_validate(
             body.model_dump(mode="json")
             | {
@@ -371,7 +379,9 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
                     error_type=type(exc).__name__,
                     error_message=str(exc),
                 ),
-                chat_completion=None,
+                # A completion that came back but failed to parse still spent tokens; it has no scenarios,
+                # so it is never chosen as the response artifact.
+                chat_completion=chat_completion,
             )
 
     def _chat_completion_to_response(
@@ -380,7 +390,7 @@ class ConversationalToolUseScenarioGenerationAgent(SimpleResponsesAPIAgent):
         completion: NeMoGymChatCompletion,
     ) -> NeMoGymResponse:
         response_params = body.responses_create_params.model_copy(update={"model": completion.model})
-        return ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        return ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params,
             completion,
         )

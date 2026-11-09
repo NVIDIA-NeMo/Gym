@@ -33,9 +33,10 @@ Presets
     agent, model, and resources server processes** — the whole point of the integration
     works without tuning.
 ``per_rollout``
-    The spine plus per-request detail (``verify``, ``agent``, ``model_call``). Omits
-    ``job`` so each rollout is its own bounded root trace rather than nesting every
-    rollout under one run-long span — the same reasoning behind NeMo-RL's ``per_step``.
+    The spine plus per-request detail (``verify``, ``agent``, ``model_call``), without the
+    run-level ``job`` and ``startup`` spans. Trace shape does not depend on it: in a standalone
+    ``gym eval`` run (no embedder's span, ``ENABLE_SINGLE_TRACEID`` unset) the driver opens
+    every rollout as its own root trace under any preset.
 ``all``
     Reserved by nemo-lens: every group registered in the process, including ``sandbox``.
 
@@ -74,12 +75,13 @@ class GymSpanGroup:
     cross-process propagation: adopts an inbound ``traceparent`` as the span's parent."""
 
     HTTP_CLIENT = "http_client"
-    """Outbound spans around ``nemo_gym.server_utils.request`` — Gym's single aiohttp
+    """Outbound spans around ``nemo_gym.client.http_client.request`` — Gym's single aiohttp
     egress point. The egress half of cross-process propagation: injects ``traceparent``
     into the outgoing headers."""
 
     ROLLOUT = "rollout"
-    """Rollout collection spans (one per task attempt, driver side)."""
+    """Rollout collection spans: ``gym.rollout.dispatch`` on the driver, once per dispatch, and
+    ``gym.rollout`` on the agent server, once per task attempt."""
 
     VERIFY = "verify"
     """Resources-server ``/verify`` spans."""
@@ -120,9 +122,7 @@ class GymSpanGroup:
     #: ``all`` is not here: nemo-lens reserves it as a wildcard over every registered group.
     _PRESETS: ClassVar[dict] = {
         "default": frozenset([JOB, STARTUP]) | CROSS_PROCESS_SPINE,
-        # NOTE: ``per_rollout`` deliberately omits ``job`` so each rollout is its own root trace with a bounded span count.
-        # ``job`` wraps a whole eval run and lives in ``default`` and ``all``.
-        # It also omits ``startup``, which happens once per run rather than once per rollout.
+        # ``per_rollout`` omits the run-level ``job`` and ``startup`` spans; trace shape does not depend on it.
         "per_rollout": frozenset([VERIFY, AGENT, MODEL_CALL]) | CROSS_PROCESS_SPINE,
     }
 

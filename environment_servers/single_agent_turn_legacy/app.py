@@ -6,52 +6,65 @@
 from typing import Any
 
 from fastapi import FastAPI
+from pydantic import ConfigDict, PositiveFloat
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.episode_types import (
-    EpisodeId,
-)
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.single_agent_turn_types import (
+from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
+    EpisodeId,
+    FailureReportRow,
+    maybe_rollout_id_from_run_body,
+)
+from nemo_gym.data import materialize_task
+from nemo_gym.server_runtime import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
 )
-from nemo_gym.task_materialization import materialize_task
+from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG_VERIFIER_INVOCATIONS_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+
+
+class SingleAgentTurnLegacyEnvironmentServerConfig(SingleAgentTurnEnvironmentServerConfig):
+    """Keep the migrated relay's timeout defaults for flat-row episodes."""
+
+    # Existing callers can still pass a typed SingleAgentTurnEnvironmentServerConfig, including its explicit limits.
+    model_config = ConfigDict(from_attributes=True)
+
+    default_episode_timeout_seconds: PositiveFloat | None = 21600
+    cleanup_timeout_seconds: PositiveFloat = 180
 
 
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    config: SingleAgentTurnEnvironmentServerConfig
+    config: SingleAgentTurnLegacyEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
-        # Legacy rows still run the native protocol through run_request, so its episodes checkpoint too.
+        # Flat rows still run the episode protocol through run_request, so its episodes checkpoint too.
         self.setup_environment_checkpoint(app)
         app.post("/run")(self.run_legacy)
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         return app
 
     async def run_legacy(self, row: dict[str, Any]) -> dict[str, Any]:
+        is_episode_request = "episode_id" in row and "task" in row
         request = (
-            SingleAgentTurnRequest.model_validate(row)
-            if "episode_id" in row and "task" in row
-            else self._episode_request_from_row(row)
+            SingleAgentTurnRequest.model_validate(row) if is_episode_request else self._episode_request_from_row(row)
         )
         response = await self.run_request(request)
-        return self._legacy_result(response)
+        # An episode request is answered with the episode reply it asks for; only a flat row gets a flat result.
+        return response.model_dump(mode="json") if is_episode_request else self._legacy_result(response)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
         task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
@@ -89,7 +102,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
-                "_ng_failure_class": "environment_server_failed",
+                "_ng_failure_class": response.failure.failure_kind or ENVIRONMENT_SERVER_FAILED,
+                "_ng_failure_kind": response.failure.failure_kind,
                 "_ng_failure_terminal": response.failure.terminal,
                 "_ng_failure_message": response.failure.failure_reason,
                 "_ng_failure_stage": response.failure.stage,
@@ -99,6 +113,15 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 failure["_ng_failure_partial_response"] = response.failure.partial_response.model_dump(mode="json")
             if response.failure.agent_observations is not None:
                 failure[NG_AGENT_OBSERVATIONS_KEY] = response.failure.agent_observations.model_dump(mode="json")
+            if response.failure.trajectory is not None:
+                failure[NG_TRAJECTORY_KEY] = response.failure.trajectory.model_dump(mode="json")
+            if response.failure.verifier_invocations is not None:
+                failure[NG_VERIFIER_INVOCATIONS_KEY] = [
+                    invocation.model_dump(mode="json") for invocation in response.failure.verifier_invocations
+                ]
+            # The flat reply keeps the typed reply's events, omission flag and selected failure.
+            if response.failure_report is not None:
+                FailureReportRow.merged_into(failure, response.failure_report)
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
@@ -106,6 +129,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
             result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
         result["agent_ref"] = agent_ref
+        if response.failure_report is not None:
+            FailureReportRow.merged_into(result, response.failure_report)
         return result
 
 

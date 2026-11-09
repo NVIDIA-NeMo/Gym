@@ -1,0 +1,20 @@
+{
+  "max_token_reached_rate": 0,
+  "context_window_exceeded_rate": 0,
+  "rollout_failure_rate": 0,
+  "reasoning_only_response_rate": 0,
+  "missing_judgment_rate": 0,
+  "parse_failure_rate": 0,
+  "any_both_bad_rate": 0,
+  "any_tie_rate": 0.4,
+  "total_prompts": 5,
+  "arena/overall/win_rate": 0.358,
+  "arena/overall/win_rate_no_SC": 0.358,
+  "win_rate_no_SC": 0.358,
+  "win_rate_no_SC_ci95_lower": 0.12375,
+  "win_rate_no_SC_ci95_upper": 0.5762499999999996,
+  "win_rate": 0.358,
+  "win_rate_ci95_lower": 0.12375,
+  "win_rate_ci95_upper": 0.5762499999999996,
+  "mean/reward": 0.35
+}

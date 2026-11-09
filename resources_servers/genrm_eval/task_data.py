@@ -21,6 +21,18 @@ class TaskData(BaseModel):
     source: str | None = Field(
         default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
     )
+    category: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    subcategory: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    task: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    response_modality: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
     label: str | None = Field(
         default=None, json_schema_extra={"consumed_by": ["verify", "metrics"], "legacy_location": "verifier_metadata"}
     )
@@ -34,5 +46,20 @@ class TaskData(BaseModel):
         default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
     )
     response_2_style_value: int | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    example_id: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    subset: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    comparisons: int | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    correct_pairs: int | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    flipped: bool | None = Field(
         default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
     )

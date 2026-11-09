@@ -1,0 +1,24 @@
+# This file is merged on top of Harbor's base docker-compose config.
+services:
+  main:
+    depends_on:
+      mcp-server:
+        condition: service_healthy
+    volumes:
+      - shared-data:/shared
+
+  mcp-server:
+    image: "${MEMORYARENA_WEBSHOP_MCP_IMAGE:-memoryarena-webshop-mcp:latest}"
+    expose:
+      - "8000"
+    volumes:
+      - shared-data:/shared
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('localhost',8000),timeout=2); s.close()"]
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 90s
+
+volumes:
+  shared-data: {}

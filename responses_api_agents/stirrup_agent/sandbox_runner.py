@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 import httpx  # noqa: E402
+from openai import APIStatusError  # noqa: E402
 from openai.types.responses import FunctionToolParam  # noqa: E402
 from pydantic import BaseModel, ConfigDict, create_model  # noqa: E402
 from stirrup.core.models import (  # noqa: E402
@@ -46,6 +47,12 @@ if TYPE_CHECKING:
 
 # Web fetches can take minutes; the runner's own deadline still bounds a hung call.
 _TOOL_TIMEOUT_S = 900
+# Connection attempts before a task tool call fails. httpx retries only before the request is sent, so a call that
+# reached the route is never repeated.
+_TOOL_CONNECT_RETRIES = 3
+
+# Statuses with which a Model Server says the request itself is invalid. Other errors are infrastructure failures.
+_REJECTION_STATUSES = frozenset({400, 413, 422})
 
 
 class LocalShell(CodeExecToolProvider):
@@ -222,7 +229,7 @@ def _report_invalid_arguments() -> None:
 INVOCATION_ID = "root"
 
 
-# Values of ``AgentInvocation.status`` and ``ToolCallObservation.status`` in ``nemo_gym.rollout_observability``,
+# Values of ``AgentInvocation.status`` and ``ToolCallObservation.status`` in ``nemo_gym.trajectory.trajectory_record``,
 # which the sandbox cannot import.
 class InvocationStatus(StrEnum):
     COMPLETED = "completed"
@@ -240,6 +247,7 @@ class Observer:
     """Record the model responses and tool executions the agent server reports as rollout evidence."""
 
     def __init__(self) -> None:
+        self.compactions: list[dict[str, Any]] = []
         self.response_ids: list[str] = []
         self.usages: list[dict[str, Any]] = []
         self.shell: LocalShell | None = None
@@ -263,6 +271,40 @@ class Observer:
             return response
 
         completions.create = observed_create
+
+    def watch_compaction(self, agent: NeMoAgent) -> None:
+        summarize = agent.summarize_messages
+        report_summary = agent._logger.context_summarization_complete
+        summary = None
+
+        def completed(content: str, bridge: str) -> None:
+            nonlocal summary
+            summary = content
+            report_summary(content, bridge)
+
+        async def observed_summarize(*args: Any, **kwargs: Any) -> Any:
+            nonlocal summary
+            summary = None
+            first = len(self.response_ids)
+            outcome = "failed"
+            try:
+                result = await summarize(*args, **kwargs)
+                outcome = "completed"
+                return result
+            finally:
+                self.compactions.append(
+                    {
+                        "invocation_id": INVOCATION_ID,
+                        "trigger": "automatic",
+                        "outcome": outcome,
+                        "observed_at": time.time(),
+                        "summary": summary,
+                        "model_calls": [{"response_id": value} for value in self.response_ids[first:]],
+                    }
+                )
+
+        agent._logger.context_summarization_complete = completed
+        agent.summarize_messages = observed_summarize
 
     def watch_tool_calls(self, agent_class: type[NeMoAgent]) -> None:
         run_tool = agent_class.run_tool
@@ -325,13 +367,14 @@ class Observer:
                 "status": status,
                 "model_response_ids": self.response_ids,
                 "tool_calls": self.tool_calls(history, list(output_items)),
+                "compactions": self.compactions,
             },
             "usages": self.usages,
         }
 
 
 async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dict[str, Any]:
-    from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent
+    from responses_api_agents.stirrup_agent.nemo_agent import CompactionSummaryError, NeMoAgent
     from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient
     from responses_api_agents.stirrup_agent.stirrup_utils import (
         convert_stirrup_history_to_output_items,
@@ -347,12 +390,10 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         cookies=access["cookies"],
         headers=access["headers"],
         timeout=_TOOL_TIMEOUT_S,
+        transport=httpx.AsyncHTTPTransport(retries=_TOOL_CONNECT_RETRIES),
     ) as http:
         finish_names = payload["finish_tool_names"]
         task_tools = [remote_tool(spec, http) for spec in payload["tools"]]
-        missing = set(finish_names or []) - {tool.name for tool in task_tools}
-        if missing:
-            raise ValueError(f"Finish tools {sorted(missing)} are not among the request's tools")
         client = DynamicMaxTokensChatCompletionsClient(api_key="gym", **payload["client"])
         shell = LocalShell(payload["workdir"], scratch)
         observer.watch_model_calls(client)
@@ -363,7 +404,7 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             name="stirrup_agent",
             max_turns=payload["max_turns"],
             tools=[
-                shell,
+                *([shell] if payload["code_exec"] else []),
                 TaskTools([tool for tool in task_tools if tool.name not in (finish_names or [])]),
             ],
             finish_tool=[tool for tool in task_tools if tool.name in finish_names] if finish_names else None,
@@ -372,8 +413,12 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             min_compaction_summary_words=payload["min_compaction_summary_words"],
             **({"system_prompt": system_prompt} if system_prompt else {}),
         )
+        observer.watch_compaction(agent)
         started = time.time()
         stop_reason = None
+        model_error = None
+        model_error_status = None
+        invalid_output = None
         async with agent.session(cache_on_interrupt=False) as session:
             try:
                 finish_params, history, _ = await session.run(messages)
@@ -382,7 +427,21 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
                 asyncio.current_task().uncancel()
                 finish_params, history = None, _completed_turns(session, messages)
                 stop_reason = _stop_reason(payload)
-        status = InvocationStatus.COMPLETED if finish_params is not None else InvocationStatus.INCOMPLETE
+            except APIStatusError as error:
+                if not _rejected_by_model(error):
+                    raise
+                # The episode ends here and is graded on the turns completed so far.
+                finish_params, history = None, _completed_turns(session, messages)
+                stop_reason, model_error = "model_error", str(error)
+                model_error_status = error.status_code
+            except CompactionSummaryError as error:
+                # The policy model's own summaries were unusable; the episode is graded on the turns so far.
+                finish_params, history = None, [*_completed_turns(session, messages)[:-1], error.messages]
+                stop_reason, invalid_output = "compaction_failed", str(error)
+        if model_error is not None or invalid_output is not None:
+            status = InvocationStatus.FAILED
+        else:
+            status = InvocationStatus.COMPLETED if finish_params is not None else InvocationStatus.INCOMPLETE
         input_items, output_items = convert_stirrup_history_to_output_items(history)
         return {
             "input_items": input_items,
@@ -390,6 +449,9 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
             "elapsed_seconds": time.time() - started,
             "resources_cookies": {cookie.name: cookie.value for cookie in http.cookies.jar},
             "stop_reason": stop_reason,
+            "model_error": model_error,
+            "model_error_status": model_error_status,
+            "invalid_output": invalid_output,
             **observer.report(status, history, output_items),
         }
 
@@ -398,6 +460,11 @@ def _completed_turns(session: Any, messages: list[Any]) -> list[list[Any]]:
     """The message history as of the start of the turn that was running, from Stirrup's per-turn snapshot."""
     state = session._current_run_state
     return [list(messages)] if state is None else [*state.full_msg_history, state.msgs]
+
+
+def _rejected_by_model(error: APIStatusError) -> bool:
+    """Whether the Model Server refused the request itself (such as a context overflow), which no retry can fix."""
+    return error.status_code in _REJECTION_STATUSES
 
 
 def _stop_reason(payload: dict[str, Any]) -> str:

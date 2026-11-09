@@ -5,6 +5,7 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def tavily_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The benchmark and standalone configs require the key and no longer default it."""
+def required_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The benchmark and standalone configs require these and no longer default them."""
     monkeypatch.setenv("TAVILY_API_KEY", "tvly-test")
+    monkeypatch.setenv("PERSIST_DELIVERABLES_DIR", "/tmp/gdpval-test-deliverables")

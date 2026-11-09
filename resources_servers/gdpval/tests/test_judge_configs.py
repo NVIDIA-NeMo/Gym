@@ -89,6 +89,15 @@ def test_minimax_overlay_repoints_the_default_judge_proxy(judge_env, monkeypatch
     assert proxy.openai_model == gdpval.judge_responses_create_params_overrides["model"] == "minimax-m3"
 
 
+@pytest.mark.parametrize("config_path", [STANDALONE, BENCHMARK], ids=["standalone", "benchmark"])
+@pytest.mark.parametrize("variable", ["PERSIST_DELIVERABLES_DIR", "TAVILY_API_KEY"])
+def test_the_configs_do_not_resolve_without_their_required_environment(judge_env, monkeypatch, config_path, variable):
+    monkeypatch.delenv(variable)
+
+    with pytest.raises(Exception, match=variable):
+        _resolved(config_path)
+
+
 def test_standalone_config_resolves_to_a_rubric_server_with_the_default_judge(judge_env, monkeypatch):
     config = _resolved(STANDALONE)
     gdpval = _gdpval_config(config)
@@ -96,7 +105,7 @@ def test_standalone_config_resolves_to_a_rubric_server_with_the_default_judge(ju
     assert (gdpval.reward_mode, gdpval.judge_panel) == ("rubric", None)
     assert gdpval.tavily_api_key == "tvly-test"
     assert gdpval.judge_model_server.name == "gdpval_judge_model"
-    assert gdpval.persist_deliverables_dir == "output/gdpval/deliverables"
+    assert gdpval.persist_deliverables_dir == "/tmp/gdpval-test-deliverables"
 
 
 def test_multistage_overlay_switches_to_comparison_against_the_anchored_references(judge_env, monkeypatch):
