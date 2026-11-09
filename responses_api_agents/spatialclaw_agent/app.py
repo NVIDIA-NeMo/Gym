@@ -27,15 +27,18 @@ from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from aiohttp import ClientError, ClientResponseError
-from fastapi import Request
+from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.agents.base_responses_api_agent import (
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY, AgentCloseSessionResponse, AgentSeedRejectedError,
+    AgentSeedSessionRequest, AgentSessionState, AgentOutcome,
+
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.client.openai_client import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -43,19 +46,21 @@ from nemo_gym.client.openai_client import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.config.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.config.global_config import get_first_server_config_dict
-from nemo_gym.server_runtime.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import get_first_server_config_dict
+from nemo_gym.server_runtime import (
+    DirectHTTPToolAccess, MCPToolAccess,
+
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.server_runtime.base_server import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
-from nemo_gym.server_runtime.base_server import request as http_request
-from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.client import request as http_request
+from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.spatialclaw_agent.kernel_transport import _kernel_transport_loop
 from responses_api_agents.spatialclaw_agent.observability import read_observations, response_usage
+from responses_api_agents.spatialclaw_agent.sessions import SpatialClawSessionState, RemoteKernelPool, resource_call
 
 
 SPATIALCLAW_URL = "ssh://git@gitlab-master.nvidia.com:12051/ehosseiniasl/spatial_claw.git"
@@ -63,7 +68,7 @@ SPATIALCLAW_COMMIT = "946ac114dfcabf9df997629bfa8b6f2f66da1425"  # pragma: allow
 
 
 class SpatialClawAgentConfig(BaseResponsesAPIAgentConfig):
-    resources_server: ResourcesServerRef
+    resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
     spatialclaw_url: str = SPATIALCLAW_URL
     spatialclaw_commit: str = SPATIALCLAW_COMMIT
@@ -708,10 +713,94 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         metadata["ref_images"] = ref_images
         return instruction, images, metadata
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> SpatialClawSessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("Native SpatialClaw uses a resource-owned kernel, not a task sandbox")
+        if body.continuation is not None:
+            raise AgentSeedRejectedError("Native SpatialClaw sessions support one activation")
+        accesses = self.effective_tool_accesses(body)
+        if any(isinstance(access, MCPToolAccess) and access.required for access in accesses):
+            raise AgentSeedRejectedError("Native SpatialClaw requires direct_http kernel access")
+        direct = [access for access in accesses if isinstance(access, DirectHTTPToolAccess)]
+        if len(direct) != 1:
+            raise AgentSeedRejectedError("Native SpatialClaw requires exactly one direct_http task grant")
+        return SpatialClawSessionState(request=body, access=direct[0])
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, SpatialClawSessionState):
+            raise TypeError("Expected SpatialClaw session state")
+        if state.task is not None and not state.task.done():
+            state.task.cancel()
+            try:
+                async with asyncio.timeout(self.config.session_close_timeout_seconds):
+                    await state.task
+            except asyncio.CancelledError:
+                pass
+        observations = state.observations or AgentObservationBundle(
+            source="spatialclaw", records=[], gaps=[{
+                "code": "observation_capture_failed", "detail": "Activation did not produce native observations"
+            }],
+        )
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            resources_cookies=dict(state.access.cookies),
+        )
+
     async def responses(
         self,
         request: Request,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
+    ) -> NeMoGymResponse:
+        session_id = self._agent_session_id_from_request(request)
+        if session_id is None:
+            return await self._responses(request, body)
+        state = self._require_agent_session(session_id)
+        if not isinstance(state, SpatialClawSessionState):
+            raise TypeError("Expected SpatialClaw session state")
+        if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
+            raise HTTPException(409, "SpatialClaw activation does not match its seeded rollout")
+        if state.task is None:
+            state.activation_request = body.model_copy(deep=True)
+            state.task = asyncio.create_task(self._session_response(state, request, state.activation_request))
+        elif body != state.activation_request:
+            raise HTTPException(409, "SpatialClaw sessions allow one activation; retry the same request")
+        return (await asyncio.shield(state.task)).model_copy(deep=True)
+
+    async def _session_response(
+        self, state: SpatialClawSessionState, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
+    ) -> NeMoGymResponse:
+        result = await self._responses(request, body, state=state)
+        raw_observations = (result.model_extra or {}).get("_ng_agent_observations")
+        if raw_observations is not None:
+            state.observations = AgentObservationBundle.model_validate(raw_observations)
+        failure = (result.model_extra or {}).get("_ng_agent_failure")
+        if failure:
+            status = failure.get("http_status")
+            kind = "model_request_error" if isinstance(status, int) else (
+                "model_transport_error" if failure.get("mask_sample") else "agent_limit"
+                if failure.get("failure_kind") == "agent_timeout" else "agent_invalid_output"
+            )
+            result.status = "failed"
+            result.metadata = dict(result.metadata or {}) | {
+                AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind, status_code=status).model_dump_json()
+            }
+        if not failure or not failure.get("mask_sample"):
+            await resource_call(state.access, "/kernel", {
+                "operation": "finalize_answer", "answer": result.output_text or "",
+            })
+        extras = dict(result.model_extra or {})
+        extras.pop("_ng_agent_failure", None)
+        extras.pop("_ng_agent_observations", None)
+        result.__pydantic_extra__ = extras
+        return result
+
+    async def _responses(
+        self,
+        request: Request,
+        body: NeMoGymResponseCreateParamsNonStreaming,
+        *,
+        state: SpatialClawSessionState | None = None,
     ) -> NeMoGymResponse:
         if self.sem is None:
             self.sem = Semaphore(self.config.concurrency)
@@ -727,12 +816,18 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
             journal = session_dir / "gym-model-responses.jsonl"
             try:
                 spatial_config = self._build_spatialclaw_config(root, session_dir, body, request)
-                instruction, images, metadata = await self._materialize_inputs(body, session_dir, spatial_config)
+                if state is None:
+                    instruction, images, metadata = await self._materialize_inputs(body, session_dir, spatial_config)
+                else:
+                    context = (await resource_call(state.access, "/get_context", {}))["structuredContent"]
+                    instruction, images, metadata = context["instruction"], context["images"], context["metadata"]
                 from spatial_agent.config import set_config
                 from spatial_agent.workflow import SpatialAgentWorkflow
 
                 set_config(spatial_config)
                 workflow = SpatialAgentWorkflow(spatial_config)
+                if state is not None:
+                    workflow._kernel_pool = RemoteKernelPool(state.access)
                 _install_gym_llm_transport(workflow.llm_client, journal=journal, cookies=request.cookies)
                 try:
                     result = await asyncio.wait_for(
@@ -831,6 +926,10 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         request: Request,
         body: SpatialClawAgentRunRequest = Body(),
     ) -> SpatialClawAgentVerifyResponse:
+        if self._agent_session_id_from_request(request) is not None:
+            raise HTTPException(409, "SpatialClaw sessions run through the Environment Server")
+        if self.config.resources_server is None:
+            raise HTTPException(422, "Compatibility /run requires a resources_server binding")
         cookies = request.cookies
         seed = await self.server_client.post(
             server_name=self.config.resources_server.name,

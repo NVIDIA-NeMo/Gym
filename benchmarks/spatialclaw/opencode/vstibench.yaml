@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+- benchmarks/spatialclaw/vstibench.yaml
+- benchmarks/spatialclaw/harnesses/opencode.yaml
+spatialclaw_vstibench_benchmark_agent:
+  _inherit_from: opencode_agent
+  responses_api_agents:
+    _delete_key: spatialclaw_agent
+    opencode_agent: {}
+spatialclaw_vstibench_benchmark_environment_server:
+  environment_servers:
+    single_agent_turn:
+      resources_tool_transports:
+      - mcp

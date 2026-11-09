@@ -1,0 +1,21 @@
+config_paths:
+- benchmarks/spatialclaw/opencode/erqa.yaml
+- benchmarks/spatialclaw/opencode/omni3d.yaml
+- benchmarks/spatialclaw/opencode/omnispatial.yaml
+- benchmarks/spatialclaw/opencode/spbench.yaml
+- benchmarks/spatialclaw/opencode/mindcube.yaml
+- benchmarks/spatialclaw/opencode/mmsi.yaml
+- benchmarks/spatialclaw/opencode/sparbench.yaml
+- benchmarks/spatialclaw/opencode/blink.yaml
+- benchmarks/spatialclaw/opencode/spatialtree.yaml
+- benchmarks/spatialclaw/opencode/viewspatial.yaml
+- benchmarks/spatialclaw/opencode/mmsivideo.yaml
+- benchmarks/spatialclaw/opencode/osibench.yaml
+- benchmarks/spatialclaw/opencode/paibench.yaml
+- benchmarks/spatialclaw/opencode/vsibench_unbiased.yaml
+- benchmarks/spatialclaw/opencode/vstibench.yaml
+- benchmarks/spatialclaw/opencode/dsibench.yaml
+- benchmarks/spatialclaw/opencode/cvbench.yaml
+- benchmarks/spatialclaw/opencode/perceptioncomp.yaml
+- benchmarks/spatialclaw/opencode/videomme.yaml
+- benchmarks/spatialclaw/opencode/videomme2.yaml

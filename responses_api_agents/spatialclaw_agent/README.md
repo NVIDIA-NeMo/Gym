@@ -30,3 +30,33 @@ proxied to the preset's Gym resource server. The complete suite lives under
 This adapter intentionally does not expose SpatialClaw's shell/Pyxis matrix runner
 through Gym. Gym owns row scheduling, retry/resume behavior, verification, and
 aggregation.
+
+## Agent sessions
+
+The session path is an in-process native SpatialClaw harness at the Evaluation
+capability level. It accepts exactly one required `direct_http` grant to a
+SpatialClaw Resources session; it rejects borrowed sandboxes, required MCP grants,
+and continuation requirements with terminal 422 responses. Optional unsupported
+MCP grants are skipped. All session workers use `num_workers: 1`.
+
+The Environment Server owns the episode lifecycle. The adapter does not seed,
+verify or close Resources during activation. It reads Resources' canonical task
+context and runs the original native graph with a remote connection to the
+resource-owned Python kernel. Model calls, including kernel VLM queries, retain
+the Gym rollout route. Native force-termination/fallback semantics remain part of
+the native harness; the final native prediction is committed to Resources through
+the trusted direct HTTP connection before verification.
+
+One activation is allowed per session. Identical retries share or replay its task;
+conflicting bodies, wrong rollout URLs and unknown/closed session cookies return
+409. A disconnected HTTP caller does not cancel shared work. Close cancels pending
+work within its cleanup budget and returns observations, or an explicit gap when
+activation produced none. It disconnects from the kernel; Resources owns final
+kernel shutdown. Infrastructure/model outcomes use Gym's `AgentOutcome` contract
+so the Environment Server selects retry, failure or verification.
+
+Sessionless `/v1/responses` remains a local development path; compatibility `/run`
+requires an explicit Resources binding. Neither path provides execution isolation.
+The session integration requires shared filesystem access between agent and
+Resources. It does not support training/token-history capture or crash-resumable
+native workflow state. A worker restart must restart the episode.

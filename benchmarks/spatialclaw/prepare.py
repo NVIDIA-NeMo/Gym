@@ -165,13 +165,20 @@ def _prepare_in_process(
                             "content": [{"type": "input_text", "text": _instruction(benchmark, sample)}],
                         }
                     ],
-                    "metadata": _sample_metadata(sample, resolved_data_root),
                 },
                 "sample_id": str(sample.sample_id),
+                "media": _sample_metadata(sample, resolved_data_root),
                 "answer": getattr(sample, "answer", None),
                 "question_type": str(getattr(sample, "question_type", "")),
                 "benchmark_name": spatial_config.benchmark,
                 "dataset_config": dataset_config,
+            }
+            row = {
+                "task_id": {"taskset": f"spatialclaw:{dataset_config}", "task_id": str(sample.sample_id)},
+                "task_input": {
+                    "responses_create_params": row.pop("responses_create_params"),
+                    "task_data": row,
+                },
             }
             output.write(json.dumps(row, ensure_ascii=False, default=str) + "\n")
 

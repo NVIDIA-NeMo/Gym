@@ -2,12 +2,13 @@
 config_paths:
   - benchmarks/spatialclaw/videomme.yaml
 
-spatialclaw_videomme_benchmark_agent:
-  responses_api_agents:
-    spatialclaw_agent:
+spatialclaw_videomme_benchmark_resources_server:
+  resources_servers:
+    spatialclaw:
       datasets:
         - name: spatialclaw_example
           type: example
+          taskset: spatialclaw:videomme_spatialclaw
           jsonl_fpath: resources_servers/spatialclaw/data/example.jsonl
           prompt_config: null
           num_repeats: 1

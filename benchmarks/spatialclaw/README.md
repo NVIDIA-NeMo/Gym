@@ -160,3 +160,76 @@ rows, preserving benchmark-specific macro averages, mean-relative-accuracy
 calculations, category breakdowns, and other native headline metrics. A native
 evaluator may mark a row unscored; such a row remains visible and is not
 silently converted into a successful result.
+
+## Interchangeable harnesses through agent sessions
+
+The session migration is a follow-up to Gym PR #3996. All 20 presets now use
+`single_agent_turn`, with typed taskset routing. Resources owns the dataset,
+canonical question, native media sampling, persistent Python kernel, tool state,
+answer submission and native scoring. The Environment Server seeds Resources,
+seeds the selected agent, activates it once, closes the agent, verifies, and
+finally closes Resources. It does not invoke the agent's compatibility `/run`.
+
+| Harness | Preset | Tool transport | Runtime |
+| --- | --- | --- | --- |
+| Native SpatialClaw | `videomme.yaml` (or another original preset) | Direct HTTP connection to the resource-owned kernel | Original SpatialClaw `946ac114dfcabf9df997629bfa8b6f2f66da1425` |
+| OpenCode | `opencode/videomme.yaml` (or the matching `opencode/` preset) | Required authenticated MCP `get_context` and `execute` | OpenCode 1.18.34 from the integration branch below |
+
+Both presets load exactly the same Resources configuration, preparation script,
+tasks, media policy, and scorer. The OpenCode preset changes agent configuration
+and tool-transport wiring. It uses the existing generic `opencode_agent`, not a
+benchmark-specific OpenCode adapter. `opencode/config.yaml` composes the whole
+suite for that harness.
+
+Prepared rows now have `task_id` and `task_input` envelopes. Media references are
+in verifier-owned `task_input.task_data.media`, and Responses input contains the
+unchanged question text. **Re-run preparation for existing datasets**; older
+flat rows with video/image metadata in Responses are incompatible with the
+OpenCode session request contract. Old retained rollout fixtures remain historical
+provenance and do not validate this migration.
+
+OpenCode's original integration is
+[`ehosseiniasl/opencode:spatialclaw-integration`](https://gitlab-master.nvidia.com/ehosseiniasl/opencode/-/tree/spatialclaw-integration)
+at `a2acc05f2aab51e574c46fecbe09c4b7e97a6c8d`. The profile pins its 1.18.34 binary
+by SHA-256 (`9ca0b9953d49997601655e54f846a3efa464f237e47c6f1b04716d0f2e64c4c2`).
+The external Python `OpenCodeWorkflow` is not copied into Gym or launched by the
+adapter: its benchmark-specific bridge is replaced by the shared Resources tool
+contract. The external runtime's non-commercial SpatialClaw license restrictions
+still apply. A different build needs an explicit reviewed digest/version update.
+
+For example, after staging the native source/data and the pinned OpenCode binary:
+
+```bash
+export SPATIALCLAW_OPENCODE_BIN=/absolute/path/to/opencode
+
+gym eval prepare --config benchmarks/spatialclaw/videomme.yaml
+
+gym eval run \
+  --config benchmarks/spatialclaw/opencode/videomme.yaml \
+  --config responses_api_models/openai_model/configs/openai_model.yaml
+```
+
+The supplied OpenCode profile explicitly uses the Local sandbox provider and the
+native resource kernel executes on the Resources host. These are trusted internal
+development paths with shared filesystem access, **without filesystem or network
+isolation**. The profile denies OpenCode's built-in host tools and grants only the
+benchmark's MCP tools; that permission map does not turn Local execution into a
+container. Production isolation and an isolated native kernel deployment are not
+claimed. Both agent and Resources session workers use `num_workers: 1`.
+
+Native SpatialClaw keeps its planner, reflection, formatting and fallback policy.
+OpenCode drives its own loop and submits through the benchmark kernel's
+`ReturnAnswer`; plain assistant prose does not replace an explicit submission.
+These harness behaviors, OpenCode's generic prompt/compaction behavior and its
+model sampling defaults can differ from the historical standalone integration.
+No score parity is claimed. Auxiliary VLM calls from the task kernel still use
+the rollout-prefixed Gym model route; when they occur, a partial OpenCode-only
+usage total is replaced with unknown usage and marked in response metadata.
+Full invocation/turn ownership reconciliation and P0 qualification remain pending.
+
+This is an Evaluation-level pairing. Native SpatialClaw does not advertise a
+function-calling shell tool, so the shell conformance probes do not apply to it.
+The OpenCode pairing deliberately disables its shell tools and grants benchmark
+Python execution instead; the shell probe suite is not a behavioral certificate
+for this configuration. Real model smokes for both harnesses, health/evidence
+inspection and full benchmark parity are required before certification.

@@ -4,13 +4,14 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class TaskData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     sample_id: str
+    media: dict[str, str] = Field(default_factory=dict)
     answer: Any = None
     question_type: str | None = None
     benchmark_name: str | None = None

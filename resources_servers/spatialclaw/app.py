@@ -5,13 +5,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Mapping
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Annotated, Any, ClassVar, Literal, Self
 
-from pydantic import ConfigDict, PrivateAttr
+from fastapi import FastAPI, Request
+from mcp import types
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, PositiveFloat, PrivateAttr, model_validator
 
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef
 from nemo_gym.metrics.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
+    BaseSeedSessionRequest,
+    MCPTool,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
+    ResourcesSessionLostError,
+    lost_session_verification,
+    reject_partial_typed_seed,
+)
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseRunRequest,
@@ -20,6 +36,7 @@ from nemo_gym.server_runtime.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from resources_servers.spatialclaw.session_runtime import SpatialClawSessionRuntime, context_result
 from resources_servers.spatialclaw.task_data import TaskData
 from responses_api_agents.spatialclaw_agent.app import (
     SPATIALCLAW_COMMIT,
@@ -31,6 +48,9 @@ from responses_api_agents.spatialclaw_agent.app import (
 )
 
 
+LOG = logging.getLogger(__name__)
+
+
 class SpatialClawResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
     spatialclaw_url: str = SPATIALCLAW_URL
@@ -39,6 +59,53 @@ class SpatialClawResourcesServerConfig(BaseResourcesServerConfig):
     source_cache_root: str | None = None
     dataset_config: str
     data_root: str | None = None
+    model_server: ModelServerRef = Field(
+        default_factory=lambda: ModelServerRef(type="responses_api_models", name="policy_model")
+    )
+    model_config_path: str | None = None
+    model_name: str | None = None
+    gpu_server_registry: str | None = None
+    config_overrides: dict[str, Any] = Field(default_factory=dict)
+    max_output_tokens: int | None = None
+    workspace_root: str = "outputs/spatialclaw_resources"
+    frame_cache_root: str = "outputs/spatialclaw_frame_cache"
+    runtime_setup_timeout: PositiveFloat = 600
+    runtime_close_timeout: PositiveFloat = 60
+    keep_workspaces: bool = True
+
+
+class SpatialClawSeedRequest(TaskData, BaseSeedSessionRequest):
+    pass
+
+
+class ExecuteRequest(BaseModel):
+    code: str = Field(max_length=100000)
+    timeout: PositiveFloat | None = None
+
+
+class KernelRequest(BaseModel):
+    operation: Literal[
+        "execute",
+        "start",
+        "shutdown",
+        "reset_namespace",
+        "get_variables",
+        "check_sentinel",
+        "clear_sentinel",
+        "finalize_answer",
+    ]
+    code: str | None = None
+    answer: str | None = None
+    timeout: PositiveFloat | None = None
+    name: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    @model_validator(mode="after")
+    def validate_operation_payload(self) -> Self:
+        if self.operation == "finalize_answer" and self.answer is None:
+            raise ValueError("finalize_answer requires answer")
+        if self.operation == "execute" and self.code is None:
+            raise ValueError("execute requires code")
+        return self
 
 
 class SpatialClawRunRequest(TaskData, BaseRunRequest):
@@ -80,12 +147,129 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
     """Use the pinned loader for row scoring and its full evaluator for metrics."""
 
     config: SpatialClawResourcesServerConfig
+    seed_request_model: ClassVar[type[BaseSeedSessionRequest]] = SpatialClawSeedRequest
     _benchmark_instance: Any = PrivateAttr(default=None)
     _sample_by_id: dict[str, Any] = PrivateAttr(default_factory=dict)
     _load_lock: asyncio.Lock | None = PrivateAttr(default=None)
+    _runtime_lock: asyncio.Lock = PrivateAttr(default_factory=asyncio.Lock)
+    _session_runtimes: dict[str, SpatialClawSessionRuntime] = PrivateAttr(default_factory=dict)
+    _source_root: Path | None = PrivateAttr(default=None)
 
     def model_post_init(self, __context: Any) -> None:
+        super().model_post_init(__context)
         self._load_lock = asyncio.Lock()
+
+    def setup_webserver(self) -> FastAPI:
+        app = super().setup_webserver()
+        app.post("/get_context")(self.get_context)
+        app.post("/execute")(self.execute)
+        app.post("/kernel")(self.kernel)
+        parent = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI):
+            try:
+                async with parent(app) as state:
+                    yield state
+            finally:
+                for session_id in list(self._session_runtimes):
+                    try:
+                        async with self.session_lock(session_id):
+                            await self.release_session_state(session_id)
+                    except Exception:
+                        LOG.exception("SpatialClaw resource cleanup failed for %s", session_id)
+
+        app.router.lifespan_context = lifespan
+        return app
+
+    def mcp_tools(self, harvested: list[MCPTool], catchall: Any) -> list[MCPTool]:
+        # Native-kernel control is an adapter API, never a model-visible tool.
+        return [tool for tool in harvested if tool.name in {"get_context", "execute"}]
+
+    def has_session_state(self, session_id: str) -> bool:
+        return session_id in self._session_runtimes
+
+    async def initialize_session_state(self, session_id: str, body: SpatialClawSeedRequest) -> None:
+        benchmark = await self._load_benchmark()
+        sample = self._sample_by_id.get(body.sample_id)
+        if sample is None:
+            raise ResourcesSeedRejectedError(f"Unknown SpatialClaw sample id: {body.sample_id}")
+        runtime = SpatialClawSessionRuntime.new(session_id, body.sample_id, self.config.workspace_root)
+        self._session_runtimes[session_id] = runtime
+        identity = self.session_identity(session_id)
+        capture_key = identity[0].capture_key if identity is not None else session_id
+        async with self._runtime_lock:
+            await asyncio.wait_for(
+                runtime.initialize(self, sample, benchmark, capture_key, media=body.media),
+                timeout=self.config.runtime_setup_timeout,
+            )
+
+    async def release_session_state(self, session_id: str) -> None:
+        runtime = self._session_runtimes.get(session_id)
+        if runtime is not None:
+            async with self._runtime_lock:
+                await runtime.close(
+                    timeout=self.config.runtime_close_timeout, keep_workspace=self.config.keep_workspaces
+                )
+            self._session_runtimes.pop(session_id, None)
+
+    async def seed_session(
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[SpatialClawSeedRequest, BeforeValidator(reject_partial_typed_seed)],
+    ) -> ResourcesSeedSessionResponse:
+        response = await super().seed_session(body, request=request)
+        if isinstance(response, ResourcesSeedSessionResponse):
+            return response.model_copy(
+                update={
+                    "observation": (
+                        "Use the granted get_context tool to inspect this task's native media and Python environment. "
+                        "Use execute for Python cells; submit the answer with ReturnAnswer(...)."
+                    )
+                }
+            )
+        return response
+
+    @staticmethod
+    def _request_session_id(request: Request) -> str | None:
+        return request.session.get(SESSION_ID_KEY)
+
+    def _runtime(self, session_id: str | None) -> SpatialClawSessionRuntime:
+        runtime = self._session_runtimes.get(session_id or "")
+        if runtime is None:
+            raise ResourcesSessionLostError("SpatialClaw task session is no longer available")
+        if runtime.verified:
+            raise ResourcesSessionLostError("SpatialClaw task session has already been verified")
+        return runtime
+
+    async def get_context(self, request: Request) -> types.CallToolResult:
+        """Get the task's native instructions and initial images, without answers or grading data."""
+        session_id = self._request_session_id(request)
+        async with self.session_lock(session_id or ""):
+            runtime = self._runtime(session_id)
+            if runtime.context is None:
+                raise ResourcesSessionLostError("SpatialClaw task initialization is incomplete")
+            return context_result(runtime.context)
+
+    async def execute(self, request: Request, body: ExecuteRequest) -> types.CallToolResult:
+        """Execute one bounded Python cell in this task's persistent native environment."""
+        session_id = self._request_session_id(request)
+        async with self.session_lock(session_id or ""):
+            runtime = self._runtime(session_id)
+            async with self._runtime_lock:
+                return await runtime.execute(body.code, body.timeout)
+
+    async def kernel(self, request: Request, body: KernelRequest) -> dict[str, Any]:
+        """Private native-adapter kernel protocol; not advertised through MCP."""
+        session_id = self._request_session_id(request)
+        async with self.session_lock(session_id or ""):
+            runtime = self._runtime(session_id)
+            async with self._runtime_lock:
+                result = await runtime.rpc(
+                    body.operation, code=body.code, timeout=body.timeout, name=body.name, answer=body.answer
+                )
+            return {"result": result}
 
     def _load_benchmark_sync(self) -> Any:
         if self._benchmark_instance is not None:
@@ -101,6 +285,7 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
             )
             root = ensure_spatialclaw_checkout(self.config.spatialclaw_url, self.config.spatialclaw_commit, cache_root)
         _install_source_path(root)
+        self._source_root = root
 
         from spatial_agent.config import SpatialAgentConfig, set_config
         from spatial_agent.evals.factory import BenchmarkFactory
@@ -138,24 +323,61 @@ class SpatialClawResourcesServer(SimpleResourcesServer):
         async with self._load_lock:
             return await asyncio.to_thread(self._load_benchmark_sync)
 
-    async def verify(self, body: SpatialClawVerifyRequest) -> SpatialClawVerifyResponse:
+    async def verify(self, body: SpatialClawVerifyRequest, request: Request = None) -> SpatialClawVerifyResponse:
+        # Stateless verification remains available for saved historical rollouts.
+        session_id = self._request_session_id(request) if request is not None else None
+        if session_id is not None:
+            async with self.session_lock(session_id):
+                runtime = self._session_runtimes.get(session_id)
+                if runtime is None:
+                    return SpatialClawVerifyResponse.model_validate(
+                        body.model_dump()
+                        | {
+                            **lost_session_verification("SpatialClaw task session was lost before verification"),
+                            "prediction": "",
+                            "extracted_answer": None,
+                            "native_score": None,
+                            "scored": False,
+                            "evaluation_completed": False,
+                        }
+                    )
+                if runtime.sample_id != body.sample_id:
+                    raise ResourcesSeedRejectedError("verify sample_id does not match the seeded task")
+                runtime.verified = True
+                journal = runtime.workspace / "gym-model-responses.jsonl"
+                if journal.is_file() and journal.stat().st_size:
+                    # The harness reports only its own provider calls. Resource VLM
+                    # queries are captured separately, so its token total is partial.
+                    response = body.response.model_copy(
+                        update={
+                            "usage": None,
+                            "metadata": dict(body.response.metadata or {})
+                            | {"spatialclaw_resource_usage_unknown": "true"},
+                        }
+                    )
+                    body = body.model_copy(update={"response": response})
+                return await self._score_prediction(body, runtime.accepted_answer or "")
+        return await self._score_prediction(body, (body.response.output_text or "").strip())
+
+    async def _score_prediction(self, body: SpatialClawVerifyRequest, prediction: str) -> SpatialClawVerifyResponse:
         benchmark = await self._load_benchmark()
         sample = self._sample_by_id.get(str(body.sample_id))
         if sample is None:
             raise ValueError(f"Unknown SpatialClaw sample id: {body.sample_id}")
 
-        prediction = (body.response.output_text or "").strip()
         score = benchmark.evaluate_single(sample, prediction)
         native_score = None if score is None else float(score)
         extracted = benchmark.extract_answer(prediction) or None
-        return SpatialClawVerifyResponse(
-            **body.model_dump(),
-            reward=0.0 if native_score is None else native_score,
-            prediction=prediction,
-            extracted_answer=extracted,
-            native_score=native_score,
-            scored=native_score is not None,
-            evaluation_completed=True,
+        return SpatialClawVerifyResponse.model_validate(
+            body.model_dump()
+            | {
+                "reward": 0.0 if native_score is None else native_score,
+                "prediction": prediction,
+                "extracted_answer": extracted,
+                "native_score": native_score,
+                "scored": native_score is not None,
+                "evaluation_completed": True,
+            }
         )
 
     def compute_metrics(self, tasks: list[list[dict[str, Any]]]) -> dict[str, Any]:

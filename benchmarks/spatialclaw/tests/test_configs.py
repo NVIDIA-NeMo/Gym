@@ -6,36 +6,28 @@ import yaml
 
 
 REPO_ROOT = Path(__file__).parents[3]
-SUITE_CONFIG = REPO_ROOT / "benchmarks" / "spatialclaw" / "config.yaml"
+SUITE_CONFIG = REPO_ROOT / "benchmarks/spatialclaw/config.yaml"
 
 
-def test_all_twenty_benchmarks_use_the_unified_spatialclaw_path() -> None:
-    suite = yaml.safe_load(SUITE_CONFIG.read_text(encoding="utf-8"))
-    preset_paths = suite["config_paths"]
-    assert len(preset_paths) == 20
-
-    for preset_path in preset_paths:
-        preset = yaml.safe_load((REPO_ROOT / preset_path).read_text(encoding="utf-8"))
-        assert preset["config_paths"] == [
-            "resources_servers/spatialclaw/configs/spatialclaw_resources.yaml",
-            "responses_api_agents/spatialclaw_agent/configs/spatialclaw_agent.yaml",
-        ]
-
-        resources = {name: value for name, value in preset.items() if name.endswith("_benchmark_resources_server")}
-        agents = {name: value for name, value in preset.items() if name.endswith("_benchmark_agent")}
-        assert len(resources) == len(agents) == 1
-
-        resource_name, resource = next(iter(resources.items()))
-        assert resource["_inherit_from"] == "spatialclaw_resources_server"
-        assert set(resource["resources_servers"]) == {"spatialclaw"}
-
-        agent = next(iter(agents.values()))
-        spatialclaw_agent = agent["responses_api_agents"]["spatialclaw_agent"]
-        assert spatialclaw_agent["resources_server"]["name"] == resource_name
-        assert spatialclaw_agent["dataset_config"] == resource["resources_servers"]["spatialclaw"]["dataset_config"]
-
-        datasets = spatialclaw_agent["datasets"]
-        assert len(datasets) == 1
-        prepare_script = REPO_ROOT / datasets[0]["prepare_script"]
-        assert prepare_script.parent == REPO_ROOT / "benchmarks" / "spatialclaw"
-        assert prepare_script.is_file()
+def test_all_twenty_presets_use_typed_resources_owned_tasks_and_agent_sessions():
+    presets = yaml.safe_load(SUITE_CONFIG.read_text())["config_paths"]
+    assert len(presets) == 20
+    for path in presets:
+        preset = yaml.safe_load((REPO_ROOT / path).read_text())
+        resource_name = next(k for k in preset if k.endswith("_benchmark_resources_server"))
+        agent_name = next(k for k in preset if k.endswith("_benchmark_agent"))
+        environment_name = next(k for k in preset if k.endswith("_benchmark_environment_server"))
+        resources = preset[resource_name]["resources_servers"]["spatialclaw"]
+        agent = preset[agent_name]["responses_api_agents"]["spatialclaw_agent"]
+        environment = preset[environment_name]["environment_servers"]
+        assert set(environment) == {"single_agent_turn"}
+        assert environment["single_agent_turn"]["resources_server"]["name"] == resource_name
+        assert environment["single_agent_turn"]["agent_server"]["name"] == agent_name
+        assert agent["resources_server"] is None and "datasets" not in agent
+        [dataset] = resources["datasets"]
+        assert dataset["num_repeats"] == 1
+        assert (REPO_ROOT / dataset["prepare_script"]).is_file()
+        assert preset["environment_server_routes"] == {dataset["taskset"]: environment_name}
+        opencode = yaml.safe_load((REPO_ROOT / "benchmarks/spatialclaw/opencode" / Path(path).name).read_text())
+        assert resource_name not in opencode  # Harness swap cannot redefine preparation or verification.
+        assert opencode[environment_name]["environment_servers"]["single_agent_turn"]["resources_tool_transports"] == ["mcp"]
