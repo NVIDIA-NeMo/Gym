@@ -8,8 +8,18 @@ Rollout health checks verify the integrity and observability of completed evalua
 missing agent activity, failed or incomplete policy-model calls, inconsistent token counts, and failures repeated across every
 attempt at a task.
 
-Health checks do not evaluate whether an answer is correct. The verifier and reward determine task success; rollout health
+Health checks do not evaluate whether an answer is correct. The verifier and reward determine task success; rollout quality
 determines whether the saved evidence is complete and internally consistent enough to trust and investigate the result.
+
+## Run health vs rollout quality
+
+Two different things are called health, and they answer different questions.
+
+**Run health** is the accounting of the rollouts the run owed. It is `run.artifacts.healthy` in `quality_summary.json`, with its causes in `unhealthy_reasons`. A run is unhealthy when no rollout was expected, when none completed, when rollouts are missing or not started, when records share a rollout identity, or when failed rollouts reach a configured limit. A failed rollout is an expected rollout whose selected record is a failure row. The count does not look at the cause, so a failure the model caused counts like an infrastructure fault: a model policy timeout settled as a counted zero is both a scored zero and a failure row, and so is an agent deadline that kept its answer. A failure is final when it cannot be retried (a terminal failure, a settled zero or a saved answer) or when its attempts reached the retry cap; every other failure is not final. The only run-level check, `run_excessive_failures`, compares the final and the not-final failures, each as a share of the expected rollouts, against `max_final_failure_fraction` and `max_not_final_failure_fraction`, and fails a group whose share reaches its limit. Both limits are unset by default, so without a limit failures alone do not make a run unhealthy. Wrong answers and incomplete responses saved as completed results are not failure rows. Run health does not decide acceptance: that is the recovery gate's status and the evaluation-health status in `--recover --inspect`, which also need traceable grading evidence, and a healthy run with every rollout measured can still be `UNVERIFIED`.
+
+**Rollout quality** is the per-rollout verdict (`healthy`, `unhealthy`, `unobserved`) in `run.verdicts` and `rollout_verdicts.jsonl`, with the `findings` behind it and the task-level flags such as `task_consistently_unhealthy` and `task_no_successful_model_calls`. These are signals about how trustworthy each measurement is. They do not depend on the reward, do not depend on run health and do not fail the run. Read them to decide whether a score means what it appears to mean.
+
+For example, suppose a benchmark saves each context-length rejection before the model's first answer as a completed zero, with no missing or duplicate rollouts. Run health can be true while complete captured-call evidence produces `rollout_ended_on_failed_model_call`. `task_no_successful_model_calls` appears only when every repeat has complete turn-to-call bindings and no successful bound call; otherwise that task check is unobserved. An overflow after an earlier successful answer in the same conversation is not an ended-on-failed-call finding. Read the flags and the served context window when interpreting the score.
 
 This page follows Gym's definitions of [task, rollout or trajectory, agent harness, and policy model](/main/about/concepts/key-terminology).
 Health-specific terms such as finding, verdict, and bound policy-model call are defined below where they are used.
@@ -34,7 +44,8 @@ remain available for line-by-line diagnostics.
 after aggregating the selected shards. Both commands print a short report:
 
 ```text
-Rollout health: 100 checked, 96 healthy, 3 unhealthy, 1 unobserved
+run health (failures vs limit): healthy; failed 0 final, 0 not final of 100 expected; limit final none, not final none
+rollout quality: 96 healthy / 3 unhealthy / 1 unobserved
 Quality summary: results/quality_summary.json
 ```
 
@@ -485,7 +496,7 @@ An ignored check does not execute and does not affect findings, unobserved state
 IDs are rejected; `model_call_failed` is accepted as an alias for `rollout_ended_on_failed_model_call`. The summary records ignored IDs and coverage so a reduced check set is explicit.
 
 <Warning>
-Ignoring a check weakens the meaning of `healthy`. Use it for a deliberate compatibility or observability investigation, and
+Ignoring a check weakens the meaning of a rollout's `healthy` verdict. Use it for a deliberate compatibility or observability investigation, and
 compare reports only when they use the same enabled check set.
 </Warning>
 

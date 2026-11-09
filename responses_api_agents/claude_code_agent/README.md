@@ -261,6 +261,30 @@ alternatively, `sandbox_executable_path` names a binary already **inside the
 sandbox**. These two options are mutually exclusive and require
 `sandbox_executable_sha256`.
 
+`network_access: model_only` limits an agent-owned sandbox's egress to the model
+endpoint's host. The CLI is uploaded from the Agent Server, so setup needs no other
+host. The OpenSandbox policy is set when the sandbox is created, so a session that
+borrows a task sandbox rejects any value other than `inherit` (the default, the
+provider's network). Only the OpenSandbox provider enforces the policy, so every
+other provider rejects a restricted value, including ones with network controls of
+their own. `network_access` cannot be combined with
+`sandbox_config.provider_options.network_policy`. Claude uses no tool grants, so
+`model_and_tools` is rejected. Each of these refusals fails the seed with HTTP 422.
+Under `model_only` the image must already include `bash`: the step that installs a
+missing one on a root image runs after the sandbox starts, when the package mirrors
+are out of reach. A borrowed sandbox relies on its owner's network policy. The policy
+is only as strong as the OpenSandbox server's egress mode: in `dns` mode only name
+resolution is filtered, so a hard-coded IP bypasses it; `dns+nft` also enforces it at
+the IP layer and is needed for full isolation.
+
+With neither `model_server` nor `anthropic_base_url` set, the CLI calls Anthropic's
+API directly, so `model_only` allows `api.anthropic.com`, and the real API key is in
+the sandbox. This path has not been run live behind the deny policy. It stops fetches
+by host name, but that host also serves Anthropic's server-side web search, so the
+policy alone may not stop the model from searching: pair it with
+`disallowed_tools: WebSearch,WebFetch`. With a Gym model server, the sandbox holds
+only placeholder credentials and this does not arise; the benchmark profile uses one.
+
 Configure `model_server` as above, or `anthropic_base_url` and `anthropic_api_key`;
 the endpoint must be reachable from the sandbox. With `model_server`, only
 placeholder Anthropic credentials enter the sandbox; the configured direct
@@ -321,15 +345,9 @@ Messages API, with an empty `anthropic_api_key`, and pins `claude_code_version`,
 profile sets the sandbox's lifetime (`ttl_s`), which OpenSandbox otherwise ends after 10 minutes. Supply the image
 in `sandbox_config.image`; set other `sandbox_config` keys under the profile's own instance name,
 `claude_code_agent.responses_api_agents.claude_code_agent.sandbox_config`.
+It sets `network_access: model_only`, so the sandbox reaches only the model server; the image must
+include `bash`.
 
-The pairing also needs one Environment Server setting. HLE's Environment Server, like those of HLE Diamond, GPQA and
-APEX Shortlist, grants the agent its Resources server over `direct_http`, which this agent cannot use, so every seed
-fails with a 422. The judge offers the agent no tools, so load this alongside the benchmark, the profile and the
-model config, under the benchmark's own Environment Server name (`gym env resolve` shows it):
-
-```yaml
-hle_equivalence_llm_judge_environment_server:
-  environment_servers:
-    single_agent_turn_legacy:
-      resources_tool_transports: []
-```
+HLE, HLE Diamond, GPQA and APEX Shortlist need no Environment Server setting: their judges serve no tools, so their
+Environment Servers grant the agent none. This agent rejects a required `direct_http` grant with a 422, so a
+benchmark whose Resources server serves its tools over direct HTTP does not pair with it.
