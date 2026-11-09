@@ -79,3 +79,12 @@ directory, or `BABYVISION_TSV` to the file). Two copies are accepted:
 
 They have identical questions and answers. In the `b3a93182…` copy, 175 of the 388 images are
 JPEG re-encodes of the `4216333e…` copy's PNGs.
+
+## Example data
+
+`data/example.jsonl` has five rows. The first three (`example_0` to `example_2`) are small synthetic puzzles. The
+last two are BabyVision tasks 4624 (Spatial Perception, Count 3D blocks) and 487 (Visual Pattern Recognition, Logic
+Patterns), taken from the [`UnipatAI/BabyVision`](https://huggingface.co/datasets/UnipatAI/BabyVision) dataset
+(MIT license) at revision `849cbeea2b1d00ad334e9e1e2b49a1960c9ff3f3` and written in `prepare.py`'s format. For a
+multiple-choice task, the question lists the options as `(A)`, `(B)`, … and the answer is the option's letter, as in
+VLMEvalKit. `data/example_rollouts.jsonl` holds one OpenCode rollout of each row.
