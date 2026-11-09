@@ -20,3 +20,5 @@ class TaskData(SWEBenchProTaskData):
     source_revision: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
     source_license: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
     source_task_path: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    task_license: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    task_license_url: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})

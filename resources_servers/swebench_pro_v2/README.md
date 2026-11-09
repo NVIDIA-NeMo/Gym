@@ -16,8 +16,10 @@ python benchmarks/swebench/pro_v2_hard/prepare.py
 
 ## Example input provenance
 
-Five genuine example inputs and their real model rollouts are required before this onboarding is
-ready. The example fixture is pending compatible task-content licensing and inspected model evidence.
+`data/example.jsonl` contains five genuine Teleport task inputs whose exact source base commits
+are Apache-2.0 licensed. Each row records its task license and immutable license URL. The complete
+Apache-2.0 text is retained in `data/LICENSE-TELEPORT`; all five source license files are identical.
+Five inspected real-model rollouts are still required before this onboarding is ready.
 The source inputs are pinned to the [HF dataset revision](https://huggingface.co/datasets/ScaleAI/SWE-bench_Pro/tree/2d52cb3df914a3fcf80c7f66738b3a88ae37fc50)
 and [upstream task tree](https://github.com/scaleapi/SWE-bench_Pro-os/tree/66f92766bba642462d4bbe5479e83f91f9211862/v2/tasks).
 
@@ -26,6 +28,8 @@ the licenses of their source repositories. `data/LICENSE` preserves the harness'
 Do not attribute all task content to MIT or copy incompatible task source into this Apache-2.0 repository.
 Record the exact task repository/base commit, file paths, source revisions and applicable licenses for
 any committed fixture. Keep input data, gold/empty verifier controls and real model rollouts distinct.
+The dataset-source schema cannot express this joined HF/Git subset with both source revisions;
+its exact provenance is recorded per row instead of pointing the downloader at the full HF split.
 
 The separate `configs/swebench_pro_v2_example.yaml` selects the example fixture once present and
 stages its pinned offline ripgrep tool. It leaves both full-set benchmark presets unchanged.
