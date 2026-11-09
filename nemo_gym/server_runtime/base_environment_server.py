@@ -604,6 +604,8 @@ class _OpenEpisode:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # The call that holds the lock, so the end of the episode can stop it.
     running: Optional[asyncio.Task] = None
+    # The first handled episode failure a tool raised, such as a crashed sandbox; the episode fails with it.
+    failure: Optional[NgFailureEvent] = None
 
 
 class _EpisodeTokensOpenOnlyTools:
@@ -655,8 +657,11 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     The base refuses ``checkpoint_mode = "exported"``: a restored attempt has a new episode ID, and the agent's
     grant still names the old one.
 
-    When the server shuts down, it finishes the cleanups of every episode still running, such as stopping its
-    sandbox.
+    A tool that raises a handled episode failure (``handled_episode_failure``), such as for a crashed sandbox,
+    fails the episode with it when ``run_episode`` returns; the agent sees that call fail meanwhile.
+
+    A subclass implements ``run_episode``, not ``run``, so the base tracks the episode's cleanups. When the server
+    shuts down, it finishes the cleanups of every episode still running, such as stopping its sandbox.
     """
 
     config: BaseEnvironmentServerWithToolsConfig
@@ -668,6 +673,11 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
+        if "run" in cls.__dict__:
+            raise TypeError(
+                f"{cls.__name__} overrides run; a BaseEnvironmentServerWithTools implements run_episode, so the base "
+                "can track the episode's cleanups for the shutdown sweep"
+            )
         if cls.checkpoint_mode == "exported":
             raise TypeError(
                 f"{cls.__name__} sets checkpoint_mode='exported', which BaseEnvironmentServerWithTools does not "
@@ -714,11 +724,19 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         self._running_cleanups[key] = cleanup
 
         async def forget() -> None:
-            self._running_cleanups.pop(key, None)
+            # A cleanup that failed, such as a sandbox stop that got a provider error, stays tracked, so the shutdown
+            # sweep tries it again.
+            if not any(entry.active for entry in cleanup._cleanups if entry is not tracking.entry):
+                self._running_cleanups.pop(key, None)
 
         # Registered first, so it runs last: the episode stays tracked until each of its cleanups has finished.
-        cleanup.register_cleanup("shutdown tracking", forget)
-        return await self.run_episode(request, cleanup)
+        tracking = cleanup.register_cleanup("shutdown tracking", forget)
+        response = await self.run_episode(request, cleanup)
+        episode = self._open_episodes.get(request.episode_id)
+        if episode is not None and episode.failure is not None:
+            # A tool met a failure the episode cannot recover from; the agent saw the call fail.
+            raise episode.failure
+        return response
 
     @abstractmethod
     async def run_episode(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
@@ -729,9 +747,35 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
         Shutdown cancels the running ``/run`` requests and does not wait for them, so a second cancellation can
         interrupt an episode's cleanup partway. Cleanups are idempotent, so this runs each one that has not
-        finished, each within ``cleanup_timeout_seconds``.
+        finished, under its episode's rollout. They all start at once, so a sandbox stop does not wait behind a
+        call to a Gym server that is shutting down too. The sweep waits ``cleanup_timeout_seconds`` in all, and
+        logs each episode whose cleanup it could not confirm.
         """
-        await asyncio.gather(*(cleanup.aclose() for cleanup in list(self._running_cleanups.values())))
+
+        async def finish(cleanup: CleanupContext, entry: _CleanupEntry) -> None:
+            with rollout_context(cleanup.episode_id.capture_key):
+                await entry.close()
+
+        tasks = {
+            asyncio.ensure_future(finish(cleanup, entry)): cleanup.episode_id
+            for cleanup in list(self._running_cleanups.values())
+            for entry in cleanup._cleanups
+            if entry.active
+        }
+        if not tasks:
+            return
+        await asyncio.wait(tasks, timeout=self.config.cleanup_timeout_seconds)
+        unconfirmed: set[EpisodeId] = set()
+        for task, episode_id in tasks.items():
+            if not task.done():
+                task.cancel()
+                unconfirmed.add(episode_id)
+            elif task.cancelled() or task.exception() is not None:
+                unconfirmed.add(episode_id)
+            # Consume a failure that lands after the sweep stops waiting.
+            task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
+        for episode_id in sorted(unconfirmed, key=lambda episode_id: episode_id.capture_key):
+            LOGGER.error(f"Episode cleanup unconfirmed at shutdown: episode_id={episode_id.capture_key}")
 
     def multiple_workers_unsupported_reason(self) -> Optional[str]:
         return "a tool call reaches whichever worker accepts it, and only the worker that runs the episode holds it"
@@ -861,6 +905,8 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         except Exception as error:
             LOGGER.exception(f"Episode tool {name!r} failed: episode_id={episode.claims.episode_id}")
             status, is_error, output = 500, True, {"detail": f"Tool {name!r} failed: {type(error).__name__}"}
+            if is_handled_episode_failure(error) and episode.failure is None:
+                episode.failure = error
         if not _is_json(output):
             status, is_error = 500, True
             output = {"detail": f"Tool {name!r} returned a value that is not JSON, such as NaN or Infinity"}
