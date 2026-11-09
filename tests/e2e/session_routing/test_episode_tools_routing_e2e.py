@@ -201,8 +201,20 @@ def test_a_tool_call_for_an_exited_workers_episode_gets_410(deployment: Deployme
                     f"{deployment.url}/run", json=_run_body(10**6, grant_file=str(grant_file), hold_seconds=120)
                 )
             )
-            while not grant_file.exists():
-                await asyncio.sleep(0.05)
+            try:
+                # Fail at once, with the reply, if /run ends before it writes its grant.
+                async with asyncio.timeout(60):
+                    while not grant_file.exists():
+                        if episode.done():
+                            response = await episode
+                            pytest.fail(
+                                f"/run ended before writing its grant: {response.status} {await response.text()}"
+                            )
+                        await asyncio.sleep(0.05)
+            except BaseException:
+                episode.cancel()
+                await asyncio.gather(episode, return_exceptions=True)
+                raise
             grant = json.loads(grant_file.read_text())
             owner = psutil.Process(grant["pid"])
             owner.send_signal(signal.SIGKILL)

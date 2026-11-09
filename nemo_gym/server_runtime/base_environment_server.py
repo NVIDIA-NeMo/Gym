@@ -904,7 +904,14 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
         session_owners = self._session_owners
         if session_owners is not None and session_owners.acquire(episode_id.capture_key) != session_owners.routing_id:
-            raise ValueError(f"Episode {episode_id.capture_key} already serves its tools on another worker")
+            # Another worker owns this attempt, or did: a worker that died leaves its owner file. A /run resent after
+            # a crash starts over, so the attempt budget retries the episode under a new attempt key.
+            raise handled_episode_failure(
+                terminal=False,
+                stage="seed",
+                operation="episode.serve_tools",
+                failure_reason=f"Episode {episode_id.capture_key} already serves its tools on another worker",
+            )
 
         token, claims = self._episode_tokens.mint(episode_id)
         episode = _OpenEpisode(claims=claims, toolset=toolset, specs=specs, calls=[])

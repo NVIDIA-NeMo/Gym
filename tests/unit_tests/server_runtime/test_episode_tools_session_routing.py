@@ -10,7 +10,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Iterator
-from typing import Optional
+from typing import Any, Optional
 from unittest.mock import MagicMock
 
 import pytest
@@ -22,11 +22,13 @@ from pydantic import BaseModel
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.core.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeId, MaterializedTask, TaskId
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.base_environment_server import (
     BaseEnvironmentServerWithTools,
     BaseEnvironmentServerWithToolsConfig,
     CleanupContext,
     ServedTools,
+    is_handled_episode_failure,
 )
 from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens, episode_token_secret
 from nemo_gym.server_runtime.episode_tools import TypedToolset, episode_tool
@@ -200,8 +202,34 @@ def test_an_episode_running_on_another_worker_cannot_serve_its_tools_again(worke
     a, b = workers
     a.serve("3-0")
 
-    with pytest.raises(ValueError, match="already serves its tools on another worker"):
+    with pytest.raises(NgFailureEvent, match="already serves its tools on another worker") as refused:
         b.serve("3-0")
+
+    # A worker that died leaves its owner file; a resent /run is retried under a new attempt, not failed for good.
+    assert is_handled_episode_failure(refused.value) and refused.value.episode_terminal is False
+
+
+def test_a_token_reader_that_raises_is_handled_where_the_call_lands(
+    workers: tuple[_Worker, _Worker], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The router reads the header outside the exception middleware, so a reader bug must not become a bare 500."""
+    a, b = workers
+    served, _, counter = a.serve("3-0")
+
+    read, reads = b.server._episode_tokens.read, []
+
+    def read_broken_for_the_router(token: str) -> Any:
+        reads.append(token)
+        if len(reads) == 1:
+            raise RuntimeError("reader bug")
+        return read(token)
+
+    monkeypatch.setattr(b.server._episode_tokens, "read", read_broken_for_the_router)
+    reply = b.add(_token(served))
+
+    # Not forwarded: b's own handler read the token and answered that b does not run the episode.
+    assert reply.status_code == 410 and "not running on this server" in reply.json()["detail"]
+    assert counter.total == 0 and len(reads) == 2
 
 
 def test_ownership_ends_with_the_episode(socket_dir: str, workers: tuple[_Worker, _Worker]) -> None:

@@ -812,8 +812,13 @@ class SessionRoutingMiddleware:
         if self.session_header is not None:
             value = connection.headers.get(self.session_header)
             if value is not None:
-                # A value the reader rejects names no session; the handler refuses the request.
-                return self.session_from_header(value)
+                # A value the reader rejects names no session; the handler refuses the request. This runs outside
+                # the exception middleware, so a reader that raises also names no session, rather than a bare 500.
+                try:
+                    return self.session_from_header(value)
+                except Exception:
+                    LOG.exception(f"Session header {self.session_header} could not be read; handling it here")
+                    return None
         # A kind without a cookie key never names its session in the cookie.
         cookie = connection.cookies.get(self.session_cookie) if self.kind.cookie_key is not None else None
         token = connection.headers.get(self.mcp_token_header) if self.mcp_token_serializer is not None else None
