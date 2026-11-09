@@ -719,7 +719,7 @@ confirm cleanup, artifacts that cannot be read, or a provider exec error. Raise 
 | `has_result` | The harness exited cleanly and left its answer or its work. A nonzero exit or a missing result is not a result. |
 | `timed_out` | The run's deadline ended it, from the supervisor's receipt or a structured deadline. Never from message text: a "timed out" message is at most `model_transport_error` evidence. |
 | `model_replied` | Whether any reply of the policy model was observed; `None` when the adapter cannot tell. |
-| `stopped` | A rollout stop ended the run. `finish_response` sets it for a timed-out run whose session a stop expired. |
+| `stopped` | A rollout stop, or the session's close, ended the run before it finished. `finish_response` sets it for a timed-out run whose session a stop expired. |
 | `context_limit` | The harness or the endpoint explicitly reported that the context window was exceeded. HTTP 400 or 413 alone is not this evidence. |
 | `model_limit` | `output` (the model's output limit) or `turns` (the harness's configured turn or step limit). |
 | `refusal` | The model refused the task. |
@@ -730,7 +730,7 @@ The ladder (`decide_outcome`); the first matching row wins:
 
 | # | Evidence | Response | Default action | Harbor equivalent |
 | --- | --- | --- | --- | --- |
-| 1 | `stopped` | `incomplete`, `ng_rollout_stop` | Verify | — |
+| 1 | `stopped` | `incomplete`; `ng_rollout_stop` only for a rollout stop | Verify | — |
 | 2 | `context_limit` (or an `error` classified `model_context_limit`) | `incomplete` | Verify | `ContextLengthExceededError`: graded |
 | 3 | `timed_out` and `infra_fault` | `failed`, the fault's kind | Retry | — |
 | 4 | `timed_out` | `incomplete` | Verify | `AgentTimeoutError`: graded |
