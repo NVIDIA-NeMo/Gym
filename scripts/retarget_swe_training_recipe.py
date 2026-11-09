@@ -17,6 +17,7 @@ from omegaconf import OmegaConf
 from scripts.prepare_swe_single_agent_turn_recipe import (
     HARNESSES,
     configure_gym,
+    configure_wandb_labels,
     harness_assets,
     materialize_training_rows,
     validate_harnesses,
@@ -136,8 +137,16 @@ def retarget(
         project=wandb_project,
         entity=wandb_entity,
         mode="online",
-        name=output.name,
         log_nemo_gym_full_result_tables=False,
+    )
+    configure_wandb_labels(
+        config,
+        model=original["model"].get("repo", config.policy.model_name),
+        source_server=source_server,
+        task_count=len(rows),
+        harnesses=harnesses,
+        route=route,
+        output=output,
     )
     config.logger.wandb.pop("id", None)
     config.logger.wandb.pop("resume", None)

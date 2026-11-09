@@ -12,6 +12,7 @@ import copy
 import importlib.util
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -356,6 +357,29 @@ def materialize_training_rows(
     return materialized
 
 
+def configure_wandb_labels(
+    config: DictConfig,
+    *,
+    model: str,
+    source_server: str,
+    task_count: int,
+    harnesses: list[str],
+    route: str,
+    output: Path,
+) -> None:
+    """Describe the configured experiment without changing its W&B identity."""
+    model_label = next((f"nano{key}" for key, value in MODELS.items() if value[0] == model), Path(model).name)
+    dataset = f"{source_server.replace('_', '').replace('-', '')}{task_count}"
+    roster = harnesses[0] if len(harnesses) == 1 else "mix-" + "-".join(harnesses)
+    attempt = re.search(r"(?:^|[-_])(attempt\d+)(?:$|[-_])", output.name)
+    attempt_label = attempt.group(1) if attempt else output.name
+    budget = f"{config.grpo.max_num_steps}steps-g{config.grpo.num_generations_per_prompt}-seed{config.grpo.seed}"
+    group = f"{model_label}-{dataset}-{budget}"
+    config.logger.wandb.name = f"{model_label}-{dataset}-{roster}-{route}-{budget}-{attempt_label}"
+    config.logger.wandb.group = group
+    config.logger.wandb.tags = [model_label, dataset, route, *harnesses]
+
+
 def model_manifest(repo: str, revision: str, path: Path) -> dict:
     """Read immutable Hub file hashes without downloading checkpoint weights."""
     info = HfApi().model_info(repo, revision=revision, files_metadata=True)
@@ -489,7 +513,15 @@ def prepare(args: argparse.Namespace) -> dict:
         config.logger.wandb.entity = getattr(args, "wandb_entity", None)
         config.logger.wandb.mode = "online"
         config.logger.wandb.log_nemo_gym_full_result_tables = False
-    config.logger.wandb.name = output.name
+    configure_wandb_labels(
+        config,
+        model=model,
+        source_server="swe_rebench",
+        task_count=len(rows),
+        harnesses=args.harnesses,
+        route=args.route,
+        output=output,
+    )
     OmegaConf.save(config, output / "config.yaml", resolve=False)
     manifest = {
         "gym_commit": gym_revision,
