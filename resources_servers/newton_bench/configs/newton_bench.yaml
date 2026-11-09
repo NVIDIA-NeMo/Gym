@@ -1,19 +1,22 @@
+# NewtonBench through the single-agent-turn Environment Server. The Environment Server seeds the Resources Server
+# and Simple Agent sessions, grants the agent direct HTTP access to the experiment and Python tools, runs one agent
+# turn, verifies, then closes both sessions.
+config_paths:
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
 newton_bench:
   resources_servers:
     newton_bench:
       entrypoint: app.py
-      host: 127.0.0.1
-      port: 8000
       domain: math
       verified: false
       description: Scientific law discovery tasks through agentic experimentation across 12 physics domains
       value: Improve science, reasoning, and tool use capabilities
-newton_bench_simple_agent:
+newton_bench_session_agent:
   responses_api_agents:
     simple_agent:
       entrypoint: app.py
-      host: 127.0.0.1
-      port: 8001
+      # Sessions take tool access from the Environment Server's grant; dataset tooling finds the task schema here.
       resources_server:
         type: resources_servers
         name: newton_bench
@@ -30,10 +33,15 @@ newton_bench_simple_agent:
         jsonl_fpath: resources_servers/newton_bench/data/example.jsonl
         license: Apache 2.0
 
-newton_bench_environment_server:
+newton_bench_single_agent_turn:
+  _inherit_from: single_agent_turn_legacy
   environment_servers:
-    legacy_agent:
-      entrypoint: app.py
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: newton_bench
       agent_server:
         type: responses_api_agents
-        name: newton_bench_simple_agent
+        name: newton_bench_session_agent
+      resources_tool_transports:
+      - direct_http

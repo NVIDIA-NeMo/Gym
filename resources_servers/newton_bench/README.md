@@ -92,6 +92,10 @@ vllm serve \
 ```
 
 ### Launch servers
+`configs/newton_bench.yaml` is the default config and runs rows through the `single_agent_turn_legacy` Environment
+Server. The Environment Server seeds the Resources Server and Simple Agent sessions, grants direct HTTP tool
+access, verifies, and closes both sessions.
+
 ```bash
 gym env start \
     --resources-server newton_bench \
@@ -101,28 +105,28 @@ gym env start \
 ### Collect rollouts
 ```bash
 gym eval run --no-serve \
-    --agent newton_bench_simple_agent \
+    --agent newton_bench_session_agent \
     --input resources_servers/newton_bench/data/example.jsonl \
     --output resources_servers/newton_bench/data/example_rollouts.jsonl \
     --limit 5
 ```
 
-### Run under the single-agent-turn Environment Server
-`configs/newton_bench_single_agent_turn.yaml` runs the same rows through the `single_agent_turn_legacy` Environment
-Server. Rollout collection still sends flat rows, but the Environment Server seeds the Resources Server and the
-Simple Agent with episode sessions, grants the agent direct HTTP access to the tools, verifies, and then closes both
-sessions:
+### Run with the legacy agent
+The previous config is available as `configs/newton_bench_legacy_agent.yaml` and uses the `legacy_agent` Environment
+Server:
 ```bash
 gym env start \
-    --config resources_servers/newton_bench/configs/newton_bench_single_agent_turn.yaml \
+    --config resources_servers/newton_bench/configs/newton_bench_legacy_agent.yaml \
     --model-type vllm_model
 
 gym eval run --no-serve \
-    --agent newton_bench_session_agent \
+    --agent newton_bench_simple_agent \
     --input resources_servers/newton_bench/data/example.jsonl \
-    --output resources_servers/newton_bench/data/example_single_agent_turn_rollouts.jsonl \
+    --output resources_servers/newton_bench/data/example_legacy_agent_rollouts.jsonl \
     --limit 5
 ```
+
+### Session lifecycle
 
 Session allocation, release, and live-state lookup use the shared `SimpleResourcesServer` hooks, and close and
 checkpoint retirement are inherited. Newton keeps a typed seed adapter to check that a repeated seed still has
