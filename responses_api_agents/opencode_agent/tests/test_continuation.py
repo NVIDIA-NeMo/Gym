@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+import yaml
 from fastapi import Request
 from fastapi.testclient import TestClient
 
@@ -813,6 +814,15 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
 
 
+def test_sessions_return_their_own_turns_by_default():
+    # The harness evidence checks join each captured call to the OpenCode step that made it only through these turns.
+    from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
+
+    assert OpenCodeAgentConfig.model_fields["return_session_trajectory"].default is True
+    defaults = yaml.safe_load((Path(__file__).parents[1] / "configs" / "opencode_agent.yaml").read_text())
+    assert defaults["opencode_agent"]["responses_api_agents"]["opencode_agent"]["return_session_trajectory"] is True
+
+
 @pytest.mark.parametrize("return_session_trajectory", [False, True])
 def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
     from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
@@ -871,7 +881,7 @@ def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, r
         assert response.status_code == 200, response.text
         receipt = close(client, request)
     if not return_session_trajectory:
-        # The default keeps the existing protocol: collection builds the turns from the captured calls.
+        # With false, collection builds the turns from the captured calls.
         assert "trajectory" not in receipt
         return
     trajectory = TrajectoryRecord.model_validate(receipt["trajectory"])

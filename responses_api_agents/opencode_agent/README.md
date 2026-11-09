@@ -285,11 +285,12 @@ confirmation. A final negative termination receipt fails the activation and skip
 verification; close releases the borrowed connection with `cleanup_confirmed: false`.
 The task sandbox remains available to its owner for verification or teardown.
 
-Ordinary single-turn sessions keep their existing protocol. With `return_session_trajectory:
-true`, their close also returns the session's trajectory (one turn per saved assistant reply,
-compaction summaries excluded), so rollout collection joins captured calls to those turns and
-the summary call stays on the compaction record. Without it, collection builds one turn per
-captured call, and the summary call of a compaction is counted as a step too.
+By default (`return_session_trajectory: true`), the close of an ordinary single-turn session also
+returns the session's trajectory (one turn per saved assistant reply, compaction summaries
+excluded), so rollout collection joins captured calls to those turns, the harness evidence checks
+match each model call to its step, and the summary call stays on the compaction record. With
+`false`, collection builds one turn per captured call with no message ID, so every call is reported
+as an unmatched assistant message and the summary call of a compaction is counted as a step too.
 
 ### Offline sandbox runtimes and native model identity
 
