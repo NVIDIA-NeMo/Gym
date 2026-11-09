@@ -83,7 +83,7 @@ def _mock_client(web=None, **kwargs) -> MagicMock:
     return mock
 
 
-class TestYouConfig:
+class TestYdcConfig:
     def test_ydc_is_selected_explicitly(self) -> None:
         assert _config().search_provider == "ydc"
 
@@ -98,7 +98,7 @@ class TestYouConfig:
         )
         assert config.search_provider == "tavily"
 
-    def test_requires_you_key(self) -> None:
+    def test_requires_ydc_key(self) -> None:
         with pytest.raises(ValueError, match="ydc_api_key"):
             _config(ydc_api_key=None)
 
@@ -108,15 +108,15 @@ class TestYouConfig:
 
     def test_client_per_key_and_json_headers(self) -> None:
         server = _server(ydc_api_key=["k1", "k2"])
-        assert [c.headers["X-API-Key"] for c in server._you_clients] == ["k1", "k2"]
-        assert server._you_clients[0].headers["Content-Type"] == "application/json"
-        assert server._select_you_client() is server._you_clients[0]
-        assert server._select_you_client() is server._you_clients[1]
+        assert [c.headers["X-API-Key"] for c in server._ydc_clients] == ["k1", "k2"]
+        assert server._ydc_clients[0].headers["Content-Type"] == "application/json"
+        assert server._select_ydc_client() is server._ydc_clients[0]
+        assert server._select_ydc_client() is server._ydc_clients[1]
 
 
-class TestYouClient:
-    def _client(self) -> app_module.YouAIOHTTPClient:
-        return app_module.YouAIOHTTPClient(headers={}, base_url="https://ydc-index.io")
+class TestYdcClient:
+    def _client(self) -> app_module.YdcAIOHTTPClient:
+        return app_module.YdcAIOHTTPClient(headers={}, base_url="https://ydc-index.io")
 
     async def test_search_payload_uses_highlights(self, monkeypatch) -> None:
         fake_request = AsyncMock(return_value=_http_response(200, {"results": {}}))
@@ -191,10 +191,10 @@ class TestYouClient:
         assert fake_request.await_count == 3
 
 
-class TestYouSearch:
+class TestYdcSearch:
     async def test_highlights_rendered_inline(self) -> None:
         server = _server()
-        server._you_clients = [_mock_client([_hit("T1", "https://x.com", ["foo", "bar"])])]
+        server._ydc_clients = [_mock_client([_hit("T1", "https://x.com", ["foo", "bar"])])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["who won"]))
 
@@ -205,7 +205,7 @@ class TestYouSearch:
 
     async def test_falls_back_to_snippets_then_description(self) -> None:
         server = _server()
-        server._you_clients = [
+        server._ydc_clients = [
             _mock_client(
                 [
                     {"title": "A", "url": "https://a.com", "snippets": ["from snippets"]},
@@ -223,7 +223,7 @@ class TestYouSearch:
         server = _server(max_results=7)
         server._exclude_domains = ["bad.com"]
         mock = _mock_client()
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         await server.search(_req(), app_module.TavilySearchRequest(queries=["q"]))
 
@@ -233,7 +233,7 @@ class TestYouSearch:
         # The API caps exclude_domains, so registries beyond the cap must still apply.
         server = _server()
         server._exclude_domains = ["bad.com"]
-        server._you_clients = [
+        server._ydc_clients = [
             _mock_client([_hit("Bad", "https://www.bad.com/p"), _hit("Good", "https://good.com/p")])
         ]
 
@@ -244,7 +244,7 @@ class TestYouSearch:
 
     async def test_contaminated_hit_is_dropped(self) -> None:
         server = _server()
-        server._you_clients = [
+        server._ydc_clients = [
             _mock_client([_hit("Mirror", "https://huggingface.co/datasets/x/y"), _hit("Clean", "https://good.com/p")])
         ]
 
@@ -255,7 +255,7 @@ class TestYouSearch:
 
     async def test_budget_drops_oversized_entries(self) -> None:
         server = _server()
-        server._you_clients = [_mock_client([_hit("Big", highlights=["z" * 5000]), _hit("Small")])]
+        server._ydc_clients = [_mock_client([_hit("Big", highlights=["z" * 5000]), _hit("Small")])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=200))
 
@@ -264,7 +264,7 @@ class TestYouSearch:
 
     async def test_oversized_hit_is_skipped_and_only_later_hit_is_saved_in_terminal_mode(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
-        server._you_clients = [_mock_client([_hit("Big", highlights=["z" * 5000]), _hit("Small")])]
+        server._ydc_clients = [_mock_client([_hit("Big", highlights=["z" * 5000]), _hit("Small")])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=200))
 
@@ -277,7 +277,7 @@ class TestYouSearch:
         # Regression: one hit whose highlights exceed the query's budget slice used to end
         # the loop on the first hit, returning an empty result although the API offered hits.
         server = _server()
-        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000]), _hit("Next")])]
+        server._ydc_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000]), _hit("Next")])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=8000))
 
@@ -293,7 +293,7 @@ class TestYouSearch:
         # split the budget (6000 // 6 = 1000), so the first hit ended the loop and every query
         # came back empty although You.com offered hits.
         server = _server()
-        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+        server._ydc_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
 
         resp = await server.search(
             _req(), app_module.TavilySearchRequest(queries=[f"q{i}" for i in range(6)], max_total_length=6000)
@@ -310,7 +310,7 @@ class TestYouSearch:
 
     async def test_hit_is_not_shown_when_too_little_budget_is_left_to_be_useful(self) -> None:
         server = _server()
-        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+        server._ydc_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=150))
 
@@ -320,7 +320,7 @@ class TestYouSearch:
 
     async def test_terminal_mode_page_keeps_full_highlights_when_inline_is_truncated(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
-        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+        server._ydc_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=8000))
 
@@ -330,7 +330,7 @@ class TestYouSearch:
 
     async def test_terminal_mode_budget_includes_saved_path_line(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
-        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+        server._ydc_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=1000))
 
@@ -341,7 +341,7 @@ class TestYouSearch:
 
     async def test_terminal_mode_every_query_block_fits_its_slice(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
-        server._you_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
+        server._ydc_clients = [_mock_client([_hit("Huge", highlights=["z" * 20000])])]
 
         resp = await server.search(
             _req(), app_module.TavilySearchRequest(queries=[f"q{i}" for i in range(6)], max_total_length=6000)
@@ -354,7 +354,7 @@ class TestYouSearch:
     async def test_query_too_long(self) -> None:
         server = _server()
         mock = _mock_client()
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q" * 401]))
 
@@ -364,18 +364,18 @@ class TestYouSearch:
     async def test_failure_returns_soft_message_and_records_error(self) -> None:
         server = _server()
         mock = MagicMock()
-        mock.search = AsyncMock(side_effect=Exception("you boom"))
-        server._you_clients = [mock]
+        mock.search = AsyncMock(side_effect=Exception("ydc boom"))
+        server._ydc_clients = [mock]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"]))
 
-        assert "Search failed: you boom" in resp.results_string
+        assert "Search failed: ydc boom" in resp.results_string
         call = server._session_id_to_metrics["test_session_id"].async_tavily_calls[0]
         assert (call.provider, call.function, call.status) == ("ydc", "search", "error")
 
     async def test_metering_records_yield(self) -> None:
         server = _server()
-        server._you_clients = [_mock_client([_hit(), _hit(url="https://y.com")])]
+        server._ydc_clients = [_mock_client([_hit(), _hit(url="https://y.com")])]
 
         await server.search(_req(), app_module.TavilySearchRequest(queries=["a", "b"]))
 
@@ -386,7 +386,7 @@ class TestYouSearch:
 
     async def test_terminal_mode_writes_highlights_to_pages(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
-        server._you_clients = [_mock_client([_hit("T", "https://x.com", ["page highlight"])])]
+        server._ydc_clients = [_mock_client([_hit("T", "https://x.com", ["page highlight"])])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"]))
 
@@ -397,7 +397,7 @@ class TestYouSearch:
 
     async def test_terminal_mode_does_not_orphan_page_when_entry_over_budget(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
-        server._you_clients = [_mock_client([_hit("Big", highlights=["z" * 5000])])]
+        server._ydc_clients = [_mock_client([_hit("Big", highlights=["z" * 5000])])]
 
         resp = await server.search(_req(), app_module.TavilySearchRequest(queries=["q"], max_total_length=200))
 
@@ -405,12 +405,12 @@ class TestYouSearch:
         assert not list((Path(tmp_path) / "test_session_id" / "pages").iterdir())
 
 
-class TestYouBrowse:
+class TestYdcBrowse:
     async def test_inline(self) -> None:
         server = _server()
         mock = MagicMock()
         mock.get_contents = AsyncMock(return_value=[{"url": "https://x.com", "markdown": "FULL BODY TEXT"}])
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         resp = await server.browse(_req(), app_module.BrowseRequest(urls=["https://x.com"], goal="g"))
 
@@ -422,7 +422,7 @@ class TestYouBrowse:
         server = _server()
         mock = MagicMock()
         mock.get_contents = AsyncMock(return_value=["PLAIN STRING BODY"])
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         resp = await server.browse(_req(), app_module.BrowseRequest(urls=["https://x.com"], goal="g"))
 
@@ -433,7 +433,7 @@ class TestYouBrowse:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
         mock = MagicMock()
         mock.get_contents = AsyncMock(return_value=[{"url": "https://x.com", "markdown": "PAGE CONTENT"}])
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         resp = await server.browse(_req(), app_module.BrowseRequest(urls=["https://x.com"], goal="g"))
 
@@ -445,7 +445,7 @@ class TestYouBrowse:
     async def test_empty_entry_and_no_results(self, tmp_path) -> None:
         server = _server(workspace="per_session", workspace_root=str(tmp_path))
         mock = MagicMock()
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         mock.get_contents = AsyncMock(return_value=[{"url": "https://x.com", "markdown": ""}])
         resp = await server.browse(_req(), app_module.BrowseRequest(urls=["https://x.com"], goal="g"))
@@ -458,12 +458,12 @@ class TestYouBrowse:
     async def test_failure_returns_soft_message_and_records_error(self) -> None:
         server = _server()
         mock = MagicMock()
-        mock.get_contents = AsyncMock(side_effect=Exception("you boom"))
-        server._you_clients = [mock]
+        mock.get_contents = AsyncMock(side_effect=Exception("ydc boom"))
+        server._ydc_clients = [mock]
 
         resp = await server.browse(_req(), app_module.BrowseRequest(urls=["https://x.com"], goal="g"))
 
-        assert "Failed to extract content: you boom" in resp.results_string
+        assert "Failed to extract content: ydc boom" in resp.results_string
         call = server._session_id_to_metrics["test_session_id"].async_tavily_calls[0]
         assert (call.provider, call.function, call.status) == ("ydc", "browse", "error")
 
@@ -472,7 +472,7 @@ class TestYouBrowse:
         server._exclude_domains = ["bad.com"]
         mock = MagicMock()
         mock.get_contents = AsyncMock(return_value=[])
-        server._you_clients = [mock]
+        server._ydc_clients = [mock]
 
         resp = await server.browse(_req(), app_module.BrowseRequest(urls=["https://bad.com/p"], goal="g"))
 
