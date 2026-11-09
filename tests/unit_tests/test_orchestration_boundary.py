@@ -56,7 +56,6 @@ KNOWN_VIOLATIONS = {
     ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.server_supervisor"),
     ("nemo_gym/cli/utils.py", "nemo_gym.orchestration.executors.resume_script"),
     ("nemo_gym/config/global_config.py", "nemo_gym.orchestration.h2_ping_sidecar.config"),
-    ("nemo_gym/environment/benchmark_preparation.py", "nemo_gym.orchestration.jobs"),
     ("nemo_gym/environment/in_process.py", "nemo_gym.orchestration.server_supervisor"),
     ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
     ("resources_servers/deepswe/tests/test_app.py", "nemo_gym.orchestration.recovery"),
