@@ -44,6 +44,7 @@ from nemo_gym.config.global_config import (
     HF_TOKEN_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
+    SKIP_TOKEN_CAPTURE_KEY_NAME,
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
     GlobalConfigDictParser,
@@ -1304,7 +1305,8 @@ This could be due to a change in how metrics are calculated, leading to outdated
                             validator.validate_row(row_index // d.num_repeats, row)
                         if d.taskset is not None:
                             # Keep collector identity outside task_data so shards and retries
-                            # retain their capture keys after materialization.
+                            # retain their capture keys after materialization, and keep a row's
+                            # request to skip token capture.
                             identity = {
                                 key: row[key]
                                 for key in (
@@ -1312,6 +1314,7 @@ This could be due to a change in how metrics are calculated, leading to outdated
                                     ROLLOUT_INDEX_KEY_NAME,
                                     ROLLOUT_ID_KEY_NAME,
                                     ATTEMPT_INDEX_KEY_NAME,
+                                    SKIP_TOKEN_CAPTURE_KEY_NAME,
                                 )
                                 if key in row
                             }
