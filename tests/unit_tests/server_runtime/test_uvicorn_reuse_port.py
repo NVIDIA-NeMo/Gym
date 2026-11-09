@@ -312,7 +312,7 @@ class _SupervisorWithTarget(_RecordingSupervisor):
 
 
 class _SupervisorWithoutTarget(_RecordingSupervisor):
-    """Uvicorn's Multiprocess in versions that build each worker's server inside its Process (0.54 and later)."""
+    """Uvicorn's Multiprocess in versions that build each worker's server inside its Process (0.51 and later)."""
 
     def __init__(self, config: object, sockets: list) -> None:
         self.built.append({"sockets": sockets})
