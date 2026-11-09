@@ -700,7 +700,7 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
             "get_first_server_config_dict resolve_dataset_agent taskset_environment_server_name",
         ),
         **_names("nemo_gym.eval.eval_plan", "0.8.0", "PlanBenchmark PlanGym build_eval_plan"),
-        **_names("nemo_gym.orchestration.jobs", "0.8.0", "installed_gym_commit"),
+        **_names("nemo_gym.utils.gym_commit", "0.8.0", "installed_gym_commit"),
     },
     "nemo_gym.cli.main": {
         # Split out of main. The asset lookup lost its leading underscore because other modules call it now.

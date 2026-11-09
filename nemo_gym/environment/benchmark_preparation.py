@@ -36,8 +36,8 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.failure_kinds import ENVIRONMENT_PREPARE_FAILED
 from nemo_gym.environment.benchmarks import BenchmarkConfig
 from nemo_gym.eval.eval_plan import EvalPlan, PlanBenchmark, PlanGym, build_eval_plan
-from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
+from nemo_gym.utils.gym_commit import installed_gym_commit
 
 
 logger = logging.getLogger(__name__)
