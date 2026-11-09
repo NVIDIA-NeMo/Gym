@@ -943,7 +943,7 @@ should state all three:
   real question. The server refuses re-seeding an existing session (HTTP 409), which does not cover a
   new one or one its session cap has forgotten, and the session and MCP-token signing key derives from
   public config. Closing it needs an
-  authenticated seed channel; tracking issue: TRACKING_ISSUE_TBD. Until then the span rule binds a
+  authenticated seed channel; tracking issue: NVIDIA-NeMo/Gym#5845. Until then the span rule binds a
   cooperative harness, not the sandboxed model.
 - Oversized pages: the protocol caps `web_fetch` output at 60,000 characters with a truncation
   indicator, so upstream would serve the start of any page. This server checks the provider's whole

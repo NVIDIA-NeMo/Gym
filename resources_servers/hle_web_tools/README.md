@@ -30,7 +30,7 @@ with a key derived from public config (`get_session_middleware_key`: the server 
 instance name), so they are not a secret that could tell the agent server's seed from the sandbox's.
 Closing this needs an authenticated seed channel, a secret the agent server holds and the sandbox never
 sees; until then the span rule is a check on a cooperative harness, not on the sandboxed model. Tracking
-issue: TRACKING_ISSUE_TBD. The Diamond README lists this next to the backend and the oversized-page refusal
+issue: NVIDIA-NeMo/Gym#5845. The Diamond README lists this next to the backend and the oversized-page refusal
 under Sandboxed agents (with tools) > Upstream web tools, and all three belong next to any with-tools number
 from that preset.
 
