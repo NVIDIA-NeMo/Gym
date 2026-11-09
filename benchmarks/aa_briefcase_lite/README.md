@@ -74,8 +74,8 @@ scoring path, append
 `++aa_briefcase_lite_resources_server.resources_servers.aa_briefcase_lite.reward_mode=binary` or `...reward_mode=pairwise`,
 or set `AA_BRIEFCASE_REWARD_MODE`. Explicit Gym config overrides take precedence.
 
-Report `aa_lite/binary_pass_rate` and `aa_lite/pairwise_win_rate` separately,
-alongside their counts and Gym's expected, scored, and missing rollout coverage.
+Report `aa_lite/binary_pass_rate` and `aa_lite/pairwise_win_rate` separately (a rate is
+omitted when its path did not run), alongside their counts and Gym's expected, scored, and missing rollout coverage.
 Failed rollouts are recorded in the failures sidecar and may never reach the
 resource aggregate, so `aa_lite/rows_total` alone does not establish completeness.
 A judge that gives no usable answer to a check after the format retries is a judge

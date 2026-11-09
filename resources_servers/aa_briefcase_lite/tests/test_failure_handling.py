@@ -290,3 +290,16 @@ async def test_conversion_uses_the_configured_libreoffice_command(make_server, t
     await _verify(server, tmp_path, {"report.md": "x"})
 
     assert convert.await_args.kwargs["libreoffice_command"] == ["wrapper", "soffice"]
+
+
+async def test_the_rate_of_a_path_that_did_not_run_is_absent_not_zero(
+    make_server, tmp_path: Path, monkeypatch
+) -> None:
+    server = make_server(reward_mode="binary")
+    monkeypatch.setattr(server, "_binary_call", AsyncMock(return_value=PASSED))
+    row = await _verify(server, tmp_path, {"report.md": "x"})
+
+    metrics = await server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[row]))
+
+    assert metrics.key_metrics["aa_lite/binary_pass_rate"] == 1.0
+    assert "aa_lite/pairwise_win_rate" not in metrics.key_metrics

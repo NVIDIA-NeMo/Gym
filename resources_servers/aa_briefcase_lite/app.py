@@ -1050,16 +1050,19 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
             "aa_lite/rows_total": len(rows),
             "aa_lite/binary_passed": passed,
             "aa_lite/binary_total": rubric_total,
-            "aa_lite/binary_pass_rate": passed / rubric_total if rubric_total else 0.0,
             "aa_lite/pairwise_wins": wins,
             "aa_lite/pairwise_losses": losses,
             "aa_lite/pairwise_ties": ties,
             "aa_lite/pairwise_judged": judged,
             "aa_lite/pairwise_references_skipped": skipped_references,
-            "aa_lite/pairwise_win_rate": (wins + 0.5 * ties) / judged if judged else 0.0,
             # Numeric for downstream metric serializers. Always false for Lite.
             "aa_lite/official_leaderboard_comparable": 0.0,
         }
+        # A path the run did not take has no rate: 0.0 would read as the model failing every check.
+        if rubric_total:
+            extra["aa_lite/binary_pass_rate"] = passed / rubric_total
+        if judged:
+            extra["aa_lite/pairwise_win_rate"] = (wins + 0.5 * ties) / judged
         return AggregateMetrics(
             group_level_metrics=base.group_level_metrics,
             agent_metrics={**base.agent_metrics, **extra},
