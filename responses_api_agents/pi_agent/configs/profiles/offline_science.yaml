@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Shared settings of the offline scientific benchmark presets (benchmarks/hle/pi.yaml,
-# benchmarks/apex_shortlist/pi.yaml), merged into the `pi_agent` instance that each preset's agent inherits. Each
-# session creates its own sandbox from the offline science image with Pi
+# benchmarks/apex_shortlist/pi.yaml, benchmarks/hle_diamond/pi.yaml), merged into the `pi_agent` instance that each
+# preset's agent inherits. Each session creates its own sandbox from the offline science image with Pi
 # (responses_api_agents/pi_sandboxed_agent/offline_science_image), which reaches only the model server. The settings
 # follow pi_sandboxed_agent's configs/benchmark.yaml where pi_agent has them; the benchmark READMEs list what differs.
 use_absolute_ip: true

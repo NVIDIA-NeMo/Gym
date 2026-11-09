@@ -52,10 +52,16 @@ covers the image rows. The search presets and `opencode_search_full` are selecta
 sandbox from `PI_SANDBOX_IMAGE` with the shared settings in
 [`offline_science.yaml`](../../responses_api_agents/pi_agent/configs/profiles/offline_science.yaml), and the search
 preset gets Tavily through the agent's `tool_servers`. `pi_legacy_agent` and `pi_search_legacy_agent` keep the
-deprecated `pi_sandboxed_agent` on the `legacy_agent` relay (`sandbox_docker_local.yaml` does not cover them). What
-differs from that relay is listed in [`benchmarks/hle`'s README](../hle/README.md#sandboxed-agents); in short, a
-harness crash is retried and then reported as a failed rollout instead of scoring 0, there is no `PI_ARTIFACTS_DIR`,
-and rows carry `ng_agent_observations` instead of the `pi_*` fields. The OpenCode presets stay on
+deprecated `pi_sandboxed_agent` on the `legacy_agent` relay; composing them with `sandbox_docker_local.yaml` fails
+validation, so they have no local-Docker path. What differs from that relay is listed in
+[`benchmarks/hle`'s README](../hle/README.md#sandboxed-agents); in short, a harness crash is retried and then
+reported as a failed rollout instead of scoring 0, there is no `PI_ARTIFACTS_DIR`, rows carry
+`ng_agent_observations` instead of the `pi_*` fields, and `pi_agent` refuses request fields other than the input,
+`instructions` and `model` with 422. **Run `pi` and `pi_search` without
+`++responses_create_params.reasoning.effort=high`** (and without temperature, top-p or an output cap): the request
+field would fail every row, and `thinking: high` in the preset is their effort knob (Prompting > Reasoning
+effort). The aggregate of these two presets carries the partition slices and `judgement_parsing_issue_rate`,
+because `single_agent_turn_legacy` forwards aggregation to the judge. The OpenCode presets stay on
 `opencode_sandboxed_agent` for now: `opencode_agent` sessions accept text input only (the `_full` presets attach
 images) and have no setting for OpenCode's per-model `reasoningEffort` (Prompting > Reasoning effort).
 
@@ -137,7 +143,8 @@ was probed per model (Responses API, `reasoning.effort` low against high on the 
    the gateway. Label such a run "effort not controllable via this gateway (adaptive default)" and
    never call a Claude run "reasoning high".
 3. Every model is still run with the one request shape (`++responses_create_params.reasoning.effort=high`,
-   no temperature, top-p or output cap), so runs differ only in what the gateway does with it. Apply
+   no temperature, top-p or output cap), so runs differ only in what the gateway does with it. The Pi
+   presets are the exception: `pi_agent` refuses the `reasoning` field with 422, so run them without it. Apply
    the label by model family from the probe, not from token counts: `reasoning_tokens > 0` is not
    evidence that the effort was honoured (the Claude models report thousands of reasoning tokens at
    every setting), and only the GPT models echo the effort (`response.reasoning.effort`; Gemini and
@@ -145,8 +152,9 @@ was probed per model (Responses API, `reasoning.effort` low against high on the 
    the pilot rows for the mean-output-token comparison only.
 
 On the no-tools path the effort travels on Gym's Responses request. On the sandboxed path it does
-not: `++responses_create_params.reasoning.effort` decorates only Gym's run request, while OpenCode
-and Pi build their own model calls inside the sandbox (a model-call capture of the stock preset
+not: `++responses_create_params.reasoning.effort` decorates only Gym's run request (and the Pi session
+presets refuse it with 422), while OpenCode and Pi build their own model calls inside the sandbox (a model-call
+capture of the stock preset
 showed no `reasoning_effort`, so the gateway default, medium, applied). The presets therefore carry
 each harness's own knob:
 
@@ -390,8 +398,8 @@ multipleChoice):
   answering "None" on them is right, so an `Answer: None` control over the whole set has a floor of
   about 11/1000, and the two false positives of the 100-row control were two of these rows. The
   carried `answer_type` and `uuid` let you separate them.
-- On the sandboxed presets (`opencode`, `opencode_search`, `pi`, `pi_search`) the aggregate carries
-  neither the partition slices nor `judgement_parsing_issue_rate`: the adapters' inherited
+- On the relay presets (`opencode`, `opencode_search`, `pi_legacy_agent`, `pi_search_legacy_agent`) the
+  aggregate carries neither the partition slices nor `judgement_parsing_issue_rate`: the adapters' inherited
   `aggregate_metrics` never calls the judge resources server's `compute_metrics`. The rollouts carry
   `partition` and `judge_evaluations`, so compute both post hoc (Reading sandboxed results); the
   durable fix is for those adapters to proxy aggregation to their resources server, a Gym
@@ -561,7 +569,8 @@ infrastructure only") and say nothing about the score.
 # ${oc.env:...} values must resolve even though the Docker provider is used: placeholders suffice.
 export OPENSANDBOX_API_KEY=unused-local-docker
 export OPENSANDBOX_DOMAIN=unused.invalid
-export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local      # PI_SANDBOX_IMAGE=gym-pi-science:local for the pi presets
+# For the pi presets: PI_SANDBOX_IMAGE=gym-pi-science:local, and drop the reasoning.effort line below.
+export OPENCODE_SANDBOX_IMAGE=gym-opencode-science:local
 export OPENCODE_ARTIFACTS_DIR=/abs/path/oc-artifacts          # the harness's native transcripts (the pi session presets keep none)
 mkdir -p /abs/path/model-calls
 
@@ -624,15 +633,16 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
 
 ### Reading sandboxed results
 
-- `response.status` is `null` on sandboxed rows (the adapter synthesises the response) unless the
+- `response.status` is `null` on relay rows (the adapter synthesises the response) unless the
   output limit was hit, when the adapter sets `incomplete` with
   `incomplete_details.reason = max_output_tokens`. Read success or failure from
   `opencode_finished`, `opencode_failed`, `opencode_exit_code` and
   `opencode_export_found` (OpenCode) or, on `pi_legacy_agent` rows, `finished_naturally`, `pi_failed`,
   `pi_exit_code` and `pi_error_type`; the aggregate metrics carry `mean/opencode_failed` and
-  `mean/opencode_finished`. Rows of the Pi session presets carry `ng_agent_observations` instead.
-- The aggregate of a sandboxed run carries neither `slices/partition/...` nor
-  `judgement_parsing_issue_rate`, although every rollout row carries `partition` and
+  `mean/opencode_finished`. Rows of the Pi session presets carry `ng_agent_observations` instead, and their
+  `response.status` is set by `pi_agent`.
+- The aggregate of a relay run (the OpenCode presets and `pi_*_legacy_agent`) carries neither
+  `slices/partition/...` nor `judgement_parsing_issue_rate`, although every rollout row carries `partition` and
   `judge_evaluations`: the collector posts `/aggregate_metrics` to the agent server, and the
   OpenCode and Pi adapters inherit `BaseResponsesAPIAgent.aggregate_metrics`, which never calls
   the judge resources server's `compute_metrics` where both live (observed on the 5-row
@@ -834,8 +844,8 @@ exclusion list blocks for the Tavily tools and a service the reference sandbox m
 
 See the shared
 [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
-for images, credentials, network policies, token limits and failure handling. Gates specific to
-these presets:
+for images, credentials and network policies; its token limits and failure handling describe the OpenCode presets
+and `pi_*_legacy_agent`. Gates specific to these presets:
 
 - Sandbox images: `OPENCODE_SANDBOX_IMAGE` and `PI_SANDBOX_IMAGE` must point at images with the
   scientific stack described in the guide.

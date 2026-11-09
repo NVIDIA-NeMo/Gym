@@ -1,8 +1,8 @@
 # Deprecated: pi_sandboxed_agent and its legacy_agent relay will be removed after the Environment Server
 # migration. Use pi.yaml instead, which runs pi_agent through single_agent_turn_legacy.
 # The two harnesses are configured differently, so do not compare their scores as the same measurement.
-# sandbox_docker_local.yaml overrides the session preset's pi_agent and does not apply to this file.
-# Pi sandboxed preset on the 728 text-only HLE-Diamond questions. Mirrors benchmarks/hle/pi.yaml.
+# sandbox_docker_local.yaml overrides the session preset's pi_agent; composing it with this file fails validation.
+# Pi sandboxed preset on the 728 text-only HLE-Diamond questions. Mirrors benchmarks/hle/pi_legacy_agent.yaml.
 config_paths:
 - benchmarks/hle_diamond/config.yaml
 - responses_api_agents/pi_sandboxed_agent/configs/benchmark.yaml
