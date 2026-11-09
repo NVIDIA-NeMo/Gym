@@ -18,11 +18,11 @@ from math import ceil
 from pathlib import Path
 from shutil import rmtree
 from time import monotonic
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import Request
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_global_config_dict
@@ -46,6 +46,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionConflictError,
     ReverifyMode,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.app import (
@@ -185,8 +186,10 @@ class SeededAgentSandbox:
 class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionResourcesServer):
     """Reuse DeepSWE collection/grading with self-contained task rows.
 
-    Agent sandboxes of both kinds of seed live in ``_session_id_to_sandbox``, so close, expiry and shutdown stop
-    them. Golden- and null-patch validation start and stop their own sandboxes and hold no session.
+    Agent sandboxes of both kinds of seed live in ``_session_id_to_sandbox``, so verify, close and shutdown stop
+    them. Only an episode session also expires after the sandbox's ``ttl_s``; an agent-run seed that never reaches
+    verify keeps its sandbox until a re-seed or shutdown, and the provider reclaims it after ``ttl_s``. Golden- and
+    null-patch validation start and stop their own sandboxes and hold no session.
     """
 
     config: DeepsweExternal1ResourcesServerConfig
@@ -276,9 +279,6 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
             raise RuntimeError(f"Verifier Python setup failed (exit {result.return_code}): {details[-4000:]}")
         logger.info("Verifier Python setup: %s", details)
 
-    async def _stop_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> None:
-        await self._release_sandbox(sandbox, task_id=task_id, phase=phase)
-
     async def _release_sandbox(self, sandbox: AsyncSandbox, *, task_id: str, phase: str) -> bool:
         try:
             await sandbox.stop()
@@ -288,12 +288,16 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
             return False
 
     async def seed_session(
-        self, request: Request, body: DeepsweExternal1SeedSessionRequest | ResourcesSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[DeepsweExternal1SeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> DeepSWESeedSessionResponse | ResourcesSeedSessionResponse:
         """Start the task's agent sandbox.
 
         An Environment Server seeds an episode session and gets the sandbox back as ``sandbox_access``. An agent's
-        ``/run`` seeds with the task row and gets the sandbox handle; repeating that seed replaces the sandbox.
+        ``/run`` seeds with the task row and gets the sandbox handle; repeating that seed replaces the sandbox. A body
+        that names a ``resources_session_id`` is an episode seed and must validate as one (422 otherwise).
         """
         if self.config.is_verifying_golden_patch or self.config.is_verifying_null_patch:
             raise ResourcesSeedRejectedError("seed_session is unavailable in golden/null-validation mode")
@@ -470,7 +474,8 @@ class DeepsweExternal1ResourcesServer(DeepSWEResourcesServer, SandboxSessionReso
                     agent_id = self._check_seeded_agent_sandbox(session_id, body, task)
                     failure_stage = "patch_collection"
                     started = monotonic()
-                    # An episode session keeps the capture, so a verify retried after the stop reuses it.
+                    # An episode session keeps the capture, so a verify cancelled after it reuses it on retry. A
+                    # failed stop below is masked instead, and that verdict is the one a retry replays.
                     model_patch = await self.capture_task_sandbox_patch(
                         session_id,
                         lambda: self._collect_model_patch(self._session_id_to_sandbox[session_id], task),

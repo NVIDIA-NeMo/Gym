@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Episode sessions and the agent-run seed, through the server's HTTP routes with fake sandboxes."""
 
+import asyncio
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+import anyio
 import pytest
+from fastapi import Request
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
@@ -16,6 +19,7 @@ from resources_servers.deepswe.validate_golden import _empty_response
 from resources_servers.deepswe_external1.app import (
     DeepsweExternal1ResourcesServer,
     DeepsweExternal1ResourcesServerConfig,
+    DeepsweExternal1VerifyRequest,
 )
 from resources_servers.deepswe_external1.inline_task import InlineTask
 from resources_servers.deepswe_external1.prepare_examples import task_row
@@ -139,6 +143,103 @@ def test_failed_agent_cleanup_masks_the_sample_and_close_retries_the_stop(task: 
         assert phases == ["agent"], "no verifier starts while the agent sandbox is still held"
         assert client.post("/close_session", json=CLOSE).status_code == 200
     assert sandboxes[0].stop.await_count == 2 and not server._session_id_to_sandbox
+
+
+def _fail_verifier_stops(server: DeepsweExternal1ResourcesServer, outcomes: list) -> None:
+    create = server._create_sandbox.side_effect
+
+    async def create_with_failing_verifier_stop(*args, **kwargs) -> AsyncMock:
+        box = await create(*args, **kwargs)
+        if kwargs["phase"] == "verifier":
+            box.stop.side_effect = outcomes
+        return box
+
+    server._create_sandbox.side_effect = create_with_failing_verifier_stop
+
+
+def test_verifier_whose_stop_fails_in_the_request_is_stopped_by_the_verify_wrapper(task: InlineTask) -> None:
+    server, sandboxes, _ = make_server()
+    _fail_verifier_stops(server, [RuntimeError("delete unavailable"), None])
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed(task).model_dump(mode="json")).status_code == 200
+        result = client.post("/verify", json=verify_body(task)).json()
+        # The completed grade stands; the session-registered verifier is stopped again by the base's verify wrapper.
+        assert result["reward"] == 1.0 and not result["mask_sample"]
+        assert result["cleanup_errors"] == ["verifier"]
+        assert sandboxes[1].stop.await_count == 2
+        assert not server._verifier_sandboxes
+
+
+def test_verifier_whose_stops_keep_failing_stays_owned_until_close(task: InlineTask) -> None:
+    server, sandboxes, _ = make_server()
+    _fail_verifier_stops(server, [RuntimeError("down"), RuntimeError("down"), None])
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=seed(task).model_dump(mode="json")).status_code == 200
+        assert client.post("/verify", json=verify_body(task)).json()["reward"] == 1.0
+        assert "resources-session" in server._verifier_sandboxes
+        assert client.post("/close_session", json=CLOSE).status_code == 200
+    assert sandboxes[1].stop.await_count == 3
+    assert not server._verifier_sandboxes and not server._task_sessions
+
+
+@pytest.mark.asyncio
+async def test_cancelled_verify_stops_both_sandboxes_and_a_retry_grades_the_saved_patch(task: InlineTask) -> None:
+    server, sandboxes, phases = make_server()
+    stopped: list[str] = []
+    create = server._create_sandbox.side_effect
+
+    async def create_with_suspending_stop(*args, **kwargs) -> AsyncMock:
+        box = await create(*args, **kwargs)
+        name = kwargs["phase"]
+
+        async def stop() -> None:
+            # A real provider call suspends; an unshielded stop in a cancelled scope would end here.
+            await anyio.sleep(0)
+            stopped.append(name)
+
+        box.stop.side_effect = stop
+        return box
+
+    server._create_sandbox.side_effect = create_with_suspending_stop
+    grading = asyncio.Event()
+
+    async def hang(*_args, **_kwargs) -> VerifierResult:
+        grading.set()
+        await anyio.sleep_forever()
+
+    server._run_verifier = AsyncMock(side_effect=hang)
+    request = Request({"type": "http", "session": {}})
+    await server.seed_session(request, seed(task))
+    verify_request = DeepsweExternal1VerifyRequest.model_validate(verify_body(task))
+
+    async with anyio.create_task_group() as group:
+        scope = anyio.CancelScope()
+
+        async def run() -> None:
+            with scope:
+                await server.verify(request, verify_request)
+
+        group.start_soon(run)
+        await grading.wait()
+        # As a client disconnect cancels the request handler.
+        scope.cancel()
+
+    assert stopped == ["agent", "verifier"]
+    assert not server._verifier_sandboxes and not server._session_id_to_sandbox
+
+    server._run_verifier = AsyncMock(return_value=VerifierResult(evaluation_completed=True, reward=1.0))
+    retried = await server.verify(request, verify_request)
+    assert retried.reward == 1.0 and not retried.mask_sample
+    assert server._collect_model_patch.await_count == 1, "the retry grades the saved capture"
+    assert phases == ["agent", "verifier", "verifier"]
+
+
+def test_seed_naming_a_resources_session_must_be_an_episode_seed(task: InlineTask) -> None:
+    server, sandboxes, _ = make_server()
+    hybrid = task_row(task.data, "original instruction\n") | {"resources_session_id": "resources-session"}
+    with TestClient(server.setup_webserver(), raise_server_exceptions=False) as client:
+        assert client.post("/seed_session", json=hybrid).status_code == 422
+    assert not sandboxes
 
 
 @pytest.mark.parametrize("mode", ["golden", "null"])
