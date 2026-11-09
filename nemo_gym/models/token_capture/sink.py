@@ -34,6 +34,7 @@ from contextvars import ContextVar, Token
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.fingerprint import assistant_fingerprint
 from nemo_gym.models.token_capture.lineage import stamp_continuation
 from nemo_gym.models.token_capture.protocols import (
@@ -163,7 +164,12 @@ _RESOLVER_UNAVAILABLE_NOTED = [False]
 _REFUSE_CALL_MISSING_NOTED = [False]
 
 
-def _count_resolution(status_value: str) -> None:
+# Reasons Gym's resolvers give; a custom resolver's other reasons are counted as ``other``.
+_RESOLUTION_REASONS = frozenset({"resolver_unavailable", "lookup_error", "not_attempted", "no_match", "ambiguous"})
+
+
+def _count_resolution(status_value: str, reason: str | None = None) -> None:
+    capture_metrics.count(f"parent_{status_value}", capture_metrics.bounded_reason(reason, _RESOLUTION_REASONS))
     with _STATS_LOCK:
         _RESOLUTION_COUNTS[status_value] = _RESOLUTION_COUNTS.get(status_value, 0) + 1
         total = sum(_RESOLUTION_COUNTS.values())
@@ -259,8 +265,9 @@ async def resolve_parent(request_messages: list | None) -> None:
                     "and multi-call rollouts will be masked (allow_unresolved_continuations is set)."
                 )
         else:
-            context.parent_resolution = await context.lineage_store.resolve(context.capture_key, request_messages)
-        _count_resolution(context.parent_resolution.status.value)
+            with capture_metrics.timed("lineage.resolve", component=context.lineage_store):
+                context.parent_resolution = await context.lineage_store.resolve(context.capture_key, request_messages)
+        _count_resolution(context.parent_resolution.status.value, context.parent_resolution.reason)
     except Exception as error:
         # Worker custody fails closed: an unresolved parent would silently
         # break the ledger's chained-ancestry guarantees.
@@ -271,6 +278,8 @@ async def resolve_parent(request_messages: list | None) -> None:
             ParentResolutionStatus.UNRESOLVED,
             reason="lookup_error",
         )
+        # Metric only: the resolution counts above have always covered completed lookups, not failed ones.
+        capture_metrics.count(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "lookup_error")
     resolved_match = context.parent_resolution.match if context.parent_resolution is not None else None
     if resolved_match is not None:
         context.parent_staging_chain = list(resolved_match.staging_chain)
@@ -308,7 +317,8 @@ async def resolve_parent(request_messages: list | None) -> None:
                 context.capture_key,
                 exc_info=True,
             )
-            await ledger.record_failure(
+            await record_ledger_failure(
+                ledger,
                 context.capture_key,
                 context.model_call_id,
                 UNRESOLVED_PARENT_REASON,
@@ -340,11 +350,19 @@ async def resolve_parent(request_messages: list | None) -> None:
         context.parent_resolution.reason if context.parent_resolution is not None else None,
         len(context.request_items),
     )
-    await ledger.record_failure(
+    await record_ledger_failure(
+        ledger,
         context.capture_key,
         context.model_call_id,
         UNRESOLVED_PARENT_REASON,
     )
+
+
+async def record_ledger_failure(ledger: CaptureLedger, capture_key: str, model_call_id: str, reason: str) -> None:
+    """Record a failure row that poisons a call, and count it by reason."""
+    capture_metrics.count("poisoned", reason)
+    with capture_metrics.timed("ledger.record_failure", component=ledger):
+        await ledger.record_failure(capture_key, model_call_id, reason)
 
 
 async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -> None:
@@ -360,7 +378,9 @@ async def _admit_candidate(context: CaptureContext, request_items: list[dict]) -
     if not context.external_staging or not isinstance(context.lineage_store, CaptureLedger):
         raise ValueError("Source-history parent resolution requires an external capture ledger")
     try:
-        manifest = RolloutManifest.model_validate(await context.lineage_store.manifest(context.capture_key))
+        with capture_metrics.timed("ledger.manifest", component=context.lineage_store):
+            payload = await context.lineage_store.manifest(context.capture_key)
+        manifest = RolloutManifest.model_validate(payload)
     except RolloutRetiredError as error:
         raise CaptureAdmissionError(str(error)) from error
     predecessor = None
@@ -461,7 +481,8 @@ async def register_call_intent() -> None:
         if begin is None or context.capture_admission is None:
             raise ValueError("Framework-owned capture requires durable call intents")
         try:
-            await begin(context.capture_key, context.model_call_id)
+            with capture_metrics.timed("ledger.begin_call", component=context.lineage_store):
+                await begin(context.capture_key, context.model_call_id)
         except RolloutRetiredError as error:
             raise CaptureAdmissionError(str(error)) from error
         context.intent_registered = True
@@ -471,7 +492,8 @@ async def register_call_intent() -> None:
     begin = getattr(context.token_sink, "begin_call", None)
     if begin is None:
         return
-    await begin(context.capture_key, context.model_call_id)
+    with capture_metrics.timed("sink.begin_call", component=context.token_sink):
+        await begin(context.capture_key, context.model_call_id)
     context.intent_registered = True
 
 
@@ -551,7 +573,7 @@ async def _record_external_refusal(context: CaptureContext) -> None:
     ledger = context.lineage_store
     if context.capture_admission is None or context.committed or not isinstance(ledger, CaptureLedger):
         return
-    await ledger.record_failure(context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
+    await record_ledger_failure(ledger, context.capture_key, context.model_call_id, ENGINE_REFUSED_CALL_REASON)
     context.engine_refusal_recorded = True
 
 
@@ -618,6 +640,7 @@ async def capture_tokens(
                 ParentResolutionStatus.UNRESOLVED,
                 reason="not_attempted",
             )
+            capture_metrics.count(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "not_attempted")
         entry = TokenEntry(
             capture_key=context.capture_key,
             model_call_id=context.model_call_id,
@@ -683,6 +706,7 @@ async def commit_entry(
                 ParentResolutionStatus.UNRESOLVED,
                 reason="not_attempted",
             )
+            capture_metrics.count(f"parent_{ParentResolutionStatus.UNRESOLVED.value}", "not_attempted")
         # The digest always describes the full sequence.
         # Delta storage changes representation, not lineage identity.
         # The parent decision is persisted with the same sink write.
@@ -709,9 +733,11 @@ async def commit_entry(
             cumulative=cumulative,
         )
         entry.parent_resolution_reason = resolution.reason or ""
-        await context.token_sink.put(entry)
+        with capture_metrics.timed("sink.put", component=context.token_sink, tokens=entry.cum_len):
+            await context.token_sink.put(entry)
         context.committed = True
     except TokenCaptureFrozenError:
+        capture_metrics.count("late_write_dropped", "frozen")
         # The rollout finished and its capture was frozen while this call was
         # still in flight (for example its harness was killed at a timeout
         # backstop). The freeze already judged completeness from the durable
@@ -738,6 +764,7 @@ async def _capture_failed(context: CaptureContext, stage: str) -> None:
     """
     if not await _mark_incomplete(context):
         return
+    capture_metrics.count("capture_failed", stage)
     with _STATS_LOCK:
         _CAPTURE_FAILURES[0] += 1
         failures = _CAPTURE_FAILURES[0]
@@ -804,4 +831,6 @@ async def _mark_incomplete(context: CaptureContext) -> bool:
         return False
     except Exception:
         logger.warning("Could not mark rollout %s incomplete.", context.capture_key, exc_info=True)
+        return True
+    capture_metrics.count("marked_incomplete")
     return True

@@ -32,6 +32,7 @@ import asyncio
 import logging
 from pathlib import Path
 
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.builder import (
     assert_prefix_contiguity,
     project_main_chain_response,
@@ -329,7 +330,8 @@ async def trajectories_from_source(
     A refused call is reported through ``metrics["engine_refusals"]``; see ``_copy_engine_refusals``.
     """
     try:
-        snapshot = await source.freeze(rollout_id)
+        with capture_metrics.timed("source.freeze", component=source):
+            snapshot = await source.freeze(rollout_id)
     except Exception as error:
         logger.warning("Could not freeze token capture for rollout %s.", rollout_id, exc_info=True)
         return _failed_build(rollout_id, builder, f"{type(error).__name__}: {error}")

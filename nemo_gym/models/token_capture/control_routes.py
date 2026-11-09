@@ -19,6 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.protocols import CaptureLedger, RolloutRemovalPayload, RolloutRetiredError
 from nemo_gym.models.token_capture.staging.records import RolloutManifest, RolloutRemoval
 
@@ -77,7 +78,8 @@ def install_rollout_control_routes(
     ) -> dict:
         check_auth(authorization)
         try:
-            return await lineage_store.manifest(capture_key)
+            with capture_metrics.timed("ledger.manifest", component=lineage_store):
+                return await lineage_store.manifest(capture_key)
         except RolloutRetiredError as error:
             # Gone, not empty: an empty manifest would read as a rollout that made no calls.
             raise HTTPException(status_code=410, detail=str(error)) from error
@@ -92,7 +94,8 @@ def install_rollout_control_routes(
         check_auth(authorization)
         check_removal()
         try:
-            return await lineage_store.retire(body.capture_keys)
+            with capture_metrics.timed("ledger.retire", component=lineage_store):
+                return await lineage_store.retire(body.capture_keys)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
@@ -104,7 +107,8 @@ def install_rollout_control_routes(
         check_auth(authorization)
         check_removal()
         try:
-            return await lineage_store.delete(body.capture_keys)
+            with capture_metrics.timed("ledger.delete", component=lineage_store):
+                return await lineage_store.delete(body.capture_keys)
         except ValueError as error:
             raise HTTPException(status_code=400, detail=str(error)) from error
 
