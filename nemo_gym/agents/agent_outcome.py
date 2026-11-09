@@ -14,7 +14,11 @@ from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+    PROVIDER_IO_TIMEOUT,
     PROVIDER_OOM_KILLED,
+    PROVIDER_PROTOCOL_ERROR,
+    PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
     FailureClassificationConfig,
     classify_failure,
@@ -76,7 +80,18 @@ class AgentOutcomePolicyConfig(OutcomePolicyConfig):
             AGENT_INVALID_OUTPUT: OutcomeAction.VERIFY,
             AGENT_LIMIT: OutcomeAction.VERIFY,
             MODEL_TRANSPORT_ERROR: OutcomeAction.RETRY,
-            PROVIDER_UNAVAILABLE: OutcomeAction.RETRY,
+            # Transient sandbox-provider failures reported by an agent: the episode runs again, which is not a
+            # replay of the uncertain operation inside the provider.
+            **dict.fromkeys(
+                (
+                    PROVIDER_UNAVAILABLE,
+                    PROVIDER_IO_TIMEOUT,
+                    PROVIDER_STATUS_UNAVAILABLE,
+                    PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                    PROVIDER_PROTOCOL_ERROR,
+                ),
+                OutcomeAction.RETRY,
+            ),
             PROVIDER_OOM_KILLED: OutcomeAction.VERIFY,
             "unknown": OutcomeAction.RETRY,
         }

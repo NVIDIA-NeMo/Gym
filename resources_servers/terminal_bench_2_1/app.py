@@ -28,7 +28,9 @@ from nemo_gym.core import (
     VERIFIER_ERROR,
     EpisodeId,
     FailureBoundary,
+    FailureClass,
     NgFailureEvent,
+    classify_failure,
     current_verifier_invocation_id,
     observe_failure,
 )
@@ -723,6 +725,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         failure_reason: str | None = None
         counts_as_zero = False
+        outcome_action: OutcomeAction | None = None
+        outcome_attribution: FailureClass | None = None
         # A typed provider failure keeps its kind; only a verifier-side failure is a verifier_error.
         failure_kind = failure_cause.failure_kind if isinstance(failure_cause, NgFailureEvent) else VERIFIER_ERROR
         if failure_cause is not None:
@@ -742,10 +746,13 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             observe_failure(failure)
             evaluation_completed = False
             reward = 0.0
-            # The configured policy decides whether the failed verification is masked or a scored zero.
-            counts_as_zero = (
-                failure_outcome_policy(failure, config=self.config.outcome_policy) == OutcomeAction.COUNT_AS_ZERO
+            # The configured policy decides whether the failed verification is masked or a scored zero. The applied
+            # decision is part of the result, so a saved row and its recovery read it instead of inferring it.
+            outcome_action = failure_outcome_policy(failure, config=self.config.outcome_policy)
+            outcome_attribution = classify_failure(
+                failure_kind=failure.failure_kind, stage=failure.stage, http_status=failure.http_status
             )
+            counts_as_zero = outcome_action == OutcomeAction.COUNT_AS_ZERO
 
         return TerminalBench21VerifyResponse(
             **body.model_dump(),
@@ -757,6 +764,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
             mask_sample=failure_reason is not None and not counts_as_zero,
             failure_kind=failure_kind if failure_reason is not None else None,
             failure_reason=failure_reason,
+            failure_outcome_action=outcome_action,
+            failure_outcome_attribution=outcome_attribution,
         )
 
     async def _reward_file_exists(self, eval_sandbox: AsyncSandbox) -> bool:

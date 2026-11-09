@@ -1335,8 +1335,18 @@ class TestSessionInfrastructureFailureReply:
     """In an agent session the provider failure is reported for the Environment Server's policy to select."""
 
     @pytest.mark.asyncio
-    async def test_sandbox_failure_is_a_failed_response_that_keeps_the_provider_event(self, monkeypatch):
-        provider_event = _provider_event()
+    @pytest.mark.parametrize(
+        "kind",
+        [
+            "provider_unavailable",
+            "provider_io_timeout",
+            "provider_status_unavailable",
+            "provider_command_outcome_unknown",
+            "provider_protocol_error",
+        ],
+    )
+    async def test_sandbox_failure_is_a_failed_response_that_keeps_the_provider_event(self, monkeypatch, kind):
+        provider_event = _provider_event(kind)
 
         async def run(agent, instruction, environment, context):
             raise provider_event
@@ -1345,13 +1355,13 @@ class TestSessionInfrastructureFailureReply:
 
         assert response.status == "failed"
         assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
-            failure_kind="provider_unavailable"
+            failure_kind=kind
         )
         report = FailureReport.model_validate(response.model_extra["failure_report"])
         selected = report.events[report.failure_id]
         assert (selected.boundary, selected.failure_kind, selected.http_status) == (
             "agent",
-            "provider_unavailable",
+            kind,
             None,
         )
         provider = report.events[provider_event.event_id]
@@ -1369,10 +1379,10 @@ class TestSessionInfrastructureFailureReply:
         assert raised.value.__cause__.failure_kind == "cancelled"
 
 
-def _provider_event():
+def _provider_event(kind="provider_unavailable"):
     return NgFailureEvent(
         boundary="sandbox",
-        failure_kind="provider_unavailable",
+        failure_kind=kind,
         failure_reason="Sandbox command did not run to completion",
         http_status=503,
         details=SandboxFailureDetails(provider="p", sandbox_id="s-1", provider_status_reason="sandbox"),

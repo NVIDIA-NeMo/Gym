@@ -700,6 +700,66 @@ async def test_configured_outcome_policy_selects_the_outcome_and_keeps_the_provi
     assert outcomes["zero"].mask_sample is False
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy_action", ["retry", "count_as_zero"])
+async def test_applied_outcome_decision_is_part_of_the_result_and_survives_a_saved_row(
+    tmp_path: Path, policy_action: str
+) -> None:
+    """A configured verifier zero is a saved decision, so recovery counts it without a successful verification."""
+    from nemo_gym.core.outcome_policy import is_policy_counted_zero
+    from tests.unit_tests.orchestration.test_evaluation_health import _gate
+    from tests.unit_tests.orchestration.test_shared_fault_classes import _policy_zero
+
+    async def execute(command, **kwargs):
+        if "test.sh" in command:
+            raise ConnectionError("sandbox connection dropped")
+        return _ok()
+
+    server, request = _infra_server(tmp_path, execute)
+    server.config = server.config.model_copy(
+        update={"outcome_policy": TerminalBench21OutcomePolicyConfig(default_action=policy_action)}
+    )
+    result = await server.verify(request, _verify_request(tmp_path))
+
+    counted = policy_action == "count_as_zero"
+    assert result.failure_kind == "verifier_error" and result.evaluation_completed is False and result.reward == 0.0
+    assert result.mask_sample is (not counted)
+    assert (result.failure_outcome_action, result.failure_outcome_attribution) == (policy_action, "evaluation")
+
+    # The saved row, as the Environment Server returns it, carries the decision to recovery.
+    collected = _policy_zero(kind=result.failure_kind)
+    row = collected.results[0]
+    row.pop("failure_outcome_action", None)  # only what the verifier returned may decide the row
+    row.update(
+        result.model_dump(
+            include={
+                "reward",
+                "mask_sample",
+                "evaluation_completed",
+                "failure_kind",
+                "failure_reason",
+                "failure_outcome_action",
+                "failure_outcome_attribution",
+            },
+            exclude_none=True,
+        )
+    )
+    assert is_policy_counted_zero(row) is counted
+    decision, _, _ = _gate(collected)
+    assert decision.counts == ({"scored": 1} if counted else {"masked": 1})
+
+
+@pytest.mark.asyncio
+async def test_scored_task_failure_carries_no_failure_outcome_decision(tmp_path: Path) -> None:
+    async def execute(command, **kwargs):
+        return _ok(return_code=1) if command.startswith("test -f") else _ok()
+
+    server, request = _infra_server(tmp_path, execute, FileNotFoundError("reward.txt"))
+    result = await server.verify(request, _verify_request(tmp_path))
+    assert result.mask_sample is False and result.reward == 0.0
+    assert result.failure_outcome_action is None and result.failure_outcome_attribution is None
+
+
 @pytest.mark.parametrize("action", ["fail", "verify"])
 def test_verifier_outcome_policy_rejects_actions_it_cannot_execute(action: str) -> None:
     with pytest.raises(ValueError, match="only retry and count_as_zero"):
