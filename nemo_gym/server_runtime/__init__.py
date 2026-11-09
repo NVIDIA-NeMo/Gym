@@ -12,7 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""What runs inside every Gym server: the resources and environment server bases, request handling, sessions, and partial-rollout checkpoints."""
+"""What runs inside every Gym server: the resources and environment server bases, request handling, sessions, and partial-rollout checkpoints. Also the supervisor that starts the servers of a run and the venvs they run in."""
 
 # Public API
 from typing import TYPE_CHECKING
@@ -104,6 +104,7 @@ if TYPE_CHECKING:
     from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER, install_session_routing
+    from nemo_gym.server_runtime.server_venv import get_venv_path, run_command, setup_env_command
     from nemo_gym.server_runtime.single_agent_turn_types import (
         SingleAgentTurnFailure,
         SingleAgentTurnRequest,
@@ -129,6 +130,9 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "get_venv_path": "server_venv",
+    "run_command": "server_venv",
+    "setup_env_command": "server_venv",
     "async_rollout_prefix_hook": "base_server",
     "rollout_prefix_hook": "base_server",
     "with_rollout_prefix": "base_server",

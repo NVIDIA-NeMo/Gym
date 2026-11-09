@@ -14,12 +14,12 @@ from unittest.mock import MagicMock
 
 import pytest
 
-import nemo_gym.orchestration.server_supervisor as env_module
+import nemo_gym.server_runtime.supervisor as env_module
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.global_config import HEAD_SERVER_KEY_NAME
 from nemo_gym.core.failure_kinds import SERVER_START_FAILED
-from nemo_gym.orchestration.server_supervisor import HeadServerUnresponsiveError, RunHelper, ServerStartFailedError
-from tests.unit_tests.orchestration.test_server_start_failed import taken_port as taken_port
+from nemo_gym.server_runtime.supervisor import HeadServerUnresponsiveError, RunHelper, ServerStartFailedError
+from tests.unit_tests.server_runtime.test_server_start_failed import taken_port as taken_port
 
 
 def waiting_runner(monkeypatch, *, alive: bool, statuses: list[str], timeout_s: float | None = None) -> RunHelper:

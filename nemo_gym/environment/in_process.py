@@ -56,8 +56,8 @@ from nemo_gym.data.task_selection import row_task_id, select_tasks
 from nemo_gym.environment.assets import asset_config_path
 from nemo_gym.environment.benchmark_preparation import PrepareBenchmarkConfig, plan_for_config
 from nemo_gym.eval.eval_plan import EvalPlan
-from nemo_gym.orchestration.server_supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
 from nemo_gym.rollouts.rollout_collection import RolloutCollectionHelper
+from nemo_gym.server_runtime.supervisor import RunHelper, ServerSpinupTimeoutError, ServerStartFailedError
 
 
 @dataclass(frozen=True)

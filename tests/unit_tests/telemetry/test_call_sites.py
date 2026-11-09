@@ -347,7 +347,7 @@ def test_supervisor_is_the_only_writer_of_the_active_servers_gauge():
     )
 
     callers = {line.split(":")[0].rsplit("/", 1)[-1] for line in hits}
-    assert callers == {"server_supervisor.py", "metrics.py"}, (
+    assert callers == {"supervisor.py", "metrics.py"}, (
         f"gym.servers.active must only be written by the server supervisor, found: {sorted(callers)}"
     )
 

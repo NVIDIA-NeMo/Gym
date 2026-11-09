@@ -18,7 +18,7 @@ NVCF endpoints sit behind AWS Global Accelerator, which drops a connection that 
 application data for 340s. Gym's aiohttp client cannot send HTTP/2 PINGs, so Gym points its model
 base URLs at a local sidecar that forwards over HTTP/2 and sends the PINGs itself.
 
-This module imports only pydantic, so it is safe to import from Gym's config machinery.
+The key name of the block, ``H2_PING_SIDECAR_KEY_NAME``, is defined in ``nemo_gym.config.global_config``.
 """
 
 import ipaddress
@@ -28,8 +28,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from nemo_gym._moved_paths import moved_names_getattr
 
-H2_PING_SIDECAR_KEY_NAME = "sidecar"
 
 # AWS Global Accelerator's fixed idle timeout. A ping interval at or above it defeats the sidecar.
 GLOBAL_ACCELERATOR_IDLE_TIMEOUT_SECONDS = 340.0
@@ -212,3 +212,6 @@ class H2PingSidecarConfig(BaseModel, extra="forbid"):
         if len(set(listens)) != len(listens):
             raise ValueError(f"instances must listen on different addresses, got {listens}")
         return self
+
+
+__getattr__ = moved_names_getattr(__name__)
