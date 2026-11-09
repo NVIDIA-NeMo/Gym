@@ -13,7 +13,7 @@ Server compares the row digest at verification time, establishing that the row
 did not change during the episode.
 
 Set `skip_verification: true` to return `skip_verification_reward` (default `0.0`) without calling `/verify`,
-as `single_agent_turn` does, for example to generate conversations without scoring them. The result keeps its
+for example to generate conversations without scoring them. `single_agent_turn` reads the setting the same way. The result keeps its
 shape with `verification: null`, empty `reward_components`, the fixed `reward`, and `verification_skipped: true`,
 so anything reading the result can tell it from a measured reward. A simulation that UserSim reports as failed
 does not earn the fixed reward: it scores `0.0` with the `failure_kind` and `failure_reason` that `/verify` would give,

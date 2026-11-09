@@ -66,6 +66,7 @@ if TYPE_CHECKING:
         get_global_config_dict,
         get_hf_token,
         maybe_get_global_config_dict,
+        skipped_verification_reward,
         taskset_environment_server_name,
     )
     from nemo_gym.config.server_metadata import ServerMetadata, visit_agent_server, visit_resources_server
@@ -117,6 +118,7 @@ _PUBLIC_API = {
     "is_almost_server": "config_types",
     "maybe_get_global_config_dict": "global_config",
     "maybe_get_server_instance_config": "config_types",
+    "skipped_verification_reward": "global_config",
     "taskset_environment_server_name": "global_config",
     "visit_agent_server": "server_metadata",
     "visit_resources_server": "server_metadata",

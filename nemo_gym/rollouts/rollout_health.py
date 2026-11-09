@@ -1353,8 +1353,9 @@ def _mlflow_configured(config: Mapping[str, Any]) -> bool | None:
 def run_provenance(rollout_path: Path) -> dict[str, Any]:
     """Facts about how the run was configured, read from the resolved config saved beside the rollouts.
 
-    Only values the config states are reported: ``route_failures_to_sidecar`` and each agent's ``skip_verification``
-    are booleans when written as booleans and ``None`` otherwise, never a default. Each top-level server entry
+    Only values the config states are reported: ``route_failures_to_sidecar`` and the ``skip_verification`` of each
+    agent and Environment Server are booleans when written as booleans and ``None`` otherwise, never a default. An
+    Environment Server's own setting is reported because it overrides its agent's. Each top-level server entry
     reports its kind (``responses_api_agents``, ``resources_servers`` or ``environment_servers``), its implementation
     key and, for an agent, the resources server it names. No values beyond these names and flags are copied.
     """
@@ -1383,6 +1384,7 @@ def run_provenance(rollout_path: Path) -> dict[str, Any]:
             if kind == "responses_api_agents":
                 resources = settings.get("resources_server")
                 fact["resources_server"] = resources.get("name") if isinstance(resources, dict) else None
+            if kind in ("responses_api_agents", "environment_servers"):
                 fact["skip_verification"] = _flag(settings.get("skip_verification"))
             servers[str(name)] = fact
     return {

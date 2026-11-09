@@ -60,6 +60,7 @@ from nemo_gym.config.global_config import (
     get_first_server_config_dict,
     get_global_config_dict,
     resolve_dataset_agent,
+    skipped_verification_reward,
 )
 from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_hide_secrets
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
@@ -3858,3 +3859,44 @@ def test_the_cli_parse_leaves_hydras_argument_parser_as_it_found_it(monkeypatch:
         GlobalConfigDictParser().parse_global_config_dict_from_cli()
 
     assert hydra_main_module.get_args_parser is original
+
+
+@mark.parametrize(
+    ("own", "agent", "expected"),
+    [
+        # Gym fills the global flags in only on agents, so an unset server setting takes the agent's.
+        ({}, {"skip_verification": True, "skip_verification_reward": 0.5}, 0.5),
+        ({}, {"skip_verification": "true", "skip_verification_reward": "0.25"}, 0.25),
+        ({}, {"skip_verification": "false", "skip_verification_reward": 1.0}, None),
+        ({}, {"skip_verification": True}, 0.0),
+        ({}, {}, None),
+        # The server's own settings win over the agent's.
+        ({"skip_verification": False}, {"skip_verification": True}, None),
+        ({"skip_verification": True, "skip_verification_reward": 0.75}, {"skip_verification_reward": 0.5}, 0.75),
+        ({"skip_verification": True}, {"skip_verification": False, "skip_verification_reward": 0.5}, 0.5),
+    ],
+)
+def test_skipped_verification_reward_prefers_the_servers_setting_over_its_agents(
+    own: dict, agent: dict, expected: float | None
+) -> None:
+    global_config_dict = OmegaConf.create({"bench_agent": {"responses_api_agents": {"simple_agent": agent}}})
+
+    reward = skipped_verification_reward(
+        global_config_dict,
+        "bench_agent",
+        skip_verification=own.get("skip_verification"),
+        skip_verification_reward=own.get("skip_verification_reward"),
+    )
+
+    assert reward == expected
+
+
+def test_skipped_verification_reward_rejects_an_agent_value_that_is_not_a_flag() -> None:
+    global_config_dict = OmegaConf.create(
+        {"bench_agent": {"responses_api_agents": {"simple_agent": {"skip_verification": "sometimes"}}}}
+    )
+
+    with raises(ValidationError):
+        skipped_verification_reward(
+            global_config_dict, "bench_agent", skip_verification=None, skip_verification_reward=None
+        )

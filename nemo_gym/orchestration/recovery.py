@@ -3196,11 +3196,16 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
             for name, fact in servers.items()
             if fact.get("kind") == "responses_api_agents"
         }
-        environments = sorted(str(n) for n, f in servers.items() if f.get("kind") == "environment_servers")
+        # An Environment Server's own skip_verification overrides its agent's.
+        environments = {
+            str(name): fact.get("skip_verification")
+            for name, fact in sorted(servers.items(), key=lambda item: str(item[0]))
+            if fact.get("kind") == "environment_servers"
+        }
         route = provenance.get("route_failures_to_sidecar")
         facts = (
             f"agents (implementation, resources server, skip_verification) {agents}, environment servers "
-            f"{environments}, route_failures_to_sidecar {route if isinstance(route, bool) else None}"
+            f"(skip_verification) {environments}, route_failures_to_sidecar {route if isinstance(route, bool) else None}"
         )
     runtime = quality.get("observed_runtime")
     runtime_count = _count(runtime.get("invocation_observations")) if isinstance(runtime, dict) else None

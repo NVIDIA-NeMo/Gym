@@ -29,8 +29,6 @@ from nemo_gym.agents import (
 )
 from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
-    SKIP_VERIFICATION_KEY_NAME,
-    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -38,6 +36,7 @@ from nemo_gym.config import (
     AggregateMetricsRequest,
     ResourcesServerRef,
     get_first_server_config_dict,
+    skipped_verification_reward,
 )
 from nemo_gym.core import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
@@ -768,24 +767,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return OutcomeAction((agent.get("outcome_policy") or {}).get("default_action", OutcomeAction.RETRY))
 
     def _skipped_verification_reward(self) -> float | None:
-        """The fixed reward that replaces /verify, or None to verify.
-
-        This server's own setting wins; otherwise the bound agent's applies.
-        The agent's raw values are parsed as the agent's own config parses them, so a string "false" stays false.
-        """
-        agent_config = get_first_server_config_dict(
+        """The fixed reward that replaces /verify, or None to verify; the bound agent supplies unset settings."""
+        return skipped_verification_reward(
             self.server_client.global_config_dict,
             self.config.agent_server.name,
+            skip_verification=self.config.skip_verification,
+            skip_verification_reward=self.config.skip_verification_reward,
         )
-        skip = self.config.skip_verification
-        if skip is None:
-            skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
-        if not skip:
-            return None
-        reward = self.config.skip_verification_reward
-        if reward is None:
-            reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
-        return reward
 
     def _agent_responses_path(self, request: SingleAgentTurnRequest) -> str:
         block = self.server_client.global_config_dict.get(TOKEN_CAPTURE_BLOCK) or {}

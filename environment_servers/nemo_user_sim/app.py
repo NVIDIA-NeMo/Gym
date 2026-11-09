@@ -15,7 +15,7 @@ from warnings import warn
 
 from aiohttp import ClientError, ClientResponseError
 from fastapi import Body
-from pydantic import ConfigDict, Field, TypeAdapter
+from pydantic import ConfigDict, Field
 
 from environment_servers.nemo_user_sim.episode_contracts import (
     UserSimEpisodeRequest,
@@ -31,8 +31,6 @@ from nemo_gym.agents import (
 from nemo_gym.client import format_exception_with_response_body, get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
-    SKIP_VERIFICATION_KEY_NAME,
-    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_BLOCK,
     TOKEN_CAPTURE_PATH_SEGMENT,
     AgentServerRef,
@@ -41,6 +39,7 @@ from nemo_gym.config import (
     ModelServerRef,
     ResourcesServerRef,
     get_first_server_config_dict,
+    skipped_verification_reward,
 )
 from nemo_gym.core import (
     FailureStage,
@@ -616,25 +615,13 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
             await runtime.close()
 
     def _skipped_verification_reward(self) -> float | None:
-        """The fixed reward that replaces /verify, or None to verify.
-
-        This server's own setting wins; otherwise the assistant agent's applies, as single_agent_turn falls back to
-        its agent's. Gym fills the agents' settings from the global flags. The agent's raw values are parsed as the
-        agent's own config parses them, so a string "false" stays false.
-        """
-        agent_config = get_first_server_config_dict(
+        """The fixed reward that replaces /verify, or None to verify; the assistant agent supplies unset settings."""
+        return skipped_verification_reward(
             self.server_client.global_config_dict,
             self.config.assistant_agent.name,
+            skip_verification=self.config.skip_verification,
+            skip_verification_reward=self.config.skip_verification_reward,
         )
-        skip = self.config.skip_verification
-        if skip is None:
-            skip = TypeAdapter(bool).validate_python(agent_config.get(SKIP_VERIFICATION_KEY_NAME, False))
-        if not skip:
-            return None
-        reward = self.config.skip_verification_reward
-        if reward is None:
-            reward = TypeAdapter(float).validate_python(agent_config.get(SKIP_VERIFICATION_REWARD_KEY_NAME, 0.0))
-        return reward
 
     def responses_path(
         self,

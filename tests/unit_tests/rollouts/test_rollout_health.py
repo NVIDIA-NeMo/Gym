@@ -3637,6 +3637,9 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
         "bench_environment:\n"
         "  environment_servers:\n"
         "    bench_env: {}\n"
+        "skipping_environment:\n"
+        "  environment_servers:\n"
+        "    bench_env: {skip_verification: true}\n"
         "output_jsonl_fpath: rollouts.jsonl\n"
     )
     summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
@@ -3659,7 +3662,17 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
                 "skip_verification": None,
             },
             "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
-            "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
+            "bench_environment": {
+                "kind": "environment_servers",
+                "implementation": "bench_env",
+                "skip_verification": None,
+            },
+            # An Environment Server's own setting overrides its agent's, so it is reported too.
+            "skipping_environment": {
+                "kind": "environment_servers",
+                "implementation": "bench_env",
+                "skip_verification": True,
+            },
         },
         "mlflow": {"configured": False, "tracking_required": None},
     }
