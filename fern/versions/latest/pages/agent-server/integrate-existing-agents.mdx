@@ -78,8 +78,14 @@ sequences. Other OpenCode configuration keeps its native substitution behavior.
 Pi's `enable_tools` defaults to `true`. Setting it to `false` disables Pi's
 built-in tools through `--no-builtin-tools`; separately configured MCP tools and
 session grants remain available and retain their validation. For a run with no
-tools, also omit MCP configuration and grants. OpenCode continues to select its
-tools through `opencode_config.tools`, for example `{"*": false}`.
+tools, also omit MCP configuration and grants. For OpenCode, withhold tools with
+`opencode_config.permission` rules, for example `task: deny`. To withhold every
+tool, also deny `edit` and `bash` through their own maps (`edit: {"**": deny}`,
+`bash: {"*": deny}`): `opencode_agent`'s permission profile allows them after its
+`"*"` rule, and a `"*": deny` override keeps that rule's place before them. Do not
+use an `opencode_config.tools` map with `opencode_agent`: OpenCode places its keys
+before the profile's `"*": allow`, which then overrides them (see the
+`opencode_agent` README).
 
 Record prompt replacement and tool selection as evaluation treatments: they can
 change results relative to the harness's default coding behavior.

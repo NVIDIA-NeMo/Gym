@@ -24,8 +24,6 @@ evaluations of every Chart.js, marked and p5.js task of the SWE-bench Multimodal
 import re
 from typing import Callable
 
-from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
-
 
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -80,12 +78,13 @@ FAILURE_ONLY_SUITE_CHECKS: dict[str, Callable[[str], bool]] = {
 def failure_only_suite_completed(repo: str, test_output: str) -> bool:
     """Whether ``test_output`` shows that ``repo``'s test suite ran to completion.
 
-    Only the output between SWE-bench's test-output markers counts. A repository without a check is never accepted.
+    The whole output is read, not only the section between SWE-bench's test-output markers: bash's trace prints the
+    markers on stderr, and a sandbox returns stdout and stderr one after the other, so the test runner's summary
+    falls outside that section. SWE-bench's own log parsing falls back to the whole output for the same reason.
+    These repositories' evaluation scripts run nothing else that prints a runner summary. A repository without a
+    check is never accepted.
     """
     check = FAILURE_ONLY_SUITE_CHECKS.get(repo)
     if check is None:
         return False
-    log = _ANSI_ESCAPE.sub("", test_output)
-    if START_TEST_OUTPUT in log and END_TEST_OUTPUT in log:
-        log = log.split(START_TEST_OUTPUT, 1)[1].split(END_TEST_OUTPUT, 1)[0]
-    return check(log)
+    return check(_ANSI_ESCAPE.sub("", test_output))
