@@ -1843,6 +1843,30 @@ class TestSessionSandbox:
         assert raised.value.failure_kind == "provider_protocol_error"
         assert sentinel.read_bytes() == b"original" and provider.downloads == []
 
+    @pytest.mark.parametrize("placement", [{"session_sandbox": SANDBOX}, {"session_nodes": 2}])
+    def test_repo_dir_is_rejected_for_sessions_that_copy_only_the_run_directory(
+        self, tmp_path: Path, placement: dict
+    ) -> None:
+        """The generated config and images land in repo_dir, which sandbox and remote sessions do not copy."""
+        with pytest.raises(ValueError, match="repo_dir"):
+            _make_agent(repo_dir=str(tmp_path / "repo"), **placement)
+
+    @pytest.mark.parametrize("sandboxed", [True, False])
+    def test_only_host_sessions_install_opencode_on_the_host(self, tmp_path: Path, sandboxed: bool) -> None:
+        agent = _make_agent(**({"session_sandbox": self.SANDBOX} if sandboxed else {}))
+        run_sandbox = AsyncMock(return_value=(0, b"", False))
+        run_local = AsyncMock(return_value=(0, b"", False))
+        with (
+            patch.object(agent, "_workspace_root", return_value=tmp_path / "work"),
+            patch.object(agent, "_run_sandbox_session", run_sandbox),
+            patch.object(agent, "_run_local_session", run_local),
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            (tmp_path / "work").mkdir()
+            asyncio.run(agent._run_opencode("look", None, collect_observations=False))
+        assert agent._ensure_local_runtime.await_count == (0 if sandboxed else 1)
+        assert (run_sandbox.await_count, run_local.await_count) == ((1, 0) if sandboxed else (0, 1))
+
     def test_fractional_task_budget_keeps_the_inner_watchdog(self, tmp_path: Path) -> None:
         provider = _FakeSandboxProvider()
         agent = _make_agent(session_sandbox=self.SANDBOX, timeout=60)

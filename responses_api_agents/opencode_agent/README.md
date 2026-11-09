@@ -235,6 +235,11 @@ Every local session runs in its own process group, which is killed when the
 session ends, so commands the model left running do not outlive it. Local runs
 also pass `--title`, so OpenCode does not spend a policy call naming the session.
 
+`session_sandbox` and `session_nodes > 1` copy only the run directory to where
+the session runs, so they reject `repo_dir` (whose generated `opencode.json`
+and images would not arrive). With `session_sandbox`, the sandbox image or its
+`setup_command` provides OpenCode; the agent host does not install it.
+
 ## Multi-turn continuation
 
 Seed an owned or borrowed sandbox session with `continuation: {mode: resume_harness_session}`.

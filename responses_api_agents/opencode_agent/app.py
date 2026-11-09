@@ -684,6 +684,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self._sandbox_provider: Any = None
         if self.config.session_sandbox is not None and self.config.session_nodes > 1:
             raise ValueError("session_sandbox and session_nodes > 1 are alternatives; set only one")
+        if self.config.repo_dir and (self.config.session_sandbox is not None or self.config.session_nodes > 1):
+            # The generated opencode.json and attached images go into repo_dir, but sandbox and remote
+            # sessions copy only the run directory, so OpenCode would start without them.
+            raise ValueError(
+                "repo_dir is supported only for local sessions, not with session_sandbox or session_nodes > 1"
+            )
 
     async def _ensure_local_runtime(self) -> None:
         if self._local_setup_task is None:
@@ -819,7 +825,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
         timeout = self.config.timeout if timeout is None else timeout
-        await self._ensure_local_runtime()
+        if self.config.session_sandbox is None:
+            # Local and remote-node sessions run the host's OpenCode; a sandbox image brings its own.
+            await self._ensure_local_runtime()
         prompt = instruction if not system_prompt else f"{system_prompt}\n\n{instruction}"
         work_dir = self._workspace_root()
         project_dir = self._repo_dir(work_dir)
