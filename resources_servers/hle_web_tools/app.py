@@ -880,7 +880,7 @@ class HLEWebToolsResourcesServerConfig(BaseResourcesServerConfig):
 
 
 class HLEWebToolsSeedSessionRequest(BaseSeedSessionRequest):
-    # An Agent's run request (its extra fields are the task row) or an Environment Server's typed seed.
+    # An Agent's run request (its extra fields are the task row) or an Environment Server's episode seed.
     model_config = ConfigDict(extra="allow")
 
     resources_session_id: Optional[str] = None
@@ -975,7 +975,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     _backend: Optional[TavilyBackend] = PrivateAttr(default=None)
     _blocklist: Optional[Blocklist] = PrivateAttr(default=None)
     _session_spans: "OrderedDict[str, QuestionSpans]" = PrivateAttr(default_factory=OrderedDict)
-    # The episode and task each typed (Environment Server) session is bound to, under the same cap as the questions.
+    # The episode and task each episode session is bound to, under the same cap as the questions.
     _session_identity: "OrderedDict[str, Tuple[EpisodeId, TaskId]]" = PrivateAttr(default_factory=OrderedDict)
     _locks: ResourcesSessionLocks = PrivateAttr(default_factory=ResourcesSessionLocks)
     _fences: "ResourcesSessionFences[EpisodeId]" = PrivateAttr()
@@ -1045,11 +1045,11 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             self._install_question(request.session[SESSION_ID_KEY], question)
             return BaseSeedSessionResponse()
         try:
-            typed = ResourcesSeedSessionRequest.model_validate(raw)
+            episode_seed = ResourcesSeedSessionRequest.model_validate(raw)
         except ValueError as error:
-            raise ResourcesSeedRejectedError(f"invalid typed seed: {error}") from error
-        resources_session_id = typed.resources_session_id
-        identity = (typed.episode_id, typed.task_id)
+            raise ResourcesSeedRejectedError(f"invalid episode seed: {error}") from error
+        resources_session_id = episode_seed.resources_session_id
+        identity = (episode_seed.episode_id, episode_seed.task_id)
         async with self._locks.locked(resources_session_id):
             # A seed that arrives after its session closed (a retry, or a reply that raced the close) must not
             # recreate it.
@@ -1057,7 +1057,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             bound = self._session_identity.get(resources_session_id)
             if bound is not None and bound != identity:
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
-            # Session routing makes the cookie's session ID equal resources_session_id for a typed seed.
+            # Session routing makes the cookie's session ID equal resources_session_id for an episode seed.
             self._install_question(resources_session_id, question)
             self._session_identity[resources_session_id] = identity
             self._session_identity.move_to_end(resources_session_id)
@@ -1071,8 +1071,8 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             # again; a seed that would change or drop the question is a conflict, so a caller who holds a session
             # (a sandbox reaching the plain route with the rollout's credentials) cannot swap the span check
             # out from under it. A fresh session seeded from inside the sandbox is NOT caught here: that needs
-            # an authenticated seed channel (see the README). Nor is a session the cap has forgotten: only a typed
-            # seed checks the fence, so an untyped seed through its cookie installs whatever question it brings.
+            # an authenticated seed channel (see the README). Nor is a session the cap has forgotten: only an episode
+            # seed checks the fence, so an agent-run seed through its cookie installs whatever question it brings.
             if question is None or QuestionSpans(question, self.config.verbatim_span_words).digest != current.digest:
                 logger.warning(
                     "hle_web_tools refused to re-seed session %s with %s",
@@ -1100,7 +1100,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     def _forget_sessions_over_cap(self) -> None:
         """Forget the least recently seeded sessions, question and identity together, beyond the cap.
 
-        A forgotten typed session is fenced as if closed by its episode, so a later seed of its ID for any episode
+        A forgotten episode session is fenced as if closed by its episode, so a later seed of its ID for any episode
         gets 409 instead of binding a session whose question is gone.
         """
         for table in (self._session_spans, self._session_identity):

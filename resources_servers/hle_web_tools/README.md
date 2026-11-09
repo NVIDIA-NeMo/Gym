@@ -104,19 +104,23 @@ Beyond the families, the protocol's own refusals:
   family `unseeded_session`, and a seed without a question is logged at WARNING; set
   `require_seeded_question: false` to serve such sessions without the span rule instead. A seeded
   session cannot be re-seeded with another question (HTTP 409; a retry with the same question is
-  served). An Environment Server's typed seed (`resources_session_id`, `episode_id`, `task_id`,
+  served). An Environment Server's episode seed (`resources_session_id`, `episode_id`, `task_id`,
   `task_data`) also binds the session to its episode and task: a seed of the same ID for another episode
   or task, or a close naming another episode, gets HTTP 409, and after a close the ID is fenced for
   `session_close_retry_window_seconds`, so a delayed seed cannot recreate it. At most 10,000 seeded
   sessions are held; past that the least recently seeded one is forgotten, question and episode binding
   together, with a WARNING naming it, and its searches are refused as `unseeded_session`; a forgotten
-  typed session's ID is fenced as if its episode had closed it, so a later seed of that ID gets HTTP 409.
-  Only a typed session closed through `/close_session` frees its slot before then. A session an Agent seeds
-  with its run body, which is how the OpenCode preset seeds, is never closed, so held sessions add up over
+  episode session's ID is fenced as if its episode had closed it, so a later seed of that ID gets HTTP 409.
+  Before then a slot is released only by an episode session's `/close_session` or, when checkpointing is
+  configured, by the checkpoint controller retiring the attempt that seeded the session
+  (`retire_session_state` releases every session of that attempt, whether an episode seed or an agent-run
+  seed created it, and does not fence the ID). A session an Agent seeds
+  with its run body, which is how the OpenCode preset seeds, is otherwise never closed, so held sessions add up over
   the server's life, and a rollout's question is forgotten once 10,000 later sessions are seeded on the same
   server while that rollout is still running, however few rollouts are open at once. For a harness that
-  closes its sessions, the cap must exceed the peak number of sessions open at once. A forgotten Agent
-  (untyped) session is not fenced, and neither is a typed ID against a later untyped seed: a later seed
+  closes its sessions, the cap must exceed the peak number of sessions open at once. A forgotten session
+  that an agent-run seed created is not fenced, and neither is an episode session's ID against a later
+  agent-run seed: a later seed
   carrying its cookie installs whatever question it brings (HTTP 200), so once the cap forgets a session,
   a caller holding its cookie can swap its span check. This is the same unauthenticated-seed residual as a
   sandbox-seeded fresh session (above), and so is a flood of unauthenticated seeds past the cap, which
@@ -249,7 +253,7 @@ pytest resources_servers/hle_web_tools/tests/test_app.py
 
 Model-free; the Tavily transport is stubbed. Each rule family has one test built on rules taken from
 the upstream blocklist, plus the two query refusals, the fail-closed refusal of a cookie-less
-`POST /web_search` after a seed, the 409 on re-seeding a session with another question, the typed-session
+`POST /web_search` after a seed, the 409 on re-seeding a session with another question, the episode-session
 contract (`nemo_gym.server_runtime.testing.session_conformance.check_resources_session_contract`), wrapper decoding, the cap and marker, the exact two-tool list over a
 real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and exhaustion of the key
 pool, malformed provider bodies, including a 200 whose body is not JSON (a tool error, not an HTTP 500) and the blocklist digest pin. A table of URL
