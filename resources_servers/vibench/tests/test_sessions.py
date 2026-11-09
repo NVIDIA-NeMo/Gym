@@ -688,7 +688,7 @@ def test_harvested_session_cannot_be_lent_when_stop_failed(server, root, graded,
 
 
 def test_failed_initial_prd_delivery_retains_cleanup(server, root, monkeypatch):
-    from nemo_gym.sandbox.providers.local.provider import LocalProvider
+    from nemo_gym.sandbox import LocalProvider
 
     client = TestClient(server.setup_webserver(), raise_server_exceptions=False)
     seed = _seed()
