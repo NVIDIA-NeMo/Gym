@@ -1303,11 +1303,38 @@ class TestHTTPClient:
         window.record(first_error)
         await asyncio.sleep(0.06)
 
-        # E.g. a 503 retry of the same logical call: it raises the earlier error without connecting again.
+        # A retry of the same logical call after only connection errors: it raises the earlier error without connecting.
         with raises(ClientOSError) as raised:
             await nemo_gym.client.http_client.request("POST", "http://dead-host:1/v1", _connection_retry_window=window)
         assert raised.value is first_error
         assert client.request.await_count == 0
+
+    async def test_an_answer_closes_the_window_so_a_later_retry_is_not_cut_off(self, monkeypatch: MonkeyPatch) -> None:
+        clock = SimpleNamespace(now=100.0)
+
+        async def advance(seconds: float) -> None:
+            clock.now += seconds
+
+        unavailable = MagicMock(ok=False, status=503)
+        ok = MagicMock(ok=True, status=200)
+        client = MagicMock(timeout=ClientTimeout(total=300))
+        client.request = AsyncMock(side_effect=[ClientOSError(111, "refused"), unavailable, ok])
+        monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: client)
+        monkeypatch.setattr(nemo_gym.client.http_client, "time", SimpleNamespace(monotonic=lambda: clock.now))
+        monkeypatch.setattr(nemo_gym.client.http_client.asyncio, "sleep", advance)
+        monkeypatch.setattr(nemo_gym.client.http_client, "is_span_group_enabled", lambda _: False)
+        window = nemo_gym.client.http_client.ConnectionRetryWindow(1.0)
+
+        first = await nemo_gym.client.http_client.request("POST", "http://host:1/v1", _connection_retry_window=window)
+        assert first is unavailable
+        assert window.remaining() is None and window.last_error is None
+
+        # The caller's status retry comes after the first window would have run out: the server is reachable,
+        # so the retry connects instead of raising the earlier "refused".
+        clock.now += 5.0
+        second = await nemo_gym.client.http_client.request("POST", "http://host:1/v1", _connection_retry_window=window)
+        assert second is ok
+        assert client.request.await_count == 3
 
     async def test_retry_window_bounds_a_reconnect_that_hangs(self, monkeypatch: MonkeyPatch) -> None:
         class FailThenHang(TCPConnector):

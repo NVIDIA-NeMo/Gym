@@ -296,7 +296,7 @@ By default a model call retries a refused or dropped connection without a time l
 endpoint_connection_retry_timeout_s: 300
 ```
 
-The value must be positive. The window starts at the call's first connection error, and HTTP-status retries of the same call (for example a 503 with `Retry-After`) share it and never wait past it. It bounds only connection setup: a call that has connected and is generating is not cut short. `null` adds no time cap, but does not lift the attempt cap that `endpoint_connection_retries` sets when `endpoint_file` or `route_around_failing_endpoints` is used.
+The value must be positive. The window starts at the call's first connection error and closes when the server answers, so it bounds only an unbroken run of connection failures. A call that has connected and is generating is not cut short, and HTTP-status retries (for example a 503 with `Retry-After`) keep their own limits. Each model call gets its own window, so a caller that retries the failed call (for example the OpenAI SDK's `max_retries` in an agent's policy client) waits up to one window per retry. Set the cap above the model server's startup time if rollouts can start before the engine accepts connections. `null` adds no time cap, but does not lift the attempt cap that `endpoint_connection_retries` sets when `endpoint_file` or `route_around_failing_endpoints` is used.
 
 ## Use VLLMModel with multiple replicas of a model endpoint
 

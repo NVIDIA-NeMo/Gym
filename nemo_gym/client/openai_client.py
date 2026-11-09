@@ -286,7 +286,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         gt=0,
         description=(
             "Wall-clock seconds one call may spend retrying connection errors, counted from the first one, "
-            "before that error is raised. HTTP-status retries of the same call share the window. "
+            "before that error is raised. Any answer from the server closes the window. "
             "None retries connection errors without a time limit."
         ),
     )
@@ -593,12 +593,6 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     failure_id=last_failure.event_id if last_failure else None,
                 )
                 await _raise_exhausted(response, content, last_failure)
-
-            # A connection error already opened the window: a status wait must not outlast it.
-            window = request_kwargs.get("_connection_retry_window")
-            remaining = window.remaining() if window is not None else None
-            if remaining is not None:
-                wait = max(0.0, min(wait, remaining))
 
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(

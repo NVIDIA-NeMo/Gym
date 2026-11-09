@@ -15,7 +15,6 @@
 """Tests of the OpenAI-compatible client in `nemo_gym.client.openai_client`."""
 
 import re
-import time
 from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, call
@@ -658,11 +657,18 @@ class TestProviderBackoff:
         assert windows[0] is windows[1]
         assert windows[2] is not windows[0]
 
-    async def test_an_opened_window_cuts_a_status_wait_short(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        connection_error = ClientOSError(111, "refused")
+    async def test_an_answer_after_a_connection_error_keeps_the_full_status_wait(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        success = MagicMock(ok=True, status=200)
         transport = MagicMock()
-        transport.request = AsyncMock(side_effect=[connection_error, _busy(status=503, retry_after="60")])
+        transport.request = AsyncMock(
+            side_effect=[ClientOSError(111, "refused"), _busy(status=503, retry_after="60"), success]
+        )
+        sleep = AsyncMock()
         monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr("nemo_gym.client.http_client.asyncio.sleep", AsyncMock())
+        monkeypatch.setattr("nemo_gym.client.openai_client.sleep", sleep)
         client = NeMoGymAsyncOpenAI(
             api_key="abc",
             base_url="https://example.com/v1",
@@ -671,15 +677,11 @@ class TestProviderBackoff:
             connection_retry_timeout_s=1.0,
         )
 
-        started = time.monotonic()
-        with pytest.raises(ClientOSError) as raised:
-            await client._request(method="POST", url="https://example.com/v1/responses")
-        elapsed = time.monotonic() - started
-
-        # The 60 s Retry-After is cut to the window's remainder, then the saved error is raised without reconnecting.
-        assert raised.value is connection_error
-        assert transport.request.await_count == 2
-        assert 0.9 <= elapsed < 1.8
+        # The 503 shows the server is reachable: its Retry-After is honored in full, and the retry is not
+        # reported as the earlier "refused".
+        assert await client._request(method="POST", url="https://example.com/v1/responses") is success
+        sleep.assert_awaited_once_with(60.0)
+        assert transport.request.await_count == 3
 
     async def test_an_unopened_window_keeps_the_full_status_wait(self, monkeypatch: pytest.MonkeyPatch) -> None:
         success = SimpleNamespace(status=200)

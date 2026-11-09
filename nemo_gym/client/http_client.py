@@ -439,8 +439,9 @@ async def request(
     attempt budget) decides whether the request runs again.
 
     ``_connection_retry_window`` caps the wall-clock time spent retrying connection errors, counted from the
-    first one; past it the last connection error is raised. Share one window across the calls of one logical
-    request so they draw on a single budget. None retries connection errors without a time limit.
+    first one, and closed when the server answers; past it the last connection error is raised. Share one window
+    across the calls of one logical request so they draw on a single budget. None retries connection errors without
+    a time limit.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -632,7 +633,8 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
 class ConnectionRetryWindow:
     """Wall-clock budget for connection-error retries of one logical request.
 
-    The window opens at the first connection error. After that, each attempt may wait for a
+    The window opens at the first connection error and closes when the server answers, so it
+    bounds only an unbroken run of connection failures. While open, each attempt may wait for a
     connection only as long as the budget has left, but a connected attempt is never cut short.
     """
 
@@ -649,6 +651,11 @@ class ConnectionRetryWindow:
         if self.first_error_at is None:
             self.first_error_at = time.monotonic()
         self.last_error = error
+
+    def close(self) -> None:
+        """The server answered: a later connection error opens a fresh window."""
+        self.first_error_at = None
+        self.last_error = None
 
     def remaining(self) -> Optional[float]:
         """Seconds left in the budget, or None while no connection error has happened."""
@@ -726,6 +733,8 @@ async def _request_with_retries(
                 attempt_kwargs["timeout"] = window.bound_connect(kwargs.get("timeout") or client.timeout)
             try:
                 response = await client.request(method=method, url=url, **attempt_kwargs)
+                if window is not None:
+                    window.close()
                 if (
                     _read_body
                     and _resend_after_disconnect
