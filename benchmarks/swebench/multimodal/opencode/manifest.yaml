@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: coding
 description: SWE-bench Multimodal dev-split JavaScript repair tasks with the issue's images
-  attached, using prepared repair prompts, a sandboxed OpenCode agent, and binary
+  attached, using prepared repair prompts, OpenCode agent sessions, and binary
   patch-resolution scoring.
 modality: text,image
 licensing: unknown
@@ -19,7 +19,7 @@ reward:
 determinism: unknown
 config_path: ../opencode.yaml
 resources_server: swebench
-agent_server: opencode_sandboxed_agent
+agent_server: opencode_agent
 datasets:
 - name: swebench_multimodal
   type: benchmark
