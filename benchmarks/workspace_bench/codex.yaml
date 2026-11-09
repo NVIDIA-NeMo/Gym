@@ -49,6 +49,10 @@ workspace_bench_codex_environment_server:
       # Bounds the task sandboxes that run at once, as the agent's concurrency did behind legacy_agent.
       max_concurrent_episodes: 32
       queue_timeout_seconds: 86400
-      # The agent's 2-hour budget plus runtime setup, a judge run that may wait for one of the server's
-      # num_processes slots, and cleanup; it ends inside the sandbox's ttl_s (10800).
-      default_episode_timeout_seconds: 10200
+      # Covers the slowest scored path, so a slow grade is not a timeout that reruns the 2-hour episode: task
+      # sandbox start (ready_timeout_s 1200), agent CLI setup (up to 1200, outside the agent's timeout), the
+      # agent's 7200 s, collection, a wait behind up to three judge runs (32 episodes share the server's
+      # num_processes 10 judge slots; each run is judge sandbox start 1200 + judge_timeout_s 600), then its own
+      # judge run. Verify starts well before the session's ttl_s (10800) ends; the task sandbox is stopped after
+      # collection and the judge gets a sandbox of its own.
+      default_episode_timeout_seconds: 18000
