@@ -395,7 +395,11 @@ class _AggregateBinding:
     unresolved: bool = False
 
 
-def _aggregate_member_environments(rows: Iterable[Mapping[str, Any]]) -> Dict[str, _AggregateBinding]:
+def _aggregate_member_environments(
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    existing_bindings: Optional[Mapping[str, _AggregateBinding]] = None,
+) -> Dict[str, _AggregateBinding]:
     """Keep saved dispatch routes separate from status members and metric labels.
 
     Empty routes retain agent-only inputs' exact-label lookup. Partial or malformed bindings retain their known
@@ -403,6 +407,10 @@ def _aggregate_member_environments(rows: Iterable[Mapping[str, Any]]) -> Dict[st
     """
     routes: Dict[str, set[Optional[str]]] = defaultdict(set)
     invalid = set()
+    for member, binding in (existing_bindings or {}).items():
+        routes[member].update(binding.environments or {None})
+        if binding.unresolved:
+            invalid.add(member)
     for row in rows:
         if not isinstance(row, Mapping):
             raise ConfigError("Aggregation route evidence contains a non-object row.")

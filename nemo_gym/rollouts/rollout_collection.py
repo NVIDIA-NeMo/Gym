@@ -2774,11 +2774,11 @@ def _refresh_shard_status_aggregation(
                     if _digest(rows) != manifest.materialized_digest:
                         raise ConfigError("Saved materialized inputs do not match the run manifest.")
                     bindings = _aggregate_member_environments(rows)
-                else:
+                elif bindings is not None or path not in (legacy_bindings or {}):
                     # Only historical agent-only inputs retain exact-label lookup without a bound inventory.
                     bindings = {
                         member: replace(binding, unresolved=True) if binding.environments else binding
-                        for member, binding in _aggregate_member_environments(rows).items()
+                        for member, binding in _aggregate_member_environments(rows, existing_bindings=bindings).items()
                     }
         except (ConfigError, OSError, ValueError, TypeError):
             logger.warning("Could not verify aggregation routes for %s.", path, exc_info=True)
@@ -6199,6 +6199,7 @@ class RolloutAggregationHelper(BaseModel):
         histories: List[RolloutStore] = []
         health_histories: Dict[Path, Optional[RolloutStore]] = {}
         legacy_paths: List[Path] = []
+        legacy_source_keys: Dict[Path, str] = {}
         legacy_results: List[Dict] = []
         legacy_bindings: Dict[str, Optional[Dict[str, _AggregateBinding]]] = {}
         history_results: Dict[str, List[Dict]] = {}
@@ -6228,6 +6229,7 @@ class RolloutAggregationHelper(BaseModel):
                     shard_digests[shard_path] = (f.tell(), sha256)
                 continue
             legacy_paths.append(shard)
+            legacy_source_keys[shard] = shard_path
             keys = shard_keys[str(shard)] = set()
             digest = hashlib.sha256()
             status_rows = []
@@ -6338,10 +6340,13 @@ class RolloutAggregationHelper(BaseModel):
         # not hide another run's failed or lost rollout. A rollout another shard landed for the same
         # server is still not counted, and of the attempts recorded for one rollout the last stands.
         latest_failures: Dict[tuple, Dict[str, Any]] = {}
+        latest_failure_sources: Dict[tuple, str] = {}
         for path, failures_fpath in zip(legacy_paths, failures_fpaths):
             for key, row in _latest_failure_rows([failures_fpath]).items():
                 if key not in shard_keys[str(path)]:
-                    latest_failures[_identity_key(row, group)] = row
+                    identity = _identity_key(row, group)
+                    latest_failures[identity] = row
+                    latest_failure_sources[identity] = legacy_source_keys[path]
         result_ids = (
             {_identity_key(r, group) for r in legacy_results}
             if latest_failures or config.count_missing_rollouts_as_zero
@@ -6349,11 +6354,13 @@ class RolloutAggregationHelper(BaseModel):
         )
         wanted = set(config.count_failure_classes_as_zero)
         # A row that names no agent and no server cannot reach any server's metrics; it stays a dropped one.
-        counted = [
-            _counted_failure_row(row)
-            for identity, row in latest_failures.items()
-            if identity not in result_ids and _counts_as_zero(row, wanted) and _routing_identity(row) is not None
-        ]
+        counted: List[Dict[str, Any]] = []
+        counted_by_source: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        for identity, row in latest_failures.items():
+            if identity not in result_ids and _counts_as_zero(row, wanted) and _routing_identity(row) is not None:
+                scored_failure = _counted_failure_row(row)
+                counted.append(scored_failure)
+                counted_by_source[latest_failure_sources[identity]].append(scored_failure)
         if config.count_failure_classes_as_zero or counted:
             print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
         materialized_fpaths = [materialized_path_for(path) for path in legacy_paths]
@@ -6367,9 +6374,23 @@ class RolloutAggregationHelper(BaseModel):
                     if _identity_key(zero, group) not in accounted:
                         accounted.add(_identity_key(zero, group))
                         missing.append(zero)
+                        counted_by_source[legacy_source_keys[path]].append(zero)
             counted.extend(missing)
         if counted:
             _fill_task_fields(counted, legacy_results, materialized_fpaths, group)
+        # Keep only actual metric contributors, after task fields have been filled into their scored copies.
+        # Earlier or uncounted failures must not claim ownership of the aggregate they did not enter.
+        for source, contributors in counted_by_source.items():
+            bindings = legacy_bindings[source]
+            if bindings is None:
+                continue
+            try:
+                legacy_bindings[source] = _aggregate_member_environments(
+                    (_batch_status_row(row, {}) for row in contributors), existing_bindings=bindings
+                )
+            except ConfigError:
+                logger.warning("Could not verify aggregation routes for %s.", source, exc_info=True)
+                legacy_bindings[source] = None
 
         legacy_counted_ids = {_identity_key(row, group) for row in counted}
         for history in histories:
