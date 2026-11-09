@@ -1261,15 +1261,20 @@ def test_switch_keeps_a_relay_with_settings_the_switched_server_would_drop(
 def test_switch_replaces_a_relay_whose_resources_server_reads_the_typed_coordinates(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # A server that still accepts the flat keys from an Agent's /run, and reads the typed field the switched server
-    # sends, verifies on either path.
+    # A server that still accepts the flat keys from an Agent's /run, and copies the typed field the switched server
+    # sends into them before validation, verifies on either path. Its response model may echo the flat keys.
     server = tmp_path / "servers" / "mcqa"
     server.mkdir(parents=True)
     server.joinpath("app.py").write_text(
         "class Verify(BaseVerifyRequest):\n"
         "    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n"
-        "    def read(self):\n"
-        "        return self.rollout_coordinates\n"
+        "    @model_validator(mode='before')\n"
+        "    @classmethod\n"
+        "    def _read(cls, data):\n"
+        "        coordinates = data.get('rollout_coordinates') or {}\n"
+        "        return data | {ROLLOUT_INDEX_KEY_NAME: coordinates.get('rollout_index')}\n"
+        "class VerifyResponse(BaseVerifyResponse):\n"
+        "    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n"
     )
     monkeypatch.setattr(migration, "RESOURCES_SERVERS_ROOT", tmp_path / "servers")
     config = tmp_path / "my_run.yaml"
@@ -1288,9 +1293,58 @@ def test_switch_replaces_a_relay_whose_resources_server_reads_the_typed_coordina
             "class Verify(BaseModel):\n    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n",
             "resources server mcqa reads the row's rollout coordinates, which are forwarded only as rollout_coordinates",
         ),
+        # Naming the typed field copies nothing into a required flat alias, so each of these fails every verify.
+        (
+            "class Verify(BaseVerifyRequest):\n"
+            "    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n"
+            "    def read(self):\n"
+            "        return self.rollout_coordinates\n",
+            "reads the row's rollout coordinates, which are forwarded only as rollout_coordinates (Verify)",
+        ),
+        (
+            "# TODO: read rollout_coordinates once this server migrates.\n"
+            "class Verify(BaseVerifyRequest):\n"
+            '    """Reads rollout_coordinates later."""\n'
+            "    group_attempt: int = Field(alias=GROUP_ATTEMPT_KEY_NAME)\n",
+            "reads the row's rollout coordinates, which are forwarded only as rollout_coordinates (Verify)",
+        ),
+        (
+            "class Verify(BaseVerifyRequest):\n"
+            "    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n"
+            "    @model_validator(mode='before')\n"
+            "    def _read(cls, data):\n"
+            "        '''Will read rollout_coordinates.'''\n"
+            "        return data\n",
+            "reads the row's rollout coordinates, which are forwarded only as rollout_coordinates (Verify)",
+        ),
+        # A model that copies the typed field does not cover another model that reads only the flat keys.
+        (
+            "class Typed(BaseVerifyRequest):\n"
+            "    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n"
+            "    @model_validator(mode='before')\n"
+            "    def _read(cls, data):\n"
+            "        return data | {ROLLOUT_INDEX_KEY_NAME: data['rollout_coordinates']['rollout_index']}\n"
+            "class Flat(BaseVerifyRequest):\n"
+            "    rollout_index: int = Field(alias=ROLLOUT_INDEX_KEY_NAME)\n",
+            "reads the row's rollout coordinates, which are forwarded only as rollout_coordinates (Flat)",
+        ),
+        (
+            "RolloutIndex = Annotated[int, Field(alias=ROLLOUT_INDEX_KEY_NAME)]\n"
+            "class Verify(BaseVerifyRequest):\n"
+            "    rollout_index: RolloutIndex\n",
+            "reads the row's rollout coordinates, which are forwarded only as rollout_coordinates (app.py)",
+        ),
         (None, "cannot find resources server mcqa under"),
     ],
-    ids=["rollout-coordinates", "missing-implementation"],
+    ids=[
+        "rollout-coordinates",
+        "typed-getter-only",
+        "typed-in-comment-and-docstring",
+        "typed-in-validator-docstring-only",
+        "one-model-of-two-copies-the-typed-field",
+        "alias-outside-a-model",
+        "missing-implementation",
+    ],
 )
 def test_switch_keeps_a_relay_whose_resources_server_it_cannot_drive(
     tmp_path: Path,

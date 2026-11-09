@@ -331,8 +331,9 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     def _read_rollout_coordinates(cls, data: Any) -> Any:
         """Take the cohort coordinates an Environment Server sends as typed ``rollout_coordinates``.
 
-        An Agent's ``/run`` sends the row's flat ``_ng_*`` keys instead, and stored rows keep those keys for
-        reverification. When both arrive, they must agree.
+        An Agent's ``/run`` sends the row's flat ``_ng_*`` keys instead, as does judge-failed-only reverification
+        from a stored row. When both arrive, they must agree. Only the ``_ng_*`` key is compared: a task-data column
+        with the bare field name loses to the alias, as it does on the relay.
         Then treat an omitted group attempt as zero during client migration.
         """
         if not isinstance(data, dict):
@@ -346,7 +347,7 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
                 value = coordinates.get(name)
                 if value is None:
                     continue
-                flat = data.get(key, data.get(name))
+                flat = data.get(key)
                 if flat is not None and flat != value:
                     raise ValueError(f"{key}={flat!r} disagrees with rollout_coordinates.{name}={value!r}")
                 data[key] = value

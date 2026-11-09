@@ -417,9 +417,10 @@ The simple agent converts upstream HTTP errors to HTTP 500 from `/run`. With
 By default an HTTP error aborts collection. Behind `single_agent_turn_legacy`, the shipped environment
 servers, the same errors return HTTP 200 with a flat failure row instead: `_ng_failure_class:
 environment_server_failed`, `_ng_failure_stage: verification`, and the member's answer as
-`_ng_failure_partial_response`. A 503 is retryable (`_ng_failure_terminal: false`), so the collector retries
-that rollout as it retries any retryable failure; a retry of a failed group gets the group's recorded failure
-until the caller replaces the whole group. A 409 or 422 is terminal.
+`_ng_failure_partial_response`. A 503 is retryable (`_ng_failure_terminal: false`), so a resumed run dispatches
+that rollout again, up to `NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, as it does any retryable failure. Each new attempt
+generates a new policy answer before it reaches `/verify`, where a retry of a failed group gets the group's
+recorded failure until the caller replaces the whole group. A 409 or 422 is terminal.
 
 Judge failures (including judge deadlines) use Gym's standard `JudgeError` failsafe instead. Each member
 receives HTTP 200 with its original generated `response`, `_ng_failure_class: judge_failed`, and

@@ -40,7 +40,7 @@ A relay stays when its agent binds no Resources Server, would get a grant `simpl
 (a required MCP tool access, or more than one direct HTTP tool access), or binds a Resources Server whose
 `seed_session` accepts only the legacy body, not the `ResourcesSeedSessionRequest` an Environment Server sends,
 or whose request models read the row's flat `_ng_*` rollout coordinates, which an Environment Server forwards only
-as the typed `rollout_coordinates` field, and not that field.
+as the typed `rollout_coordinates` field, without copying that field into them before validation.
 It also stays when it sets keys the switched server would drop, or when another config merges it with a
 `legacy_agent` server of the same name, unless a relay it inherits switches: it cannot stay alone then, so the
 script refuses (exit 2) and names the config, which should declare its own server instead.
@@ -123,6 +123,7 @@ SWITCHED_INSTANCE_KEYS = {"environment_servers", "_inherit_from"}
 ROLLOUT_COORDINATES = {
     "ROLLOUT_INDEX_KEY_NAME",
     "GROUP_ID_KEY_NAME",
+    "GROUP_ATTEMPT_KEY_NAME",
     "'_ng_rollout_index'",
     "'_ng_group_id'",
     "'_ng_group_attempt'",
@@ -439,28 +440,73 @@ def _seed_overrides(path: Path) -> list[ast.AsyncFunctionDef]:
     return [node for node in ast.walk(tree) if isinstance(node, ast.AsyncFunctionDef) and node.name == "seed_session"]
 
 
-def _reads_rollout_coordinates(path: Path) -> bool:
-    """True when a model in ``path`` aliases a field to one of the row's rollout coordinates."""
+def _aliases_rollout_coordinates(node: ast.AST) -> bool:
+    """True when a call under ``node`` aliases a field to one of the row's flat rollout coordinates."""
+    return any(
+        keyword.arg == "alias" and ast.unparse(keyword.value) in ROLLOUT_COORDINATES
+        for call in ast.walk(node)
+        if isinstance(call, ast.Call)
+        for keyword in call.keywords
+    )
+
+
+def _copies_typed_rollout_coordinates(model: ast.ClassDef) -> bool:
+    """True when ``model`` has a before-validator that reads the typed `rollout_coordinates` key from the raw body.
+
+    That is where a model can copy the typed coordinates into its flat aliases. A getter, a comment or a docstring
+    that names the field copies nothing, so a required flat alias would still be missing.
+    """
+    for method in model.body:
+        if not isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        is_before_validator = any(
+            isinstance(decorator, ast.Call)
+            and ast.unparse(decorator.func).split(".")[-1] == "model_validator"
+            and any(
+                keyword.arg == "mode" and isinstance(keyword.value, ast.Constant) and keyword.value.value == "before"
+                for keyword in decorator.keywords
+            )
+            for decorator in method.decorator_list
+        )
+        # The docstring names the field without reading it.
+        statements = method.body[1:] if ast.get_docstring(method) is not None else method.body
+        reads_typed_key = any(
+            isinstance(node, ast.Constant) and node.value == TYPED_ROLLOUT_COORDINATES
+            for statement in statements
+            for node in ast.walk(statement)
+        )
+        if is_before_validator and reads_typed_key:
+            return True
+    return False
+
+
+def _flat_rollout_coordinate_readers(path: Path) -> list[str]:
+    """The request models in ``path`` that read the row's flat rollout coordinates and not the typed field.
+
+    A model that echoes them in a response never parses a verify body, so it does not count. An alias outside any
+    class, such as an ``Annotated`` type, cannot be traced to a model, so it counts.
+    """
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)
             tree = ast.parse(path.read_text())
     except (OSError, SyntaxError, ValueError):
-        return False
-    return any(
-        keyword.arg == "alias" and ast.unparse(keyword.value) in ROLLOUT_COORDINATES
+        return []
+    models = [node for node in ast.walk(tree) if isinstance(node, ast.ClassDef)]
+    readers = [
+        model.name
+        for model in models
+        if _aliases_rollout_coordinates(model)
+        and not any(ast.unparse(base).endswith("Response") for base in model.bases)
+        and not _copies_typed_rollout_coordinates(model)
+    ]
+    in_models = {id(node) for model in models for node in ast.walk(model)}
+    if any(
+        isinstance(node, ast.Call) and id(node) not in in_models and _aliases_rollout_coordinates(node)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        for keyword in node.keywords
-    )
-
-
-def _reads_typed_rollout_coordinates(path: Path) -> bool:
-    """True when ``path`` reads the typed `rollout_coordinates` field an Environment Server sends to /verify."""
-    try:
-        return TYPED_ROLLOUT_COORDINATES in path.read_text()
-    except (OSError, ValueError):
-        return False
+    ):
+        readers.append(path.name)
+    return readers
 
 
 def resources_blocker(resources: dict) -> str | None:
@@ -470,8 +516,9 @@ def resources_blocker(resources: dict) -> str | None:
     The base `seed_session` does that. An override must accept the typed body, or read `resources_session_id`
     from the raw request; one that takes only the legacy body would fail every seed.
     It verifies with the task's data, without the row's `_ng_*` rollout coordinates, which it sends as the typed
-    `rollout_coordinates` field instead. A server whose request models read the flat keys and not that field,
-    such as a cohort comparison that has not moved to it, would fail every verify.
+    `rollout_coordinates` field instead. A server whose request models alias the flat keys, such as a cohort
+    comparison, fails every verify unless each such model copies the typed field into them in a
+    `model_validator(mode="before")`.
     The checks read the source, so a server passes them once it migrates; a server whose source is not under
     `resources_servers/` cannot be checked, so it stays.
     """
@@ -493,13 +540,11 @@ def resources_blocker(resources: dict) -> str | None:
         source = ast.unparse(override)
         if TYPED_SEED not in source and "resources_session_id" not in source:
             return f"resources server {implementation} seeds only the legacy body, not {TYPED_SEED}"
-    paths = [entrypoint, *sources]
-    if any(_reads_rollout_coordinates(path) for path in paths) and not any(
-        _reads_typed_rollout_coordinates(path) for path in paths
-    ):
+    readers = [reader for path in [entrypoint, *sources] for reader in _flat_rollout_coordinate_readers(path)]
+    if readers:
         return (
             f"resources server {implementation} reads the row's rollout coordinates, "
-            f"which are forwarded only as {TYPED_ROLLOUT_COORDINATES}"
+            f"which are forwarded only as {TYPED_ROLLOUT_COORDINATES} ({', '.join(readers)})"
         )
     return None
 

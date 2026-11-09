@@ -250,20 +250,25 @@ def test_each_repeat_of_a_flat_row_reaches_verify_with_its_own_coordinates(group
     assert all(body["instance_id"] == "task" for body in verify_bodies)
 
 
-def test_a_flat_row_with_malformed_coordinates_is_refused_before_any_session() -> None:
+@pytest.mark.parametrize(
+    ("coordinate", "field"),
+    [
+        ({"_ng_group_attempt": "1"}, "group_attempt"),
+        ({"_ng_rollout_index": True}, "rollout_index"),
+        ({"_ng_group_id": ""}, "group_id"),
+    ],
+    ids=["numeric-string-attempt", "boolean-index", "empty-group"],
+)
+def test_a_flat_row_with_malformed_coordinates_is_refused_before_any_session(
+    coordinate: dict[str, object], field: str
+) -> None:
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    row = {"instance_id": "task", "responses_create_params": {"input": "task"}, "_ng_task_index": 5}
 
-    with pytest.raises(ValueError, match="group_attempt"):
-        adapter._episode_request_from_row(
-            {
-                "instance_id": "task",
-                "responses_create_params": {"input": "task"},
-                "_ng_task_index": 5,
-                "_ng_rollout_index": 0,
-                "_ng_group_attempt": "1",
-            }
-        )
+    with pytest.raises(ValueError, match=field):
+        TestClient(adapter.setup_webserver()).post("/run", json={"_ng_rollout_index": 0} | row | coordinate)
+    # Refused while the request is built: nothing was seeded and no agent session opened.
     assert client.calls == []
 
 
