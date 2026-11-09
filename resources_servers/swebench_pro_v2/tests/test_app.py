@@ -13,8 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -23,7 +25,7 @@ import pytest
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest
 from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig
 from resources_servers.swebench_pro_v2.app import (
@@ -147,33 +149,66 @@ def test_schema_and_runtime_reject_missing_or_non_string_task_assets(field: str,
         assert model.model_fields[field].is_required()
 
 
-class LocalGitSandbox:
-    """Execute the resource server's real git commands in a temporary task repository."""
+class LocalGitProvider:
+    """Run provider commands with the working directory supplied by AsyncSandbox."""
+
+    name = "local-git"
 
     def __init__(self, root: Path) -> None:
         self.root = root
         self.stopped = False
-        self._handle = SimpleNamespace(sandbox_id="local-task")
 
     def path(self, remote: str) -> Path:
         return self.root / remote.removeprefix("/")
 
-    async def exec(self, command: str, **kwargs: object) -> SandboxExecResult:
-        local = command
-        for remote in ("/testbed", "/app", "/tmp"):
-            local = local.replace(remote, str(self.path(remote)))
-        completed = subprocess.run(local, shell=True, executable="/bin/bash", capture_output=True, text=True)
-        stdout = completed.stdout.replace(str(self.root), "")
+    async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return SandboxHandle(sandbox_id="local-task", provider_name=self.name, raw=None)
+
+    async def exec(
+        self,
+        handle: SandboxHandle,
+        command: str,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+        timeout_s: int | float | None = None,
+        user: str | int | None = None,
+    ) -> SandboxExecResult:
+        local = re.sub(r"/(?:testbed|app|tmp)\b", lambda match: str(self.path(match[0])), command)
+        completed = subprocess.run(
+            local,
+            cwd=self.path(cwd or "/"),
+            shell=True,
+            executable="/bin/bash",
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+        stdout = completed.stdout.replace(f"{self.root}/", "/").replace(str(self.root), "/")
         return SandboxExecResult(stdout=stdout, stderr=completed.stderr, return_code=completed.returncode)
 
-    async def download(self, remote: str, local: Path) -> None:
+    async def upload_file(self, handle: SandboxHandle, source: Path, remote: str) -> None:
+        target = self.path(remote)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
+
+    async def download_file(self, handle: SandboxHandle, remote: str, local: Path) -> None:
         shutil.copyfile(self.path(remote), local)
 
-    async def stop(self) -> None:
+    async def status(self, handle: SandboxHandle) -> SandboxStatus:
+        return SandboxStatus.STOPPED if self.stopped else SandboxStatus.RUNNING
+
+    async def close(self, handle: SandboxHandle) -> None:
         self.stopped = True
 
-    async def serialize(self) -> dict[str, str]:
+    async def aclose(self) -> None:
+        pass
+
+    async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, str]:
         return {"sandbox_id": "local-task"}
+
+    async def connect(self, descriptor: Mapping[str, object]) -> SandboxHandle:
+        return SandboxHandle(sandbox_id=str(descriptor["sandbox_id"]), provider_name=self.name, raw=None)
 
 
 @pytest.mark.asyncio
@@ -182,7 +217,7 @@ class LocalGitSandbox:
 async def test_agent_handoff_snapshot_and_patch_capture_use_the_task_repository(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, repository: str, typed: bool
 ) -> None:
-    for directory in ("app", "testbed", "tmp"):
+    for directory in (repository, "tmp"):
         (tmp_path / directory).mkdir()
     repo = tmp_path / repository
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
@@ -192,9 +227,13 @@ async def test_agent_handoff_snapshot_and_patch_capture_use_the_task_repository(
     subprocess.run(["git", "-C", str(repo), "add", "source.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "commit.gpgsign=false", "commit", "-qm", "initial"], check=True)
     (repo / "image-artifact.log").write_text("already in the image\n")
-    sandbox = LocalGitSandbox(tmp_path)
-    server = make_server()
-    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=sandbox))
+    (repo / "dump.rdb").write_text("stale Redis state\n")
+    provider = LocalGitProvider(tmp_path)
+    server = make_server(environment_repairs=["stale_database_state"])
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.get_global_config_dict", lambda: {"test": {"opensandbox": {}}}
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.AsyncSandbox", lambda config: AsyncSandbox(provider))
     row = instance_request().model_dump()
     if typed:
         seed = ResourcesSeedSessionRequest(
@@ -208,6 +247,18 @@ async def test_agent_handoff_snapshot_and_patch_capture_use_the_task_repository(
 
     response = await server.seed_session(SimpleNamespace(session={SESSION_ID_KEY: "session"}), seed)
     assert (response.sandbox_access.workdir if typed else response.workdir) == f"/{repository}"
+    assert not (repo / "dump.rdb").exists()
+    descriptor = response.sandbox_access.connection.descriptor if typed else response.sandbox_descriptor
+    borrowed = await AsyncSandbox.connect(descriptor, provider=provider, owns_provider=False)
+    try:
+        result = await borrowed.exec("pwd")
+        assert result.return_code == 0
+        assert result.stdout.strip() == "/"
+        result = await borrowed.exec("pwd", cwd=f"/{repository}")
+        assert result.return_code == 0
+        assert result.stdout.strip() == f"/{repository}"
+    finally:
+        await borrowed.disconnect()
     (repo / "source.txt").write_text("after\n")
     (repo / "new-source.txt").write_text("new\n")
 
@@ -216,7 +267,7 @@ async def test_agent_handoff_snapshot_and_patch_capture_use_the_task_repository(
     assert "+after\n" in patch
     assert "+new\n" in patch
     assert "image-artifact.log" not in patch
-    assert sandbox.stopped
+    assert provider.stopped
     assert not server._session_id_to_sandbox
 
 
