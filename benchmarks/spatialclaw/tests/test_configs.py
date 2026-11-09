@@ -72,7 +72,13 @@ def test_both_harnesses_resolve_the_same_resource_contract_for_every_benchmark(m
             resources.pop("host", None)
             resources.pop("port", None)
             # Execution placement may differ; dataset preparation/scoring/media must not.
-            for key in ["sandbox_provider", "sandbox_config", "sandbox_image", "sandbox_network_access", "sandbox_workdir"]:
+            for key in [
+                "sandbox_provider",
+                "sandbox_config",
+                "sandbox_image",
+                "sandbox_network_access",
+                "sandbox_workdir",
+            ]:
                 resources.pop(key, None)
             resolved.append(resources)
             assert list(cfg[environment_name].environment_servers) == ["single_agent_turn"]

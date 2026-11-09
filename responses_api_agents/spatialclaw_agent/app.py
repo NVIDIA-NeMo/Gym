@@ -785,17 +785,16 @@ class SpatialClawAgent(SimpleResponsesAPIAgent):
         failure = (result.model_extra or {}).get("_ng_agent_failure")
         if failure:
             status = failure.get("http_status")
-            kind = (
-                "model_request_error"
-                if isinstance(status, int)
-                else (
-                    "model_transport_error"
-                    if failure.get("mask_sample")
-                    else "agent_limit"
-                    if failure.get("failure_kind") == "agent_timeout"
-                    else "agent_invalid_output"
-                )
-            )
+            if isinstance(status, int):
+                kind = "model_request_error"
+            elif failure.get("failure_kind") == "spatialclaw:model_transport_error":
+                kind = "model_transport_error"
+            elif failure.get("mask_sample"):
+                kind = "unknown"
+            elif failure.get("failure_kind") == "agent_timeout":
+                kind = "agent_limit"
+            else:
+                kind = "agent_invalid_output"
             result.status = "failed"
             result.metadata = dict(result.metadata or {}) | {
                 AGENT_OUTCOME_METADATA_KEY: AgentOutcome(failure_kind=kind, status_code=status).model_dump_json()

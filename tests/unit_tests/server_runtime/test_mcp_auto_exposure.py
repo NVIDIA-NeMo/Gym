@@ -471,8 +471,8 @@ def test_tool_output_images_become_image_content_after_the_text():
     )
 
     # OpenCode replaces the content with structured content when it is present, which would drop the images.
-    assert result.structuredContent is None
-    assert [content.model_dump(exclude_none=True) for content in result.content] == [
+    assert result.model_dump(by_alias=True)["structuredContent"] is None
+    assert [content.model_dump(by_alias=True, exclude_none=True) for content in result.content] == [
         {"type": "text", "text": '{"ok":true}'},
         {"type": "text", "text": "Image 2"},
         {"type": "image", "data": "iVBORw0KGgo=", "mimeType": "image/png"},
@@ -485,12 +485,12 @@ def test_tool_output_images_keep_the_structured_content_that_an_output_schema_re
 
     result = _to_result(payload, output_schema={"type": "object"})
 
-    assert result.structuredContent == {"ok": True}
+    assert result.model_dump(by_alias=True)["structuredContent"] == {"ok": True}
     assert [content.type for content in result.content] == ["text", "image"]
 
 
 def test_a_result_without_images_keeps_its_structured_content():
-    assert _to_result({"ok": True}).structuredContent == {"ok": True}
+    assert _to_result({"ok": True}).model_dump(by_alias=True)["structuredContent"] == {"ok": True}
 
 
 def test_sequential_calls_keep_sessions_isolated_and_ordered():

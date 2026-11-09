@@ -34,9 +34,9 @@ def _ensure_server_venv() -> Path:
     completion_marker = SERVER_DIR / ".venv" / ".spatialclaw-requirements-installed"
     with _checkout_lock(SERVER_DIR / ".venv.setup.lock"):
         dependency_files = [SERVER_DIR / "requirements.txt", SERVER_DIR / "overrides.txt"]
-        fingerprint = hashlib.sha256(b"\0".join(
-            path.read_bytes() if path.exists() else b"" for path in dependency_files
-        )).hexdigest()
+        fingerprint = hashlib.sha256(
+            b"\0".join(path.read_bytes() if path.exists() else b"" for path in dependency_files)
+        ).hexdigest()
         if venv_python.exists() and completion_marker.exists() and completion_marker.read_text() == fingerprint:
             return venv_python
         if not venv_python.exists():

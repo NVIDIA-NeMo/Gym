@@ -82,3 +82,42 @@ def test_kernel_transport_reuses_pool_across_short_lived_event_loops() -> None:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def test_kernel_transport_shutdown_closes_http_pool_on_its_owner_loop(monkeypatch) -> None:
+    import asyncio
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Lock
+    from types import SimpleNamespace
+
+    from responses_api_agents.spatialclaw_agent import kernel_transport
+
+    # Give this test its own transport state without disturbing another test's
+    # process-wide pool. The background loop and thread are the real runtime.
+    monkeypatch.setattr(kernel_transport, "_kernel_loop", None)
+    monkeypatch.setattr(kernel_transport, "_kernel_thread", None)
+    monkeypatch.setattr(kernel_transport, "_kernel_loop_lock", Lock())
+    closed_on = []
+
+    async def close():
+        closed_on.append(asyncio.get_running_loop())
+
+    monkeypatch.setattr(kernel_transport.server_utils, "is_global_aiohttp_client_setup", lambda: True)
+    monkeypatch.setattr(
+        kernel_transport.server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(close=close)
+    )
+    try:
+        with ThreadPoolExecutor(max_workers=4) as callers:
+            loops = list(callers.map(lambda _: kernel_transport._kernel_transport_loop(), range(16)))
+        loop = loops[0]
+        thread = kernel_transport._kernel_thread
+        assert all(candidate is loop for candidate in loops)
+        assert thread is not None and thread.is_alive()
+        kernel_transport._shutdown_kernel_transport()
+        assert closed_on == [loop]
+        assert loop.is_closed() and not thread.is_alive()
+        assert kernel_transport._kernel_loop is None and kernel_transport._kernel_thread is None
+        kernel_transport._shutdown_kernel_transport()
+        assert closed_on == [loop]
+    finally:
+        kernel_transport._shutdown_kernel_transport()

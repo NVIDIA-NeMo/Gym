@@ -163,9 +163,12 @@ async def test_remote_kernel_uses_granted_episode_credentials(monkeypatch):
 async def test_remote_kernel_restarts_and_keeps_resource_ownership(monkeypatch):
     calls = []
     values = {
-        "start": "new-kernel", "shutdown": None, "reset_namespace": None,
+        "start": "new-kernel",
+        "shutdown": None,
+        "reset_namespace": None,
         "get_variables": {"x": {"type": "int", "value": "2"}},
-        "check_sentinel": {"text": "A"}, "clear_sentinel": None,
+        "check_sentinel": {"text": "A"},
+        "clear_sentinel": None,
     }
 
     async def resource(access, path, payload):
@@ -191,11 +194,24 @@ async def test_remote_kernel_restarts_and_keeps_resource_ownership(monkeypatch):
     assert len(calls) == before  # Agent close never destroys Resources' kernel.
 
 
-@pytest.mark.parametrize("accesses", [[], [seed().tool_accesses[0], {
-    "kind": "direct_http", "name": "other", "required": True, "base_url": "http://other",
-}]])
+@pytest.mark.parametrize(
+    "accesses",
+    [
+        [],
+        [
+            seed().tool_accesses[0],
+            {
+                "kind": "direct_http",
+                "name": "other",
+                "required": True,
+                "base_url": "http://other",
+            },
+        ],
+    ],
+)
 async def test_native_seed_requires_one_resource_kernel(accesses):
     from nemo_gym.agents import AgentSeedRejectedError
+
     with pytest.raises(AgentSeedRejectedError, match="exactly one"):
         await agent()._seed_agent_session_state(seed(tool_accesses=accesses))
 
