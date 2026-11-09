@@ -46,6 +46,7 @@ from nemo_gym.models.token_capture.protocols import (
     ParentResolutionMode,
     RolloutRetiredError,
     TokenCaptureFrozenError,
+    TokenCaptureRetiredError,
     TokenSink,
 )
 from nemo_gym.models.token_capture.records import (
@@ -165,7 +166,9 @@ _REFUSE_CALL_MISSING_NOTED = [False]
 
 
 # Reasons Gym's resolvers give; a custom resolver's other reasons are counted as ``other``.
-_RESOLUTION_REASONS = frozenset({"resolver_unavailable", "lookup_error", "not_attempted", "no_match", "ambiguous"})
+_RESOLUTION_REASONS = frozenset(
+    {"resolver_unavailable", "lookup_error", "not_attempted", "no_match", "ambiguous", "tool_call_turn"}
+)
 
 
 def _count_resolution(status_value: str, reason: str | None = None) -> None:
@@ -359,8 +362,11 @@ async def resolve_parent(request_messages: list | None) -> None:
 
 
 async def record_ledger_failure(ledger: CaptureLedger, capture_key: str, model_call_id: str, reason: str) -> None:
-    """Record a failure row that poisons a call, and count it by reason."""
-    capture_metrics.count("poisoned", reason)
+    """Record a failure row that poisons a call, timing the write.
+
+    Gym's ledgers count ``poisoned`` themselves when the row is written, so a replayed row or one dropped for a
+    retired rollout is not counted; every attempt still has a ``ledger.record_failure`` sample.
+    """
     with capture_metrics.timed("ledger.record_failure", component=ledger):
         await ledger.record_failure(capture_key, model_call_id, reason)
 
@@ -736,8 +742,11 @@ async def commit_entry(
         with capture_metrics.timed("sink.put", component=context.token_sink, tokens=entry.cum_len):
             await context.token_sink.put(entry)
         context.committed = True
-    except TokenCaptureFrozenError:
-        capture_metrics.count("late_write_dropped", "frozen")
+    except TokenCaptureFrozenError as error:
+        # A retired rollout is fenced as frozen; its own reason matches the ledger's count of the same case.
+        capture_metrics.count(
+            "late_write_dropped", "retired" if isinstance(error, TokenCaptureRetiredError) else "frozen"
+        )
         # The rollout finished and its capture was frozen while this call was
         # still in flight (for example its harness was killed at a timeout
         # backstop). The freeze already judged completeness from the durable

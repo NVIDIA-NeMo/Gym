@@ -50,6 +50,7 @@ from nemo_gym.models._checkpoint import (
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
 )
+from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.config import token_capture_config
 from nemo_gym.models.token_capture.control_routes import install_rollout_control_routes
 from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
@@ -860,6 +861,7 @@ class _CaptureMiddleware:
                 marked_incomplete = True
                 try:
                     await token_sink.mark_incomplete(rollout_from_path, "")
+                    capture_metrics.count("marked_incomplete", "unclassified_request")
                     logger.warning(
                         f"Marked rollout {rollout_from_path} incomplete because unclassified model request "
                         f"{method} {path} {reason}. Declare the exact request on the model server only if its "

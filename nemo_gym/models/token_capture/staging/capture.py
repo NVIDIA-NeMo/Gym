@@ -246,8 +246,9 @@ class RolloutTokenCapture:
         """
         admission = call.admission
         try:
+            # The private builder: the public one times checkpoint cuts, and this call is timed as staging.
             with capture_metrics.timed("staging.build_record") as timer:
-                record = self.build_prefix_record(
+                record = self._build_prefix_record(
                     call,
                     prompt_token_ids=prompt_token_ids,
                     generated_token_ids=generated_token_ids,
@@ -318,13 +319,7 @@ class RolloutTokenCapture:
             cumulative_hash=record.cumulative_hash,
         )
 
-    def build_prefix_record(self, call: ActiveCall, **kwargs: Any) -> StagedCallRecord:
-        with capture_metrics.timed("cut.build_prefix_record") as timer:
-            record = self._build_prefix_record(call, **kwargs)
-            timer.tokens = record.cum_len
-        return record
-
-    def _build_prefix_record(
+    def build_prefix_record(
         self,
         call: ActiveCall,
         *,
@@ -337,7 +332,28 @@ class RolloutTokenCapture:
 
         A checkpoint backend uses this to persist a cut while the same physical request remains live.
         Unlike :meth:`complete_call`, this method neither claims nor mutates the call's single-completion state.
+        It is timed as the ``cut.build_prefix_record`` capture operation.
         """
+        with capture_metrics.timed("cut.build_prefix_record") as timer:
+            record = self._build_prefix_record(
+                call,
+                prompt_token_ids=prompt_token_ids,
+                generated_token_ids=generated_token_ids,
+                generated_logprobs=generated_logprobs,
+                extras=extras,
+            )
+            timer.tokens = record.cum_len
+        return record
+
+    def _build_prefix_record(
+        self,
+        call: ActiveCall,
+        *,
+        prompt_token_ids: list[int],
+        generated_token_ids: list[int],
+        generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
+    ) -> StagedCallRecord:
         admission = call.admission
         if admission.mode == "token_in" and prompt_token_ids[: admission.prev_len] != call.prefix_token_ids:
             raise ValueError("generation prompt does not begin with the gate-authorized token prefix")
@@ -386,9 +402,22 @@ class RolloutTokenCapture:
             cumulative_hash=cumulative_hash,
         )
 
-    def build_generation_chunk_record(self, call: ActiveCall, **kwargs: Any) -> StagedCallRecord:
+    def build_generation_chunk_record(
+        self,
+        call: ActiveCall,
+        *,
+        generated_token_ids: list[int],
+        generated_logprobs: list[float],
+        extras: dict[str, Any] | None = None,
+    ) -> StagedCallRecord:
+        """Build one independently validated generated-token-only cut chunk.
+
+        It is timed as the ``cut.build_chunk_record`` capture operation.
+        """
         with capture_metrics.timed("cut.build_chunk_record") as timer:
-            record = self._build_generation_chunk_record(call, **kwargs)
+            record = self._build_generation_chunk_record(
+                call, generated_token_ids=generated_token_ids, generated_logprobs=generated_logprobs, extras=extras
+            )
             timer.tokens = record.cum_len
         return record
 
@@ -400,7 +429,6 @@ class RolloutTokenCapture:
         generated_logprobs: list[float],
         extras: dict[str, Any] | None = None,
     ) -> StagedCallRecord:
-        """Build one independently validated generated-token-only cut chunk."""
         if not generated_token_ids:
             raise ValueError("generation chunk must contain at least one token")
         if len(generated_token_ids) != len(generated_logprobs):

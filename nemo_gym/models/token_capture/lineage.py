@@ -87,6 +87,7 @@ def _log_late_write_dropped(rollout_id: str, model_call_id: str, staging_key: st
     # the client had already retried. Nobody will read its row, so this is not an error.
     # The worker staged the call's tokens before the ledger refused the row, so no manifest names them;
     # the warning carries the staging key for the framework that has to remove them.
+    capture_metrics.count("late_write_dropped", "retired")
     if staging_key is None:
         logger.warning("Discarding the ledger row of model call %s: rollout %s is retired.", model_call_id, rollout_id)
         return
@@ -508,7 +509,8 @@ class LineageIndex:
 
     @property
     def total_tokens(self) -> int:
-        return sum(lineage.total_tokens for lineage in self._rollouts.values())
+        # A list copy: the metric export thread reads this while the event loop adds rollouts.
+        return sum(lineage.total_tokens for lineage in list(self._rollouts.values()))
 
     def drop(self, rollout_id: str) -> None:
         """Release a rollout's lineage early.
@@ -624,6 +626,7 @@ class InMemoryLineageStore:
         row = {"model_call_id": model_call_id, "failure_reason": reason}
         if not any(existing == row for existing in rows):
             rows.append(row)
+            capture_metrics.count("poisoned", reason)
 
     async def manifest(self, capture_key: str) -> dict:
         if capture_key in self._retired:
@@ -940,7 +943,7 @@ class FileLineageStore(IncrementalLineageStore):
         return [*super().cache_sizes(), ("ledger_rollouts", len(getattr(self, "_ledger_cache", ())))]
 
     def _read_locked(self, rollout_id: str):
-        return self._store._locked(rollout_id, shared=True)
+        return self._store._locked(rollout_id, shared=True, waiter=self)
 
     def _fetch_new_entries(self, rollout_id: str, cursor: Any) -> tuple[list[tuple[TokenEntry, Any]], Any]:
         path = self._store.path_for(rollout_id)
@@ -1015,7 +1018,7 @@ class FileLineageStore(IncrementalLineageStore):
         # Ledger rows share the token store's per-rollout lock file. The two
         # record families are never both written for one rollout, so one lock
         # discipline covers both and no second lock file is minted.
-        return self._store._locked(rollout_id)
+        return self._store._locked(rollout_id, waiter=self)
 
     def _ledger_cache_pop(self, rollout_id: str) -> None:
         # Forget a rollout's cached rows. Every removal goes through here, so that a cache that also tracks
@@ -1211,6 +1214,10 @@ class FileLineageStore(IncrementalLineageStore):
         await asyncio.to_thread(self._record_failure, capture_key, model_call_id, reason)
 
     def _record_failure(self, capture_key: str, model_call_id: str, reason: str) -> None:
+        with capture_metrics.timed("ledger.record_failure.in_thread", component=self):
+            self._record_failure_row(capture_key, model_call_id, reason)
+
+    def _record_failure_row(self, capture_key: str, model_call_id: str, reason: str) -> None:
         # No fingerprint: ``_resolve_row`` filters on it, so a failure row can
         # never be returned as a parent. Idempotent for the identical reason.
         record = {"model_call_id": model_call_id, "failure_reason": reason}
@@ -1222,6 +1229,7 @@ class FileLineageStore(IncrementalLineageStore):
             if any(existing == record for existing in records):
                 return
             self._append(capture_key, record, records)
+        capture_metrics.count("poisoned", reason)
 
     async def manifest(self, capture_key: str) -> dict:
         return await asyncio.to_thread(self._manifest, capture_key)

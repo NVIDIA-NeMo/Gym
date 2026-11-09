@@ -359,6 +359,12 @@ class TokenSource(Protocol):
 
         Return ``False`` if state changed after the snapshot.
         Transports without delete return ``True`` and own retention.
+
+        A source may also implement the optional extension
+        ``drop_with_reason(rollout_id, *, snapshot_id, version) -> tuple[bool, str]``, which behaves like
+        ``drop`` and also says why it refused: ``stale_snapshot`` when the rollout was frozen again at a
+        different snapshot, ``not_frozen`` when it is no longer frozen (retired or deleted), or ``""``.
+        The ``retire_skipped`` capture metric carries that reason; a source without it is counted with none.
         """
         ...
 

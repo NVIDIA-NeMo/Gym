@@ -16,6 +16,7 @@
 """Token-capture metrics against a real in-memory reader, and the cost of the disabled path."""
 
 import asyncio
+import fcntl
 import gc
 import logging
 import os
@@ -24,17 +25,22 @@ import sys
 import threading
 import timeit
 import weakref
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 
 import pytest
 
 from nemo_gym.models.token_capture import capture_metrics
 from nemo_gym.models.token_capture.consumer import trajectories_from_source
 from nemo_gym.models.token_capture.delivery import finalize_rollout_token_capture, retire_rollout_token_capture
-from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.models.token_capture.lineage import FileLineageStore, InMemoryLineageStore
+from nemo_gym.models.token_capture.external_capture import VLLMWorkerCaptureHandler, publish_deferred_commit
+from nemo_gym.models.token_capture.lineage import (
+    FileLineageStore,
+    InMemoryLineageStore,
+    LineageIndex,
+    stamp_continuation,
+)
 from nemo_gym.models.token_capture.protocols import LineageResolution
-from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.models.token_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.models.token_capture.sink import (
     CaptureContext,
     capture_tokens,
@@ -672,12 +678,23 @@ async def test_token_capture_times_the_freeze_of_a_rollout_that_already_carries_
     assert _durations(collected)[("source.freeze", "TokenCaptureStore", "", "")] == 1
 
 
+@contextmanager
+def _held_lock(path):
+    with open(path, "a+b") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def test_token_capture_times_a_contended_store_lock(collected, tmp_path):
     store = TokenCaptureStore(tmp_path)
     held, release = threading.Event(), threading.Event()
 
     def holder():
-        with store._locked("r1"):
+        # A raw lock, so the holder's own acquisition is not a sample.
+        with _held_lock(store.lock_path_for("r1")):
             held.set()
             release.wait()
 
@@ -741,7 +758,8 @@ async def test_external_staging_reports_operations_outcomes_digests_and_caches(c
     durations = _durations(collected)
     assert durations[("staging.build_record", "", "lt_4k", "")] == 1
     assert durations[("staging.build_record", "", "", "error")] == 1
-    assert durations[("cut.build_prefix_record", "", "lt_4k", "")] == 1
+    # Ordinary staging is not a checkpoint cut, so it records no cut.* operation.
+    assert not any(operation.startswith("cut.") for operation, *_ in durations)
     assert durations[("staging_sink.stage", "_RecordingSink", "lt_4k", "")] == 1
     assert durations[("ledger.record", "FileLineageStore", "lt_4k", "")] == 1
     assert durations[("ledger.record.in_thread", "FileLineageStore", "lt_4k", "")] == 1
@@ -801,7 +819,7 @@ def test_external_staging_times_a_contended_ledger_lock(collected, tmp_path):
     held, release = threading.Event(), threading.Event()
 
     def holder():
-        with ledger._locked("r1"):
+        with _held_lock(ledger._store.lock_path_for("r1")):
             held.set()
             release.wait()
 
@@ -819,7 +837,8 @@ def test_external_staging_times_a_contended_ledger_lock(collected, tmp_path):
     waits = [
         p for p in collected()[recorders.OPERATION_DURATION_INSTRUMENT] if p.attributes[OPERATION] == "file_lock.wait"
     ]
-    assert [(p.attributes[IMPLEMENTATION], p.count) for p in waits] == [("TokenCaptureStore", 1)]
+    # The ledger shares the token store's lock file; the wait is labelled with the ledger that waited.
+    assert [(p.attributes[IMPLEMENTATION], p.count) for p in waits] == [("FileLineageStore", 1)]
     assert 40 <= waits[0].sum < 5_000
 
 
@@ -857,3 +876,303 @@ def test_stores_built_during_an_export_do_not_blank_the_cache_metric(collected):
         thread.join()
         sys.setswitchinterval(previous)
     assert missing == 0
+
+
+# Review follow-ups: each pins a count or label a reviewer found wrong or untested.
+
+
+@pytest.mark.asyncio
+async def test_token_capture_counts_a_parent_matched_on_its_tool_call_turn(collected):
+    """A harness rewrote the tool arguments it echoes back; Gym still finds the parent by the turn's tool calls."""
+    context_items = [{"role": "user", "content": "Inspect the repository."}]
+
+    def turn(arguments: str) -> list[dict]:
+        return [
+            {"role": "assistant", "content": "I will inspect it."},
+            {"type": "function_call", "call_id": "call_0", "name": "Bash", "arguments": arguments},
+        ]
+
+    store = InMemoryLineageStore()
+    entry = TokenEntry(
+        capture_key="r1",
+        model_call_id="c1",
+        prompt_token_ids=[11, 12],
+        generation_token_ids=[101],
+        generation_log_probs=[-0.1],
+        output_items=turn('{"command":"cd /repo && ls"}'),
+        response_id="response-c1",
+    )
+    stamp_lineage(entry, None, parent_resolution=ParentResolutionStatus.ROOT)
+    stamp_continuation(entry, context_items)
+    await store.put(entry)
+
+    request = [
+        *context_items,
+        *turn('{"command":"ls"}'),
+        {"type": "function_call_output", "call_id": "call_0", "output": "files"},
+        {"role": "user", "content": "continue"},
+    ]
+    context = CaptureContext(capture_key="r1", model_call_id="c2", token_sink=None, lineage_store=store)
+    token = set_token_sink(context)
+    try:
+        await resolve_parent(request)
+    finally:
+        reset_token_sink(token)
+
+    assert context.parent_resolution.reason == "tool_call_turn"
+    assert _outcomes(collected) == {(f"parent_{ParentResolutionStatus.RESOLVED.value}", "tool_call_turn"): 1}
+
+
+@pytest.mark.asyncio
+async def test_external_staging_counts_late_ledger_rows_and_only_written_failures(collected, tmp_path):
+    """A call that finishes after its rollout was retired leaves staged tokens that no manifest names."""
+    ledger = FileLineageStore(tmp_path)
+    await record_ledger_failure(ledger, "r1", "c1", WORKER_CAPTURE_FAILED_REASON)
+    # A replay of the same failure row writes nothing new.
+    await record_ledger_failure(ledger, "r1", "c1", WORKER_CAPTURE_FAILED_REASON)
+    await ledger.retire(["r1"])
+    await record_ledger_failure(ledger, "r1", "c2", WORKER_CAPTURE_FAILED_REASON)
+    capture = RolloutTokenCapture(sink=_RecordingSink(), weight_version_fn=lambda: 7)
+    late = await _finalize_on_model_server(ledger, "c3", _staged(capture, "c3", [-0.1, -0.2]))
+    assert late.committed
+
+    outcomes = _outcomes(collected)
+    assert outcomes[("poisoned", WORKER_CAPTURE_FAILED_REASON)] == 1
+    assert outcomes[("late_write_dropped", "retired")] == 2
+    durations = _durations(collected)
+    # Every attempt is timed at the call site and in the ledger's thread, written or not.
+    assert durations[("ledger.record_failure", "FileLineageStore", "", "")] == 3
+    assert durations[("ledger.record_failure.in_thread", "FileLineageStore", "", "")] == 3
+
+
+@pytest.mark.asyncio
+async def test_token_capture_says_why_a_drop_was_refused(collected, tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    request = [{"role": "user", "content": "hi"}]
+    await _token_capture_call(store, None, "r1", "c1", request, _token_response("hello", [1, 2, 3], [4, 5]))
+    built = await trajectories_from_source("r1", store)
+    assert await retire_rollout_token_capture("r1", store, built) is True
+    await store.delete(["r1"])
+    # The rollout was deleted after the drop, so it is no longer frozen.
+    assert await retire_rollout_token_capture("r1", store, built) is False
+
+    class _PlainSource:
+        """A framework source without the optional ``drop_with_reason`` extension."""
+
+        async def drop(self, rollout_id, *, snapshot_id, version):
+            return False
+
+    assert await retire_rollout_token_capture("r1", _PlainSource(), built) is False
+
+    outcomes = _outcomes(collected)
+    assert outcomes[("retire_skipped", "not_frozen")] == 1
+    assert outcomes[("retire_skipped", "")] == 1
+    assert ("retire_skipped", "stale_snapshot") not in outcomes
+
+
+@pytest.mark.asyncio
+async def test_token_capture_does_not_count_a_mark_that_failed(collected):
+    class _BrokenSink:
+        async def put(self, entry):
+            raise OSError("disk full")
+
+        async def mark_incomplete(self, capture_key, model_call_id=""):
+            raise OSError("disk still full")
+
+    context = CaptureContext(capture_key="r1", model_call_id="c1", token_sink=_BrokenSink(), lineage_store=None)
+    token = set_token_sink(context)
+    try:
+        await commit_entry(_entry("r1", "c1"))
+    finally:
+        reset_token_sink(token)
+
+    outcomes = _outcomes(collected)
+    assert ("marked_incomplete", "") not in outcomes
+    # The failure is still counted: the rollout may be incomplete without the mark.
+    assert outcomes[("capture_failed", "write")] == 1
+
+
+def test_token_capture_counts_a_rollout_marked_for_an_unclassified_request(collected, tmp_path):
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+
+    async def app(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"{}", "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    async def send(message):
+        pass
+
+    store = TokenCaptureStore(tmp_path)
+    path = "/ng-rollout/r1/training-token-capture/v1/completions"
+    middleware = _CaptureMiddleware(
+        app, store=None, model_server_name="srv", token_store=store, token_capture_enabled=True
+    )
+    asyncio.run(middleware({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, receive, send))
+
+    assert store.is_incomplete("r1")
+    assert _outcomes(collected)[("marked_incomplete", "unclassified_request")] == 1
+
+
+@pytest.mark.asyncio
+async def test_external_staging_times_a_ledger_row_published_on_delivery(collected, tmp_path):
+    """The ledger row of a call whose commit waits for delivery is timed when it is published."""
+    capture = RolloutTokenCapture(sink=_RecordingSink(), weight_version_fn=lambda: 7)
+    ledger = FileLineageStore(tmp_path)
+    context = CaptureContext(
+        capture_key="r1",
+        model_call_id="c1",
+        token_sink=None,
+        lineage_store=ledger,
+        external_staging=True,
+        publish_on_delivery=True,
+        request_items=[{"role": "user", "content": "go"}],
+        capture_admission=CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"),
+    )
+    payload = {
+        "id": "response-c1",
+        "choices": [{"message": {"role": "assistant", "content": "done"}}],
+        "ng_commit_coords": _staged(capture, "c1", [-0.1, -0.2]).model_dump(mode="json"),
+    }
+    handler = VLLMWorkerCaptureHandler()
+    token = set_token_sink(context)
+    try:
+        handler.prepare_response(payload)
+        await handler.finalize_response(payload)
+    finally:
+        reset_token_sink(token)
+    assert context.deferred_commit is not None
+    assert ("ledger.record", "FileLineageStore", "lt_4k", "") not in _durations(collected)
+
+    await publish_deferred_commit(context)
+    assert _durations(collected)[("ledger.record", "FileLineageStore", "lt_4k", "")] == 1
+
+
+def test_external_staging_times_checkpoint_cut_chunks(collected):
+    capture = RolloutTokenCapture(sink=_RecordingSink(), weight_version_fn=lambda: 7)
+    call = capture.begin_call(CaptureAdmission(capture_key="r1", model_call_id="c1", mode="text"))
+    capture.build_prefix_record(call, prompt_token_ids=[1, 2, 3], generated_token_ids=[4], generated_logprobs=[-0.1])
+    capture.build_generation_chunk_record(call, generated_token_ids=[5, 6], generated_logprobs=[-0.1, -0.2])
+
+    durations = _durations(collected)
+    assert durations[("cut.build_prefix_record", "", "lt_4k", "")] == 1
+    assert durations[("cut.build_chunk_record", "", "lt_4k", "")] == 1
+    assert not any(operation == "staging.build_record" for operation, *_ in durations)
+
+
+@pytest.mark.asyncio
+async def test_external_staging_times_the_checkpoint_ledger_retire(collected, tmp_path):
+    from nemo_gym.core.episode_types import EpisodeId
+    from nemo_gym.models._checkpoint import retire_ledgers
+
+    await retire_ledgers(FileLineageStore(tmp_path), [EpisodeId(rollout_id="r1", attempt=1)])
+    durations = _durations(collected)
+    assert durations[("ledger.retire", "FileLineageStore", "", "")] == 1
+    assert durations[("ledger.retire.in_thread", "FileLineageStore", "", "")] == 1
+
+
+@pytest.mark.parametrize(("tokens", "expected"), [(4_095, "lt_4k"), (4_096, "lt_32k"), (131_072, "ge_128k")])
+def test_size_classes_split_at_their_exact_bounds(collected, tokens, expected):
+    with capture_metrics.timed("sink.put", implementation_name="TokenCaptureStore", tokens=tokens):
+        pass
+    (point,) = collected()[recorders.OPERATION_DURATION_INSTRUMENT]
+    assert point.attributes[SIZE] == expected
+
+
+def test_token_totals_are_split_by_implementation(collected):
+    for name, tokens in (("TokenCaptureStore", 10), ("FrameworkSink", 30)):
+        with capture_metrics.timed("sink.put", implementation_name=name, tokens=tokens):
+            pass
+    totals = {
+        (p.attributes[OPERATION], p.attributes[IMPLEMENTATION]): p.value
+        for p in collected()[recorders.OPERATION_TOKENS_INSTRUMENT]
+    }
+    assert totals == {("sink.put", "TokenCaptureStore"): 10, ("sink.put", "FrameworkSink"): 30}
+
+
+def test_an_operation_under_the_slow_threshold_does_not_warn(collected, caplog):
+    assert capture_metrics.SLOW_OPERATION_MS == 5_000.0
+    with caplog.at_level(logging.WARNING, logger=capture_metrics.__name__):
+        with capture_metrics.timed("sink.put", implementation_name="TokenCaptureStore", tokens=10):
+            pass
+    assert not caplog.records
+
+
+def test_lineage_cache_sizes_survive_concurrent_rollout_growth(collected):
+    """The export thread reads the lineage index while the event loop adds rollouts to it."""
+    index = LineageIndex(max_rollouts=100_000, max_tokens=10**12)
+    stop = threading.Event()
+
+    def add_rollouts():
+        count = 0
+        while not stop.is_set():
+            index.for_rollout(f"r{count}")
+            count += 1
+
+    previous = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    thread = threading.Thread(target=add_rollouts)
+    thread.start()
+    errors = 0
+    try:
+        for _ in range(5_000):
+            try:
+                index.cache_sizes()
+            except RuntimeError:
+                errors += 1
+    finally:
+        stop.set()
+        thread.join()
+        sys.setswitchinterval(previous)
+    assert errors == 0
+
+
+@pytest.mark.asyncio
+async def test_token_capture_counts_a_write_after_retirement_as_retired(collected, tmp_path):
+    store = TokenCaptureStore(tmp_path)
+    await store.retire(["r1"])
+    context = CaptureContext(capture_key="r1", model_call_id="c1", token_sink=store, lineage_store=None)
+    token = set_token_sink(context)
+    try:
+        await commit_entry(_entry("r1", "c1"))
+    finally:
+        reset_token_sink(token)
+
+    outcomes = _outcomes(collected)
+    assert outcomes[("late_write_dropped", "retired")] == 1
+    assert ("late_write_dropped", "frozen") not in outcomes
+
+
+@pytest.mark.asyncio
+async def test_token_capture_labels_a_contended_lineage_read_with_the_lineage_store(collected, tmp_path):
+    """A parent lookup reads the token store's records under a shared lock on the same lock file."""
+    store = TokenCaptureStore(tmp_path)
+    lineage = FileLineageStore(tmp_path)
+    store.append(_entry("r1", "c1"))
+    held, release = threading.Event(), threading.Event()
+
+    def holder():
+        with _held_lock(store.lock_path_for("r1")):
+            held.set()
+            release.wait()
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    held.wait()
+    threading.Timer(0.05, release.set).start()
+    request = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "x"},
+        {"role": "user", "content": "more"},
+    ]
+    await lineage.resolve("r1", request)
+    thread.join()
+
+    waits = [
+        p for p in collected()[recorders.OPERATION_DURATION_INSTRUMENT] if p.attributes[OPERATION] == "file_lock.wait"
+    ]
+    assert [(p.attributes[IMPLEMENTATION], p.count) for p in waits] == [("FileLineageStore", 1)]
+    assert 40 <= waits[0].sum < 5_000

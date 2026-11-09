@@ -18,7 +18,8 @@
 Token capture runs on every captured model call, so recording must stay cheap and the number of
 exported series must stay small at scale (one exporter per server worker, many servers per job).
 Call sites reach these instruments through ``nemo_gym.models.token_capture.capture_metrics``, which is a no-op
-unless a metrics exporter is active.
+unless the process can export metrics: Gym's own telemetry has a metrics exporter, or another library, such as
+a training framework's worker setup, installed an OpenTelemetry SDK meter provider.
 
 Instruments
 -----------
@@ -35,7 +36,8 @@ event loop; Gym's file stores also report their in-thread work (``sink.put.in_th
 recorded only when the wait exceeded a threshold; ``lock_acquired`` outcomes count every acquisition.
 
 ``gym.token_capture.operation.tokens_total`` (counter): tokens of the records each operation
-handled. ``duration sum / tokens`` gives milliseconds per token without a per-record histogram.
+handled, by operation and implementation. ``duration sum / tokens`` per operation and implementation gives
+milliseconds per token without a per-record histogram.
 
 ``gym.token_capture.outcome_total`` (observable counter): capture decisions and failures, with
 ``nemo.gym.token_capture.outcome`` and a ``nemo.gym.token_capture.reason`` from a fixed set.
@@ -179,7 +181,10 @@ class TokenCaptureInstruments:
         attributes = self._duration_attributes.get((operation, implementation, size, error), build)
         self._duration.record(duration_ms, attributes=attributes)
         if tokens:
-            token_attributes = self._token_attributes.get((operation,), lambda: {OPERATION_ATTRIBUTE: operation})
+            token_attributes = self._token_attributes.get(
+                (operation, implementation),
+                lambda: {OPERATION_ATTRIBUTE: operation, IMPLEMENTATION_ATTRIBUTE: implementation},
+            )
             self._tokens.add(tokens, attributes=token_attributes)
 
 
