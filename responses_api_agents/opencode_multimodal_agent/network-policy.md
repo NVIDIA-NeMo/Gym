@@ -4,9 +4,9 @@ The adapter uses Gym's `SandboxNetworkAccess` values and defaults to `inherit`.
 
 | Value | Allowed network access | Native WebFetch / WebSearch |
 | --- | --- | --- |
-| `inherit` | Public destinations plus model/MCP grants, excluding control services | Independently configurable |
-| `model_only` | Configured model API origin only | Disabled |
-| `model_and_tools` | Model API and accepted MCP tool-grant origins | Disabled |
+| `inherit` | Provider networking; Enroot/Bubblewrap additionally filter public destinations and model/MCP grants | Independently configurable |
+| `model_only` | Configured model host on owned OpenSandbox; exact origin on Enroot/Bubblewrap | Disabled |
+| `model_and_tools` | Model and accepted MCP hosts on owned OpenSandbox; exact origins on Enroot/Bubblewrap | Disabled |
 
 `model_and_tools` uses the effective MCP grants from the agent configuration and
 session seed, as the shared OpenCode agent does. It has no built-in destination
@@ -17,9 +17,11 @@ non-MCP grants do not add network destinations.
 Native WebFetch and WebSearch are not MCP grants. To use them, select `inherit`
 and enable each tool explicitly. Tool permissions control advertisement and
 execution; they do not prevent Bash or Python from using permitted networking.
-`inherit` neither opens nor removes an outer sandbox restriction. In this adapter,
-it additionally excludes local/private destinations and Gym control services;
-it no longer launches directly on the provider's inherited host network.
+`inherit` neither opens nor removes an outer sandbox restriction. Owned OpenSandbox
+sessions use the provider's container network, like the shared OpenCode agent.
+Their deployment must make Gym control services unreachable from task containers.
+Enroot/Bubblewrap additionally exclude local/private destinations and Gym control
+services through the wrapper described below.
 
 ## Benchmark configuration
 
@@ -49,6 +51,12 @@ HTTP 422. Metadata is not added to the model prompt. Both execution paths use a
 request-local configuration, so concurrent samples cannot change each other's
 policy. The local training path does not provision session MCP grants; there,
 `model_and_tools` has model-only connectivity.
+
+Owned OpenSandbox sessions are an exception: the provider fixes egress at creation,
+before activation metadata is available. A different per-request network mode is
+rejected with HTTP 422. Use separate agent configurations for different modes.
+Per-request tool restrictions remain supported. Mixed-mode training below uses
+the compatibility path and retains its per-sample network enforcement.
 
 For a mixed offline/online dataset, use this run configuration:
 
@@ -82,7 +90,18 @@ OpenSandbox uses the shared `restrict_sandbox_network` helper with model and MCP
 grant URLs. Do not combine a restricted mode with an explicit provider
 `network_policy`; that conflicting configuration is rejected.
 
-All sandbox launches use the namespace/proxy wrapper, including `inherit`.
+Owned OpenSandbox sessions use provider process isolation and creation-time egress
+rules, without a nested namespace/proxy wrapper or a private Python helper.
+The provider allows entire model/MCP hosts, including all their ports and paths.
+`protected_control_urls` is a wrapper setting and does not filter this path.
+Keep control services off allowed hosts' reachable ports and out of public ingress;
+for example, bind controls to the Gym host's loopback while exposing only the model
+gateway. `inherit` requires the same independently enforced control separation.
+Do not put Gym services or their credentials inside task containers. Shared
+supervision bounds process cleanup, and closing the owned session destroys the
+container, including detached processes; supervision alone is not a security boundary.
+
+Enroot/local and borrowed sandbox launches use the namespace/proxy wrapper, including `inherit`.
 OpenCode and its child tools run with loopback only, private PID and mount
 namespaces, and fresh procfs. A Unix-socket bridge reaches the outer proxy;
 direct TCP/UDP cannot bypass it. The compatibility Bubblewrap path binds the
@@ -111,7 +130,8 @@ tool services must not expose credentials, privileged control routes or an
 unrestricted forwarding service. A shared reverse-proxy address may be rejected
 because protecting control services takes precedence over granting web access.
 
-All Linux sessions need Bash, tar/gzip and util-linux `unshare`. The private,
+All Linux sessions need Bash and tar/gzip. Wrapper-based sessions additionally
+need util-linux `unshare`. Their private,
 checksum-verified stdlib Python runtime is prepared on the host and uploaded at
 seed. Seed runs the actual wrapper, checking user, network, mount and PID
 namespaces, private procfs, loopback, proxy listeners and control-origin conflicts.
@@ -136,14 +156,19 @@ their sandbox policies are unchanged.
 ## Provider execution and deployment qualification
 
 The recommended `<benchmark>/opencode.yaml` recipes use Gym provider-managed
-sandboxes and the shared OpenCode session lifecycle. The multimodal wrapper
-adds the process/network boundary described above to both provider execution
-and compatibility Bubblewrap execution. This applies to every `inherit`
-task and preserves the native web-tool interface.
+sandboxes and the shared OpenCode session lifecycle. Owned OpenSandbox uses the
+same provider boundary as the shared OpenCode agent. Enroot/local and compatibility
+Bubblewrap add the process/network wrapper described above, including for `inherit`.
+Both preserve the native web-tool interface.
 Other OpenCode agents, including BrowseComp's pairing, are unchanged.
 
 Keep head, agent, judge and verifier control services off public ingress where
-possible. Configure every additional ingress alias in `protected_control_urls`;
+possible. The OpenSandbox overlay binds the head, agent, verifier
+and environment to loopback; optional judge presets bind the judge to loopback too.
+These presets assume the Gym control services run on the same host. A distributed
+deployment must provide an equivalent private control network. The policy gateway
+must be reachable from task containers.
+For wrapper-based execution, configure every additional ingress alias in `protected_control_urls`;
 a wrapper cannot discover an unlisted public reverse proxy that forwards to a
 control service. Do not expose the head's unauthenticated
 `/global_config_dict_yaml` endpoint through a granted model/tool origin.
@@ -151,6 +176,18 @@ control service. Do not expose the head's unauthenticated
 For each deployment, use synthetic sentinels to confirm host process entries and
 control services are inaccessible by hostname, IP and redirects, while model
 and public-web access work. Qualify the actual container and namespace policy:
-Pyxis/Enroot configurations can differ. OpenSandbox still needs a live deployment
-qualification; neither configuration resolution nor local Linux tests establish
-its isolation or offline setup behavior.
+Pyxis/Enroot configurations can differ. Neither configuration resolution nor local
+Linux tests establish an OpenSandbox deployment's isolation or offline setup.
+
+Live qualification on 2026-11-09 used owned OpenSandbox containers restored from
+a temporary pinned runtime snapshot (OpenCode 1.17.11, plugin dependencies and
+ripgrep). All three modes completed image tasks with successful Bash calls through
+the actual Gym model gateway. The actual head (including its config route), judge,
+agent, verifier and environment listeners were live on loopback and unreachable
+through the host's task-facing address. Task PID namespaces differed from the Gym
+process namespace, its process entry was absent, and service credential variables
+were not present in task environments. `model_only` and `model_and_tools` blocked
+public HTTPS/package access; `inherit` permitted it. All sessions closed and their
+containers were confirmed deleted. The full-session `model_and_tools` case had no
+MCP grants; separate provider tests checked an allowed tool host and a denied host.
+These results apply to the tested bindings and runtime, not arbitrary deployments.

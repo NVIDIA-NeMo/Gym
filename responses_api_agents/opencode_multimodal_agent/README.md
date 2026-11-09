@@ -104,17 +104,24 @@ be supplied with `sandbox_executable_path` and `sandbox_executable_sha256`.
 For OpenSandbox with `model_only` or `model_and_tools`, use
 `benchmarks/opencode_multimodal_benchmarks/opencode_sessions_opensandbox.yaml`.
 The provider restricts egress at creation, before seed: a fresh sandbox cannot
-download OpenCode or npm dependencies. The task image must contain OpenCode,
+download OpenCode or npm dependencies. The task image or runtime snapshot must contain OpenCode,
 a plugin dependency archive, and ripgrep; supply each `sandbox_*_path` and
 `sandbox_*_sha256` required by that overlay. Missing pins reject seed before
 allocating a sandbox. See the shared agent's
 [offline bundle instructions](../opencode_agent/README.md#pinned-offline-runtime-bundle)
 for archive layout and checksum generation. The paths are inside the task image,
-not paths on the Gym host. Bash, tar/gzip, checksum tools, and util-linux `unshare`
+not paths on the Gym host. Bash, tar/gzip and checksum tools
 must also be available in the image.
 
-The private Python helper is prepared on the Gym host and uploaded. Every
-seed runs the actual network wrapper to verify namespace creation, private
+Owned OpenSandbox uses provider container isolation and creation-time egress,
+without nested namespaces or a private Python helper. Keep control services
+unreachable from task containers: allowed model/MCP hosts include all ports and
+paths, and `inherit` leaves provider networking unchanged. A per-request network
+mode different from the creation-time mode is rejected. See the
+[deployment requirements](network-policy.md#enforcement-and-runtime-requirements).
+
+For Enroot/local and borrowed sessions, the private Python helper is prepared on
+the Gym host and uploaded. Seed runs the actual network wrapper to verify namespace creation, private
 procfs, proxy setup, and model/tool/control origin separation before activation. Setup failure
 closes the owned sandbox and remains an infrastructure failure. This check does
 not prove that an OpenSandbox deployment's outer egress policy is configured
@@ -130,8 +137,9 @@ The session path implements the **Observability** capability level: evaluation,
 model-call and tool observations. MCP task grants reuse the parent adapter.
 `model_and_tools` permits their endpoints in owned sessions; `model_only` rejects
 required MCP grants. Grants must not share an origin with a protected Gym control
-service; use a separate tool-only MCP endpoint. With `inherit`, public destinations
-are also permitted through the wrapper, subject to the provider policy. Set
+service; use a separate tool-only MCP endpoint. OpenSandbox grants whole hosts;
+its deployment must separate control services accordingly. With `inherit`, public
+destinations are permitted subject to the provider and applicable wrapper policy. Set
 `tool_rewards: null` and disable token-ID capture for these sessions; unsupported
 training requests are rejected. Training capture and auxiliary rewards remain
 available on the compatibility path. Qualification requires the conformance
@@ -188,12 +196,13 @@ can give that wildcard precedence over specific denies.
 Set `network_access` to `model_only`, `model_and_tools`, or `inherit` to control harness and tool
 network access. The adapter default is `inherit`; the shipped offline training
 recipe and non-search benchmark profiles explicitly select `model_only`.
-`inherit` allows public destinations through a proxy while excluding private/local
-addresses and registered Gym control services. Native WebFetch/WebSearch remain
+On Enroot/Bubblewrap, `inherit` allows public destinations through a proxy while
+excluding private/local addresses and registered Gym control services. Owned
+OpenSandbox uses provider networking and requires deployment control separation. Native WebFetch/WebSearch remain
 available; the provider's outer restrictions still apply.
 Restricted modes keep the configured model API reachable; `model_and_tools` also permits
 the accepted MCP tool-grant endpoints in owned sessions. Without such grants it allows only the model. These controls apply to owned Linux sandbox sessions and
-the local Bubblewrap training path. They require nested Linux namespaces.
+the local Bubblewrap training path. Only wrapper-based execution requires nested Linux namespaces.
 
 Use `allowed_tools` to select advertised tools. Structured request metadata may
 restrict both settings for individual samples, within the run's configured
@@ -329,7 +338,7 @@ the [conformance instructions](../../scripts/harness_conformance/README.md).
 
 ## Private runtime installation
 
-All sessions seed the network wrapper's stdlib-only Python runtime using
+Enroot/local and borrowed sessions seed the network wrapper's stdlib-only Python runtime using
 Gym's `SandboxPythonRuntime`. Installation probes the sandbox platform, verifies
 the pinned interpreter archive, and reuses an installed runtime only after its
 health check passes. The agent host needs access to the pinned Python release or
@@ -339,8 +348,9 @@ The interpreter is launched by absolute path with `-I`; task Python libraries an
 environment variables remain available to the tools. Session close leaves the
 shared runtime intact. Failed installation closes the session, retaining the
 handle if cleanup must be retried.
-`inherit` has the same namespace and private-procfs requirements as the restricted
-modes. Namespace failure stops setup; there is no host-network fallback.
+For these sessions, `inherit` has the same namespace and private-procfs requirements
+as restricted modes. Namespace failure stops setup; there is no host-network fallback.
+Owned OpenSandbox sessions instead use provider isolation and do not install this helper.
 
 
 ### Shared-code compatibility
@@ -378,15 +388,25 @@ and rejects another model entrypoint at agent startup. Existing turn counting an
 notice/grace thresholds are retained. The hosted gateway preset preserves explicit
 server sampling/template settings while omitting harness sampling defaults.
 
-Both provider-managed execution and the compatibility Bubblewrap path require
-private PID/procfs and network namespaces. Synthetic process/control-service
+Enroot/local execution and the compatibility Bubblewrap path require
+private PID/procfs and network namespaces. Owned OpenSandbox uses provider isolation
+and independently enforced deployment control separation. Synthetic process/control-service
 denial and public-web access have been checked on Bubblewrap and Enroot/Pyxis.
 These checks do not qualify a different deployment or an unlisted public control
 endpoint; see [deployment qualification](network-policy.md#provider-execution-and-deployment-qualification).
 
-Live OpenSandbox deployment validation remains outstanding. Qwen reasoning-history
-retention under the deployed chat template is also unverified; investigation is
-paused. The adapter preserves preceding reasoning, but the trailing directive
-normalized to a user message could affect template rendering. A render comparison
-using the actual deployed template and settings is required before claiming
-reasoning-history compatibility.
+Live OpenSandbox qualification passed with a pinned OpenCode 1.17.11 runtime
+snapshot in all three network modes: seed, model calls through the Gym gateway,
+Bash execution, image input and answer extraction, session close and sandbox deletion. Actual
+head, judge, verifier, agent and environment services bound to the Gym host's
+loopback were unreachable from task containers; public web access remained
+available under `inherit`. This qualifies that deployment arrangement, not other
+bindings, ingress aliases or images. See the deployment checks in
+[network-policy.md](network-policy.md#provider-execution-and-deployment-qualification).
+
+Qwen reasoning retention depends on the deployed template and settings. The
+adapter preserves preceding reasoning, but its trailing directive normalized to a
+user message can affect templates that truncate reasoning before the last user
+message. Qualify with history preservation enabled: the tested local templates
+use `truncate_history_thinking: false`; the tested hosted deployment supports
+`preserve_thinking: true`. Recheck when the deployment/template changes.

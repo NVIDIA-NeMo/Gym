@@ -53,6 +53,13 @@ class MultimodalSessionMixin:
     def _sandbox_network_access(self) -> SandboxNetworkAccess:
         return self.config.network_access
 
+    @staticmethod
+    def _uses_provider_isolation(state: OpenCodeSandboxSession) -> bool:
+        # Owned OpenSandbox sessions use the provider's container boundary and
+        # creation-time egress policy, as in the shared OpenCode agent. Closing
+        # the session destroys the container, including detached task processes.
+        return state.session.owns_sandbox and state.session.sandbox.provider_name == "opensandbox"
+
     def _restrict_owned_sandbox_network(
         self, spec: SandboxSpec, provider: SandboxProvider, body: AgentSeedSessionRequest
     ) -> SandboxSpec:
@@ -105,8 +112,10 @@ class MultimodalSessionMixin:
     async def _check_session_network(self, state: MultimodalSandboxSession) -> None:
         if state.network_checked:
             return
-        # All modes need private processes/procfs and isolated task networking.
-        # Inherit admits public destinations but never bypasses this boundary.
+        if self._uses_provider_isolation(state):
+            state.network_checked = True
+            return
+        # Local/Enroot and borrowed sessions retain the namespace/proxy boundary.
         if not await _NETWORK_RUNTIME.is_installed(state.session.sandbox):
             await _NETWORK_RUNTIME.install(
                 state.session.sandbox, timeout_s=self.config.sandbox_install_timeout_seconds
@@ -222,6 +231,12 @@ class MultimodalSessionMixin:
         assert isinstance(state, MultimodalSandboxSession)
         network_access = self._network_access_for_request(body)
         allowed_tools = self._tools_for_request(body)
+        if self._uses_provider_isolation(state) and network_access != self.config.network_access:
+            raise HTTPException(
+                422,
+                "OpenSandbox network_access is fixed at sandbox creation; "
+                "use an agent configured with the requested network mode",
+            )
         if network_access != "inherit" and state.request.sandbox_access is not None:
             raise HTTPException(422, "Restricted networking requires an owned sandbox")
         grants = [
@@ -297,22 +312,23 @@ class MultimodalSessionMixin:
             payload["command"].extend(
                 ["--model", runner._effective_model(), "--agent", "build", "--file", *image_paths, "--"]
             )
-            network_runner = f"{state.session.session_dir}/network_runner.py"
-            payload["command"] = [
-                _NETWORK_RUNTIME.python,
-                "-I",
-                network_runner,
-                "--mode",
-                network_access,
-                *[arg for url in self._protected_control_urls() for arg in ("--protect-url", url)],
-                *(
-                    [arg for access in grants for arg in ("--tool-url", str(access.connection.url))]
-                    if network_access != "model_only"
-                    else []
-                ),
-                "--",
-                *payload["command"],
-            ]
+            if not self._uses_provider_isolation(state):
+                network_runner = f"{state.session.session_dir}/network_runner.py"
+                payload["command"] = [
+                    _NETWORK_RUNTIME.python,
+                    "-I",
+                    network_runner,
+                    "--mode",
+                    network_access,
+                    *[arg for url in self._protected_control_urls() for arg in ("--protect-url", url)],
+                    *(
+                        [arg for access in grants for arg in ("--tool-url", str(access.connection.url))]
+                        if network_access != "model_only"
+                        else []
+                    ),
+                    "--",
+                    *payload["command"],
+                ]
             # Keep adapter-owned files out of a borrowed task repository.
             payload["prompt"] = "Image files: " + ", ".join(image_paths) + "\n\n" + payload["prompt"]
 

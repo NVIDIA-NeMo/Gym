@@ -66,6 +66,9 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     if sessions == "opensandbox-provider":
         initial.config_paths.append("nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml")
     if sessions == "opensandbox":
+        monkeypatch.setenv("GYM_JUDGE_BASE_URL", "https://judge.invalid/v1")
+        monkeypatch.setenv("GYM_JUDGE_API_KEY", "test-placeholder")
+        initial.config_paths.append(f"{prefix}/judge.yaml")
         settings = initial.visual_agent.responses_api_agents.opencode_multimodal_agent
         for asset in ("executable", "plugin_dependencies", "ripgrep"):
             settings[f"sandbox_{asset}_path"] = f"/opt/runtime/{asset}"
@@ -109,6 +112,12 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
             assert agent.sandbox_plugin_dependencies_path is None
         if sessions == "opensandbox":
             assert agent.host == cfg.head_server.host == "127.0.0.1"
+            assert "visual_opencode" not in cfg
+            assert cfg.visual_judge.responses_api_models.openai_model.host == "127.0.0.1"
+            assert (
+                cfg.opencode_multimodal_benchmarks.resources_servers.opencode_multimodal_benchmarks.host == "127.0.0.1"
+            )
+            assert cfg.visual_environment.environment_servers.single_agent_turn.host == "127.0.0.1"
             assert cfg.use_absolute_ip
             assert agent.sandbox_plugin_dependencies_path == "/opt/runtime/plugin_dependencies"
         assert cfg.environment_routing_mode == "taskset"

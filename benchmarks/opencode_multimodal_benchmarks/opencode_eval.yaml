@@ -9,6 +9,7 @@ opencode_multimodal_benchmarks:
 visual_judge:
   responses_api_models:
     openai_model:
+      host: 127.0.0.1
       entrypoint: app.py
       openai_base_url: ${oc.env:GYM_JUDGE_BASE_URL}
       openai_api_key: ${oc.env:GYM_JUDGE_API_KEY}

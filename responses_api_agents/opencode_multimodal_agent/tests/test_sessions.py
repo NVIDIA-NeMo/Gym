@@ -57,6 +57,7 @@ def visual_setup(opencode_setup, tmp_path, monkeypatch):
     # contract is exercised explicitly below.
     base_app.create_provider.return_value.name = "local"
     original, sandbox = opencode_setup
+    sandbox.provider_name = "local"
     config = OpenCodeMultimodalAgentConfig(
         **(
             original.config.model_dump()
@@ -149,6 +150,59 @@ def test_offline_bundle_preserves_opensandbox_model_only_policy(visual_setup):
         "defaultAction": "deny",
         "egress": [{"action": "allow", "target": "model.example"}],
     }
+
+
+@pytest.mark.parametrize("mode", ["model_only", "model_and_tools", "inherit"])
+@pytest.mark.parametrize("narrow_request", [False, True])
+def test_owned_opensandbox_uses_creation_policy_without_nested_wrapper(
+    visual_setup, monkeypatch, mode, narrow_request
+):
+    from unittest.mock import AsyncMock, patch
+
+    from responses_api_agents.opencode_agent import app as base_app
+    from responses_api_agents.opencode_multimodal_agent.sessions import _NETWORK_RUNTIME
+
+    if narrow_request and mode == "model_only":
+        pytest.skip("No narrower network mode")
+    agent, sandbox = visual_setup
+    base_app.create_provider.return_value.name = "opensandbox"
+    sandbox.provider_name = "opensandbox"
+    sandbox.start = AsyncMock()
+    agent.config.network_access = mode
+    agent.config.sandbox_config = {"image": "offline-image", "workdir": "/app"}
+    for asset in ("executable", "plugin_dependencies", "ripgrep"):
+        setattr(agent.config, f"sandbox_{asset}_path", f"/opt/runtime/{asset}")
+        setattr(agent.config, f"sandbox_{asset}_sha256", "a" * 64)
+    install = AsyncMock(side_effect=AssertionError("OpenSandbox needs no nested namespace runtime"))
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "install", install)
+    monkeypatch.setattr(type(_NETWORK_RUNTIME), "is_installed", AsyncMock(return_value=False))
+    body = seed()
+    body.sandbox_access = None
+    body.tool_accesses = []
+    with (
+        patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
+        patch.object(type(agent), "_stage_archive", AsyncMock()),
+        TestClient(agent.setup_webserver()) as client,
+    ):
+        created = client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        request = request_body()
+        if narrow_request:
+            request["metadata"] = {"network_access": "model_only"}
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request)
+        if narrow_request:
+            assert response.status_code == 422, response.text
+            assert "fixed at sandbox creation" in response.text
+            sandbox.launch.assert_not_awaited()
+        else:
+            assert response.status_code == 200, response.text
+            assert not any("network_runner.py" in arg for arg in sandbox.params()["command"])
+        assert not any(path.endswith("network_runner.py") for path in sandbox.files)
+        install.assert_not_awaited()
+        assert not any("--model-url" in call.args[0] for call in sandbox.exec.call_args_list)
+        closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
+        sandbox.stop.assert_awaited()
 
 
 @pytest.mark.parametrize("error_type", [None, "timeout"])

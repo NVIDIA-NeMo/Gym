@@ -8,6 +8,16 @@ use_absolute_ip: true
 # Keep control endpoints off the address remote sandboxes use for model requests.
 head_server:
   host: 127.0.0.1
+opencode_multimodal_benchmarks:
+  resources_servers:
+    opencode_multimodal_benchmarks:
+      host: 127.0.0.1
+visual_environment:
+  environment_servers:
+    single_agent_turn:
+      host: 127.0.0.1
+# judge.yaml binds its optional judge route to loopback too. Only the model
+# gateway should listen on the task-facing IP.
 visual_agent:
   responses_api_agents:
     opencode_multimodal_agent:
