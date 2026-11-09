@@ -53,6 +53,7 @@ from nemo_gym.agents import (
     confirmed_policy_response_timeout,
     failure_outcome_policy,
 )
+from nemo_gym.agents.agent_outcome import POLICY_TIMEOUT_OPERATION, policy_timeout_failure
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request
 from nemo_gym.config import (
@@ -249,10 +250,6 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
         policy["by_failure_kind"] = rules | {MODEL_POLICY_RESPONSE_TIMEOUT: action}
         value["outcome_policy"] = policy
         return value
-
-
-# The classified policy-request timeout whose outcome the legacy /run boundary selects.
-POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
 def _selected_model_body_failure(error: ClientResponseError) -> bool:
@@ -587,18 +584,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 except ClientResponseError as error:
                     if _selected_model_body_failure(error) or _selected_failure_unknown(error):
                         raise  # The reply's report travels on unchanged; it is not another session chance.
-                    failure = None
-                    if _policy_request_timed_out(error):
-                        report = FailureHeader.decode(error.headers)
-                        final = report.events[report.failure_id]
-                        failure = NgFailureEvent(
-                            boundary=FailureBoundary.AGENT,
-                            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-                            failure_reason="Policy model request timed out on every attempt",
-                            operation=POLICY_TIMEOUT_OPERATION,
-                            operation_id=final.operation_id,
-                        )
-                        failure.__cause__ = error
+                    failure = policy_timeout_failure(error)
                     if not in_session:
                         if failure is not None:
                             raise failure from error
