@@ -702,6 +702,11 @@ exclude = [
     "responses_api_agents.swe_agents.swe_swebench_multilingual_setup.*",
     "responses_api_agents.swe_agents.swe_swebench_setup",
     "responses_api_agents.swe_agents.swe_swebench_setup.*",
+    # The opencode harness writes one results/<session>/ directory (export.json, opencode.db) per rollout into its
+    # own package directory unless artifacts_dir is set. Without these two entries each one is discovered as a
+    # namespace package, so a long run makes every editable install and uv sync walk tens of thousands of them.
+    "responses_api_agents.opencode_sandboxed_agent.results",
+    "responses_api_agents.opencode_sandboxed_agent.results.*",
     # `gym dataset pull` lands Harbor datasets under environments/harbor/<entry>/ (gitignored); the pulled tasks
     # ship Python (tests/*.py, task_data.py) that must never be discovered as packages of this distribution. The
     # committed entry files (README, dataset.toml, YAML) still ship as environments.harbor's package data.
