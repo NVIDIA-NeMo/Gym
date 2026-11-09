@@ -148,8 +148,10 @@ async def test_sandbox_transfers_emit_spans_with_size_but_no_paths(recorded_span
     await sandbox.download("/workspace/out.txt", tmp_path / "out.txt")
 
     spans = {span.name: span for span in recorded_spans()}
+    request_id = spans["gym.sandbox.start"].attributes["nemo.gym.sandbox.request.id"]
     for name, size in (("gym.sandbox.upload", 64), ("gym.sandbox.download", len(b"downloaded"))):
         assert spans[name].attributes["nemo.gym.sandbox.provider"] == "stub"
+        assert spans[name].attributes["nemo.gym.sandbox.request.id"] == request_id
         assert spans[name].attributes["nemo.gym.sandbox.id"] == "handle-1"
         assert spans[name].attributes["nemo.gym.sandbox.transfer.size_bytes"] == size
         assert not any("task-secret-name" in str(value) for value in spans[name].attributes.values())

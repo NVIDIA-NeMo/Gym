@@ -35,15 +35,16 @@ default stops at ten seconds and a sandbox start routinely takes a minute.
 ``gym.sandbox.create_retry_total`` (counter): one per create attempt a provider retried.
 Retrying is provider-internal, so each provider that retries records it from its own loop.
 
-All four carry ``nemo.gym.sandbox.provider``.
-
 ``gym.sandbox.transfer_duration_ms`` (histogram): wall-clock of one file transfer into or out of a sandbox,
 including the seed files ``AsyncSandbox.start()`` writes after the provider returns the sandbox.
-It carries ``nemo.gym.sandbox.provider``, ``nemo.gym.sandbox.transfer.direction`` (``upload`` or ``download``)
+It carries ``nemo.gym.sandbox.transfer.direction`` (``upload`` or ``download``)
 and ``nemo.gym.sandbox.transfer.outcome`` (``ok``, ``error`` or ``cancelled``).
+Sidecar downloads are not counted.
 
-``gym.sandbox.transfer_bytes_total`` (counter, bytes): the size of each file a transfer moved successfully,
-by provider and direction.
+``gym.sandbox.transfer_bytes_total`` (counter, bytes): the size of each regular file a transfer moved successfully,
+by direction.
+
+All six carry ``nemo.gym.sandbox.provider``.
 
 Server startup
 --------------
@@ -158,7 +159,7 @@ by ``nemo.gym.checkpoint.event``:
 import logging
 import threading
 from collections.abc import Callable, Iterable, Sequence
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 
 logger = logging.getLogger(__name__)
@@ -172,6 +173,8 @@ SANDBOX_TRANSFER_DURATION_INSTRUMENT = "gym.sandbox.transfer_duration_ms"
 SANDBOX_TRANSFER_BYTES_INSTRUMENT = "gym.sandbox.transfer_bytes_total"
 SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE = "nemo.gym.sandbox.transfer.direction"
 SANDBOX_TRANSFER_OUTCOME_ATTRIBUTE = "nemo.gym.sandbox.transfer.outcome"
+SandboxTransferDirection = Literal["upload", "download"]
+SandboxTransferOutcome = Literal["ok", "error", "cancelled"]
 SERVER_STARTUP_STAGE_INSTRUMENT = "gym.server.startup_stage_duration_ms"
 SERVER_NAME_ATTRIBUTE = "nemo.gym.server.name"
 SERVER_TYPE_ATTRIBUTE = "nemo.gym.server.type"
@@ -238,7 +241,9 @@ SANDBOX_TRANSFER_DURATION_BOUNDARIES_MS: tuple[float, ...] = (
     10_000,
     30_000,
     60_000,
+    120_000,
     300_000,
+    600_000,
 )
 
 #: Milliseconds.
@@ -404,7 +409,12 @@ def record_sandbox_create_retry(*, provider: str) -> None:
 
 
 def record_sandbox_transfer(
-    duration_ms: float, *, provider: str, direction: str, outcome: str, size_bytes: int | None
+    duration_ms: float,
+    *,
+    provider: str,
+    direction: SandboxTransferDirection,
+    outcome: SandboxTransferOutcome,
+    size_bytes: int | None,
 ) -> None:
     """Record one file transfer's wall-clock and, when it succeeded, the bytes it moved."""
     attributes = {SANDBOX_PROVIDER_ATTRIBUTE: provider, SANDBOX_TRANSFER_DIRECTION_ATTRIBUTE: direction}
