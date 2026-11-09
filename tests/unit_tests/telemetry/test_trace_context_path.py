@@ -79,6 +79,19 @@ class TestProducer:
         assert shared_with_rollout == "http://m:8000/ng-rollout/0-0"
         assert TRACEPARENT_PATTERN.match(traceparent)
 
+    def test_segment_is_empty_for_a_traceparent_with_a_trailing_newline(self, monkeypatch):
+        import nemo_gym.client.server_client as server_client
+        import nemo_gym.telemetry.contrib as contrib
+
+        monkeypatch.setattr(server_client, "is_trace_exporter_active", lambda: True)
+        monkeypatch.setattr(
+            contrib, "inject_trace_context", lambda carrier: carrier.update(traceparent=TRACEPARENT + "\n")
+        )
+        assert trace_context_path_segment() == ""
+
+        monkeypatch.setattr(contrib, "inject_trace_context", lambda carrier: carrier.update(traceparent=TRACEPARENT))
+        assert trace_context_path_segment() == f"/ng-trace/{TRACEPARENT}"
+
 
 class TestMiddlewarePathRewrite:
     """The strip half works without telemetry, so a URL built with the segment always routes."""
@@ -149,9 +162,15 @@ class TestMiddlewarePathRewrite:
             "/ng-rollout/0-0/training-token-capture/ng-agent-instance/judge/v1/responses",
             "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses",
             "/ng-rollout/0-0/ng-agent-instance/v1/responses",
+            # What a client's "%0A" decodes to: the name or traceparent must not keep the newline.
+            "/ng-rollout/0-0/ng-agent-instance/judge\n/v1/responses",
+            f"/ng-rollout/0-0/ng-trace/{TRACEPARENT}\n/v1/responses",
+            # A malformed value is malformed whether or not a routed path follows it.
+            "/ng-trace/not-a-traceparent",
+            "/ng-rollout/0-0/ng-agent-instance/Judge",
         ],
     )
-    async def test_answers_a_malformed_prefix_with_400(self, recorded, path):
+    async def test_answers_a_malformed_prefix_with_404(self, recorded, path):
         seen, app = recorded
         sent = []
 
@@ -160,7 +179,7 @@ class TestMiddlewarePathRewrite:
 
         await app({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, None, send)
         assert seen == {}
-        assert sent[0]["status"] == 400
+        assert sent[0]["status"] == 404
 
 
 class TestRedirectLocation:
@@ -204,6 +223,11 @@ class TestRedirectLocation:
 
     def test_non_redirect_responses_are_untouched(self):
         assert self._restored("/v1/responses", status=200) == "/v1/responses"
+
+    def test_a_target_with_a_malformed_prefix_is_untouched(self):
+        # The follow-up request is refused with its own reason, not one the segment would introduce.
+        location = "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses"
+        assert self._restored(location) == location
 
 
 @requires_lens

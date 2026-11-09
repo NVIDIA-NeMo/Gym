@@ -14,6 +14,8 @@
 # limitations under the License.
 """Middleware that reads trace context carried in a request's URL path."""
 
+import dataclasses
+import logging
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI
@@ -21,17 +23,20 @@ from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from nemo_gym.config.config_types import TRACE_CONTEXT_PATH_SEGMENT
-from nemo_gym.core.correlation import CorrelationContext, CorrelationPathError, encode, parse_path, remember, resolve
+from nemo_gym.core.correlation import CorrelationPathError, encode, parse_path, remember, resolve
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+
+
+logger = logging.getLogger(__name__)
 
 
 class TraceContextPathMiddleware:
     """Resolve the request's correlation prefix once, and turn ``/ng-trace/<traceparent>`` into the header.
 
-    This is the outermost layer on every Gym server, so it resolves the path through
-    ``nemo_gym.core.correlation.resolve``, which shares the result with inner middleware through
-    ``scope["state"]``. A malformed prefix (segments out of order, an invalid agent instance name or
-    traceparent) is answered with 400.
+    This is the outermost layer that reads the path on every Gym server (only request-context isolation is
+    outside it), so it resolves the path through ``nemo_gym.core.correlation.resolve``, which shares the
+    result with inner middleware through ``scope["state"]``. A malformed prefix (segments out of order, an
+    invalid agent instance name or traceparent) is answered with 404, as an unroutable path was before.
 
     The trace segment comes from ``apply_rollout_prefix``: a model URL an agent hands to a client that
     sends no ``traceparent`` header, such as a harness inside a sandbox. A header the client did
@@ -48,7 +53,9 @@ class TraceContextPathMiddleware:
         try:
             resolved = resolve(scope)
         except CorrelationPathError as error:
-            await JSONResponse({"detail": str(error)}, status_code=400)(scope, receive, send)
+            # 404, not 400: the agent outcome policy grades a 400 as the model's request error.
+            logger.warning(f"Refusing a malformed correlation prefix: {error}")
+            await JSONResponse({"detail": str(error)}, status_code=404)(scope, receive, send)
             return
         if resolved is None or resolved[0].trace_parent is None:
             await self.app(scope, receive, send)
@@ -58,16 +65,16 @@ class TraceContextPathMiddleware:
         headers = list(scope.get("headers") or [])
         if not any(name.lower() == b"traceparent" for name, _ in headers):
             headers.append((b"traceparent", traceparent.encode("ascii")))
-        head = CorrelationContext(
-            capture_key=context.capture_key,
-            agent_instance=context.agent_instance,
-            token_capture=context.token_capture,
-        )
-        scope = scope_with_routed_path(scope, encode(head) + rest)
+        # The parsed prefix is canonical, so the trace segment sits right before ``rest``: cut it out.
+        segment = f"/{TRACE_CONTEXT_PATH_SEGMENT}/{traceparent}"
+        path = scope["path"]
+        scope = scope_with_routed_path(scope, path[: len(path) - len(rest) - len(segment)] + rest)
         scope["headers"] = headers
         # Inner middleware reads the rewritten path; a trace-only path has no prefix left.
-        remember(scope, (head, rest) if head.capture_key is not None else None)
-        segment = encode(CorrelationContext(trace_parent=traceparent))
+        remember(
+            scope,
+            (dataclasses.replace(context, trace_parent=None), rest) if context.capture_key is not None else None,
+        )
 
         async def send_with_segment_on_redirect(message: Message) -> None:
             # The client only ever had the URL, so a redirect it follows must carry the segment again.
@@ -83,8 +90,9 @@ def _restore_trace_segment_on_redirect(
 ) -> Message:
     """Put ``/ng-trace/<traceparent>`` back into root-relative and same-origin redirect targets.
 
-    Inserted after a rollout or token-capture prefix (which the capture middleware has already restored)
-    or at the root; cross-origin targets and targets that already carry a segment are left alone.
+    Inserted after the correlation prefix (capture key, agent instance name, training segment), which the
+    capture middleware has already restored, or at the root. Cross-origin targets, targets that already
+    carry a segment and targets with a malformed prefix are left alone.
     """
     status = int(message.get("status") or 0)
     if not 300 <= status < 400:
@@ -103,7 +111,8 @@ def _restore_trace_segment_on_redirect(
         try:
             prefix = parse_path(parts.path, allow_empty_rest=True)
         except CorrelationPathError:
-            prefix = None
+            # Left as is, so the follow-up request is refused with its own reason.
+            continue
         head = encode(prefix[0]) if prefix is not None else ""
         path = f"{head}{segment}{parts.path[len(head) :]}"
         headers[index] = (key, urlunsplit(parts._replace(path=path)).encode("latin-1"))

@@ -37,6 +37,7 @@ from uuid import uuid4
 
 import orjson
 from fastapi import Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, model_validator
 
 from nemo_gym.core.correlation import CorrelationPathError, resolve
@@ -803,14 +804,13 @@ class _CaptureMiddleware:
         token_capture_requested = False
         capture_prefix = ""
         try:
-            # The outermost middleware has already resolved this path; this reads its result.
+            # Under run_webserver the trace middleware has already resolved this path, so this reads its result;
+            # a stack without it resolves here.
             resolved = resolve(scope)
         except CorrelationPathError as error:
-            await Response(
-                content=json.dumps({"detail": str(error)}),
-                status_code=400,
-                media_type="application/json",
-            )(scope, receive, send)
+            # 404, not 400: the agent outcome policy grades a 400 as the model's request error.
+            logger.warning(f"Refusing a malformed correlation prefix: {error}")
+            await JSONResponse({"detail": str(error)}, status_code=404)(scope, receive, send)
             return
         if resolved is not None and resolved[0].capture_key is not None:
             correlation, rest = resolved

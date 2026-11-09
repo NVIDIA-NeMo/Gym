@@ -185,7 +185,17 @@ def test_remember_stores_the_resolution_of_a_rewritten_path():
 
 
 def test_resolve_ignores_non_http_scopes():
-    assert resolve({"type": "lifespan"}) is None
+    scope = {"type": "lifespan"}
+
+    assert resolve(scope) is None
+    assert "state" not in scope
+
+
+def test_resolve_leaves_the_state_of_an_unprefixed_request_untouched():
+    scope = {"type": "http", "path": "/v1/responses"}
+
+    assert resolve(scope) is None
+    assert "state" not in scope
 
 
 def test_the_checkpoint_admission_reader_still_finds_the_capture_key_before_a_name():
@@ -194,3 +204,55 @@ def test_the_checkpoint_admission_reader_still_finds_the_capture_key_before_a_na
     match = _ROLLOUT_PREFIX.match("/ng-rollout/r-a1/ng-agent-instance/judge/training-token-capture/v1/responses")
 
     assert match is not None and match.group("capture_key") == "r-a1"
+
+
+def test_a_trailing_newline_is_not_part_of_a_valid_name_or_traceparent():
+    # ``$`` also matches before a final newline; the patterns must anchor at the absolute end.
+    with pytest.raises(ValueError):
+        validate_agent_instance("judge\n")
+    with pytest.raises(ValueError):
+        CorrelationContext(trace_parent=TRACEPARENT + "\n")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/ng-rollout/k/ng-agent-instance/judge\n/v1/responses",
+        f"/ng-trace/{TRACEPARENT}\n/v1/responses",
+        f"/ng-rollout/k/ng-trace/{TRACEPARENT}\n/v1/responses",
+    ],
+)
+def test_a_path_whose_name_or_traceparent_ends_in_a_newline_is_malformed(path):
+    with pytest.raises(CorrelationPathError):
+        parse_path(path)
+
+
+@pytest.mark.parametrize("allow_empty_rest", [False, True])
+@pytest.mark.parametrize(
+    "path",
+    ["/ng-rollout/k/ng-agent-instance/Judge", "/ng-trace/not-a-traceparent", "/ng-rollout/k/ng-agent-instance/v1"],
+)
+def test_a_malformed_prefix_raises_whether_or_not_a_rest_follows(path, allow_empty_rest):
+    with pytest.raises(CorrelationPathError):
+        parse_path(path, allow_empty_rest=allow_empty_rest)
+
+
+@pytest.mark.parametrize(
+    "path, context",
+    [
+        ("/ng-rollout/k", CorrelationContext(capture_key="k")),
+        (
+            "/ng-rollout/k/ng-agent-instance/judge/training-token-capture",
+            CorrelationContext(capture_key="k", agent_instance="judge", token_capture=True),
+        ),
+        (f"/ng-trace/{TRACEPARENT}", CorrelationContext(trace_parent=TRACEPARENT)),
+    ],
+)
+def test_a_valid_bare_prefix_is_read_only_when_an_empty_rest_is_allowed(path, context):
+    assert parse_path(path) is None
+    assert parse_path(path, allow_empty_rest=True) == (context, "")
+
+
+def test_a_context_takes_keyword_arguments_only():
+    with pytest.raises(TypeError):
+        CorrelationContext("k", "judge")

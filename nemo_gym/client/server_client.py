@@ -369,7 +369,7 @@ def trace_context_path_segment() -> str:
     carrier: dict[str, str] = {}
     inject_trace_context(carrier)
     traceparent = carrier.get("traceparent", "")
-    if not TRACEPARENT_PATTERN.match(traceparent):
+    if not TRACEPARENT_PATTERN.fullmatch(traceparent):
         return ""
     return encode(CorrelationContext(trace_parent=traceparent))
 

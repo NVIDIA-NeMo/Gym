@@ -20,14 +20,15 @@ A Gym component that hands a model URL to a client puts the request's identity i
     /ng-rollout/<capture key>[/ng-agent-instance/<name>][/training-token-capture][/ng-trace/<traceparent>]/v1/...
 
 The segments appear in that fixed order. A path may also carry only ``/ng-trace/<traceparent>``.
-``resolve`` reads the prefix and ``encode`` builds it, so no other code parses or builds it by hand.
+``resolve`` reads the prefix and ``encode`` builds it. Readers that still parse the path by hand are moving
+onto this module.
 
 An agent instance name is ``<agent kind>[.<n>]``, for example ``assistant``, ``judge`` or ``debater.1``.
 The name never equals a segment literal or ``v1``, so a missing name cannot swallow the next segment.
 
-Each request is resolved once, by the outermost Gym middleware, which shares the result through
-``scope["state"]``; inner middleware reads it there instead of parsing the path again.
-Headers are not read.
+On a Gym server, ``TraceContextPathMiddleware``, the outermost layer that reads the path, resolves it and
+shares the result through ``scope["state"]``; inner middleware reads it there instead of parsing again.
+``resolve`` reads only the path.
 """
 
 from __future__ import annotations
@@ -40,22 +41,21 @@ from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH
 
 
 AGENT_INSTANCE_PATH_SEGMENT = "ng-agent-instance"
-AGENT_INSTANCE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)?$")
-# A name equal to one of these would read as the segment that should have followed it.
-RESERVED_AGENT_INSTANCE_NAMES = frozenset(
-    {ROLLOUT_PATH_PREFIX, AGENT_INSTANCE_PATH_SEGMENT, TOKEN_CAPTURE_PATH_SEGMENT, TRACE_CONTEXT_PATH_SEGMENT, "v1"}
-)
-# A W3C ``traceparent``, version 00, the only form the propagator writes.
-TRACEPARENT_PATTERN = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$")
-
-CORRELATION_STATE_KEY = "nemo_gym.correlation"
+# ``\Z`` rather than ``$``: ``$`` also matches before a final newline.
+AGENT_INSTANCE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]*(?:\.[a-z0-9_-]+)?\Z")
 _SEGMENT_LITERALS = frozenset(
     {ROLLOUT_PATH_PREFIX, AGENT_INSTANCE_PATH_SEGMENT, TOKEN_CAPTURE_PATH_SEGMENT, TRACE_CONTEXT_PATH_SEGMENT}
 )
+# A name equal to one of these would read as the segment that should have followed it.
+RESERVED_AGENT_INSTANCE_NAMES = _SEGMENT_LITERALS | {"v1"}
+# A W3C ``traceparent``, version 00, the only form the propagator writes.
+TRACEPARENT_PATTERN = re.compile(r"^00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}\Z")
+
+CORRELATION_STATE_KEY = "nemo_gym.correlation"
 
 
 class CorrelationPathError(ValueError):
-    """A request path carries a malformed correlation prefix. Servers answer it with 400."""
+    """A request path carries a malformed correlation prefix. Servers answer it with 404."""
 
     def __init__(self, reason: str, path: str) -> None:
         super().__init__(f"{reason}: {path!r}")
@@ -78,7 +78,7 @@ def agent_kind_of(agent_instance: str) -> str:
     return agent_instance.partition(".")[0]
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class CorrelationContext:
     """The identity a request path carries.
 
@@ -95,7 +95,7 @@ class CorrelationContext:
         if self.capture_key is not None and (not self.capture_key or "/" in self.capture_key):
             raise ValueError(f"invalid capture key {self.capture_key!r}")
         if self.capture_key is None and (self.agent_instance is not None or self.token_capture):
-            raise ValueError("an agent instance or the training tag requires a capture key")
+            raise ValueError("an agent instance or the training segment requires a capture key")
         if self.agent_instance is not None:
             validate_agent_instance(self.agent_instance)
         if self.trace_parent is not None and not TRACEPARENT_PATTERN.match(self.trace_parent):
@@ -161,8 +161,6 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
     if index < len(segments) and segments[index] in _SEGMENT_LITERALS:
         raise CorrelationPathError(f"{segments[index]} segment out of order or repeated", path)
     rest = "/" + "/".join(segments[index:]) if index < len(segments) else ""
-    if not rest and not allow_empty_rest:
-        return None
     try:
         context = CorrelationContext(
             capture_key=capture_key,
@@ -172,6 +170,9 @@ def parse_path(path: str, *, allow_empty_rest: bool = False) -> tuple[Correlatio
         )
     except ValueError as error:
         raise CorrelationPathError(str(error), path) from error
+    # Checked after validation, so a malformed value raises whether or not a path follows it.
+    if not rest and not allow_empty_rest:
+        return None
     return context, rest
 
 
@@ -185,9 +186,13 @@ def resolve(scope: dict[str, Any]) -> tuple[CorrelationContext, str] | None:
     """Return the context a request's path carries and the remaining path, or ``None`` without a prefix.
 
     Resolve once per request: the result is stored in ``scope["state"]`` for the path it was read from,
-    and a later call for the same path returns it. Raise ``CorrelationPathError`` for a malformed prefix.
+    and a later call for the same path returns it. The cache is keyed by path, so ``resolve`` must read only
+    the path. Raise ``CorrelationPathError`` for a malformed prefix.
     """
     path = scope.get("path", "") if scope.get("type") == "http" else ""
+    if not path.startswith("/ng-"):
+        # No prefix is possible: leave ``scope["state"]`` untouched, including for non-http scopes.
+        return None
     state = scope.setdefault("state", {})
     stored = state.get(CORRELATION_STATE_KEY)
     if isinstance(stored, _Resolved) and stored.path == path:

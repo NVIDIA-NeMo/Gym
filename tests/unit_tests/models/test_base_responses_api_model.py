@@ -1453,7 +1453,7 @@ def test_a_named_prefix_with_a_trace_segment_routes_through_both_middlewares():
         "/ng-rollout/3-0/ng-agent-instance/Judge/v1/chat/completions",
     ],
 )
-def test_a_malformed_prefix_is_refused_with_400(path, with_trace_middleware):
+def test_a_malformed_prefix_is_refused_with_404(path, with_trace_middleware):
     from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
 
     app = FastAPI()
@@ -1467,12 +1467,12 @@ def test_a_malformed_prefix_is_refused_with_400(path, with_trace_middleware):
         install_trace_context_path(app)
     response = TestClient(app).post(path, json={})
 
-    assert response.status_code == 400
+    assert response.status_code == 404
     assert path in response.json()["detail"]
 
 
 def test_a_redirect_keeps_a_named_capture_prefix():
-    from nemo_gym.models.base_responses_api_model import _preserve_capture_prefix_on_redirect
+    from nemo_gym.models.model_call_capture import _preserve_capture_prefix_on_redirect
 
     prefix = "/ng-rollout/3-0/ng-agent-instance/user/training-token-capture"
     message = {"type": "http.response.start", "status": 307, "headers": [(b"location", b"/v1/responses/")]}
@@ -1482,6 +1482,49 @@ def test_a_redirect_keeps_a_named_capture_prefix():
     )
 
     assert dict(redirected["headers"])[b"location"] == f"{prefix}/v1/responses/".encode()
+
+
+@pytest.mark.parametrize("trace_segment", ["", f"/ng-trace/{_TRACEPARENT}"])
+def test_a_named_training_prefix_captures_tokens_and_keeps_the_full_prefix_on_redirect(tmp_path, trace_segment):
+    from fastapi.responses import RedirectResponse
+
+    from nemo_gym.core.episode_context import current_rollout_id
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
+    from nemo_gym.models.token_capture.sink import current_capture_context
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
+    from nemo_gym.server_runtime.request_handling.trace_context import install_trace_context_path
+
+    app = FastAPI()
+    seen = {}
+
+    @app.post("/v1/chat/completions")
+    async def _cc() -> dict:
+        context = current_capture_context()
+        seen["rollout_id"] = current_rollout_id()
+        seen["capture_key"] = context.capture_key if context is not None else None
+        return {}
+
+    @app.post("/v1/moved")
+    async def _moved() -> RedirectResponse:
+        return RedirectResponse("/v1/chat/completions", status_code=307)
+
+    app.add_middleware(
+        _CaptureMiddleware,
+        store=None,
+        model_server_name="policy",
+        token_store=TokenCaptureStore(tmp_path),
+        token_capture_enabled=True,
+    )
+    install_trace_context_path(app)
+    client = TestClient(app)
+    prefix = "/ng-rollout/3-0/ng-agent-instance/judge/training-token-capture"
+
+    assert client.post(f"{prefix}{trace_segment}/v1/chat/completions", json={}).status_code == 200
+    assert seen == {"rollout_id": "3-0", "capture_key": "3-0"}, "the training segment after a name opens capture"
+
+    redirected = client.post(f"{prefix}{trace_segment}/v1/moved", json={}, follow_redirects=False)
+    assert redirected.status_code == 307
+    assert redirected.headers["location"] == f"{prefix}{trace_segment}/v1/chat/completions"
 
 
 def test_capture_store_concurrent_append_no_loss(tmp_path):
