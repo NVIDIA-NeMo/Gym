@@ -68,7 +68,8 @@ DEPRECATION_WARNING = (
     "environment-server migration. Use the harness's own agent (claude_code_agent, codex_agent, hermes_agent, "
     "pi_agent, opencode_agent and so on) with sandbox sessions under an environment server instead, as the job_bench "
     "and workspace_bench configs do. The swe_atlas_qa and rna_design configs still run on this agent and keep "
-    "working until they move. See responses_api_agents/harness_agent/README.md."
+    "working until they move; cline, prime, simple_strands and deepagents have no session agent to move to yet. "
+    "See responses_api_agents/harness_agent/README.md."
 )
 
 

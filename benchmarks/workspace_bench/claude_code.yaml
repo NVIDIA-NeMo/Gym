@@ -5,6 +5,10 @@ config_paths:
 - resources_servers/workspace_bench/configs/workspace_bench.yaml
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The agent calls the model server from inside a remote sandbox, so the servers advertise this host's address
+# instead of loopback. Pass +default_host=<address the sandbox reaches> when the hostname does not resolve.
+use_absolute_ip: true
+
 workspace_bench_claude_code_agent:
   responses_api_agents:
     claude_code_agent:
