@@ -37,6 +37,9 @@ Response must include:
 - Recommendations for what should be done next
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."""
+# OpenCode releases whose step-limit text equals OPENCODE_MAX_STEPS_PROMPT exactly (compared on 2026-11-09). Add a
+# release only after comparing its text, so that a new default OpenCode version cannot silently break capture.
+OPENCODE_MAX_STEPS_PROMPT_VERSIONS = frozenset({"1.15.13", "1.17.8", "1.17.11", "1.19.4"})
 
 # Exact texts only: an assistant message that merely resembles a note stays model output.
 HARNESS_NOTES = frozenset({OPENCODE_MAX_STEPS_PROMPT})
