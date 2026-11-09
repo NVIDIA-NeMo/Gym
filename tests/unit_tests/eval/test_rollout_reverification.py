@@ -74,6 +74,7 @@ from nemo_gym.eval.rollout_reverification import (
     summarize_cache_usage,
 )
 from nemo_gym.rollouts.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollouts.rollout_records import logical_rollout_id
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
@@ -85,6 +86,19 @@ _TOOL_TRAJECTORY_SHA256 = (
 _RESPONSES_TRAJECTORY_SHA256 = (
     "8d9c3c2d21c4ef0a8d9488eac560b1fdfaa532712b8a4fc628023a94d0bab825"  # pragma: allowlist secret
 )
+
+
+def _prepared_stub_payloads(payloads):
+    from nemo_gym.eval.rollout_reverification import _reverification_context
+
+    def prepare(*_args, context_out, **_kwargs):
+        for row in payloads:
+            context_out[(logical_rollout_id(row), row.get("_ng_attempt_index", 0))] = _reverification_context(
+                InputRolloutPair(input=row, rollout={}), row
+            )
+        return payloads
+
+    return prepare
 
 
 class TestRolloutReverificationConfig:
@@ -1372,6 +1386,59 @@ class TestPreparePayloads:
 
         assert capture["rollout_predicate"] is None
 
+    def test_context_keeps_response_identified_policy_calls_and_removes_only_unique_prior_judge_calls(self, tmp_path):
+        policy = {"type": "responses_api_models", "name": "policy"}
+        judge = {"type": "responses_api_models", "name": "judge"}
+        policy_ref = {"model_ref": policy, "response_id": "policy-response"}
+        judge_ref = {"model_ref": judge, "response_id": "judge-response"}
+        row = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "task_id": {"taskset": "suite", "task_id": "task-A"},
+            "task_input": {"question": "Synthetic question"},
+        }
+        rollout = {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "_ng_rollout_id": "saved",
+            "_ng_attempt_index": 2,
+            "response": {},
+            "ng_trajectory": {
+                "task_id": "task-A",
+                "rollout_id": "saved-a2",
+                "invocations": [{"invocation_id": "policy", "model_calls": [policy_ref]}],
+                "verifier_invocations": [{"invocation_id": "prior-judge", "model_calls": [judge_ref]}],
+                "model_calls": [
+                    {"model_call_id": None, "response_metadata": policy_ref},
+                    {"model_call_id": None, "response_metadata": judge_ref},
+                    {"model_call_id": None, "response_metadata": {"response_id": "unowned"}},
+                ],
+            },
+        }
+        inputs, source = tmp_path / "inputs.jsonl", tmp_path / "source.jsonl"
+        inputs.write_bytes(orjson.dumps(row) + b"\n")
+        source.write_bytes(orjson.dumps(rollout) + b"\n")
+        context = {}
+        [payload] = _prepare_payloads(inputs, source, self._paths(tmp_path), False, context_out=context)
+        assert payload == {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "question": "Synthetic question",
+            "response": {},
+            "_ng_rollout_id": "saved",
+            "_ng_attempt_index": 2,
+        }
+        selected = context[("saved", 2)]
+        assert selected.row["task_id"] == row["task_id"] and selected.row["task_input"] == row["task_input"]
+        assert selected.row["_ng_rollout_id"] == "saved" and selected.row["_ng_attempt_index"] == 2
+        assert selected.observations["ng_trajectory"]["verifier_invocations"] == []
+        assert selected.observations["ng_trajectory"]["model_calls"] == [
+            rollout["ng_trajectory"]["model_calls"][0],
+            rollout["ng_trajectory"]["model_calls"][2],
+        ]
+        assert source.read_bytes() == orjson.dumps(rollout) + b"\n"
+        assert inputs.read_bytes() == orjson.dumps(row) + b"\n"
+
 
 class TestPrepareAtifPayloads:
     def _paths(self, tmp_path: Path) -> OutputPaths:
@@ -2370,7 +2437,9 @@ class TestRolloutReverificationRunFromConfig:
     def _patch_common(self, monkeypatch: pytest.MonkeyPatch, pairs: list[tuple[dict, dict]]) -> None:
         """Patch the delegates that run_from_config calls."""
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", lambda *_a, **_kw: payloads)
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification._prepare_payloads", _prepared_stub_payloads(payloads)
+        )
 
         async def fake_future(row: dict, result: dict) -> tuple[dict, dict]:
             return row, result
@@ -2397,6 +2466,164 @@ class TestRolloutReverificationRunFromConfig:
         return [orjson.loads(line) for line in path.read_bytes().splitlines() if line.strip()]
 
     # ------------------------------------------------------------------ tests
+
+    @pytest.mark.parametrize("judge_failed_only", [False, True])
+    @pytest.mark.parametrize(
+        "schema_version,redacted,observability_enabled",
+        [("1.0", False, True), ("1.0", True, True), ("2.0", False, True), ("2.0", True, True), ("1.0", False, False)],
+    )
+    async def test_separate_reverification_preserves_saved_policy_context(
+        self, tmp_path, monkeypatch, judge_failed_only, schema_version, redacted, observability_enabled
+    ) -> None:
+        from nemo_gym.models.model_call_capture import CaptureStore
+        from nemo_gym.rollouts.rollout_collection import enrich_run_result
+        from nemo_gym.rollouts.rollout_recovery import RunManifest
+        from nemo_gym.rollouts.rollout_store import RolloutStore
+        from tests.unit_tests.rollouts.test_rollout_collection import FakeResponse
+
+        captures = CaptureStore(tmp_path / "captures")
+        config = {
+            "observability_enabled": observability_enabled,
+            "model_call_capture_dir": str(captures.root),
+            "model_call_capture": {"trajectory_schema_version": schema_version},
+            "agent": {"responses_api_agents": {"simple_agent": {"resources_server": {"name": "judge_rs"}}}},
+            "judge_rs": {"resources_servers": {"synthetic": {}}},
+        }
+        row = self._make_row("agent", 0) | {"_ng_rollout_id": "saved-context"}
+        source = tmp_path / "inputs.jsonl"
+        source.write_bytes(orjson.dumps(row) + b"\n")
+        answer = {"id": "saved-answer", "status": "completed", "output": []}
+        sentinel = "data:image/png;base64,synthetic-private-image"
+
+        def exchange(call_id, *, verifier=None):
+            return {
+                "model_call_id": call_id,
+                "dialect": "responses",
+                "model_ref": {"type": "responses_api_models", "name": "judge" if verifier else "policy"},
+                "status_code": 200,
+                "request": {"input": [{"type": "input_image", "image_url": sentinel}]},
+                "response": {
+                    "id": f"response-{call_id}",
+                    "status": "completed",
+                    "output": [],
+                    "usage": {
+                        "input_tokens": 11 if verifier is None else 100,
+                        "output_tokens": 7 if verifier is None else 100,
+                    },
+                },
+                "verifier_invocation_id": verifier,
+            }
+
+        def verifier(invocation_id, call_id):
+            return {
+                "invocation_id": invocation_id,
+                "status": "completed",
+                "model_calls": [{"model_call_id": call_id}],
+            }
+
+        captures.record("saved-context", exchange("policy-call"))
+        captures.record("saved-context", exchange("old-judge-call", verifier="old-verifier"))
+        previous = {
+            "response": answer,
+            "reward": 1.0,
+            "ng_verifier_invocations": [verifier("old-verifier", "old-judge-call")],
+            "ng_agent_observations": {
+                "schema_version": schema_version,
+                "source": "synthetic",
+                "records": [
+                    {
+                        "kind": "agent_invocation",
+                        "invocation_id": "policy-agent",
+                        "status": "completed",
+                        "model_calls": [{"model_call_id": "policy-call"}],
+                    }
+                ],
+                "gaps": [{"code": "multimodal_history_redacted"}] if redacted else [],
+            },
+        }
+        if judge_failed_only:
+            previous |= {
+                "_ng_failure_class": "judge_failed",
+                "_ng_failure_id": "old-failure",
+                "failure_kind": "judge_failed",
+            }
+        await enrich_run_result(
+            row,
+            previous,
+            capture_dirs=[captures.root],
+            observability_enabled=observability_enabled,
+            trajectory_schema_version=schema_version,
+            rollout_latency_ms=42000,
+        )
+        source_output = tmp_path / "source-rollouts.jsonl"
+        with RolloutStore.start_or_resume(
+            source_output, lambda: ([row], RunManifest.create(source, [row], {}, config)), resume=False
+        ) as store:
+            [dispatched] = store.pending()
+            store.record_dispatch(dispatched)
+            store.record_outcome(dispatched | previous)
+        captures.record("saved-context", exchange("fresh-judge-call", verifier="fresh-verifier"))
+        capture_bytes = captures.path_for("saved-context").read_bytes()
+        posted = []
+
+        async def post(*, server_name, url_path, json, **kwargs):
+            assert server_name == "judge_rs" and url_path == "/verify"
+            assert not {"ng_trajectory", "ng_agent_observations", "ng_perf", "task_input"}.intersection(json)
+            posted.append(json)
+            return FakeResponse(
+                200,
+                {
+                    "response": json["response"],
+                    "reward": 0.5,
+                    "ng_verifier_invocations": [verifier("fresh-verifier", "fresh-judge-call")],
+                },
+            )
+
+        client = MagicMock(
+            global_config_dict=config, post=post, get=AsyncMock(return_value=FakeResponse(200, "stateless"))
+        )
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.setup_server_client", lambda: client)
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification.get_exporters", list)
+        destination = tmp_path / "rescored.jsonl"
+        [result] = await RolloutReverificationHelper().run_from_config(
+            RolloutReverificationConfig(
+                materialized_inputs_jsonl_fpath=str(
+                    source_output.with_name("source-rollouts_materialized_inputs.jsonl")
+                ),
+                rollouts_jsonl_fpath=str(source_output),
+                output_jsonl_fpath=str(destination),
+                judge_failed_only=judge_failed_only,
+                disable_aggregation=True,
+            )
+        )
+        assert len(posted) == 1 and posted[0]["response"] == answer == result["response"]
+        assert result["reward"] == 0.5
+        if redacted:
+            assert sentinel.encode() not in destination.read_bytes()
+        trajectory = result["ng_trajectory"]
+        assert trajectory["schema_version"] == schema_version
+        assert [item["invocation_id"] for item in trajectory["invocations"]] == ["policy-agent"]
+        assert [item["invocation_id"] for item in trajectory["verifier_invocations"]] == ["fresh-verifier"]
+        assert {call["model_call_id"] for call in trajectory["model_calls"]} == (
+            {"policy-call", "fresh-judge-call"} if observability_enabled else {"policy-call"}
+        )
+        if redacted:
+            assert all(call["request"] is None and call["response"] is None for call in trajectory["model_calls"])
+            assert any(gap["code"] == "multimodal_history_redacted" for gap in trajectory["gaps"])
+        elif observability_enabled:
+            fresh = next(call for call in trajectory["model_calls"] if call["model_call_id"] == "fresh-judge-call")
+            assert fresh["request"]["input"][0]["image_url"] == sentinel
+            assert fresh["response"]["id"] == "response-fresh-judge-call"
+        if observability_enabled:
+            fresh = next(call for call in trajectory["model_calls"] if call["model_call_id"] == "fresh-judge-call")
+            assert fresh["response_metadata"]["response_id"] == "response-fresh-judge-call"
+            assert fresh["response_metadata"]["response_status"] == "completed"
+        assert captures.path_for("saved-context").read_bytes() == capture_bytes
+        if observability_enabled:
+            assert result["ng_perf"]["total_latency_ms"] == 42000
+            assert result["ng_perf"]["prompt_tokens"] == 11 and result["ng_perf"]["completion_tokens"] == 7
+        else:
+            assert "ng_perf" not in result
 
     async def test_atif_manifest_uses_only_its_selected_stateless_verifier_and_persists_provenance(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -2754,7 +2981,9 @@ class TestRolloutReverificationRunFromConfig:
             (self._make_row("agent_b", task=3), {"reward": 0.3}),
         ]
         payloads = [row for row, _ in pairs]
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", lambda *_a, **_kw: payloads)
+        monkeypatch.setattr(
+            "nemo_gym.eval.rollout_reverification._prepare_payloads", _prepared_stub_payloads(payloads)
+        )
 
         # Wire _run_verification_payloads through its real impl so routing is exercised.
         # Patch the hooks it relies on instead.
@@ -2842,7 +3071,7 @@ class TestRunFromConfigForceFlag:
         async def fake_future() -> tuple[dict, dict]:
             return row, result
 
-        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", lambda *_a, **_kw: [row])
+        monkeypatch.setattr("nemo_gym.eval.rollout_reverification._prepare_payloads", _prepared_stub_payloads([row]))
         monkeypatch.setattr(
             "nemo_gym.eval.rollout_reverification._guard_reverify_mode",
             AsyncMock(return_value=force_warning),

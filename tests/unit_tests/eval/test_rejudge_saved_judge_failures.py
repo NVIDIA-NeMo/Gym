@@ -274,20 +274,22 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
 
 @pytest.mark.parametrize("schema_version,redacted", [("1.0", False), ("2.0", False), ("2.0", True)])
 @pytest.mark.parametrize(
-    "attempt,explicit,capture_mode",
+    "attempt,explicit,capture_mode,input_shape",
     [
-        (0, False, "complete"),
-        (1, False, "complete"),
-        (1, True, "complete"),
-        (1, True, "prior_sse"),
-        (0, True, "prior_sse_history"),
-        (1, True, "missing"),
-        (1, True, "mismatched"),
-        (1, True, "unreadable"),
+        (0, False, "complete", "legacy"),
+        (1, False, "complete", "legacy"),
+        (1, True, "complete", "legacy"),
+        (1, True, "prior_sse", "legacy"),
+        (0, True, "prior_sse_history", "legacy"),
+        (1, True, "missing", "legacy"),
+        (1, True, "mismatched", "legacy"),
+        (1, True, "unreadable", "legacy"),
+        (1, True, "complete", "materialized_flat"),
+        (1, True, "complete", "materialized_canonical"),
     ],
 )
 async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health(
-    tmp_path, monkeypatch, attempt, explicit, capture_mode, schema_version, redacted
+    tmp_path, monkeypatch, attempt, explicit, capture_mode, input_shape, schema_version, redacted
 ):
     import asyncio
     import json
@@ -350,6 +352,12 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     ]
     if explicit:
         rows[1]["_ng_rollout_id"] = "saved-explicit"
+    if input_shape != "legacy":
+        for index, row in enumerate(rows):
+            params = row.pop("responses_create_params")
+            fields = {"responses_create_params": params}
+            row["task_id"] = {"taskset": "synthetic", "task_id": f"semantic-task-{index}"}
+            row["task_input"] = fields if input_shape == "materialized_flat" else {"task_data": fields}
     source = tmp_path / "source.jsonl"
     source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
     prepare = lambda: (rows, RunManifest.create(source, rows, {}, config))
@@ -485,9 +493,20 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
         async def save_verification(store, row, phase):
             key = maybe_rollout_id_from_run_body(row)
             answer = response(f"policy-{key}", "Saved synthetic answer")
-            captures.record(key, exchange(f"policy-{key}", "policy", row["responses_create_params"], answer))
+            fields = row.get("task_input", row)
+            fields = fields.get("task_data", fields)
+            policy_capture = exchange(f"policy-{key}", "policy", fields["responses_create_params"], answer)
+            answer["usage"] = {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "total_tokens": 18,
+                "input_tokens_details": {"cached_tokens": 2},
+                "output_tokens_details": {"reasoning_tokens": 3},
+            }
+            captures.record(key, policy_capture)
             state["phase"] = phase
-            result = await verify(row | {"response": answer})
+            request = {key: value for key, value in row.items() if key not in ("task_id", "task_input")}
+            result = await verify(request | fields | {"response": answer})
             result |= {
                 "_ng_environment_server": "environment",
                 "_ng_result_type": "legacy_agent",
@@ -515,6 +534,7 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
                 capture_dirs=[captures.root],
                 observability_enabled=True,
                 trajectory_schema_version=schema_version,
+                rollout_latency_ms=42000,
             )
             store.record_outcome(row | result)
 
@@ -543,6 +563,9 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
         async def post(*, server_name, url_path, json, **kwargs):
             assert server_name == "judge_rs" and url_path == "/verify"
             assert maybe_rollout_id_from_run_body(json) == capture_key
+            assert not {"task_id", "task_input", "ng_trajectory", "ng_agent_observations", "ng_perf"}.intersection(
+                json
+            )
             posted.append(json)
             result = await verify(json)
             return FakeResponse(200, result)
@@ -566,6 +589,11 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     assert failure["ng_trajectory"]["schema_version"] == trajectory["schema_version"] == schema_version
     wire_identity = "capture_key" if schema_version == "2.0" else "rollout_id"
     assert failure["ng_trajectory"][wire_identity] == trajectory[wire_identity] == capture_key
+    assert (
+        trajectory["task_id"]
+        == ("1" if input_shape == "legacy" else "semantic-task-1")
+        == failure["ng_trajectory"]["task_id"]
+    )
     assert ("rollout_id" if schema_version == "2.0" else "capture_key") not in trajectory
     [verifier] = trajectory["verifier_invocations"]
     assert len(posted) == (2 if capture_mode == "prior_sse_history" else 1)
@@ -578,6 +606,9 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     assert trajectory["turns"] == failure["ng_trajectory"]["turns"]
     assert trajectory["tool_calls"] == failure["ng_trajectory"]["tool_calls"]
     assert recovered["ng_agent_observations"] == failure["ng_agent_observations"]
+    assert recovered["ng_perf"] == failure["ng_perf"]
+    assert recovered["ng_perf"]["total_latency_ms"] == 42000
+    assert recovered["ng_perf"]["prompt_tokens"] == 11 and recovered["ng_perf"]["completion_tokens"] == 7
     if redacted:
         assert all(call["request"] is None and call["response"] is None for call in trajectory["model_calls"])
         assert any(gap["code"] == "multimodal_history_redacted" for gap in trajectory["gaps"])
@@ -599,6 +630,7 @@ async def test_inline_rejudgment_retains_new_captures_and_derives_grading_health
     assert persisted_recovery["ng_trajectory"]["schema_version"] == schema_version
     assert persisted_recovery["ng_trajectory"][wire_identity] == capture_key
     assert persisted_recovery["ng_agent_observations"] == failure["ng_agent_observations"]
+    assert persisted_recovery["ng_perf"] == failure["ng_perf"]
     assert {item["model_call_id"] for item in persisted_recovery["ng_model_call_capture"]["calls"]} >= {
         f"judge-{state['recover_start'] + 1}"
     }
