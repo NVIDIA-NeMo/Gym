@@ -194,7 +194,16 @@ async def test_unset_extensions_keep_setup_activation_and_capture_unchanged(setu
         "limit": {"context": 32000, "input": 32000, "output": 4096},
         "modalities": {"input": ["text", "image"], "output": ["text"]},
     }
-    assert set(config) == {"model", "small_model", "enabled_providers", "autoupdate", "share", "provider", "plugin"}
+    assert set(config) == {
+        "model",
+        "small_model",
+        "enabled_providers",
+        "autoupdate",
+        "share",
+        "attachment",
+        "provider",
+        "plugin",
+    }
     assert config["plugin"] == [Path(f"{directory}/task_environment.mjs").as_uri()]
     assert response.status == "completed"
     assert "export_dir_write_failed" not in gap_codes(closed.agent_observations)

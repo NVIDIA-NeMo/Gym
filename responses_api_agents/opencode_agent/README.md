@@ -150,7 +150,9 @@ that path to the model, so naming the file by its content keeps the prompt the s
 rollouts of a task. In a borrowed sandbox these files remain after the session closes. OpenCode places the images, in order, before the task text and does
 not use the `detail` setting. Sessions always declare image input on the Gym model, so OpenCode
 also passes on images its read tool returns; a text-only deployment rejects such requests.
-Images outside the user task and image URLs are rejected. Saved trajectories keep only the
+Sessions also lift OpenCode's `attachment.image` limits, which would otherwise shrink and re-encode
+any image over 2000 px on a side or 5 MiB of base64, so the model gets images at the size the
+environment sent. Images outside the user task and image URLs are rejected. Saved trajectories keep only the
 text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
 (see [Owner extensions](#owner-extensions)). A request `max_output_tokens` passes when it is at
 least the configured `max_output_tokens`, because OpenCode's limit for each model call already

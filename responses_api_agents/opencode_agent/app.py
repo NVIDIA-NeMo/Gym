@@ -132,6 +132,7 @@ from responses_api_agents.opencode_agent.runtime import (
     RUNTIME_INSTALLER_SOURCE,
     TASK_ENVIRONMENT_PLUGIN_FILE,
     TASK_ENVIRONMENT_PLUGIN_SOURCE,
+    UNRESTRICTED_IMAGE_ATTACHMENT,
     apply_observability_patch,
     command_failure_reason,
 )
@@ -1709,6 +1710,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             "enabled_providers": ["nemo_gym"],
             "autoupdate": False,
             "share": "disabled",
+            # Images reach the model unchanged; the environment decides their size. opencode_config cannot set
+            # attachment, so this always applies.
+            "attachment": copy.deepcopy(UNRESTRICTED_IMAGE_ATTACHMENT),
             "provider": {
                 "nemo_gym": {
                     "npm": "@ai-sdk/openai-compatible",
