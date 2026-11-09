@@ -358,3 +358,207 @@ def test_http_429_remains_retryable(monkeypatch):
     assert parsed.reasoning == "Enough evidence"
     assert len(client.requests) == 2
     assert sleeps == [0.1, 1.25, 0.1]
+
+
+def _retrieval_failure_server(mode, error_type):
+    from resources_servers.longfact.verifier_fixture import _JudgeResponse, _response, _server_factory
+
+    class JudgeTransport:
+        global_config_dict = {"observability_enabled": True}
+
+        def __init__(self):
+            self.requests = []
+
+        async def post(self, *, json: NeMoGymResponseCreateParamsNonStreaming, **kwargs):
+            from json import dumps
+
+            schema = json.text["format"]["name"]
+            payloads = {
+                "AtomicFacts": ["A factual claim."],
+                "PreparedFact": {"self_contained_fact": "A factual claim.", "relevant": True, "queries": ["evidence"]},
+                "ThreeWayClaimJudgment": {"label": "SUPPORTED", "explanation": "Evidence agrees."},
+                "BatchSearchPlan": {"claims": [{"claim_id": "C1", "queries": ["evidence"]}]},
+                "CardBatchVerdicts": {
+                    "verdicts": [
+                        {
+                            "claim_id": "C1",
+                            "claim": "A factual claim.",
+                            "answer": "true",
+                            "reasoning": "Evidence agrees.",
+                            "supporting_evidence": [],
+                        }
+                    ]
+                },
+            }
+            self.requests.append({"schema": schema, **kwargs})
+            response = _response(dumps(payloads[schema]))
+            response.id = f"recovery-judge-{len(self.requests)}"
+            return _JudgeResponse(response.model_dump_json().encode())
+
+    class SearchBoundary:
+        available = False
+        cache_stats = {}
+
+        async def search(self, query):
+            if not self.available:
+                raise error_type("temporary retrieval outage")
+            return [
+                SimpleNamespace(
+                    title="Evidence", url="https://example.test/evidence", snippet="A factual claim.", search_score=1.0
+                )
+            ]
+
+    server = _server_factory()
+    judge = JudgeTransport()
+    server.server_client = judge
+    server.config.fact_check_mode = mode
+    server._evaluator = JsonEvaluator(
+        server_client=judge,
+        model_server=server.config.evaluator_model_server,
+        create_params=server.config.evaluator_responses_create_params,
+        max_concurrency=1,
+        max_attempts=1,
+        timeout_seconds=1,
+    )
+    provider = SearchBoundary()
+    server._search_provider = provider
+    body = {
+        "responses_create_params": {"input": [{"role": "user", "content": "Question"}]},
+        "response": _response("The original saved policy answer.").model_dump(mode="json"),
+        "id": "source-task",
+        "task_id": "source-task",
+        "benchmark_variant": "longfact-safe-v1",
+        "prompt": "Question",
+        "source_provenance": {"path": "published-source.jsonl", "row_index": 7},
+    }
+    return server, provider, judge, body
+
+
+@pytest.mark.parametrize("mode", ["per_claim", "gpt5_card_batch"])
+@pytest.mark.parametrize("backend", ["tavily", "tantivy", "milvus"])
+def test_known_retrieval_failure_recovers_the_saved_answer_without_policy_generation(
+    tmp_path, monkeypatch, mode, backend
+):
+    import httpx
+    from omegaconf import OmegaConf
+
+    from nemo_gym.eval import rollout_reverification as recovery
+    from resources_servers.longfact.milvus_provider import MilvusProviderError
+    from resources_servers.longfact.tantivy_provider import TantivyProviderError
+    from resources_servers.longfact.tavily_provider import TavilyProviderError
+
+    errors = {"tavily": TavilyProviderError, "tantivy": TantivyProviderError, "milvus": MilvusProviderError}
+
+    async def run():
+        server, provider, judge, body = _retrieval_failure_server(mode, errors[backend])
+        server.config.search_backend = backend
+        transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            failed_response = await client.post("/ng-rollout/retrieval-failure/verify", json=body)
+            assert failed_response.status_code == 200
+            failed = failed_response.json()
+            assert failed["mask_sample"] is True
+            assert failed["failure_kind"] == failed["_ng_failure_class"] == "judge_failed"
+            assert failed["response"] == body["response"]
+            assert failed["source_provenance"] == body["source_provenance"]
+            reset = await client.post("/reset", json={key: value for key, value in body.items() if key != "response"})
+            assert reset.status_code == 200
+            legacy_step = await client.post("/step", json=body)
+            assert legacy_step.status_code == 500
+            close = await client.post("/close", json={})
+            assert close.status_code == 200
+
+            source = {key: value for key, value in body.items() if key != "response"}
+            source |= {"_ng_task_index": 0, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}
+            settled_input = source | {"_ng_task_index": 1, "id": "settled-task", "task_id": "settled-task"}
+            success = settled_input | {"response": body["response"] | {"id": "settled-response"}, "reward": 0.5}
+            failed |= {"_ng_task_index": 0, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}}
+            files = {
+                "inputs.jsonl": [source, settled_input],
+                "rollouts.jsonl": [success],
+                "rollouts_failures.jsonl": [failed],
+            }
+            for name, rows in files.items():
+                (tmp_path / name).write_text("".join(json.dumps(row) + "\n" for row in rows))
+            original = {name: (tmp_path / name).read_bytes() for name in files}
+
+            class RecoveryTransport:
+                global_config_dict = OmegaConf.create(
+                    {
+                        "agent": {
+                            "responses_api_agents": {
+                                "simple_agent": {"resources_server": {"type": "resources_servers", "name": "longfact"}}
+                            }
+                        }
+                    }
+                )
+
+                def __init__(self):
+                    self.dispatched = []
+
+                async def post(self, *, server_name, url_path, json, **kwargs):
+                    assert (server_name, url_path) == ("longfact", "/verify")
+                    self.dispatched.append(json)
+                    response = await client.post("/ng-rollout/retrieval-recovery/verify", json=json)
+
+                    class Reply:
+                        ok = response.status_code < 400
+                        status = response.status_code
+                        headers = response.headers
+
+                        async def read(self):
+                            return response.content
+
+                    return Reply()
+
+            recovered_transport = RecoveryTransport()
+            monkeypatch.setattr(recovery, "setup_server_client", lambda: recovered_transport)
+            monkeypatch.setattr(recovery, "get_exporters", list)
+            provider.available = True
+            results = await recovery.RolloutReverificationHelper().run_from_config(
+                recovery.RolloutReverificationConfig(
+                    materialized_inputs_jsonl_fpath=str(tmp_path / "inputs.jsonl"),
+                    rollouts_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+                    output_jsonl_fpath=str(tmp_path / "recovered.jsonl"),
+                    judge_failed_only=True,
+                    disable_aggregation=True,
+                    resume_from_cache=False,
+                )
+            )
+        return results, recovered_transport, body, success, original, judge
+
+    results, transport, body, success, original, judge = asyncio.run(run())
+    assert len(transport.dispatched) == 1
+    assert transport.dispatched[0]["response"] == body["response"]
+    assert transport.dispatched[0]["prompt"] == body["prompt"]
+    assert transport.dispatched[0]["source_provenance"] == body["source_provenance"]
+    rows = {row["_ng_task_index"]: row for row in results}
+    assert rows[1] == success
+    assert rows[0]["response"] == body["response"]
+    assert rows[0]["reward"] == pytest.approx(2 / 101)
+    assert not rows[0]["mask_sample"]
+    assert "_ng_failure_class" not in rows[0]
+    (invocation,) = rows[0]["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    (operation,) = invocation["grading_operations"]
+    assert operation["outcome"] == "completed"
+    assert all(request["server_name"] == "offline_judge" for request in judge.requests)
+    assert all((tmp_path / name).read_bytes() == data for name, data in original.items())
+
+
+@pytest.mark.parametrize("mode", ["per_claim", "gpt5_card_batch"])
+def test_retrieval_programming_error_remains_a_verifier_error(mode):
+    async def run():
+        import httpx
+
+        server, _provider, _judge, body = _retrieval_failure_server(mode, ValueError)
+        transport = httpx.ASGITransport(app=server.setup_webserver(), raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            return await client.post("/ng-rollout/retrieval-programming-error/verify", json=body)
+
+    response = asyncio.run(run())
+    assert response.status_code == 500
+    row = response.json()
+    assert "_ng_failure_class" not in row
+    (invocation,) = row["ng_verifier_invocations"]
+    assert invocation["failure_kind"] == "verifier_error"

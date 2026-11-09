@@ -29,6 +29,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     observe_llm_judge_grading,
 )
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, record_parsed_judge_verdict
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 from resources_servers.longfact.card_fact_check import (
@@ -44,10 +45,10 @@ from resources_servers.longfact.evaluator import (
     EvaluatorParseError,
     JsonEvaluator,
 )
-from resources_servers.longfact.milvus_provider import MilvusProvider
-from resources_servers.longfact.tantivy_provider import TantivyProvider
+from resources_servers.longfact.milvus_provider import MilvusProvider, MilvusProviderError
+from resources_servers.longfact.tantivy_provider import TantivyProvider, TantivyProviderError
 from resources_servers.longfact.task_data import TaskData
-from resources_servers.longfact.tavily_provider import TavilyProvider
+from resources_servers.longfact.tavily_provider import TavilyProvider, TavilyProviderError
 from resources_servers.longfact.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 
 
@@ -331,6 +332,8 @@ class LongFactSafeServer(GymnasiumServer):
                 return await self._evaluate_fact(prompt, response, fact)
             except (EvaluatorIdentityError, JudgeError, NgFailureEvent):
                 raise
+            except (TavilyProviderError, TantivyProviderError, MilvusProviderError) as exc:
+                raise JudgeError(f"LongFact retrieval failed: {exc}") from exc
             except Exception as exc:  # noqa: BLE001 - retain per-claim failure provenance.
                 return {
                     "atomic_fact": fact,
@@ -396,6 +399,8 @@ class LongFactSafeServer(GymnasiumServer):
             return await self._check_batch(prompt, response, claims)
         except (EvaluatorIdentityError, JudgeError, NgFailureEvent):
             raise
+        except (TavilyProviderError, TantivyProviderError, MilvusProviderError) as exc:
+            raise JudgeError(f"LongFact retrieval failed: {exc}") from exc
         except Exception as exc:  # noqa: BLE001 - every claim in the batch keeps the failure provenance.
             return [
                 {"atomic_fact": claim, "label": "ERROR", "fact_error": repr(exc), "evidence": []} for claim in claims
@@ -777,3 +782,5 @@ RETRIEVED EVIDENCE:
 
 if __name__ == "__main__":
     LongFactSafeServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    app = LongFactSafeServer.run_webserver()

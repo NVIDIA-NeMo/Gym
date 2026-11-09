@@ -2,6 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+from textwrap import dedent
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +23,86 @@ from resources_servers.longfact.evaluator import (
     EvaluatorIdentityError,
     EvaluatorParseError,
 )
+
+
+@pytest.mark.parametrize("launch_mode", ["ordinary_import", "worker_import", "main_launch"])
+def test_entrypoint_import_constructs_only_the_app_requested_by_the_launcher(tmp_path: Path, launch_mode: str):
+    cache_dir = tmp_path / "tavily-replay"
+    cache_dir.mkdir(mode=0o700)
+    global_config = {
+        "dry_run": False,
+        "head_server": {"host": "127.0.0.1", "port": 1},
+        "worker_longfact": {
+            "resources_servers": {
+                "longfact": {
+                    "host": "127.0.0.1",
+                    "port": 0,
+                    "entrypoint": "app.py",
+                    "num_workers": 2 if launch_mode == "worker_import" else 1,
+                    "uvicorn_reuse_port": False,
+                    "evaluator_model_server": {"type": "responses_api_models", "name": "offline_judge"},
+                    "evaluator_responses_create_params": {"input": []},
+                    "search_backend": "tavily",
+                    "tavily_cache_mode": "replay",
+                    "tavily_cache_dir": str(cache_dir),
+                }
+            }
+        },
+    }
+    env = os.environ | {
+        "LONGFACT_ENTRYPOINT_TEST_MODE": launch_mode,
+        "IS_NEMO_GYM_FASTAPI_WORKER": "1" if launch_mode == "worker_import" else "0",
+        "IS_NEMO_GYM_FASTAPI_ENTRYPOINT": "resources_servers/longfact/app.py",
+        "NEMO_GYM_FASTAPI_NUM_WORKERS": "2" if launch_mode == "worker_import" else "1",
+        "NEMO_GYM_CONFIG_PATH": "worker_longfact",
+        "NEMO_GYM_CONFIG_DICT": "invalid: [" if launch_mode == "ordinary_import" else json.dumps(global_config),
+        "NEMO_GYM_OTEL_ENABLED": "0",
+    }
+    env.pop("NEMO_GYM_SESSION_SOCKET_DIR", None)
+    program = dedent("""
+        import importlib
+        import os
+        import runpy
+
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+
+        mode = os.environ["LONGFACT_ENTRYPOINT_TEST_MODE"]
+        if mode == "ordinary_import":
+            module = importlib.import_module("resources_servers.longfact.app")
+            assert not hasattr(module, "app"), "ordinary library import exported a running app"
+        else:
+            if mode == "main_launch":
+                import uvicorn
+
+                launches = []
+                uvicorn.run = lambda **kwargs: launches.append(kwargs)
+                runpy.run_module("resources_servers.longfact.app", run_name="__main__", alter_sys=True)
+                assert len(launches) == 1, "the main entrypoint must launch exactly once"
+                assert "workers" not in launches[0], "this fixture uses the one-worker socket-launch path"
+                app = launches[0]["app"]
+            else:
+                module = importlib.import_module("resources_servers.longfact.app")
+                app = module.app
+            assert isinstance(app, FastAPI), "the entrypoint must construct the real configured app"
+            paths = {route.path for route in app.routes}
+            assert {"/verify", "/seed_session", "/close_session", "/reset", "/step"} <= paths
+            with TestClient(app) as client:
+                reply = client.get("/health")
+                assert reply.status_code == 200
+                assert reply.json() == {"status": "ok"}
+        """)
+
+    completed = subprocess.run(
+        [sys.executable, "-c", program],
+        cwd=Path(__file__).resolve().parents[3],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def test_f1_at_100_matches_safe_formula():
