@@ -23,6 +23,10 @@ agentic_mme_opencode_agent:
   responses_api_agents:
     opencode_agent:
       description: Agentic-MME with OpenCode and the 14 image tools served over MCP
+      # Repeated from opencode.yaml: the dataset schema check reads each file's own agent block.
+      resources_server:
+        type: resources_servers
+        name: agentic_mme
       # OpenCode connects to the resources server's /mcp at session start and gives up after its default 30 s.
       # With 32 sessions starting at once, 33 of 836 rollouts timed out there and
       # failed unscored. The same limit applies to each tool call; the image tools answer in well under a second.

@@ -25,7 +25,7 @@ from typing import Any, ClassVar, Optional
 import cv2
 from fastapi import FastAPI, HTTPException, Request
 from PIL import Image
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
+from pydantic import ConfigDict, Field, PrivateAttr, TypeAdapter, ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.agents import HARNESS_STEP_LIMIT_METADATA_KEY
@@ -56,7 +56,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.agentic_mme.image_tools import IMAGE_TOOLS, ImageArgs, ImageWorkspace
-from resources_servers.agentic_mme.task_data import GoldenAnswer
+from resources_servers.agentic_mme.task_data import GoldenAnswer, ImageFile
 from resources_servers.agentic_mme.verifier_fixture import create_server
 
 
@@ -177,18 +177,7 @@ class AgenticMMESandboxConfig(SandboxConfig):
     image: Optional[str] = None
 
 
-class AgenticMMEImageFile(BaseModel):
-    """One task image that a lent sandbox holds."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    # Relative to image_root on this server's host; benchmarks/agentic_mme/prepare.py writes these files.
-    source: str = Field(min_length=1)
-    # Relative to the sandbox working directory, as the prompt names it.
-    target: str = Field(min_length=1)
-
-
-_IMAGE_FILES = TypeAdapter(list[AgenticMMEImageFile])
+_IMAGE_FILES = TypeAdapter(list[ImageFile])
 
 
 class AgenticMMEConfig(BaseResourcesServerConfig):
