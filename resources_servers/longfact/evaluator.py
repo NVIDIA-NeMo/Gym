@@ -315,7 +315,7 @@ class JsonEvaluator:
             return json.loads(candidate)
         except json.JSONDecodeError as exc:
             if salvage_embedded_json:
-                payload_start = re.search(r"[\[{]", candidate)
+                payload_start = re.search(r'[\[{"]', candidate)
                 if payload_start is not None:
                     try:
                         payload, _ = json.JSONDecoder().raw_decode(candidate[payload_start.start() :])

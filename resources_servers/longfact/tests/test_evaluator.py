@@ -76,6 +76,8 @@ def test_free_form_json_parser_rejects_unfenced_commentary():
     [
         '["The notation [] means an empty array.',
         '["The notation {} means an empty object.',
+        '"The notation [] means an empty array.',
+        'Here are the claims: "The notation [] means an empty array.',
         'Here are the claims: ["The notation [] means an empty array.',
         '{"claims": ["The notation [] means an empty array.',
     ],
