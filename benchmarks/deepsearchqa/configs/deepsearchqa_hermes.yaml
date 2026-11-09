@@ -1,13 +1,27 @@
-# DeepSearchQA with Hermes in a sandbox the agent creates, searching through the exa_search tool
-# server. single_agent_turn_legacy seeds the deepsearchqa verifier and an exa_search session, grants exa_search to
-# Hermes over MCP, closes the agent, verifies its answer, then closes both sessions. Hermes calls the
-# model server and exa_search from the sandbox, so Gym binds them to an address the sandbox can reach. Export
+# DeepSearchQA with Hermes in a sandbox the agent creates, searching the web with Exa through the
+# exa_search tool server (tavily_search with search_provider: exa). single_agent_turn_legacy seeds the
+# deepsearchqa verifier and an exa_search session, grants its web_search, find_in_page and scroll_page tools to
+# Hermes over MCP, closes the agent, verifies its answer, then closes both sessions. Hermes calls the model
+# server and exa_search from the sandbox, so Gym binds them to an address the sandbox can reach. Export
 # EXA_API_KEY and pass a sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml).
-config_paths:
-- resources_servers/exa_search/configs/exa_search.yaml
-
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models, resources_servers]
+
+exa_search:
+  resources_servers:
+    tavily_search:
+      entrypoint: app.py
+      domain: agent
+      description: Exa web search and page tools
+      search_provider: exa
+      exa_api_key: ${oc.env:EXA_API_KEY}
+      # Keeps the benchmark's own dataset pages out of search results and page reads.
+      exclude_domains_file_path: benchmarks/deepsearchqa/search_exclusions.json
+      expose_tools_over_mcp: true
+      use_judge: false
+      max_cached_page_chars: 200000
+      max_scroll_words: 2000
+      verified: false
 
 deepsearchqa:
   resources_servers:
@@ -31,7 +45,7 @@ deepsearchqa_agent:
     hermes_agent:
       entrypoint: app.py
       domain: agent
-      description: Run DeepSearchQA with Hermes and the exa_search tool server
+      description: Run DeepSearchQA with Hermes and Exa web search
       value: Evaluate agentic web search
       # Names the benchmark for its manifest; the Environment Server binds the episode's resources server.
       resources_server:
@@ -50,7 +64,7 @@ deepsearchqa_agent:
       chat_template_kwargs_enabled: false
       # The Hermes run's 2-hour budget, as the other harnesses' timeout.
       sandbox_runner_timeout_seconds: 7200
-      system_prompt: You must search with the exa_search tool before answering. Research the request on the web and return a complete final answer.
+      system_prompt: You must search the web with the web_search tool before answering, and read pages with find_in_page or scroll_page. Research the request on the web and return a complete final answer.
       concurrency: 32
       sandbox_provider: sandbox
       sandbox_config:
@@ -74,7 +88,7 @@ deepsearchqa_environment_server:
       agent_server:
         type: responses_api_agents
         name: deepsearchqa_agent
-      # The deepsearchqa verifier serves no tools; Exa search comes from the exa_search tool server.
+      # The deepsearchqa verifier serves no tools; the Exa search tools come from exa_search.
       resources_tool_transports: []
       tool_servers:
         - type: resources_servers

@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Multi-step web research with answer-set F1 scoring using the kilocode
-  harness and the exa_search tool server.
+  harness and Exa web search.
 modality: text
 licensing: unknown
 authors:

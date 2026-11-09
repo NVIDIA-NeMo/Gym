@@ -5,7 +5,7 @@ kind: benchmark
 integration_profile: custom-gym-agent-loop
 domain: knowledge
 description: Broad web research with official strict table and item matching using
-  the opencode harness and the exa_search tool server.
+  the opencode harness and Exa web search.
 modality: text
 licensing: MIT
 authors:

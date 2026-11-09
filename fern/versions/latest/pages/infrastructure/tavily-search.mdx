@@ -144,3 +144,14 @@ These behaviors apply to all Tavily configurations:
   `max_cached_page_chars` limits stored page content and applies only when caching
   is enabled (including the initial response). `max_scroll_words` caps each response
   independently of caching.
+
+## Exa provider
+
+Set `search_provider: exa` and `exa_api_key` (one key, a list, or a comma-separated
+pool) to serve the same tools from [Exa](https://exa.ai); no Tavily key is needed.
+`web_search` returns Exa's query-matched highlights as result summaries,
+`find_in_page` returns the passages of the page that match its query (or the page
+text when there are none), and `scroll_page` reads the page text. Exclusions, the
+provider-side domain subset (sent as `excludeDomains`), output limits, the page
+cache, and the retry and key-failover rules above apply unchanged, with 401 as the
+rejected-key status. `search_provider` defaults to `tavily`.

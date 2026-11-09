@@ -44,3 +44,16 @@ move to the front and a duplicate rule is sent once. The server logs one
 warning per start with the number of domains not sent. Every `domain` and
 `url_substring` rule is still enforced locally on requested and returned URLs,
 so the cap never widens what an agent can see.
+
+## Exa provider
+
+Set `search_provider: exa` and `exa_api_key` to serve the same three tools from
+[Exa](https://exa.ai) instead of Tavily; `tavily_api_key` is then not needed.
+`web_search` returns Exa's query-matched highlights as each result's summary,
+`find_in_page` returns the page passages that match its query (the page text
+when Exa returns none), and `scroll_page` reads the page text. The exclusion
+policy, the provider-side domain subset (sent as Exa's `excludeDomains`), output
+limits, page cache, key pool and bounded retries work as they do for Tavily; a
+401 tries the next Exa key. `exa_base_url` defaults to `https://api.exa.ai`.
+Tavily stays the default. The DeepSearchQA and WideSearch session configs run
+this as their `exa_search` tool server.

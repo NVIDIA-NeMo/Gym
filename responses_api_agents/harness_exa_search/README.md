@@ -4,8 +4,9 @@
 > **Deprecated.** `harness_exa_search` runs each episode through its own legacy `/run` path, behind a `legacy_agent`
 > environment server, and will be removed after the environment-server migration. Do not build new configs on it.
 > Session harnesses (`codex_agent`, `pi_agent`, `hermes_agent`, `opencode_agent`, `openclaw_agent`,
-> `kilocode_agent`) get Exa search from the [`exa_search`](../../resources_servers/exa_search/README.md) tool server
-> under `single_agent_turn_legacy` instead; the DeepSearchQA and WideSearch config copies for those harnesses do this.
+> `kilocode_agent`) get Exa search under `single_agent_turn_legacy` instead, from a
+> [`tavily_search`](../../resources_servers/tavily_search/README.md) tool server with `search_provider: exa`; the
+> DeepSearchQA and WideSearch config copies for those harnesses do this.
 > The Claude Code, Cline, Prime Agent, Simple Strands and NeMo Fabric DeepAgents copies have no session path with Exa
 > yet and stay on this agent. Existing configs keep working; the agent logs a deprecation warning when it starts.
 

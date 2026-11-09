@@ -1,13 +1,27 @@
-# WideSearch with OpenClaw in a sandbox the agent creates, searching through the exa_search tool
-# server. single_agent_turn_legacy seeds the widesearch verifier and an exa_search session, grants exa_search to
-# OpenClaw over MCP, closes the agent, verifies its answer, then closes both sessions. OpenClaw calls the
-# model server and exa_search from the sandbox, so Gym binds them to an address the sandbox can reach. Export
+# WideSearch with OpenClaw in a sandbox the agent creates, searching the web with Exa through the
+# exa_search tool server (tavily_search with search_provider: exa). single_agent_turn_legacy seeds the
+# widesearch verifier and an exa_search session, grants its web_search, find_in_page and scroll_page tools to
+# OpenClaw over MCP, closes the agent, verifies its answer, then closes both sessions. OpenClaw calls the model
+# server and exa_search from the sandbox, so Gym binds them to an address the sandbox can reach. Export
 # EXA_API_KEY and pass a sandbox provider config (nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml).
-config_paths:
-- resources_servers/exa_search/configs/exa_search.yaml
-
 use_absolute_ip: true
 absolute_ip_server_types: [responses_api_models, resources_servers]
+
+exa_search:
+  resources_servers:
+    tavily_search:
+      entrypoint: app.py
+      domain: agent
+      description: Exa web search and page tools
+      search_provider: exa
+      exa_api_key: ${oc.env:EXA_API_KEY}
+      # Keeps the benchmark's own dataset pages out of search results and page reads.
+      exclude_domains_file_path: benchmarks/widesearch/search_exclusions.json
+      expose_tools_over_mcp: true
+      use_judge: false
+      max_cached_page_chars: 200000
+      max_scroll_words: 2000
+      verified: false
 
 widesearch:
   resources_servers:
@@ -31,7 +45,7 @@ widesearch_openclaw_benchmark:
     openclaw_agent:
       entrypoint: app.py
       domain: agent
-      description: Run WideSearch with OpenClaw and the exa_search tool server
+      description: Run WideSearch with OpenClaw and Exa web search
       value: Evaluate agentic web search
       # Names the benchmark for its manifest; the Environment Server binds the episode's resources server.
       resources_server:
@@ -47,7 +61,7 @@ widesearch_openclaw_benchmark:
       context_window: 262144
       max_output_tokens: 131072
       openclaw_version: 2026.6.11
-      system_prompt: You must search with the exa_search tool before answering. Research the request on the web and return exactly the requested Markdown table.
+      system_prompt: You must search the web with the web_search tool before answering, and read pages with find_in_page or scroll_page. Research the request on the web and return exactly the requested Markdown table.
       concurrency: 32
       sandbox_provider: sandbox
       sandbox_config:
@@ -72,7 +86,7 @@ widesearch_openclaw_benchmark_environment_server:
       agent_server:
         type: responses_api_agents
         name: widesearch_openclaw_benchmark
-      # The widesearch verifier serves no tools; Exa search comes from the exa_search tool server.
+      # The widesearch verifier serves no tools; the Exa search tools come from exa_search.
       resources_tool_transports: []
       tool_servers:
         - type: resources_servers

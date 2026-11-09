@@ -38,10 +38,10 @@ LOG = logging.getLogger(__name__)
 DEPRECATION_WARNING = (
     "DEPRECATED: harness_exa_search runs each episode through its own legacy /run path and will be removed after "
     "the environment-server migration. Use a session harness (codex_agent, pi_agent, hermes_agent, opencode_agent, "
-    "openclaw_agent, kilocode_agent) under single_agent_turn_legacy with the exa_search tool server in tool_servers "
-    "instead, as the deepsearchqa and widesearch config copies for those harnesses do. The Claude Code, Cline, "
-    "Prime Agent, Simple Strands and NeMo Fabric DeepAgents copies have no such path yet and keep working here. "
-    "See resources_servers/exa_search/README.md."
+    "openclaw_agent, kilocode_agent) under single_agent_turn_legacy with a tavily_search tool server set to "
+    "search_provider: exa in tool_servers instead, as the deepsearchqa and widesearch config copies for those "
+    "harnesses do. The Claude Code, Cline, Prime Agent, Simple Strands and NeMo Fabric DeepAgents copies have no such "
+    "path yet and keep working here. See resources_servers/tavily_search/README.md."
 )
 
 

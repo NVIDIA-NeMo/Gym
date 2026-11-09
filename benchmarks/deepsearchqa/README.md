@@ -33,11 +33,14 @@ a shared agent config. There are two kinds:
 
 - **Session harnesses** (Codex, Pi, Hermes, OpenCode, OpenClaw, Kilo Code) run
   under `single_agent_turn_legacy`. Each episode, the agent creates its own
-  sandbox and gets Exa search as the `exa_search` tool, granted over MCP by the
-  [`exa_search`](../../resources_servers/exa_search/README.md) tool server
-  (`tool_servers`). The sandbox calls the model server and `exa_search` on the
-  Gym host, so these configs set `use_absolute_ip: true`: the sandbox must be
-  able to reach that host.
+  sandbox and gets the `web_search`, `find_in_page` and `scroll_page` tools over
+  MCP from the `exa_search` tool server (`tool_servers`): a
+  [`tavily_search`](../../resources_servers/tavily_search/README.md) server with
+  `search_provider: exa`. Its exclusion policy,
+  [`search_exclusions.json`](search_exclusions.json), keeps the dataset's
+  Hugging Face pages out of results and page reads. The sandbox calls the model
+  server and `exa_search` on the Gym host, so these configs set
+  `use_absolute_ip: true`: the sandbox must be able to reach that host.
 - **Claude Code, Cline, Prime Agent, Simple Strands, and NeMo Fabric
   DeepAgents** still run through the deprecated `harness_exa_search` agent
   behind `legacy_agent`, which starts the harness and its Exa integration in a

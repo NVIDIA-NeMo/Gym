@@ -241,8 +241,8 @@ def test_only_the_main_process_logs_the_deprecation_once(monkeypatch, caplog, wo
     for phrase in (
         "harness_exa_search",
         "legacy /run",
-        "exa_search tool server",
+        "search_provider: exa",
         "Claude Code",
-        "exa_search/README.md",
+        "tavily_search/README.md",
     ):
         assert phrase in app.DEPRECATION_WARNING
