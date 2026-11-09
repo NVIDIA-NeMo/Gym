@@ -16,6 +16,9 @@
 tip-selection logic, and the async capture against a fake sandbox that answers the git commands
 the way a real repo would in each scenario."""
 
+import os
+import shutil
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -27,9 +30,12 @@ from resources_servers.swebench.patch_capture import (
     TipCandidate,
     capture_model_patch,
     drop_sections_under,
+    drop_test_patch_files,
+    drop_unappliable_sections,
     parse_tip_candidates,
     patch_files,
     prepare_git_for_commits,
+    remove_broken_gitfiles,
     select_tip,
 )
 
@@ -180,7 +186,117 @@ async def test_pristine_untracked_files_and_nested_repo_dirs_are_stripped():
         sb2, "/repo", BASE, mode="committed", pristine_untracked=frozenset({"extern/cmake/"})
     )
     assert cap2.patch == COMMITTED_DIFF
-    assert cap2.worktree_patch_bytes == len(COMMITTED_DIFF + GITLINK)
+    # The worktree diff keeps its exact-path drop, but a submodule pointer never applies, so it goes too.
+    assert cap2.worktree_patch_bytes == len(COMMITTED_DIFF)
+
+
+@pytest.mark.asyncio
+async def test_binary_stubs_and_submodule_pointers_are_dropped_with_a_warning():
+    stub = "diff --git a/img.png b/img.png\nindex 1..2 100644\nBinary files a/img.png and b/img.png differ\n"
+    sb = _FakeSandbox(status=" M src/x.py\n", worktree_diff=WORKTREE_DIFF + stub + GITLINK)
+    cap = await capture_model_patch(sb, "/repo", BASE, mode="worktree")
+    assert cap.patch == WORKTREE_DIFF
+    assert any("dropped 2 binary/submodule sections" in w and "img.png" in w for w in cap.warnings)
+
+
+def test_drop_unappliable_sections_keeps_text_sections_and_returns_untouched_patches_as_is():
+    bumped = (
+        "diff --git a/vendor/lib b/vendor/lib\nindex abc1234..def5678 160000\n--- a/vendor/lib\n+++ b/vendor/lib\n"
+        "@@ -1 +1 @@\n-Subproject commit abc1234\n+Subproject commit def5678\n"
+    )
+    new_bin = (
+        "diff --git a/build/app b/build/app\nnew file mode 100755\nindex 0000000..1\n"
+        "Binary files /dev/null and b/build/app differ\n"
+    )
+    kept, dropped = drop_unappliable_sections(WORKTREE_DIFF + bumped + new_bin)
+    assert kept == WORKTREE_DIFF and dropped == ["vendor/lib", "build/app"]
+    assert drop_unappliable_sections(WORKTREE_DIFF) == (WORKTREE_DIFF, [])
+    assert drop_unappliable_sections("") == ("", [])
+
+
+def _section(old: str, new: str) -> str:
+    body = "@@ -1 +1 @@\n-a\n+b\n"
+    if old == new:
+        return f"diff --git a/{old} b/{new}\n--- a/{old}\n+++ b/{new}\n{body}"
+    if old == "/dev/null":
+        return f"diff --git a/{new} b/{new}\nnew file mode 100644\n--- /dev/null\n+++ b/{new}\n{body}"
+    if new == "/dev/null":
+        return f"diff --git a/{old} b/{old}\ndeleted file mode 100644\n--- a/{old}\n+++ /dev/null\n{body}"
+    return (
+        f"diff --git a/{old} b/{new}\nsimilarity index 80%\nrename from {old}\nrename to {new}\n"
+        f"--- a/{old}\n+++ b/{new}\n{body}"
+    )
+
+
+def test_drop_test_patch_files_matches_the_old_and_the_new_path_of_a_rename():
+    # The hidden tests rename tests/test_decode.c to tests/test_h1_decoder.c (aws-c-http-64).
+    test_patch = _section("tests/test_decode.c", "tests/test_h1_decoder.c") + _section("tests/t2.c", "tests/t2.c")
+    src = _section("src/decoder.c", "src/decoder.c")
+    for agent_change in (
+        _section("tests/test_decode.c", "tests/test_decode.c"),  # edits the file the tests rename
+        _section("tests/test_decode.c", "/dev/null"),  # deletes it
+        _section("tests/test_decode.c", "tests/decode_test.c"),  # moves it elsewhere
+        _section("/dev/null", "tests/test_h1_decoder.c"),  # writes the rename's target
+        _section("tests/t2.c", "tests/t2.c"),  # plain edit of a held-out file
+    ):
+        assert drop_test_patch_files(src + agent_change, test_patch) == src
+    assert drop_test_patch_files(src, test_patch) == src
+    unrelated = src + _section("tests/t2.c", "tests/t2.c")
+    assert drop_test_patch_files(unrelated, "") == unrelated
+
+
+def test_drop_test_patch_files_reads_binary_and_quoted_sections_by_their_header():
+    binary_test = (
+        "diff --git a/tests/data/x.gz b/tests/data/x.gz\nnew file mode 100644\n"
+        "Binary files /dev/null and b/tests/data/x.gz differ\n"
+    )
+    assert (
+        drop_test_patch_files(_section("/dev/null", "tests/data/x.gz") + WORKTREE_DIFF, binary_test) == WORKTREE_DIFF
+    )
+    quoted_test = (
+        'diff --git "a/tests/my test.py" "b/tests/my test.py"\n--- "a/tests/my test.py"\n'
+        '+++ "b/tests/my test.py"\n@@ -1 +1 @@\n-a\n+b\n'
+    )
+    assert drop_test_patch_files(quoted_test + WORKTREE_DIFF, quoted_test) == WORKTREE_DIFF
+
+
+class _LocalSandbox:
+    """Runs each command in a real bash, with git's global config confined to ``home``."""
+
+    def __init__(self, home) -> None:
+        self.env = {**os.environ, "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    async def exec(self, command: str, timeout_s=None, **kwargs):
+        done = subprocess.run(["bash", "-c", command], capture_output=True, text=True, env=self.env)
+        return SimpleNamespace(return_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+@pytest.mark.asyncio
+async def test_remove_broken_gitfiles_makes_git_usable_again_and_keeps_working_submodules(tmp_path):
+    sb = _LocalSandbox(tmp_path)
+    repo = tmp_path / "repo"
+    git = f"git -C {repo} -c user.email=t@t -c user.name=t"
+    await sb.exec(f"git init -q {repo} && echo a > {repo}/a.c && {git} add a.c && {git} commit -qm base")
+    # An image that kept vendor/termbox/.git but stripped .git/modules (adsr-phpspy-104), one nested a
+    # level deeper (azure-kinect), and a submodule whose gitdir does exist.
+    for broken in ("vendor/termbox", "extern/sdk/deps/cjson"):
+        (repo / broken).mkdir(parents=True)
+        (repo / broken / ".git").write_text(f"gitdir: ../../.git/modules/{broken}\n")
+        (repo / broken / "x.c").write_text("x\n")
+    ok = f"git -C {repo}/lib/ok -c user.email=t@t -c user.name=t"
+    await sb.exec(
+        f"git init -q --separate-git-dir={tmp_path}/ok.git {repo}/lib/ok && {ok} commit -q --allow-empty -m ok"
+    )
+    await sb.exec(f"{git} update-index --add --cacheinfo 160000,{'1' * 40},vendor/termbox")
+    assert (await sb.exec(f"git -C {repo} status --porcelain")).return_code == 128
+
+    await remove_broken_gitfiles(sb, str(repo), "t")
+
+    assert (await sb.exec(f"git -C {repo} status --porcelain")).return_code == 0
+    assert (await sb.exec(f"git -C {repo} add -N . && git -C {repo} diff HEAD")).return_code == 0
+    assert not (repo / "vendor/termbox/.git").exists() and not (repo / "extern/sdk/deps/cjson/.git").exists()
+    assert (repo / "lib/ok/.git").is_file() and (repo / "vendor/termbox/x.c").exists()
 
 
 @pytest.mark.asyncio

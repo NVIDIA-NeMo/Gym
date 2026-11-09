@@ -320,7 +320,9 @@ class TestServerWiring:
 
     def test_seed_session_restores_blobs_scrubs_then_seeds_a_committer_identity(self) -> None:
         source = self._source()
-        assert source.index("await self._ensure_git_repo(") < source.index("await self._restore_missing_blobs(")
+        assert source.index("await self._ensure_git_repo(") < source.index("await remove_broken_gitfiles(")
+        # A broken submodule .git file makes the restore's `git add -u` die, so it goes first.
+        assert source.index("await remove_broken_gitfiles(") < source.index("await self._restore_missing_blobs(")
         assert source.index("await self._restore_missing_blobs(") < source.index("apply_anti_cheat_setup(sandbox")
         assert source.index("apply_anti_cheat_setup(sandbox") < source.index("await prepare_git_for_commits(")
 

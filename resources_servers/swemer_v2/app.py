@@ -64,6 +64,7 @@ from resources_servers.swebench.patch_capture import (
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
+    remove_broken_gitfiles,
 )
 from resources_servers.swemer_v2.verification import (
     VerificationInputs,
@@ -262,6 +263,7 @@ class SwemerV2ResourcesServer(SimpleResourcesServer):
 
         sandbox = await self._create_sandbox(body)
         await self._ensure_git_repo(sandbox, body.workdir)
+        await remove_broken_gitfiles(sandbox, body.workdir, "swemer_v2")
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v2")
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.

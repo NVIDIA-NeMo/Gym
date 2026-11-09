@@ -114,6 +114,67 @@ def drop_sections_under(patch: str, dirs: Iterable[str]) -> str:
     return "".join(kept)
 
 
+def _split_sections(patch: str) -> list[str]:
+    return [s for s in re.split(r"(?=^diff --git )", patch or "", flags=re.M) if s.strip()]
+
+
+def _unquote_path(value: str) -> str:
+    value = value.strip()
+    return value[1:-1] if len(value) >= 2 and value[0] == value[-1] == '"' else value
+
+
+def patch_section_paths(section: str) -> set[str]:
+    """Every path one ``diff --git`` section reads or writes: a rename or copy names its old and new path."""
+    paths: set[str] = set()
+    for line in section.splitlines()[1:]:
+        if line.startswith("@@"):
+            break
+        if line.startswith(("--- ", "+++ ")):
+            value = _unquote_path(line[4:])
+            if value != "/dev/null":
+                paths.add(value[2:] if value.startswith(("a/", "b/")) else value)
+        elif line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            paths.add(_unquote_path(line.split(" ", 2)[2]))
+    if not paths:  # binary or mode-only section: only the header names the file
+        header = re.match(r'^diff --git (?:"a/(.+?)" "b/(.+)"|a/(.+?) b/(.+))$', section.split("\n", 1)[0])
+        if header:
+            paths = {p for p in header.groups() if p}
+    return paths
+
+
+def drop_test_patch_files(patch: str, test_patch: str) -> str:
+    """Drop the sections of ``patch`` that touch a file ``test_patch`` touches, so the held-out tests apply onto
+    the files as the dataset left them (the SWE-bench harness resets them the same way).
+
+    Both sides are matched by old and new path. When the test patch renames ``t.py`` to ``test_t.py``, an agent
+    edit, deletion or move of ``t.py`` has to go too, or the rename finds nothing (or the wrong text) to move and
+    the test patch fails to apply on every rollout of a task whose fix itself moves files."""
+    held_out = set().union(*map(patch_section_paths, _split_sections(test_patch)))
+    if not patch or not held_out:
+        return patch
+    return "".join(s for s in _split_sections(patch) if not patch_section_paths(s) & held_out)
+
+
+_BINARY_STUB = re.compile(r"^Binary files .* differ$", re.M)
+_GITLINK_MODE = re.compile(r"^(?:(?:new|deleted) file mode 160000|index \S+ 160000)$", re.M)
+
+
+def drop_unappliable_sections(patch: str) -> tuple[str, list[str]]:
+    """Drop the sections no apply step can use; returns the patch and the dropped sections' paths.
+
+    A plain ``git diff`` names a binary change without its data ("Binary files ... differ"), and a submodule
+    pointer (often a dependency checkout the agent's build cloned) has no content to apply. Left in, each fails
+    ``git apply``/``patch`` and turns an otherwise clean patch into a partial apply."""
+    kept: list[str] = []
+    dropped: list[str] = []
+    for section in _split_sections(patch):
+        if section.startswith("diff --git ") and (_BINARY_STUB.search(section) or _GITLINK_MODE.search(section)):
+            dropped.extend(sorted(patch_section_paths(section)))
+        else:
+            kept.append(section)
+    return ("".join(kept), dropped) if dropped else (patch, [])
+
+
 def select_tip(candidates: Iterable[TipCandidate], head_sha: str | None) -> TipCandidate | None:
     """Descendants of base beat non-descendants, more commits beat fewer, HEAD breaks ties."""
     best: TipCandidate | None = None
@@ -183,6 +244,30 @@ async def prepare_git_for_commits(sandbox: Any, workdir: str, log_prefix: str = 
         print(f"[{log_prefix}] git identity setup failed: {exc}", flush=True)
 
 
+async def remove_broken_gitfiles(sandbox: Any, workdir: str, log_prefix: str = "patch_capture") -> None:
+    """Delete every submodule ``.git`` file under ``workdir`` whose gitdir is gone. Never raises.
+
+    Some delivery images strip ``.git/modules`` but keep the submodules' ``.git`` files, and then every ``git
+    status`` or ``git add`` in the repo dies with "not a git repository" (exit 128): the agent's own git use, the
+    blob restore and the patch capture alike. Without the file git sees an unpopulated submodule."""
+    script = (
+        f"cd {shlex.quote(workdir)} || exit 0; "
+        "find . -path ./.git -prune -o -name node_modules -prune -o -name .git -type f -print "
+        '| while IFS= read -r f; do d="${f%/.git}"; '
+        'git -C "$d" rev-parse --git-dir >/dev/null 2>&1 || { rm -f -- "$f" && echo "$d"; }; done'
+    )
+    try:
+        result = await sandbox.exec(script, timeout_s=300)
+        removed = (result.stdout or "").splitlines()
+        if removed:
+            print(
+                f"[{log_prefix}] {workdir}: removed {len(removed)} broken submodule .git files: {removed[:5]}",
+                flush=True,
+            )
+    except Exception as exc:  # pragma: no cover - provider hiccup; the capture reports any git failure later
+        print(f"[{log_prefix}] broken .git file cleanup failed: {exc}", flush=True)
+
+
 class CaptureCommandError(RuntimeError):
     """A capture command exited non-zero in the agent's sandbox.
 
@@ -226,7 +311,12 @@ async def capture_model_patch(
     cap = PatchCapture(patch="", mode=mode, source="none", base_commit=base_commit)
 
     def _clean(patch: str) -> str:
-        return drop_sections(patch, pristine_untracked) if drop_sections and pristine_untracked else patch
+        if drop_sections and pristine_untracked:
+            patch = drop_sections(patch, pristine_untracked)
+        patch, dropped = drop_unappliable_sections(patch)
+        if dropped:
+            cap.warnings.append(f"dropped {len(dropped)} binary/submodule sections no apply can use: {dropped[:5]}")
+        return patch
 
     # `git ls-files --others` reports a nested checkout as "dir/", while a diff names it "dir", so
     # the exact-path drop above misses it; treat "dir/" entries as prefixes for the committed diff.

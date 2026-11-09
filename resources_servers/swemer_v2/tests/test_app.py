@@ -325,6 +325,8 @@ class TestAntiCheating:
         ensure_idx = source.index("await self._ensure_git_repo(")
         anti_cheat_idx = source.index("apply_anti_cheat_setup(sandbox")
         assert ensure_idx < anti_cheat_idx
+        # Broken submodule .git files go before anything that walks the tree (ethereum-optimism-10248).
+        assert ensure_idx < source.index("await remove_broken_gitfiles(") < anti_cheat_idx
 
     def test_agent_facing_config_turns_it_on(self) -> None:
         from pathlib import Path

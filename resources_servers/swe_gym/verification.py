@@ -41,6 +41,7 @@ from resources_servers.swe_gym.swebench_specs import (
     spec_for,
     touched_test_files,
 )
+from resources_servers.swebench.patch_capture import drop_test_patch_files as drop_test_patch_files
 
 
 REPO_DIRECTORY = "/testbed"
@@ -127,16 +128,6 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
             continue
         kept.append(section)
     return "".join(kept)
-
-
-def drop_test_patch_files(patch: str, test_patch: str) -> str:
-    """A model may not edit the held-out tests: its sections for those files are discarded before
-    the test patch is applied, exactly as the SWE-bench harness resets them."""
-    return drop_patch_sections(patch, [p for p in map(patch_section_path, _sections(test_patch)) if p])
-
-
-def _sections(patch: str) -> list[str]:
-    return ["diff --git " + s for s in patch.split("diff --git ") if s.strip()]
 
 
 def build_eval_script(inputs: VerificationInputs) -> str:

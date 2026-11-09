@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from resources_servers.swebench.patch_capture import drop_test_patch_files as drop_test_patch_files
 from responses_api_agents.swe_agents.swe_bench_ext.frameworks import (
     get_framework_config,
     get_test_command_with_output,
@@ -155,11 +156,6 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
         kept.append(section)
 
     return "".join(kept)
-
-
-def drop_test_patch_files(patch: str, test_patch: str) -> str:
-    sections = re.split(r"(?=^diff --git )", test_patch, flags=re.MULTILINE)
-    return drop_patch_sections(patch, {patch_section_path(section) for section in sections if section.strip()})
 
 
 def _result_file_read_command(result_file: str) -> str:

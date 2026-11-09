@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from resources_servers.swebench.patch_capture import drop_test_patch_files as drop_test_patch_files
+
 
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SCALE_SWE_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SCALE_SWE_TEST_END___"
@@ -189,11 +191,6 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
         kept.append(section)
 
     return "".join(kept)
-
-
-def drop_test_patch_files(patch: str, test_patch: str) -> str:
-    sections = re.split(r"(?=^diff --git )", test_patch, flags=re.MULTILINE)
-    return drop_patch_sections(patch, {patch_section_path(section) for section in sections if section.strip()})
 
 
 def build_eval_script(inputs: VerificationInputs) -> str:

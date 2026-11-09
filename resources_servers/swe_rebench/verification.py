@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from resources_servers.swebench.patch_capture import drop_test_patch_files as drop_test_patch_files
+
 
 # The marker delimits the graded test output from the install noise that precedes it. Parsers
 # are line-oriented and several will happily interpret dependency-resolver chatter as test
@@ -110,11 +112,6 @@ def drop_patch_sections(patch: str, paths: Iterable[str]) -> str:
         kept.append(section)
 
     return "".join(kept)
-
-
-def drop_test_patch_files(patch: str, test_patch: str) -> str:
-    sections = re.split(r"(?=^diff --git )", test_patch, flags=re.MULTILINE)
-    return drop_patch_sections(patch, {patch_section_path(section) for section in sections if section.strip()})
 
 
 @dataclass

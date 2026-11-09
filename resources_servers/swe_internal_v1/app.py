@@ -68,6 +68,7 @@ from resources_servers.swebench.patch_capture import (
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
+    remove_broken_gitfiles,
 )
 
 
@@ -231,7 +232,8 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
     async def _restore_missing_blobs(self, sandbox: AsyncSandbox, workdir: str) -> None:
         """Same guard as swemer_oml: an image whose ``.git`` had its blobs stripped loses every
         tracked file the anti-cheat ``git reset --hard`` cannot re-read. Rewrite blobs from the
-        working tree first; a no-op (one probe) when HEAD's blobs are readable."""
+        working tree first; a no-op (one probe) when HEAD's blobs are readable. The commit skips the
+        repo's own hooks, which can reject it (husky ``commit-msg``, lint-staged ``pre-commit``)."""
         wd = shlex.quote(workdir)
         probe = await sandbox.exec(
             f'cd {wd} && for f in $(git ls-files | head -3); do git cat-file -e "HEAD:$f" || exit 3; done',
@@ -247,8 +249,8 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
             f"cd {wd} && git ls-files -z --stage | while IFS= read -r -d '' e; do "
             "m=${e%% *}; p=${e#*$'\\t'}; case $m in 100644|100755) printf '%s\\0' \"$p\";; esac; done "
             "| xargs -0 -r -n 500 git hash-object -w -- || true; git add -u && "
-            "(git -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym commit -q -m "
-            "'nemo_gym: restore blobs stripped from the image' || true)",
+            "(git -c core.hooksPath=/dev/null -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym "
+            "commit --no-verify -q -m 'nemo_gym: restore blobs stripped from the image' || true)",
             timeout_s=900,
         )
         if result.return_code != 0:
@@ -297,6 +299,7 @@ class SweInternalV1ResourcesServer(SimpleResourcesServer):
 
         sandbox = await self._create_sandbox(body)
         await self._ensure_git_repo(sandbox, body.workdir)
+        await remove_broken_gitfiles(sandbox, body.workdir, "swe_internal_v1")
         await self._restore_missing_blobs(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_internal_v1")

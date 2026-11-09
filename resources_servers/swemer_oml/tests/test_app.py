@@ -16,6 +16,9 @@
 verification sandbox, verdict parsing of the package grader's output, response shape, anti-cheat
 wiring and the multi-worker entrypoint."""
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -297,6 +300,8 @@ class TestServerWiring:
     def test_seed_session_scrubs_then_seeds_a_committer_identity(self) -> None:
         source = self._source()
         assert source.index("await self._ensure_git_repo(") < source.index("apply_anti_cheat_setup(sandbox")
+        # A broken submodule .git file makes the restore's `git add -u` die, so it goes first.
+        assert source.index("await remove_broken_gitfiles(") < source.index("await self._restore_missing_blobs(")
         # Blob restore must run before the scrub: its `git reset --hard` deletes files it cannot re-read.
         assert source.index("await self._restore_missing_blobs(") < source.index("apply_anti_cheat_setup(sandbox")
         assert source.index("apply_anti_cheat_setup(sandbox") < source.index("await prepare_git_for_commits(")
@@ -335,12 +340,13 @@ class TestRestoreMissingBlobs:
             return SimpleNamespace(return_code=rc, stdout="", stderr="")
 
     @pytest.mark.asyncio
-    async def test_intact_repo_is_left_alone(self) -> None:
+    async def test_intact_repo_only_commits_build_drift(self) -> None:
         from resources_servers.swemer_oml.app import SwemerOmlResourcesServer
 
         sb = self._Sandbox(probe_rc=0)
         await SwemerOmlResourcesServer._restore_missing_blobs(None, sb, "/workspace/repo")
-        assert len(sb.commands) == 1 and "cat-file -e" in sb.commands[0]
+        assert len(sb.commands) == 2 and "cat-file -e" in sb.commands[0]
+        assert "hash-object" not in sb.commands[1] and "git add -u" in sb.commands[1]
 
     @pytest.mark.asyncio
     async def test_blob_stripped_repo_is_re_added_and_committed(self) -> None:
@@ -352,4 +358,75 @@ class TestRestoreMissingBlobs:
         cmd = sb.commands[1]
         assert "git ls-files -z --stage" in cmd and "git hash-object -w --" in cmd
         assert "100644|100755" in cmd  # gitlinks (160000) and symlinks (120000) are skipped
-        assert "git add -u" in cmd and "git add -A" not in cmd and "commit -q" in cmd
+        assert "git add -u" in cmd and "git add -A" not in cmd and "commit --no-verify -q" in cmd
+
+
+def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["git", "-C", str(repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "HOME": str(repo.parent), "GIT_CONFIG_NOSYSTEM": "1"},
+    )
+
+
+class _LocalSandbox:
+    """Runs each command in a real bash, with git's global config confined to ``home``."""
+
+    def __init__(self, home: Path) -> None:
+        self.env = {**os.environ, "HOME": str(home), "GIT_CONFIG_NOSYSTEM": "1"}
+
+    async def exec(self, command: str, timeout_s=None, **kwargs):
+        done = subprocess.run(["bash", "-c", command], capture_output=True, text=True, env=self.env)
+        return SimpleNamespace(return_code=done.returncode, stdout=done.stdout, stderr=done.stderr)
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not installed")
+class TestRestoreMissingBlobsOnARealRepo:
+    """The two image shapes that made patch extraction fail on every rollout, rebuilt with git."""
+
+    @staticmethod
+    def _repo(tmp_path: Path) -> Path:
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-q")
+        (repo / "a.js").write_text("a\n")
+        (repo / "package-lock.json").write_text('{"v": 1}\n')
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-qm", "base")
+        # The repo's own hooks (husky commitlint, lint-staged) reject any other commit.
+        for hook in ("pre-commit", "commit-msg"):
+            (repo / ".git" / "hooks" / hook).write_text("#!/bin/sh\nexit 1\n")
+            (repo / ".git" / "hooks" / hook).chmod(0o755)
+        # The image build rewrote a tracked file (npm install).
+        (repo / "package-lock.json").write_text('{"v": 2}\n')
+        return repo
+
+    @pytest.mark.asyncio
+    async def test_blob_stripped_repo_with_commit_hooks_gets_readable_blobs(self, tmp_path) -> None:
+        from resources_servers.swemer_oml.app import SwemerOmlResourcesServer
+
+        repo = self._repo(tmp_path)
+        for path in ("a.js", "package-lock.json"):  # strip the blobs, as the delivery images do
+            sha = _git(repo, "rev-parse", f"HEAD:{path}").stdout.strip()
+            (repo / ".git" / "objects" / sha[:2] / sha[2:]).unlink()
+        assert _git(repo, "cat-file", "-e", "HEAD:a.js").returncode != 0
+
+        await SwemerOmlResourcesServer._restore_missing_blobs(None, _LocalSandbox(tmp_path), str(repo))
+
+        assert _git(repo, "cat-file", "-e", "HEAD:a.js").returncode == 0
+        assert _git(repo, "status", "--porcelain", "--untracked-files=no").stdout == ""
+        # What anti-cheat runs next; it used to fail here and delete the drifted file.
+        assert _git(repo, "reset", "--hard").returncode == 0
+        assert (repo / "package-lock.json").read_text() == '{"v": 2}\n'
+
+    @pytest.mark.asyncio
+    async def test_intact_repo_keeps_the_build_drift_through_the_anti_cheat_reset(self, tmp_path) -> None:
+        from resources_servers.swemer_oml.app import SwemerOmlResourcesServer
+
+        repo = self._repo(tmp_path)
+        await SwemerOmlResourcesServer._restore_missing_blobs(None, _LocalSandbox(tmp_path), str(repo))
+        _git(repo, "reset", "--hard")
+        # The agent now starts from the same package-lock.json the grading sandbox has.
+        assert (repo / "package-lock.json").read_text() == '{"v": 2}\n'
+        assert _git(repo, "log", "-1", "--format=%s").stdout.strip() == "nemo_gym: snapshot the image working tree"

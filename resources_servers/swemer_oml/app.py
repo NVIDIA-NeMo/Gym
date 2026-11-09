@@ -60,6 +60,7 @@ from resources_servers.swebench.patch_capture import (
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
+    remove_broken_gitfiles,
 )
 from resources_servers.swemer_oml.verification import (
     VerificationInputs,
@@ -236,33 +237,42 @@ class SwemerOmlResourcesServer(SimpleResourcesServer):
         works until something has to read a blob: the anti-cheat ``git reset --hard`` then deletes
         each tracked file it cannot re-read (seen on ~10% of tasks, those whose index drifted during
         the image build), and ``git diff <base> <tip>`` cannot read the base side of a modified file.
-        Re-adding the tree rewrites the blobs for what is on disk; a follow-up commit makes that the
-        base when the build left tracked files modified. Skipped when HEAD's blobs are readable."""
+        Re-adding the tree rewrites the blobs for what is on disk.
+
+        Either way, a commit then makes the image's working tree the base. Images with readable blobs
+        can still ship tracked files the build modified (an npm install's ``package-lock.json``): the
+        anti-cheat reset reverts those in the agent's sandbox only, the grading sandbox keeps them, and
+        an agent patch over such a file no longer applies. The commit skips the repo's own hooks: a
+        husky ``commit-msg`` rule or a lint-staged ``pre-commit`` rejects it and leaves the blobs
+        unreadable."""
         wd = shlex.quote(workdir)
         probe = await sandbox.exec(
             f'cd {wd} && for f in $(git ls-files | head -3); do git cat-file -e "HEAD:$f" || exit 3; done',
             timeout_s=120,
         )
-        if probe.return_code == 0:
-            return
-        print(
-            f"[swemer_oml] {workdir}: HEAD blobs missing (blob-stripped image); restoring from the working tree",
-            flush=True,
-        )
-        # Rewrite a blob for every regular tracked file (gitlinks and symlinks skipped: nested
-        # checkouts have no .git/modules in these images and would abort the batch), then stage
-        # only tracked modifications so the drifted files get a readable base too.
+        rewrite_blobs = ""
+        if probe.return_code != 0:
+            print(
+                f"[swemer_oml] {workdir}: HEAD blobs missing (blob-stripped image); restoring from the working tree",
+                flush=True,
+            )
+            # Rewrite a blob for every regular tracked file (gitlinks and symlinks skipped: nested
+            # checkouts have no .git/modules in these images and would abort the batch).
+            rewrite_blobs = (
+                "git ls-files -z --stage | while IFS= read -r -d '' e; do "
+                "m=${e%% *}; p=${e#*$'\\t'}; case $m in 100644|100755) printf '%s\\0' \"$p\";; esac; done "
+                "| xargs -0 -r -n 500 git hash-object -w -- || true; "
+            )
+        # Stage only tracked modifications, so the drifted files get a readable base too.
         result = await sandbox.exec(
-            f"cd {wd} && git ls-files -z --stage | while IFS= read -r -d '' e; do "
-            "m=${e%% *}; p=${e#*$'\\t'}; case $m in 100644|100755) printf '%s\\0' \"$p\";; esac; done "
-            "| xargs -0 -r -n 500 git hash-object -w -- || true; git add -u && "
-            "(git -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym commit -q -m "
-            "'nemo_gym: restore blobs stripped from the image' || true)",
+            f"cd {wd} && {rewrite_blobs}git add -u && "
+            "(git -c core.hooksPath=/dev/null -c user.email=nemo-gym@nvidia.com -c user.name=nemo-gym "
+            "commit --no-verify -q -m 'nemo_gym: snapshot the image working tree' || true)",
             timeout_s=900,
         )
         if result.return_code != 0:
             print(
-                f"[swemer_oml] blob restore failed ({result.return_code}): "
+                f"[swemer_oml] working-tree snapshot failed ({result.return_code}): "
                 f"{(result.stderr or '')[-400:]} {(result.stdout or '')[-400:]}",
                 file=sys.stderr,
             )
@@ -304,6 +314,7 @@ class SwemerOmlResourcesServer(SimpleResourcesServer):
 
         sandbox = await self._create_sandbox(body)
         await self._ensure_git_repo(sandbox, body.workdir)
+        await remove_broken_gitfiles(sandbox, body.workdir, "swemer_oml")
         await self._restore_missing_blobs(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
             await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_oml")
