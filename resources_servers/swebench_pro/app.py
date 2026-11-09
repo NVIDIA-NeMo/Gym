@@ -431,6 +431,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return verify_local_image(Path(image), source)
         return {"image": image, "source_uri": image}
 
+    def _sandbox_workdir(self) -> str:
+        return "/app"
+
     async def _create_sandbox(
         self,
         body: SWEBenchProInstanceRequest,
@@ -452,7 +455,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             image=image_info["image"],
             ttl_s=self.config.sandbox_config.get("ttl_s"),
             ready_timeout_s=self.config.sandbox_config.get("ready_timeout_s"),
-            workdir="/app",
+            workdir=self._sandbox_workdir(),
             env=dict.fromkeys(HARNESS_ENV_TO_SCRUB, "") | SANDBOX_ENV_OVERRIDES,
             files=files or {},
             metadata=provider_metadata
@@ -583,7 +586,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
     async def normalize_sandbox_environment(self, sandbox: AsyncSandbox, instance_id: str) -> None:
         """Give the agent container the same repairs the verifier gets; best effort."""
         try:
-            script = build_seed_normalization(self.config.environment_repairs)
+            script = build_seed_normalization(
+                self.config.environment_repairs, repository_dir=await self._repository_dir(sandbox)
+            )
             result = await sandbox.exec(f"bash -c {quote(script)}", timeout_s=300)
             if result.return_code != 0:
                 print(

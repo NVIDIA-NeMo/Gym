@@ -72,6 +72,9 @@ class SWEBenchProV2ResourcesServer(SWEBenchProResourcesServer):
     async def verify(self, request: Request, body: SWEBenchProV2VerifyRequest) -> SWEBenchProVerifyResponse:
         return await super().verify(request, body)
 
+    def _sandbox_workdir(self) -> str:
+        return "/"
+
     async def _repository_dir(self, sandbox: AsyncSandbox) -> str:
         try:
             result = await sandbox.exec(
