@@ -329,6 +329,19 @@ def new_gym_job_id(now: datetime) -> str:
     return f"gym-job-{now.strftime('%Y%m%dT%H%M%SZ')}-{secrets.token_hex(3)}"
 
 
+def benchmark_artifact_dirs(target: str) -> dict[str, Path] | None:
+    """The artifacts directory of each benchmark of the submission `target` names, or None when no record is found.
+
+    `target` is a run directory holding the submission's manifest, or a Gym job ID in this machine's job index.
+    """
+    path = Path(target)
+    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
+    if not record_path.is_file():
+        return None
+    record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    return {benchmark.benchmark: Path(benchmark.job_dir) / "artifacts" for benchmark in record.benchmarks}
+
+
 def local_index_dir() -> Path:
     """Where this machine remembers its own submissions."""
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")

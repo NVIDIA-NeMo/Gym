@@ -1943,13 +1943,18 @@ def validate_target(args: argparse.Namespace, overrides: list[str], *, agent: Ag
         sys.exit(1)
 
 
-def eval_status(target: str, *, json_output: bool = False) -> None:
-    """Print saved progress for a run directory or a locally indexed Gym job ID.
+def eval_status(
+    target: str,
+    *,
+    json_output: bool = False,
+    job_artifact_dirs: Callable[[str], dict[str, Path] | None] | None = None,
+) -> None:
+    """Print saved progress for a run directory or, through `job_artifact_dirs`, a Gym job ID.
 
-    Submitted job artifacts must be visible on the current filesystem. This command
-    reads saved progress and does not contact a scheduler or a remote host.
+    `job_artifact_dirs` maps a target that is not a run directory with status files to each benchmark's artifacts
+    directory, or to None when it names no submission. Artifacts must be visible on the current filesystem. This
+    command reads saved progress and does not contact a scheduler or a remote host.
     """
-    from nemo_gym.orchestration.jobs import MANIFEST_NAME, SubmissionRecord, local_index_dir
     from nemo_gym.rollouts.batch_status import BATCH_STATUS_FNAME
 
     def status_files(directory: Path) -> list[Path]:
@@ -1980,26 +1985,24 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
     path = Path(target)
     if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
         raise NotADirectoryError(f"Run directory expected: {target}")
-    record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
     files = status_files(path) if path.is_dir() else []
     exports: dict[str, dict[str, dict[str, Any]]] = {}
     if files:
         statuses = {str(file): json.loads(file.read_text()) for file in files}
         exports = {str(file): export_facts(file) for file in files}
-    elif record_path.is_file():
-        record = SubmissionRecord.load(json.loads(record_path.read_text()))
+    else:
+        artifact_dirs = job_artifact_dirs(target) if job_artifact_dirs is not None else None
+        if artifact_dirs is None:
+            raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
         statuses = {}
-        for benchmark in record.benchmarks:
-            directory = Path(benchmark.job_dir) / "artifacts"
+        for benchmark, directory in artifact_dirs.items():
             files = status_files(directory)
             if not files:
-                statuses[benchmark.benchmark] = {"status": "unavailable", "path": str(directory)}
+                statuses[benchmark] = {"status": "unavailable", "path": str(directory)}
             for file in files:
-                name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
+                name = benchmark if len(files) == 1 else f"{benchmark}/{file.name}"
                 statuses[name] = json.loads(file.read_text())
                 exports[name] = export_facts(file)
-    else:
-        raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
     if json_output:
         print(
             json.dumps(

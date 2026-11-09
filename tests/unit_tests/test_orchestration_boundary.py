@@ -48,7 +48,6 @@ SCANNED_ROOTS = [
 ALLOWED_IMPORTERS = {CORE / "cli" / "main.py"}
 
 KNOWN_VIOLATIONS = {
-    ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.jobs"),
     ("nemo_gym/cli/eval.py", "nemo_gym.orchestration.recovery"),
     ("nemo_gym/cli/utils.py", "nemo_gym.orchestration.executors.resume_script"),
     ("nemo_gym/eval/rollout_reverification.py", "nemo_gym.orchestration.recovery"),
