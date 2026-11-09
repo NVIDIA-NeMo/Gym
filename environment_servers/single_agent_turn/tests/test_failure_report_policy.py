@@ -252,6 +252,9 @@ RETRYABLE_PROVIDER_KINDS = [
     "provider_status_unavailable",
     "provider_command_outcome_unknown",
     "provider_protocol_error",
+    "provider_request_failed",
+    "provider_internal_error",
+    "provider_pty_unavailable",
 ]
 
 

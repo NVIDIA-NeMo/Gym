@@ -1343,6 +1343,9 @@ class TestSessionInfrastructureFailureReply:
             "provider_status_unavailable",
             "provider_command_outcome_unknown",
             "provider_protocol_error",
+            "provider_request_failed",
+            "provider_internal_error",
+            "provider_pty_unavailable",
         ],
     )
     async def test_sandbox_failure_is_a_failed_response_that_keeps_the_provider_event(self, monkeypatch, kind):
