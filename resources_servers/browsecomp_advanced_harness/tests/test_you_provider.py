@@ -41,6 +41,7 @@ def _config(**overrides) -> app_module.TavilySearchResourcesServerConfig:
         entrypoint="",
         name="",
         search_provider="ydc",
+        search_provider="ydc",
         ydc_api_key="test_ydc_key",  # pragma: allowlist secret
         exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
     )
