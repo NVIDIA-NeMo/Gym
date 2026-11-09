@@ -112,7 +112,7 @@ Beyond the families, the protocol's own refusals:
   typed session's ID is fenced as if its episode had closed it, so a later seed of that ID gets HTTP 409.
   Only a typed session closed through `/close_session` frees its slot before then. A session an Agent seeds
   with its run body, which is how the OpenCode preset seeds, is never closed, so held sessions add up over
-  the server's life, and a rollout's question is forgotten once more than 10,000 later seeds reach the same
+  the server's life, and a rollout's question is forgotten once 10,000 later sessions are seeded on the same
   server while that rollout is still running, however few rollouts are open at once. For a harness that
   closes its sessions, the cap must exceed the peak number of sessions open at once. A forgotten Agent
   (untyped) session is not fenced, and neither is a typed ID against a later untyped seed: a later seed
