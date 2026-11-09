@@ -17,6 +17,7 @@ import importlib.metadata
 import sys
 from contextlib import nullcontext as does_not_raise
 from pathlib import Path
+from typing import Optional
 from unittest.mock import MagicMock, PropertyMock
 
 from omegaconf import DictConfig, OmegaConf
@@ -52,6 +53,7 @@ from nemo_gym.config.global_config import (
     DEFAULT_HEAD_SERVER_PORT,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     USE_ABSOLUTE_IP,
+    UV_CACHE_DIR_KEY_NAME,
     UV_LOCK_TIMEOUT_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -199,6 +201,28 @@ class TestGlobalConfig:
 
         assert config[UV_LOCK_TIMEOUT_KEY_NAME] == expected
         assert nemo_gym.config.global_config.environ["UV_LOCK_TIMEOUT"] == str(expected)
+
+    @mark.parametrize(
+        ("exported", "configured", "expected"),
+        [
+            ("/warm/uv", {"uv_cache_dir": "/configured/uv"}, "/configured/uv"),  # the config key wins over the export
+            ("/warm/uv", {}, "/warm/uv"),  # an exported cache directory survives
+            (None, {}, str(Path("/local/cache") / "uv")),  # otherwise the default under the cache root
+        ],
+    )
+    def test_uv_cache_dir_precedence(
+        self, monkeypatch: MonkeyPatch, exported: Optional[str], configured: dict, expected: str
+    ) -> None:
+        self._mock_versions_for_testing(monkeypatch)
+        monkeypatch.setattr(
+            nemo_gym.config.global_config, "environ", {} if exported is None else {"UV_CACHE_DIR": exported}
+        )
+        self._mock_parse_environment(monkeypatch, DictConfig({"cache_dir": "/local/cache", **configured}))
+
+        config = get_global_config_dict()
+
+        assert config[UV_CACHE_DIR_KEY_NAME] == expected
+        assert nemo_gym.config.global_config.environ["UV_CACHE_DIR"] == expected
 
     def test_null_uv_lock_timeout_leaves_the_environment_alone(self, monkeypatch: MonkeyPatch) -> None:
         self._mock_versions_for_testing(monkeypatch)
