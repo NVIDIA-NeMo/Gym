@@ -791,8 +791,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 return response
             if request.path_params.get("rollout_id") != state.request.episode_id.capture_key:
                 raise HTTPException(409, "OpenCode activation does not match the seeded session and rollout")
-            prompt, system, media = self._session_input(body)
             if state.task is None:
+                # Parse only for a new activation: a retry is compared with the stored request instead,
+                # so its media are never decoded again.
+                prompt, system, media = self._session_input(body)
                 state.activation_request = body.model_copy(deep=True)
                 state.task = asyncio.create_task(
                     self._session_response(state, state.activation_request, prompt=prompt, system=system, media=media)
@@ -1337,16 +1339,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         roles = [getattr(item, "role", None) for item in items]
         if roles not in (["user"], ["system", "user"], ["developer", "user"]):
             raise HTTPException(
-                422, "OpenCode sandbox execution accepts one user text prompt and optional system/developer message"
+                422, "OpenCode sandbox execution accepts one user prompt and an optional system or developer message"
             )
         texts = []
         media: list[MediaFile] = []
         for item in items:
-            content = item.content
-            if not isinstance(content, str):
-                content = [part if isinstance(part, dict) else part.model_dump() for part in content]
             try:
-                text, item_media = split_text_and_media(content)
+                text, item_media = split_text_and_media(item.content)
             except UnsupportedContentError as error:
                 raise HTTPException(422, f"OpenCode sandbox execution: {error}") from error
             if item_media and item is not items[-1]:
@@ -1452,7 +1451,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         self, state: AgentSessionState, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> None:
         assert isinstance(state, OpenCodeSandboxSession)
-        _, system, _ = self._session_input(body)
+        prompt, system, media = self._session_input(body)
+        # The base class passes this same request object to _activate_agent_session_state,
+        # which reuses the result so the media are decoded once.
+        state.validated_input = (body, prompt, system, media)
         supplied_instructions = body.instructions is not None or (
             not isinstance(body.input, str)
             and any(getattr(item, "role", None) in {"system", "developer"} for item in body.input)
@@ -1465,7 +1467,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> NeMoGymResponse:
         """Run a delta under one budget, including preparation and the concurrency queue."""
         assert isinstance(state, OpenCodeSandboxSession)
-        prompt, system, media = self._session_input(body)
+        validated, state.validated_input = state.validated_input, None
+        if validated is not None and validated[0] is body:
+            _, prompt, system, media = validated
+        else:
+            # Another request validated after this one, so its result does not apply here.
+            prompt, system, media = self._session_input(body)
         if state.system_instructions is None:
             state.system_instructions = system
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -1689,9 +1696,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if state.harness_session_id:
             command.extend(["--session", state.harness_session_id])
         if media:
-            # Staging spends the activation's budget; an expiry here is a pre-launch timeout.
+            # A continuation activation's upload spends its budget, and an expiry here is a pre-launch timeout.
+            # The first activation has no deadline, so its upload is unbounded, like MCP staging.
             async with asyncio.timeout_at(deadline):
-                media_dir = f"{state.session.session_dir}/input-media/{state.activation_id}"
+                # session_dir is already one directory per continuation activation.
+                media_dir = f"{state.session.session_dir}/input-media"
                 for path in await upload_media(state.session.sandbox, files=media, directory=media_dir):
                     command.extend(["--file", path])
         payload = {
