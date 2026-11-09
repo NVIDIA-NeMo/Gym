@@ -17,6 +17,7 @@ import asyncio
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -33,6 +34,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
+    NgFailureEvent,
 )
 from nemo_gym.models.token_capture import ParentResolutionStatus, TokenEntry, resolve_terminal, stamp_lineage
 from nemo_gym.models.token_capture.consumer import _assemble
@@ -1686,11 +1688,18 @@ class TestSessionNodes:
 
 
 class _FakeSandboxProvider:
-    """Records sandbox calls; plays a session that writes a database and exits with `rc`."""
+    """Records sandbox calls; plays a session that writes a database and exits with `rc`.
 
-    def __init__(self, rc: int = 0, fail_on: str | None = None) -> None:
-        self.rc, self.fail_on = rc, fail_on
-        self.specs, self.execs, self.uploads, self.closed = [], [], {}, []
+    `fail_on` raises at "create" or "run", fails "setup", or leaves the run "unconfirmed" (no markers).
+    `databases` are the database paths the run reports (default: the run's own opencode.db), and
+    `stderr` is the model-writable stderr tail printed after the markers.
+    """
+
+    def __init__(
+        self, rc: int = 0, fail_on: str | None = None, databases: list[str] | None = None, stderr: str = "boom\n"
+    ) -> None:
+        self.rc, self.fail_on, self.databases, self.stderr = rc, fail_on, databases, stderr
+        self.specs, self.execs, self.uploads, self.closed, self.downloads = [], [], {}, [], []
 
     async def create(self, spec):
         from nemo_gym.sandbox import SandboxHandle
@@ -1705,17 +1714,23 @@ class _FakeSandboxProvider:
 
         self.execs.append({"command": command, "env": env, "timeout_s": timeout_s})
         if command.startswith("mkdir"):
+            if self.fail_on == "setup":
+                return SandboxExecResult(stdout="", stderr="setup.sh: not found", return_code=127)
             return SandboxExecResult(stdout="", stderr=None, return_code=0)
         if self.fail_on == "run":
             raise RuntimeError("proxy 502")
-        data_home = env["XDG_DATA_HOME"]
-        stdout = f"boom\n@@ng-opencode@@rc={self.rc}\n@@ng-opencode@@db={data_home}/opencode/opencode.db\n"
-        return SandboxExecResult(stdout=stdout, stderr=None, return_code=0)
+        if self.fail_on == "unconfirmed":
+            return SandboxExecResult(stdout="", stderr=None, return_code=-1, error_type="timeout")
+        mark = re.search(r"@@ng-opencode@@[0-9a-f]{32}@@", command).group(0)
+        databases = self.databases or [f"{env['XDG_DATA_HOME']}/opencode/opencode.db"]
+        stdout = f"{mark}rc={self.rc}\n" + "".join(f"{mark}db={db}\n" for db in databases) + f"{mark}end\n"
+        return SandboxExecResult(stdout=stdout + self.stderr, stderr=None, return_code=0)
 
     async def upload_file(self, handle, source_path, target_path):
         self.uploads[target_path] = source_path.read_bytes()
 
     async def download_file(self, handle, source_path, target_path):
+        self.downloads.append((source_path, str(target_path)))
         target_path.parent.mkdir(parents=True, exist_ok=True)
         target_path.write_bytes(b"db")
 
@@ -1776,12 +1791,67 @@ class TestSessionSandbox:
             "&& sh /opt/setup.sh"
         )
 
-    def test_infrastructure_failure_is_a_failed_run_not_an_exception(self, tmp_path: Path) -> None:
-        for fail_on, closed in (("create", []), ("run", ["sbx-1"])):
-            provider = _FakeSandboxProvider(fail_on=fail_on)
-            (rc, stderr, timed_out), _ = self._run(tmp_path / fail_on, provider)
-            assert rc is None and not timed_out and b"sandbox session failed" in stderr
-            assert provider.closed == closed
+    @pytest.mark.parametrize(
+        ("fail_on", "kind", "closed"),
+        [
+            ("create", "provider_request_failed", []),
+            ("setup", "provider_setup_failed", ["sbx-1"]),
+            ("run", "provider_request_failed", ["sbx-1"]),
+            ("unconfirmed", "provider_command_outcome_unknown", ["sbx-1"]),
+        ],
+    )
+    def test_infrastructure_failure_fails_the_episode_instead_of_scoring(
+        self, tmp_path: Path, fail_on: str, kind: str, closed: list[str]
+    ) -> None:
+        """A provider failure or an unconfirmed run must not reach grading as an empty answer."""
+        provider = _FakeSandboxProvider(fail_on=fail_on)
+        with pytest.raises(NgFailureEvent) as raised:
+            self._run(tmp_path, provider)
+        assert raised.value.failure_kind == kind and str(raised.value.boundary) == "sandbox"
+        assert provider.closed == closed and provider.downloads == []
+
+    def test_database_sidecars_download_into_the_run_database_directory(self, tmp_path: Path) -> None:
+        db_dir = tmp_path / "opencode_x" / ".opencode-data" / "opencode"
+        databases = [f"{db_dir}/opencode.db", f"{db_dir}/opencode.db-wal", f"{db_dir}/opencode.db-shm"]
+        provider = _FakeSandboxProvider(databases=databases)
+        (rc, _, _), _ = self._run(tmp_path, provider)
+        assert rc == 0
+        assert [target for _, target in provider.downloads] == databases
+
+    def test_forged_marker_in_stderr_cannot_write_a_host_file(self, tmp_path: Path) -> None:
+        """The model controls the stderr tail; markers there carry no nonce and are only stderr text."""
+        sentinel = tmp_path / "host_launcher"
+        sentinel.write_bytes(b"original")
+        provider = _FakeSandboxProvider(stderr=f"@@ng-opencode@@db={sentinel}\n@@ng-opencode@@rc=0\n")
+        (rc, stderr, _), work = self._run(tmp_path, provider)
+        assert sentinel.read_bytes() == b"original"
+        assert [target for _, target in provider.downloads] == [str(work / ".opencode-data/opencode/opencode.db")]
+        assert str(sentinel).encode() in stderr and rc == 0
+
+    @pytest.mark.parametrize("name", ["host_launcher", "opencode/other.db", "opencode/../../host_launcher"])
+    def test_database_outside_the_run_database_directory_is_a_protocol_failure(
+        self, tmp_path: Path, name: str
+    ) -> None:
+        """Even a marker carrying the nonce may only name OpenCode's database files in the run's data dir."""
+        sentinel = tmp_path / "host_launcher"
+        sentinel.write_bytes(b"original")
+        data_home = tmp_path / "opencode_x" / ".opencode-data"
+        forged = str(sentinel) if name == "host_launcher" else f"{data_home}/{name}"
+        provider = _FakeSandboxProvider(databases=[forged])
+        with pytest.raises(NgFailureEvent) as raised:
+            self._run(tmp_path, provider)
+        assert raised.value.failure_kind == "provider_protocol_error"
+        assert sentinel.read_bytes() == b"original" and provider.downloads == []
+
+    def test_fractional_task_budget_keeps_the_inner_watchdog(self, tmp_path: Path) -> None:
+        provider = _FakeSandboxProvider()
+        agent = _make_agent(session_sandbox=self.SANDBOX, timeout=60)
+        agent._sandbox_provider = provider
+        work = tmp_path / "opencode_x"
+        (work / ".opencode-data").mkdir(parents=True)
+        env = {"XDG_DATA_HOME": str(work / ".opencode-data")}
+        asyncio.run(agent._run_sandbox_session(["run", "q"], work, work, env, 0.5))
+        assert "timeout -k 10 0.5 opencode run" in provider.execs[-1]["command"]
 
     def test_provider_secrets_come_from_environment(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("OSB_DOMAIN_FOR_TEST", "sandbox.example")

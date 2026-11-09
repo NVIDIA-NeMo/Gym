@@ -455,6 +455,13 @@ def _tmp_roots(paths: list[Optional[str]]) -> list[str]:
 _SANDBOX_SESSION_ENV_KEYS = ("XDG_DATA_HOME", "OPENAI_BASE_URL", "OPENAI_API_KEY", "OPENCODE_CONFIG_CONTENT")
 _SANDBOX_DEFAULT_ENV = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME": "/root"}
 _SANDBOX_MARK = "@@ng-opencode@@"
+# OpenCode's session database and its SQLite sidecars: the only files a session sandbox may return.
+_OPENCODE_DATABASE_FILES = frozenset({"opencode.db", "opencode.db-wal", "opencode.db-shm", "opencode.db-journal"})
+# Registered provider failure kinds (nemo_gym.core.failure_kinds) that nemo_gym.core does not re-export.
+_PROVIDER_SETUP_FAILED = "provider_setup_failed"
+_PROVIDER_REQUEST_FAILED = "provider_request_failed"
+_PROVIDER_PROTOCOL_ERROR = "provider_protocol_error"
+_PROVIDER_COMMAND_OUTCOME_UNKNOWN = "provider_command_outcome_unknown"
 
 
 class OpenCodeSessionSandboxConfig(BaseModel):
@@ -1049,13 +1056,35 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             self._sandbox_start_sem = Semaphore(limit)
         return self._sandbox_start_sem
 
+    def _session_sandbox_failure(self, failure_kind: str, reason: str, handle: Any = None) -> NgFailureEvent:
+        """A session-sandbox provider failure; raised, it fails the episode instead of reaching grading."""
+        provider_name = next(iter(self.config.session_sandbox.provider), None)
+        details = SandboxFailureDetails(
+            sandbox_id=getattr(handle, "sandbox_id", None),
+            provider=provider_name if isinstance(provider_name, str) else None,
+        )
+        return NgFailureEvent(
+            boundary="sandbox",
+            failure_kind=failure_kind,
+            failure_reason=f"OpenCode session sandbox: {reason}"[:2000],
+            details=details,
+            operation="opencode.session_sandbox",
+            stage="agent",
+        )
+
     async def _run_sandbox_session(
         self, opencode_args: list[str], work_dir: Path, project_dir: Path, env: dict[str, str], timeout: float
     ) -> tuple[Optional[int], bytes, bool]:
         """Run one OpenCode session in its own sandbox; copy its session database back here.
 
-        A sandbox infrastructure failure is reported like a failed OpenCode run (no answer), not raised:
-        one bad sandbox must not abort the rollout batch.
+        Returns (returncode, stderr, timed_out) for a run the sandbox confirms. A provider failure, a failed
+        setup and an unconfirmed run raise a sandbox failure event instead, so they fail the episode rather
+        than score as a model answer; a confirmed task timeout (124/137) keeps the task-timeout policy.
+
+        The run reports its exit code and database files on marker lines tagged with a per-run nonce, printed
+        before the model-writable stderr tail. Database paths must name OpenCode's own database files in the
+        run's data directory, and each is written to the matching local path, so nothing the sandbox prints
+        can choose a destination on this host.
         """
         sandbox_config = self.config.session_sandbox
         provider = self._session_sandbox_provider()
@@ -1064,9 +1093,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         sandbox_env.update({key: value for key, value in self.config.env.items() if value})
         sandbox_env.update(sandbox_config.env)
         data_home = sandbox_env["XDG_DATA_HOME"]
+        remote_db_dir = PurePosixPath(data_home) / "opencode"
+        local_db_dir = Path(data_home) / "opencode"
         inputs = [path for path in work_dir.rglob("*") if path.is_file()]
         directories = {str(work_dir), str(project_dir), data_home, *(str(path.parent) for path in inputs)}
         stderr_path = f"{work_dir}/.opencode-stderr"
+        mark = f"{_SANDBOX_MARK}{uuid4().hex}@@"
         handle = None
         try:
             async with self._sandbox_start_limit():
@@ -1075,38 +1107,60 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 if sandbox_config.setup_command:
                     prepare = f"{prepare} && {sandbox_config.setup_command}"
                 prepared = await provider.exec(handle, prepare, timeout_s=sandbox_config.setup_timeout)
-                if prepared.return_code != 0:
-                    detail = f"{prepared.stdout or ''}{prepared.stderr or ''}"[-2000:]
-                    return None, f"sandbox setup failed ({prepared.return_code}): {detail}".encode(), False
+                if prepared.return_code != 0 or prepared.error_type:
+                    detail = f"{prepared.stdout or ''}{prepared.stderr or ''}"[-1500:]
+                    raise self._session_sandbox_failure(
+                        _PROVIDER_SETUP_FAILED,
+                        f"setup exited {prepared.return_code} ({prepared.error_type or 'no error type'}): {detail}",
+                        handle,
+                    )
                 for path in inputs:
                     await provider.upload_file(handle, path, str(path))
             command = [*shlex.split(sandbox_config.command), *opencode_args]
             script = (
                 f"cd {shlex.quote(str(project_dir))} && "
-                f"timeout -k 10 {int(timeout)} {shlex.join(command)} >/dev/null 2>{shlex.quote(stderr_path)}; "
-                f"rc=$?; tail -c 4000 {shlex.quote(stderr_path)}; echo; echo {_SANDBOX_MARK}rc=$rc; "
-                f"for f in {shlex.quote(data_home)}/opencode/opencode.db*; "
-                f'do [ -f "$f" ] && echo "{_SANDBOX_MARK}db=$f"; done; exit 0'
+                f"timeout -k 10 {timeout:g} {shlex.join(command)} >/dev/null 2>{shlex.quote(stderr_path)}; "
+                f"rc=$?; echo {mark}rc=$rc; "
+                f"for f in {shlex.quote(str(remote_db_dir))}/opencode.db*; "
+                f'do [ -f "$f" ] && echo "{mark}db=$f"; done; '
+                f"echo {mark}end; tail -c 4000 {shlex.quote(stderr_path)}; exit 0"
             )
             result = await provider.exec(handle, script, env=sandbox_env, timeout_s=timeout + 120)
-            output = f"{result.stdout or ''}\n{result.stderr or ''}"
             returncode = None
             databases = []
             stderr_lines = []
-            for line in output.splitlines():
-                if line.startswith(f"{_SANDBOX_MARK}rc="):
-                    returncode = int(line.removeprefix(f"{_SANDBOX_MARK}rc="))
-                elif line.startswith(f"{_SANDBOX_MARK}db="):
-                    databases.append(line.removeprefix(f"{_SANDBOX_MARK}db="))
-                else:
+            ended = False
+            for line in (result.stdout or "").splitlines():
+                if ended:
                     stderr_lines.append(line)
+                elif line == f"{mark}end":
+                    ended = True
+                elif line.startswith(f"{mark}rc="):
+                    returncode = int(line.removeprefix(f"{mark}rc="))
+                elif line.startswith(f"{mark}db="):
+                    databases.append(line.removeprefix(f"{mark}db="))
+            if result.error_type or result.return_code != 0 or not ended or returncode is None:
+                raise self._session_sandbox_failure(
+                    _PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+                    f"the run was not confirmed (exec exit {result.return_code}, "
+                    f"error type {result.error_type}, exit-code marker {'seen' if returncode is not None else 'missing'})",
+                    handle,
+                )
             for database in databases:
-                await provider.download_file(handle, database, Path(database))
+                source = PurePosixPath(database)
+                if source.parent != remote_db_dir or source.name not in _OPENCODE_DATABASE_FILES:
+                    raise self._session_sandbox_failure(
+                        _PROVIDER_PROTOCOL_ERROR, f"unexpected OpenCode database path {database[:300]!r}", handle
+                    )
+                await provider.download_file(handle, str(source), local_db_dir / source.name)
+            stderr = "\n".join([*stderr_lines, (result.stderr or "")]).encode()[-4000:]
             # timeout(1) exits 124 when it stopped the command, 137 when it had to SIGKILL it.
-            return returncode, "\n".join(stderr_lines).encode()[-4000:], returncode in (124, 137)
+            return returncode, stderr, returncode in (124, 137)
+        except NgFailureEvent:
+            raise
         except Exception as e:
             LOG.warning("OpenCode session sandbox failed: %r", e)
-            return None, f"sandbox session failed: {e!r}".encode()[-4000:], False
+            raise self._session_sandbox_failure(_PROVIDER_REQUEST_FAILED, repr(e), handle) from e
         finally:
             if handle is not None:
                 try:
