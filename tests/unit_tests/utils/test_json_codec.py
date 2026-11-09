@@ -107,6 +107,17 @@ def test_fallback_writes_other_types_as_orjson_does() -> None:
     )
 
 
+@pytest.mark.parametrize("wide_first", [False, True], ids=["generator first", "wide integer first"])
+def test_a_default_that_consumes_its_argument_writes_the_same_output_in_either_key_order(wide_first: bool) -> None:
+    # orjson drains the generator before it reaches the wide integer, so calling default again would write [].
+    numbers = (number for number in range(3))
+    value = {"n": WIDE, "a": numbers} if wide_first else {"a": numbers, "n": WIDE}
+
+    data = dumps_json(value, default=list)
+
+    assert json.loads(data) == {"a": [0, 1, 2], "n": WIDE}
+
+
 @dataclasses.dataclass
 class _Call:
     name: str

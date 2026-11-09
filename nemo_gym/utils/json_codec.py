@@ -70,20 +70,33 @@ def dumps_json(value: object, *, default: Callable[[Any], Any] | None = None, op
 
     ``option`` takes ``orjson`` flags; the fallback supports ``OPT_SORT_KEYS``, ``OPT_INDENT_2`` and
     ``OPT_APPEND_NEWLINE``. Object keys must be strings: the fallback refuses other keys rather than coerce them,
-    which could merge two keys into one. The fallback accepts only the types ``orjson`` accepts, and calls
-    ``default`` again for the others, so ``default`` must not depend on how often it runs.
+    which could merge two keys into one. The fallback accepts only the types ``orjson`` accepts, and for the others
+    reuses what ``default`` returned during the ``orjson`` pass, so a ``default`` that consumes its argument, such as
+    ``list`` on a generator, still gives the same output.
 
     Raises:
         orjson.JSONEncodeError: ``value`` holds something neither encoder can write exactly, or ``orjson`` rejects
             it while ``option`` holds a flag the fallback cannot honor.
     """
+    # Each object ``default`` saw, kept alive so its id is not reused, with what ``default`` returned for it.
+    results: dict[int, tuple[object, object]] = {}
+
+    def recording_default(obj: Any) -> Any:
+        result = default(obj)
+        results.setdefault(id(obj), (obj, result))
+        return result
+
+    def replaying_default(obj: Any) -> Any:
+        seen = results.get(id(obj))
+        return seen[1] if seen is not None and seen[0] is obj else default(obj)
+
     try:
-        return orjson.dumps(value, default=default, option=option)
+        return orjson.dumps(value, default=recording_default if default else None, option=option)
     except orjson.JSONEncodeError as error:
         if option and option & ~_SUPPORTED_OPTIONS:
             raise
         try:
-            return _dumps_stdlib(value, default=default, option=option or 0)
+            return _dumps_stdlib(value, default=replaying_default if default else None, option=option or 0)
         except (TypeError, ValueError, RecursionError) as fallback_error:
             raise orjson.JSONEncodeError(f"{error}; standard library fallback: {fallback_error}") from fallback_error
 
