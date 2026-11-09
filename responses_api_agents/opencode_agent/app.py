@@ -25,7 +25,7 @@ import shutil
 import tempfile
 from asyncio import Semaphore
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from shlex import quote
 from time import monotonic, time
@@ -33,11 +33,11 @@ from typing import Any, ClassVar, Literal, Optional, Self
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from openai.types.responses.response import IncompleteDetails
 from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym.agents import (
-    AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
@@ -52,9 +52,11 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    decide_outcome,
     resolve_agent_timeout,
     restrict_sandbox_network,
     verification_failure_fields,
@@ -66,6 +68,7 @@ from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -89,7 +92,12 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     upload_text,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPToolAccess,
+    is_retryable_dependency_status,
+)
 from nemo_gym.trajectory import (
     NG_AGENT_SANDBOX_OBSERVATION_KEY,
     AgentEpisode,
@@ -107,7 +115,7 @@ from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
     parse_opencode_session,
 )
-from responses_api_agents.opencode_agent.continuation import OpenCodeRunOutcome, classify_opencode_run
+from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.observability import scope_opencode_trajectory
 from responses_api_agents.opencode_agent.pinned import (
     COPY_PINNED,
@@ -456,6 +464,32 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if status is None and data.get("isRetryable") is True:
             return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         return AgentOutcome(failure_kind="unknown")
+
+    def _deadline_model_fault(self, recorded_error: Mapping[str, Any] | None) -> NgFailureEvent | None:
+        """The model endpoint fault behind a timed-out run, from the model error OpenCode recorded last, or ``None``.
+
+        OpenCode retries a failed model call itself and records the error only once it gives up. When that error is
+        a transport failure or a status Gym retries (408, 425, 429 or a 5xx), the deadline was spent on an
+        unavailable endpoint rather than by the model, so the ladder retries the run. Any other recorded error, or
+        none, leaves the deadline the model's.
+        """
+        if recorded_error is None:
+            return None
+        outcome = self.classify_outcome(recorded_error)
+        if outcome.failure_kind == MODEL_TRANSPORT_ERROR:
+            return NgFailureEvent(
+                boundary=FailureBoundary.MODEL,
+                failure_kind=MODEL_TRANSPORT_ERROR,
+                failure_reason="OpenCode's last model call before the deadline failed to reach the endpoint",
+            )
+        if outcome.failure_kind == MODEL_REQUEST_ERROR and is_retryable_dependency_status(outcome.status_code):
+            return NgFailureEvent(
+                boundary=FailureBoundary.MODEL,
+                failure_kind=MODEL_REQUEST_ERROR,
+                failure_reason=f"OpenCode's last model call before the deadline answered HTTP {outcome.status_code}",
+                http_status=outcome.status_code,
+            )
+        return None
 
     config: OpenCodeAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
@@ -1502,7 +1536,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 state,
                 body,
                 timeout=timeout,
-                outcome=OpenCodeRunOutcome(status="incomplete", error_type="timeout"),
+                evidence=RunEvidence(has_result=False, timed_out=True, model_replied=None),
             )
         except BaseException as error:
             failure = error
@@ -1540,11 +1574,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         body: NeMoGymResponseCreateParamsNonStreaming,
         *,
         timeout: float,
-        outcome: OpenCodeRunOutcome,
+        evidence: RunEvidence,
+        incomplete_reason: Literal["max_output_tokens", "content_filter"] | None = None,
         output: list[NeMoGymResponseOutputItem] | None = None,
         usage: NeMoGymResponseUsage | None = None,
         error_message: str | None = None,
     ) -> NeMoGymResponse:
+        """The activation's response with the status the outcome ladder decides; ``error_message`` is kept only on a
+        failed one."""
         runtime = state.runtime_info
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
@@ -1553,11 +1590,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             object="response",
             output=output or [],
             usage=usage,
-            status=outcome.status,
-            error={"code": "server_error", "message": error_message} if error_message is not None else None,
-            incomplete_details=IncompleteDetails(reason=outcome.incomplete_reason)
-            if state.is_continuation and outcome.incomplete_reason
-            else None,
+            incomplete_details=IncompleteDetails(reason=incomplete_reason) if incomplete_reason else None,
             tool_choice=body.tool_choice,
             tools=body.tools,
             parallel_tool_calls=body.parallel_tool_calls,
@@ -1568,6 +1601,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
             },
         )
+        response = self.finish_response(response, evidence, session=state.session)
+        if response.status == "failed" and error_message is not None:
+            response.error = ResponseError(code="server_error", message=error_message)
         if state.is_continuation:
             response.metadata.update({"activation_id": str(state.activation_id)})
             if state.harness_session_id is not None:
@@ -1740,9 +1776,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         else:
             state.observations = observations
         observations.gaps.extend(state.take_export_gaps())
-        mcp_unconfirmed = None
+        # A lifecycle error (required tools that did not start, an unreadable export, a supervisor error) is raised
+        # below as a typed failure; any other error leaves the run without a usable result.
+        lifecycle_error = mcp_unconfirmed = None
         if mcp_servers and not isinstance(failure, asyncio.CancelledError):
-            error, mcp_unconfirmed = await self._check_mcp_grants(state, mcp_grants, observations)
+            lifecycle_error, mcp_unconfirmed = await self._check_mcp_grants(state, mcp_grants, observations)
+        error = lifecycle_error
         if state.session.artifacts is not None:
             try:
                 parsed = json.loads(state.session.artifacts)
@@ -1755,7 +1794,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     raise ValueError("expected message info objects")
                 export = parsed
             except (ValueError, TypeError) as exc:
-                error = error or f"OpenCode output parse failed: {exc}"
+                error = lifecycle_error = error or f"OpenCode output parse failed: {exc}"
         output = []
         usage = None
         if export.get("messages"):
@@ -1774,8 +1813,10 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         )
                     )
             except Exception as exc:
-                error = error or f"OpenCode output parse failed: {exc}"
+                error = lifecycle_error = error or f"OpenCode output parse failed: {exc}"
         result = state.session.cleanup
+        if result is not None and result["error"]:
+            lifecycle_error = lifecycle_error or result["error"]
         assistants = [m["info"] for m in export.get("messages", []) if m["info"].get("role") == "assistant"]
         native_result = assistants[-1] if assistants else {}
         reported_error = error is None and failure is None and self._reported_model_error(native_result, result)
@@ -1804,14 +1845,15 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if (
             mcp_unconfirmed
             and not (error or failure or reported_error)
-            and (model_called or outcome.status == "completed")
+            and (model_called or outcome.evidence.has_result)
         ):
-            error = mcp_unconfirmed
-        if context_limit:
-            outcome = OpenCodeRunOutcome(status="incomplete")
-        status = outcome.status
-        if (error or failure) and not context_limit:
-            status = "failed"
+            error = lifecycle_error = mcp_unconfirmed
+        evidence = outcome.evidence
+        if reported_error:
+            evidence = replace(evidence, error=self.classify_outcome(native_result))
+        elif evidence.timed_out:
+            evidence = replace(evidence, infra_fault=self._deadline_model_fault(outcome.recorded_error))
+        status = "failed" if lifecycle_error or failure else decide_outcome(evidence).status
         # Artifact message completion records a model turn, not the entire invocation.
         for record in observations.records:
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
@@ -1889,37 +1931,48 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 state,
                 body,
                 timeout=timeout,
-                outcome=OpenCodeRunOutcome(status="failed", error_type="server_error"),
+                evidence=RunEvidence(
+                    has_result=False,
+                    timed_out=False,
+                    model_replied=None,
+                    error=AgentOutcome(failure_kind=execution_oom.failure_kind),
+                ),
             )
             response.metadata[NG_AGENT_SANDBOX_OBSERVATION_KEY] = observation.model_dump_json(exclude_none=True)
-            response.metadata[AGENT_OUTCOME_METADATA_KEY] = AgentOutcome(
-                failure_kind=execution_oom.failure_kind
-            ).model_dump_json()
             return response
         if failure is not None:
             raise failure
-        if error and not reported_error:
-            raise HTTPException(502, format_error_message(error, stderr=state.stderr))
-        reported_message = None
+        if lifecycle_error:
+            message = format_error_message(lifecycle_error, stderr=state.stderr)
+            raise NgFailureEvent(
+                boundary=FailureBoundary.HARNESS,
+                failure_kind=AGENT_ROUTE_FAILED,
+                operation="opencode.execute",
+                stage="agent",
+                failure_reason=message[:2000],
+                message_args=(message,),
+            )
+        # Kept only on a failed response: OpenCode's message for a provider failure it reported, else the cause.
+        error_message = format_error_message(error, stderr=state.stderr) if error else None
         if reported_error and not context_limit:
             error_data = native_result["error"].get("data") or {}
-            reported_message = error_data.get("message")
-            if not isinstance(reported_message, str) or not reported_message:
-                reported_message = "OpenCode provider request failed"
+            error_message = error_data.get("message")
+            if not isinstance(error_message, str) or not error_message:
+                error_message = "OpenCode provider request failed"
             upstream_status = error_data.get("statusCode")
             if type(upstream_status) is int and 400 <= upstream_status <= 599:
-                reported_message = f"HTTP {upstream_status}: {reported_message}"
-            reported_message = format_error_message(reported_message)
-        response = self._make_session_response(
+                error_message = f"HTTP {upstream_status}: {error_message}"
+            error_message = format_error_message(error_message)
+        return self._make_session_response(
             state,
             body,
             timeout=timeout,
-            outcome=outcome,
+            evidence=evidence,
+            incomplete_reason=outcome.incomplete_reason,
             output=output,
             usage=usage,
-            error_message=reported_message,
+            error_message=error_message,
         )
-        return self.report_outcome(response, native_result)
 
 
 if __name__ == "__main__":

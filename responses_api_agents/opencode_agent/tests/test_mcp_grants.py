@@ -13,7 +13,13 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.server_runtime import MCPToolAccess
-from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import close_body, seed, setup  # noqa: F401
+from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (  # noqa: F401
+    close_body,
+    failed_message,
+    lifecycle_reason,
+    seed,
+    setup,
+)
 
 
 def read_params(text: str) -> dict:
@@ -75,7 +81,7 @@ def test_mcp_grants_are_configured_and_checked(setup, scenario):  # noqa: F811
         return await wait_exit()
 
     sandbox.wait_exit = run_plugin_then_exit
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
@@ -99,15 +105,14 @@ def test_mcp_grants_are_configured_and_checked(setup, scenario):  # noqa: F811
             "required": ["task_tools"],
             "optional": ["extra"],
         }
+        # Required tools that did not start are a lifecycle failure (a typed 500, retried); they were a 502.
         if scenario == "required-failed":
-            assert result.status_code == 502
-            assert result.json()["detail"] == (
+            assert lifecycle_reason(agent, created.json()["agent_session_id"], result) == (
                 "Required Gym MCP tools could not be initialized: task_tools: failed (connection refused)"
             )
         elif scenario in ("never-checked", "missing", "malformed", "list"):
             # The model answered, but nothing confirms the required tools were there: fail closed.
-            assert result.status_code == 502
-            assert result.json()["detail"].startswith(_UNCONFIRMED)
+            assert lifecycle_reason(agent, created.json()["agent_session_id"], result).startswith(_UNCONFIRMED)
         else:
             assert result.status_code == 200, result.text
             assert result.json()["status"] == "completed"
@@ -145,10 +150,11 @@ def test_unconfirmed_status_keeps_an_earlier_failure_cause(setup, cause):  # noq
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
-        assert result.status_code == 502
+        # A deadline before any reply keeps its retry (unknown); a model error leaves no usable result.
+        message = failed_message(result, "unknown" if cause == "timeout" else "agent_run_error")
         expected = "OpenCode produced no assistant result" if cause == "timeout" else "model rejected request"
-        assert expected in result.json()["detail"]
-        assert _UNCONFIRMED not in result.json()["detail"]
+        assert expected in message
+        assert _UNCONFIRMED not in message
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
     sandbox.disconnect.assert_awaited_once()
@@ -160,7 +166,7 @@ def test_configured_and_request_grants_are_both_kept(setup):  # noqa: F811
     agent.config.tool_accesses = [MCPToolAccess.model_validate(grant("configured", required=False))]
     body = seed().model_dump(mode="json")
     body["tool_accesses"] = [grant("task_tools", required=True)]
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
@@ -252,13 +258,13 @@ def test_timeout_during_mcp_connect_keeps_its_cause(setup, step, with_grant):  #
     sandbox.events = json.dumps(export)
     sandbox.result["timed_out"] = True
     sandbox.result["return_code"] = -9
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if step == "model-step" and with_grant:
             # The model worked without confirmed required tools: fail closed.
-            assert result.status_code == 502 and result.json()["detail"].startswith(_UNCONFIRMED)
+            assert lifecycle_reason(agent, created.json()["agent_session_id"], result).startswith(_UNCONFIRMED)
         else:
             assert result.status_code == 200, result.text
             assert result.json()["status"] == "incomplete"

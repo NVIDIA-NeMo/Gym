@@ -26,12 +26,14 @@ from asyncio import Semaphore
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from time import time
 from typing import Any, ClassVar, Literal, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agents import (
@@ -47,9 +49,11 @@ from nemo_gym.agents import (
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    decide_outcome,
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
@@ -63,8 +67,10 @@ from nemo_gym.config import (
     get_global_config_dict,
 )
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    FailureBoundary,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -76,6 +82,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
+    NgFailureEvent,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -85,7 +92,13 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
+from nemo_gym.server_runtime import (
+    NEMO_GYM_MCP_METADATA_KEY,
+    BaseRunRequest,
+    BaseVerifyResponse,
+    MCPToolAccess,
+    is_retryable_dependency_status,
+)
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
@@ -551,6 +564,36 @@ def _model_endpoint_error(events: list[tuple[float, dict[str, Any]]]) -> Optiona
             for marker in _MODEL_ENDPOINT_ERRORS:
                 if marker in text:
                     return marker
+    return None
+
+
+def _deadline_model_fault(attempts: list[dict[str, Any]] | None) -> NgFailureEvent | None:
+    """The model endpoint fault a timed-out run's last forwarded model attempt recorded, or ``None``.
+
+    The sandbox forwarder records every upstream attempt of Codex's model calls. When the run's deadline arrived and
+    the last recorded attempt had failed to connect, been cut short, or answered a status Gym retries (408, 425, 429
+    or a 5xx), the deadline was spent on an unavailable endpoint rather than by the model, so the ladder retries the
+    run. An attempt still in flight at the deadline left no record, and an earlier failure that a later attempt
+    recovered from is not the last one: either way the deadline is the model's.
+    """
+    if not attempts:
+        return None
+    last = attempts[-1]
+    status = last.get("status")
+    if status is None or "transport_error" in last:
+        reason = last.get("transport_error") or last.get("error") or "the upstream connection failed"
+        return NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_TRANSPORT_ERROR,
+            failure_reason=f"Codex's last model attempt before the deadline failed: {reason}",
+        )
+    if type(status) is int and 400 <= status <= 599 and is_retryable_dependency_status(status):
+        return NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind=MODEL_REQUEST_ERROR,
+            failure_reason=f"Codex's last model attempt before the deadline answered HTTP {status}",
+            http_status=status,
+        )
     return None
 
 
@@ -1192,7 +1235,24 @@ class CodexAgent(SimpleResponsesAPIAgent):
         completed = any(event.get("type") == "turn.completed" for _, event in events)
         if cleanup and not completed and not cleanup["timed_out"] and not output_limited:
             error = error or "Codex ended without turn.completed"
-        status = "failed" if error else "incomplete" if cleanup["timed_out"] or output_limited else "completed"
+        timed_out = bool(cleanup and cleanup["timed_out"])
+        attempts = state.model_attempts or []
+        terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
+        if attempts:
+            terminal = {**terminal, "upstream_attempt": attempts[-1]}
+        # Any error above leaves no usable result, unless it is the provider failure Codex reported, which is the
+        # run's classified error, or verify_after_agent_error grades it (below). The model replied if Codex emitted
+        # model output or the forwarder relayed a whole 200 reply.
+        evidence = RunEvidence(
+            has_result=error is None,
+            timed_out=timed_out,
+            model_replied=any(_is_model_output(event) for _, event in events)
+            or any(attempt.get("status") == 200 and "transport_error" not in attempt for attempt in attempts),
+            model_limit="output" if output_limited else None,
+            error=self.classify_outcome(terminal) if reported_model_error else None,
+            infra_fault=_deadline_model_fault(attempts) if timed_out else None,
+        )
+        status = decide_outcome(evidence).status
         # A reported provider failure keeps its classified outcome, so the Environment Server decides it. A run
         # that never started a turn did no work to grade, and its stderr explains the failure (see below).
         gradable = bool(
@@ -1344,33 +1404,35 @@ class CodexAgent(SimpleResponsesAPIAgent):
             stderr = await self._startup_stderr_tail(state)
             if stderr:
                 error = f"{error}; stderr: {stderr}"
-                # Environment Servers keep the observations, not the 502 body, in their failure records.
+                # Environment Servers keep the observations in their failure records, besides the response's error.
                 state.observations.gaps.append(ObservationGap(code="agent_startup_failed", detail=stderr))
         graded_error = None
         if gradable:
             # The observations are stored first, so a close during the liveness probe still finds them.
             graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, events=events)
             if graded_error is not None:
-                error = None
-                # A run that also hit its time limit is graded as a timeout.
-                status = "incomplete" if cleanup["timed_out"] else "failed"
-                for record in state.observations.records:
-                    if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
-                        record.status = status
+                # The operator chose to grade a run that failed while its sandbox still runs: the work it left in
+                # the sandbox is its result. A run that also hit its time limit is still graded as a timeout.
+                evidence = replace(evidence, has_result=True)
         if failure is not None:
             raise failure
-        if error and not reported_model_error:
-            raise HTTPException(502, f"Codex execution failed: {error}")
-        terminal = next((event for _, event in reversed(events) if event.get("type") == "turn.failed"), {})
-        if state.model_attempts:
-            terminal = {**terminal, "upstream_attempt": state.model_attempts[-1]}
+        if cleanup is None or cleanup["error"]:
+            # The supervisor could not run or account for Codex: a lifecycle failure, not a result of the run.
+            message = f"Codex execution failed: {error}"
+            raise NgFailureEvent(
+                boundary=FailureBoundary.HARNESS,
+                failure_kind=AGENT_ROUTE_FAILED,
+                failure_reason=message[:2000],
+                operation="codex.execute",
+                stage="agent",
+                message_args=(message,),
+            )
         response = NeMoGymResponse(
             id=f"resp_{uuid4().hex}",
             created_at=int(time()),
             model=self._effective_model(),
             object="response",
             output=output,
-            status=status,
             incomplete_details={"reason": "max_output_tokens"} if output_limited else None,
             error={
                 "code": "rate_limit_exceeded"
@@ -1392,12 +1454,16 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 **({"graded_agent_error": graded_error[:500]} if graded_error else {}),
             },
         )
-
-        response = self.report_rollout_stop(response, state.session)
-        if graded_error:
-            # Unclassified, so the Environment Server's outcome policy verifies it, as the setting asks.
-            return response
-        return self.report_outcome(response, terminal)
+        response = self.finish_response(response, evidence, session=state.session)
+        if response.status == "failed" and not reported_model_error and error:
+            response = response.model_copy(
+                update={"error": ResponseError(code="server_error", message=f"Codex execution failed: {error}")}
+            )
+        # The invocation's observed status is the response's, a rollout stop or a graded failure included.
+        for record in state.observations.records:
+            if isinstance(record, AgentInvocation) and record.invocation_id == invocation_id:
+                record.status = response.status
+        return response
 
     async def _startup_stderr_tail(self, state: CodexSandboxSession) -> str:
         """The end of Codex's stderr, with the session's MCP grant headers redacted; empty if unreadable.

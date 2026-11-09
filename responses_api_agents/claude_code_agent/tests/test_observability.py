@@ -505,7 +505,7 @@ async def test_adapter_associates_compaction_before_collection(tmp_path: Path, m
                 task_id={"taskset": "fixture", "task_id": "task"},
             ),
             runtime="/runtime",
-            session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None),
+            session=SimpleNamespace(session_dir="/tmp/session", workdir="/app", cleanup=None, expired=False),
         )
         monkeypatch.setattr(ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
         monkeypatch.setattr(ClaudeCodeAgent, "_resolve_call_base_url", lambda *args: None)

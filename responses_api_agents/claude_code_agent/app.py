@@ -31,6 +31,7 @@ from typing import Any, Callable, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
+from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agents import (
@@ -38,15 +39,18 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxNetworkAccess,
     SandboxSession,
     SimpleResponsesAPIAgent,
+    decide_outcome,
     resolve_agent_timeout,
     restrict_sandbox_network,
     stage_skills,
@@ -54,6 +58,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -82,7 +87,12 @@ from responses_api_agents.claude_code_agent.observability import (
     associate_claude_code_compaction_calls,
     extract_claude_code_observations,
 )
-from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
+from responses_api_agents.claude_code_agent.parsing import (
+    USAGE_POLICY_REFUSAL,
+    _extract_instruction,
+    invocation_error_type,
+    parse_stream_json,
+)
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime
 from responses_api_agents.claude_code_agent.sandbox import (
     ClaudeCodeSandboxSession,
@@ -392,7 +402,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                     stdout.decode(errors="replace"), fold_thinking=not self._token_id_capture_enabled()
                 )
                 run_metadata.update(
-                    status="incomplete",
+                    status=decide_outcome(self._run_evidence(run_metadata, returncode=None, timed_out=True)).status,
                     error_type="timeout",
                     duration_ms=(monotonic() - process_started_at) * 1000,
                 )
@@ -413,8 +423,9 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 stdout_text, fold_thinking=not self._token_id_capture_enabled()
             )
             run_metadata.setdefault("duration_ms", (monotonic() - process_started_at) * 1000)
-            status, error_type = _invocation_outcome(run_metadata, proc.returncode)
-            run_metadata["status"] = status
+            evidence = self._run_evidence(run_metadata, returncode=proc.returncode, timed_out=False)
+            run_metadata["status"] = decide_outcome(evidence).status
+            error_type = invocation_error_type(run_metadata, proc.returncode)
             if error_type is not None:
                 run_metadata["error_type"] = error_type
             return output_items, model, run_metadata
@@ -532,8 +543,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
         output_items: list[Any],
         model_name: str,
         run_metadata: dict[str, Any],
-        *,
-        status: str | None = None,
     ) -> NeMoGymResponse:
         if not any(
             getattr(item, "type", None) == "message" and getattr(item, "role", None) == "assistant"
@@ -561,7 +570,6 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             else f"resp_{uuid4().hex}"
         )
         return NeMoGymResponse(
-            **({"status": status} if status is not None else {}),
             id=response_id,
             created_at=int(time()),
             model=model_name,
@@ -577,6 +585,40 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 output_tokens_details=NeMoGymResponseOutputTokensDetails(reasoning_tokens=0),
                 total_tokens=input_tokens + output_tokens,
             ),
+        )
+
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Classify the API error a Claude Code run ended on; tested on Claude Code 2.1.108.
+
+        Claude Code reports a failed model request only as text, ``API Error: <HTTP status> <body>``, after its own
+        retries. ``parse_stream_json`` keeps the status as ``api_error_status`` only when it is the error the run
+        ended on. Other ended-on errors carry no status and stay ``unknown``.
+        """
+        status = native_result.get("api_error_status")
+        if type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return AgentOutcome(failure_kind="unknown")
+
+    def _run_evidence(
+        self, run_metadata: Mapping[str, Any], *, returncode: int | None, timed_out: bool
+    ) -> RunEvidence:
+        """What a Claude Code run's stream-json result says, as the outcome ladder's evidence.
+
+        A usable result is a ``success`` result that is not an error, from a process that exited cleanly. A usage
+        policy refusal is the model's answer. ``error_max_turns`` is the configured turn limit. Any other error
+        result is the error the run ended on.
+        """
+        subtype = run_metadata.get("subtype")
+        is_error = run_metadata.get("is_error") is True
+        refusal = is_error and USAGE_POLICY_REFUSAL in run_metadata.get("error_message", "")
+        turn_limit = subtype == "error_max_turns"
+        return RunEvidence(
+            has_result=subtype == "success" and not is_error and returncode in (0, None),
+            timed_out=timed_out,
+            model_replied=run_metadata.get("model_replied"),
+            model_limit="turns" if turn_limit else None,
+            refusal=refusal,
+            error=self.classify_outcome(run_metadata) if is_error and not (refusal or turn_limit) else None,
         )
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> ClaudeCodeSandboxSession:
@@ -800,14 +842,18 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 fold_thinking=not self._token_id_capture_enabled(),
             )
         cleanup = state.session.cleanup
+        returncode = cleanup["return_code"] if cleanup else None
+        evidence = self._run_evidence(
+            run_metadata, returncode=returncode, timed_out=bool(cleanup and cleanup["timed_out"])
+        )
         if cleanup and cleanup["timed_out"]:
-            status, reason = "incomplete", "timeout"
+            status, reason = decide_outcome(evidence).status, "timeout"
         elif isinstance(failure, asyncio.CancelledError):
             status, reason = "incomplete", "cancelled"
         elif failure is not None:
             status, reason = "failed", "sandbox_error"
         else:
-            status, reason = _invocation_outcome(run_metadata, cleanup["return_code"] if cleanup else None)
+            status, reason = decide_outcome(evidence).status, invocation_error_type(run_metadata, returncode)
         if artifacts is not None:
             state.observations = await asyncio.to_thread(
                 parse_artifact_observations,
@@ -847,7 +893,14 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
             )
         if failure is not None:
             raise failure
-        return self._response_from_output(body, items, model, run_metadata, status=status)
+        response = self.finish_response(
+            self._response_from_output(body, items, model, run_metadata), evidence, session=state.session
+        )
+        error_message = run_metadata.get("error_message")
+        if response.status == "failed" and isinstance(error_message, str) and error_message:
+            # Keep Claude Code's own text (for example "API Error: 503 ...") instead of the ladder's generic error.
+            response = response.model_copy(update={"error": ResponseError(code="server_error", message=error_message)})
+        return response
 
     async def responses(
         self,

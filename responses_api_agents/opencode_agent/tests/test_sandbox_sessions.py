@@ -40,6 +40,32 @@ from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObserva
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 
+def failed_message(result, kind: str = "agent_run_error") -> str:
+    """The error of a run the outcome ladder failed: HTTP 200, failed, with ``kind`` (by default the
+    ``agent_run_error`` of a run that left no usable result, retried by default). It was a 502 before the ladder."""
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["status"] == "failed"
+    assert json.loads(body["metadata"]["ng_agent_outcome"])["failure_kind"] == kind
+    return body["error"]["message"]
+
+
+def lifecycle_reason(agent: OpenCodeAgent, session_id: str, result) -> str:
+    """The reason of a lifecycle failure (required tools, an unreadable export, the supervisor's error): the activation
+    raised the harness's typed ``opencode.execute`` failure, which the agent route answers with a 5xx. It was a 502
+    before the outcome ladder."""
+    assert result.status_code == 500, result.text
+    failure = agent._session_records[session_id].state.task.exception()
+    assert isinstance(failure, NgFailureEvent)
+    assert (failure.boundary, failure.failure_kind, failure.operation, failure.stage) == (
+        "harness",
+        "agent_route_failed",
+        "opencode.execute",
+        "agent",
+    )
+    return str(failure)
+
+
 def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
     return NgFailureEvent(
         boundary="sandbox",
@@ -1126,8 +1152,8 @@ def test_partial_output_survives_model_failure_and_timeout(setup, kind, tmp_path
         session_id = created.json()["agent_session_id"]
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if kind == "error":
-            assert result.status_code == 502
-            assert "model rejected request" in result.json()["detail"]
+            assert "model rejected request" in failed_message(result)
+            assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
         else:
             assert result.json()["status"] == "incomplete"
             assert result.json()["output"][-1]["content"][0]["text"] == "Fixed"
@@ -1254,18 +1280,22 @@ def test_model_error_does_not_hide_independent_execution_failures(setup, tmp_pat
         sandbox.result["return_code"] = 0 if case == "zero-exit" else 2
     sandbox.events = json.dumps(export)
     capture_observations(sandbox, tmp_path)
-    with TestClient(agent.setup_webserver()) as client:
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
         response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 502, response.text
         if case == "cleanup-error":
-            assert "worker failed" in response.json()["detail"]
+            assert "worker failed" in lifecycle_reason(agent, session_id, response)
+        elif case == "timeout":
+            # The recorded 400 does not name an unavailable endpoint, so the deadline is graded (it was a 502).
+            assert response.status_code == 200 and response.json()["status"] == "incomplete", response.text
+        else:
+            failed_message(response)
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         closed.raise_for_status()
         invocation = next(
             record for record in closed.json()["agent_observations"]["records"] if record["kind"] == "agent_invocation"
         )
-        assert invocation["status"] == "failed"
+        assert invocation["status"] == ("incomplete" if case == "timeout" else "failed")
         assert invocation["conversation"][-1]["content"][0]["text"] == "Fixed"
 
 
@@ -1291,8 +1321,7 @@ def test_completed_model_turn_is_not_always_terminal(setup, tmp_path, finish, ex
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if expected == "failed":
-            assert result.status_code == 502
-            assert "terminal assistant result" in result.json()["detail"]
+            assert "terminal assistant result" in failed_message(result)
         else:
             assert result.status_code == 200
             assert result.json()["status"] == expected
@@ -2049,11 +2078,14 @@ async def test_native_model_error_is_reported_with_classification(setup, status)
     response = await task
     assert response.status == "failed"
     assert response.error.message == (f"HTTP {status}: provider error" if status is not None else "provider error")
-    expected = (
-        {"failure_kind": "unknown"}
-        if status is None
-        else {"failure_kind": "model_request_error", "status_code": status}
-    )
+    if status is None:
+        expected = {"failure_kind": "unknown"}
+    elif status in (400, 401, 413):
+        # A 4xx other than 408, 425 and 429 before any model reply is a rejected request (decision 4), not graded
+        # or retried; it was model_request_error, graded for a 400 or 413 and failed for a 401.
+        expected = {"failure_kind": "model_request_rejected"}
+    else:
+        expected = {"failure_kind": "model_request_error", "status_code": status}
     assert json.loads(response.metadata["ng_agent_outcome"]) == expected
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
@@ -2159,7 +2191,8 @@ async def test_context_limit_preserves_partial_work_without_hiding_cleanup_failu
     capture_observations(sandbox, tmp_path)
     request, session_id, task = await activate(agent, sandbox)
     if cleanup_error:
-        with pytest.raises(HTTPException):
+        # The supervisor's own error is a typed lifecycle failure (it was a 502).
+        with pytest.raises(NgFailureEvent, match="cleanup failed"):
             await task
     else:
         response = await task

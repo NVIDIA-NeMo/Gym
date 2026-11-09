@@ -335,6 +335,13 @@ harness execution; setup and close use the limits above. The close response's
 sandbox was stopped. A false value can accompany successful borrowed-connection
 release; the owner must destroy that sandbox and leave the activation ungraded.
 
+The shared outcome ladder decides a sandbox activation's status from its stream-json result (see the harness
+guide). A model request that failed after Claude Code's own retries ends the run with its `API Error: <status>`
+message (tested on 2.1.108): `model_request_error` with that status, or `model_request_rejected` for a 4xx other
+than 408, 425 and 429 before any model reply. A usage-policy refusal is `completed` and graded as the answer;
+`error_max_turns` is `incomplete`; another error result is `failed` with `unknown`. A nonzero exit or a missing
+result is `failed` with `agent_run_error`, retried by default. A timeout is `incomplete`.
+
 `configs/profiles/benchmark.yaml` is a swappable profile for benchmarks whose Resources server supplies no sandbox,
 such as HLE. It leaves `resources_server.name` unset (`???`), so Gym composes this agent onto the benchmark's own
 agent instance, and each session creates its own sandbox through the `sandbox` provider. That sandbox must reach the

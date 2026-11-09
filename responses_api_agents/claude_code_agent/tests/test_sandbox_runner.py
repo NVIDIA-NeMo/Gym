@@ -15,7 +15,7 @@ import pytest
 
 from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from responses_api_agents.claude_code_agent import sandbox as adapter
-from responses_api_agents.claude_code_agent.parsing import _invocation_outcome, parse_stream_json
+from responses_api_agents.claude_code_agent.parsing import invocation_error_type, parse_stream_json
 from responses_api_agents.claude_code_agent.tests.test_sandbox import seed
 
 
@@ -67,7 +67,8 @@ os.write(1,b'{"type":"result","subtype":"success","is_error":false}\\n')
     assert "error_fake" not in raw
     output, metadata = parse_stream_json(raw)
     assert output[0].content[0].text == "x" * 300000
-    assert _invocation_outcome(metadata, result.returncode) == ("completed", None)
+    assert invocation_error_type(metadata, result.returncode) is None
+    assert metadata["subtype"] == "success" and metadata["is_error"] is False
     assert (tmp_path / "stderr.log").read_bytes().endswith(b"diagnostic\xff\nit's set|''")
     runtime = adapter.parse_runtime_info(json.loads((tmp_path / "runtime.json").read_text()))
     assert runtime is not None and runtime.hostname and runtime.pid > 0

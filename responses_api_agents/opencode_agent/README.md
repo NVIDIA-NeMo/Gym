@@ -164,7 +164,7 @@ adapter then omits `tools` and passes `permission` exactly as given.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation
-gaps. Reported API errors retain their classified cause for the Environment Server to decide grading and retries; worker and cleanup failures remain execution errors; explicit limits can retain
+gaps. The shared outcome ladder decides each response's status (see the harness guide). Reported API errors retain their classified cause for the Environment Server to decide grading and retries; a 4xx other than 408, 425 and 429 before any model reply is `model_request_rejected`. A run without a usable result (a nonzero exit, no terminal assistant result) is `failed` with `agent_run_error`, retried by default. A deadline is graded unless the model error OpenCode recorded last names an unavailable endpoint (a transport failure, 408, 425, 429 or a 5xx); a deadline before any assistant message keeps its retry for now. Required tools that did not start, an unreadable export, and worker and cleanup failures remain execution errors; explicit limits can retain
 gradable partial output. This path is eval-only; working inference does not establish
 training token-ID/logprob support or benchmark accuracy. Sandbox observations use the shared
 `FailureStage` vocabulary: execution is `agent`, while OpenCode’s own setup failure events use `seed`.

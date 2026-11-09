@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import json
+import re
 from typing import Any, Optional
 from uuid import uuid4
 
@@ -29,6 +30,11 @@ from nemo_gym.core import (
 
 # Claude Code reports a model stop_reason "refusal" as an is_error result with subtype "success" and this text.
 USAGE_POLICY_REFUSAL = "appears to violate our Usage Policy"
+# Claude Code 2.1.108 reports a model request that failed after its own retries as a local assistant message (model
+# "<synthetic>", with an ``error`` field) whose text starts "API Error: <HTTP status> <body>", then ends with an
+# is_error result carrying the same text.
+_API_ERROR_STATUS = re.compile(r"API Error: ([45]\d{2})(?:\s|$)")
+_SYNTHETIC_MODEL = "<synthetic>"
 
 
 def _extract_text(content: list[Any]) -> str:
@@ -81,6 +87,8 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     compacting_sessions: set[str] = set()
     compaction_attempts: list[dict[str, str]] = []
     terminal_response_id: Optional[str] = None
+    model_replied = False
+    terminal_api_error: Optional[str] = None
 
     for event in raw_events:
         etype = event.get("type")
@@ -118,6 +126,10 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 unidentified_input += counts[0]
                 unidentified_output += counts[1]
 
+            synthetic = message.get("model") == _SYNTHETIC_MODEL
+            # Any reply of the policy model counts, a subagent's included; Claude Code's own error messages do not.
+            model_replied = model_replied or not synthetic
+
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
             # but never let their text or tool ids testify to the main conversation's terminal call.
             if not fold_thinking and event.get("parent_tool_use_id"):
@@ -127,8 +139,12 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 content = []
 
             served_id = message.get("id")
-            if not event.get("parent_tool_use_id") and isinstance(served_id, str) and served_id:
-                terminal_response_id = served_id
+            if not event.get("parent_tool_use_id"):
+                if isinstance(served_id, str) and served_id:
+                    terminal_response_id = served_id
+                terminal_api_error = (
+                    _extract_text(content) if synthetic and isinstance(event.get("error"), str) else None
+                )
 
             think = _extract_thinking(content)
             if think and fold_thinking:
@@ -235,23 +251,38 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         metadata["num_turns"] = num_turns
     if compaction_attempts:
         metadata["compaction_attempts"] = compaction_attempts
+    metadata["model_replied"] = model_replied
     metadata.update(result_metadata)
+    # Only the error the run ended on counts: the root conversation's last message is Claude Code's API error
+    # message, and the is_error result repeats its text. An HTTP status in other text (a tool's output, a subagent's
+    # error, a recovered retry) is not the run's error.
+    if (
+        terminal_api_error is not None
+        and metadata.get("is_error") is True
+        and metadata.get("error_message") == terminal_api_error[:2000]
+        and (match := _API_ERROR_STATUS.match(terminal_api_error))
+    ):
+        metadata["api_error_status"] = int(match[1])
     return output_items, metadata
 
 
-def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tuple[str, str | None]:
+def invocation_error_type(metadata: dict[str, Any], returncode: int | None) -> str | None:
+    """Claude Code's own name for how a run ended other than with a clean result, kept in its observations.
+
+    The response's status and failure kind come from the outcome ladder (``ClaudeCodeAgent._run_evidence``).
+    """
     subtype = metadata.get("subtype")
-    if subtype == "error_max_turns":
-        return "incomplete", subtype
     if isinstance(subtype, str) and subtype.startswith("error_"):
-        return "failed", subtype
+        return subtype
     if metadata.get("is_error") is True:
-        return "failed", "refusal" if USAGE_POLICY_REFUSAL in metadata.get("error_message", "") else "agent_error"
+        if USAGE_POLICY_REFUSAL in metadata.get("error_message", ""):
+            return "refusal"
+        return "model_request_error" if "api_error_status" in metadata else "agent_error"
     if returncode not in (0, None):
-        return "failed", f"process_exit_{returncode}"
+        return f"process_exit_{returncode}"
     if subtype == "success":
-        return "completed", None
-    return "incomplete", "result_missing"
+        return None
+    return "result_missing"
 
 
 def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
