@@ -39,11 +39,10 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
 
 
 GPU_RESOURCE_KEY = "nvidia.com/gpu"
-LOGS_DIRNAME = "logs"
-ARTIFACTS_DIRNAME = "artifacts"
 OUTPUT_VOLUME_NAME = "gym-output"
 # Flat memory request for the driver container, which does no GPU work of its own: enough that it
 # isn't QoS class BestEffort either (see `_gpu_resources`), without needing its own config knob.
@@ -226,7 +225,7 @@ def _driver_command(
         prepare_cmd = "gym eval prepare " + " ".join(flatten_run_args(benchmark.prepare))
 
     if benchmark.command is None:
-        output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/rollouts.jsonl"
+        output_path = f"+output_jsonl_fpath={run_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
         policy_type = config.driver.policy_model_type
         extra_flags = (
             [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []

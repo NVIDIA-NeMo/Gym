@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel, ValidationError, model_validator
 
 import nemo_gym.client.http_client
-from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.episode_types import EpisodeId
 from nemo_gym.server_runtime._checkpoint.control import (
     CheckpointParticipant,
     CheckpointRecord,
@@ -141,7 +141,7 @@ async def test_a_straggler_is_retired_after_resume_not_while_a_checkpoint_is_ope
     assert refused.status_code == 409 and refused.json()["error"]["code"] == "checkpoint_invalid_phase"
     assert retired.status_code == 200
     assert ready["phase"] == "prepared"
-    # Stopped and freed; only the rollout's refusal remains, until the controller forgets it.
+    # Stopped and released; only the rollout's refusal remains, until the controller forgets it.
     assert participant.executions.keys() == {"s-a1"}
     assert len(participant.retired) == 1
 
@@ -706,7 +706,7 @@ async def test_a_commit_that_fails_while_retiring_out_of_scope_state_can_be_retr
 
     async def flaky_retire(episode_id: EpisodeId) -> None:
         if episode_id.capture_key in fail_on:
-            raise RuntimeError("could not free")
+            raise RuntimeError("could not release")
         await original_retire(episode_id)
 
     participant.retire = flaky_retire

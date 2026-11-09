@@ -14,8 +14,8 @@ from typing import Any
 from nemo_gym import PARENT_DIR, component_search_roots
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import load_manifest
+from nemo_gym.environment.registry import EnvironmentCatalogEntry
 from nemo_gym.environment.validation import EnvironmentValidationReport, ResolvedComponent, validate_environment
-from nemo_gym.registry import EnvironmentCatalogEntry
 from nemo_gym.verification.verifier_fixture import (
     VerifierFixture,
     VerifierFixtureError,
@@ -94,13 +94,10 @@ def _resources_server_app(component: ResolvedComponent) -> tuple[Path, Path, Pat
     for root in component_search_roots():
         component_root = root.expanduser().resolve()
         server_dir = component_root / relative_dir
-        markers = [path for path in (server_dir / "requirements.txt", server_dir / "pyproject.toml") if path.is_file()]
-        if not markers:
+        if all((server_dir / name).is_file() for name in ("pyproject.toml", "requirements.txt")):
+            raise EnvironmentOnboardingError(f"Use only one of pyproject.toml and requirements.txt in {server_dir}")
+        if not any((server_dir / name).is_file() for name in ("pyproject.toml", "requirements.txt")):
             continue
-        if len(markers) > 1:
-            raise EnvironmentOnboardingError(
-                f"Resources server '{server_dir}' must use requirements.txt or pyproject.toml, not both."
-            )
         candidate = server_dir / entrypoint
         if not candidate.is_file():
             raise EnvironmentOnboardingError(f"Resources-server entrypoint was not found: {candidate}")

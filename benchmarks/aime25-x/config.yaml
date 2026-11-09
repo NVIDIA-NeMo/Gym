@@ -28,5 +28,8 @@ aime25-x_math_with_judge_environment_server:
   _inherit_from: math_with_judge_environment_server
   environment_servers:
     single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: aime25-x_math_with_judge_resources_server
       agent_server:
         name: aime25-x_math_with_judge_simple_agent

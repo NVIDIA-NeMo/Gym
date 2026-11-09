@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The SWE adapter: it seeds an Environment Server session with the row's Scale-SWE sandbox for opencode_agent,
+"""The SWE adapter: it seeds an episode session with the row's Scale-SWE sandbox for opencode_agent,
 and grades the actor's visible trajectory against the system prompt the row's contract records."""
 
 import json
@@ -13,8 +13,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ReverifyMode
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest, ReverifyMode, check_resources_session_contract
 from resources_servers.partner_if.swe_app import SWEIFResourcesServer
 
 

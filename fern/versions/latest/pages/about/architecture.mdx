@@ -39,7 +39,7 @@ Each task attempt is an *episode*. Rollout collection sends every episode to an 
 1. **Seed** — The Environment Server receives a task row from the dataset and seeds a session on the Resources Server, which sets up isolated state for this task. It then seeds a session on the Agent Server, passing along any tool and sandbox access that the Resources Server returned.
 2. **Agent Loop** — The Environment Server activates the agent session. The agent calls a model for inference, then routes tool calls to either its own tools or the Resources Server. This repeats until the agent decides the task is complete.
 3. **Close and Verify** — The Environment Server closes the agent session, then asks the Resources Server to score the attempt. The verifier inspects the final state and returns a reward signal.
-4. **Clean up** — The Environment Server closes the Resources Server session, which releases per-task state such as sandboxes.
+4. **Clean up** — The Environment Server closes the resources session, which releases per-task state such as sandboxes.
 
 ```mermaid
 sequenceDiagram
@@ -109,6 +109,10 @@ Gym servers communicate over async HTTP (aiohttp) with:
 - **Connection pooling** via a singleton aiohttp client for high-concurrency workloads
 
 Sandbox execution and file transfer are not Gym HTTP calls. They use the configured sandbox provider's transport, such as HTTP, gRPC, a Docker CLI, or a local subprocess.
+
+## Where the Code Lives
+
+Each server type has its own top-level directory: `resources_servers/`, `responses_api_agents/`, `responses_api_models/`, and `environment_servers/`. What they share lives in the `nemo_gym` library, which is split into layered packages. For the full map, see [Repository Layout](/api/reference/api-reference#repository-layout).
 
 ## Next Steps
 
