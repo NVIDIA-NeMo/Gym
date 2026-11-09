@@ -25,7 +25,7 @@ from nemo_gym.agents import (
     shell_assignments,
 )
 from nemo_gym.config import ModelServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import MediaFile, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult, read_text, upload_text
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
@@ -175,6 +175,11 @@ class OpenCodeSandboxSession(AgentSessionState):
     observations: AgentObservationBundle | None = None
     stderr: str = ""
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # The latest validated continuation request with its prompt, system text and decoded media.
+    # Activation takes it, so it holds at most one request's media.
+    validated_input: tuple[NeMoGymResponseCreateParamsNonStreaming, str, str, list[MediaFile]] | None = field(
+        default=None, repr=False
+    )
     conversation_directory: str | None = None
     harness_session_id: str | None = None
     message_ids: list[str] = field(default_factory=list)

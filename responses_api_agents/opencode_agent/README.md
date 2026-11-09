@@ -143,11 +143,13 @@ the task environment hook before accepting a gradable result. A missing or inval
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one user task, optional system/developer text and
-`instructions`. The user task may include images as base64 data-URI `input_image` parts.
-The adapter uploads them into the session directory and attaches them with `opencode run --file`.
-Sessions always declare image input on the Gym model, so OpenCode also passes on images its
-read tool returns; a text-only deployment rejects such requests. Images outside the user task
-and image URLs are rejected. Request `temperature` and `top_p` are applied to every OpenCode agent
+`instructions`. The user task may include images as base64 data-URI `input_image` parts,
+alongside nonempty text. The adapter uploads them into the session directory and attaches them
+with `opencode run --file`. OpenCode places the images, in order, before the task text and does
+not use the `detail` setting. Sessions always declare image input on the Gym model, so OpenCode
+also passes on images its read tool returns; a text-only deployment rejects such requests.
+Images outside the user task and image URLs are rejected. Saved trajectories keep only the
+text of each message, so they do not contain the images. Request `temperature` and `top_p` are applied to every OpenCode agent
 (see [Owner extensions](#owner-extensions)). Other controls, history replay and
 required direct-HTTP tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
 their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
