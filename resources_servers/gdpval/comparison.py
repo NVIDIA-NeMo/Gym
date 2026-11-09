@@ -193,11 +193,15 @@ def _bounded_text(text: str, cap: int, marker: str = "\n[...truncated]") -> str:
 
 
 def _load_raw_text(path: str | Path, max_chars: int = MAX_TEXT_FILE_CHARS_FOR_JUDGE) -> str:
-    """Read only the prefix that can be emitted to the judge."""
+    """Read only the prefix that can be emitted to the judge.
+
+    Bytes that are not valid UTF-8 read as U+FFFD: a submitted text file in another encoding is the agent's
+    output for the judge to weigh, not a reason that no judge can read the submission.
+    """
 
     if max_chars <= 0:
         return ""
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, "r", encoding="utf-8", errors="replace") as f:
         text = f.read(max_chars + 1)
     return _bounded_text(text, max_chars)
 

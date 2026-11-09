@@ -6,9 +6,10 @@ prompts, source graphs, and reference artifacts are loaded server-side and do
 not enter the agent request.
 
 Binary mode implements all 55 released A/C checks with AA's released system and
-user judge prompts. Each check is judged independently and malformed judge
-output fails closed. Pairwise mode evaluates the eight released AQ/P criteria
-against configured public reference submissions with GDPval's artifact
+user judge prompts. Each check is judged independently. A judge that still gives
+no usable verdict after the format retries fails the task as `judge_failed`; the
+check is not scored as a fail. Pairwise mode evaluates the eight released AQ/P
+criteria against configured public reference submissions with GDPval's artifact
 handling, compatible judge routing, and position-debiased trials. The default
 reference is the public `gpt-5-5` example.
 

@@ -79,3 +79,39 @@ async def test_binary_checks_select_only_requested_artifacts_and_capable_judges(
     assert eligible_panels[2:] == [["gpt", "claude", "gemini"]]
     assert call.call_args_list[2].args[0].name == call.call_args_list[0].args[0].name
     assert [item["passed"] for item in results] == [True, False, False]
+
+
+async def test_a_deliverable_in_another_encoding_is_judged_not_an_evaluation_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(AABriefcaseLiteResourcesServer, "model_post_init", lambda self, context: None)
+    server = AABriefcaseLiteResourcesServer.model_construct(
+        config=AABriefcaseLiteResourcesServerConfig.model_construct(
+            dataset_dir=str(tmp_path), preconvert_office_to_pdf=False
+        )
+    )
+    # Windows-1252 smart quotes, as an agent's script can write them.
+    (tmp_path / "captions.srt").write_bytes("1\n00:00:00,000 --> 00:00:01,000\n\x93Hello\x94\n".encode("latin-1"))
+    (tmp_path / "report.tex").write_bytes("\\section{Caf\xe9}".encode("latin-1"))
+    server._aa_checks = [
+        {
+            "task_id": "w1_t1",
+            "scoring_type": "binary",
+            "check_id": name,
+            "check_type": "format",
+            "taskdoer_output_file": filename,
+        }
+        for name, filename in [("subtitles", "captions.srt"), ("source", "report.tex")]
+    ]
+    judge = ResolvedJudge(name="gpt", model="gpt", base_url="http://judge.invalid/v1")
+    call = AsyncMock(return_value=({"passed": True, "reasoning": "test response"}, "{}"))
+    monkeypatch.setattr(AABriefcaseLiteResourcesServer, "_binary_call", call)
+
+    reward, _results = await server._verify_binary(
+        AABriefcaseLiteVerifyRequest.model_construct(task_id="w1_t1", deliverables_dir=str(tmp_path)),
+        "Write the captions and the report.",
+        [judge],
+    )
+
+    assert reward == 1.0
+    subtitle_blocks, source_blocks = [entry.args[3] for entry in call.call_args_list]
+    assert "\ufffdHello\ufffd" in str(subtitle_blocks)
+    assert "Caf\ufffd" in str(source_blocks)
