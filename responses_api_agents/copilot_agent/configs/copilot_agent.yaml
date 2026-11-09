@@ -15,3 +15,9 @@ copilot_agent:
       model: ${policy_model_name}
       copilot_version: 1.0.103
       timeout: 900
+      network_access: inherit
+      allow_web_fetch: false
+      # For offline installation, set all three to a trusted version-matched image runtime.
+      copilot_binary: null
+      copilot_binary_sha256: null
+      copilot_dist_dir: null

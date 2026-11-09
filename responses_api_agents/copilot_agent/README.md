@@ -6,7 +6,7 @@ verification, and cleanup. Copilot borrows the sandbox and runs its own model/to
 
 Copilot reaches the model through its bring-your-own-key (BYOK) provider support, pointed at the
 rollout-prefixed Gym Model Server with `COPILOT_OFFLINE=true`. It needs no GitHub account or token and makes
-no Copilot service calls. Authentication, client telemetry, built-in MCP servers, and auto-update are disabled; task tools can still access the network.
+no Copilot service calls. Authentication, client telemetry, built-in MCP servers, and auto-update are disabled; task shell tools can still access the network. Built-in web fetch is denied by default; set `allow_web_fetch: true` to enable it.
 
 [configs/copilot_agent.yaml](configs/copilot_agent.yaml) is the default agent configuration.
 Capability level: Observability, with task sandboxes, within the limits described below. Resources tool grants
@@ -64,9 +64,14 @@ in the runtime directory instead of the task's HOME. A later seed in the same sa
 ready marker and reports the pinned version. Concurrent seeds in one sandbox share one installation when the image
 has `flock`.
 
-The registry must be reachable from both the Agent Server and the sandbox, which also needs a CA bundle.
-A benchmark that restricts the task sandbox's network to the Model Server, such as SWE-bench Pro with a
-`task_network_policy`, therefore cannot install Copilot. The sandbox needs bash, `curl` or `wget`, `sha512sum`,
+The default download path requires registry access from both the Agent Server and the sandbox, plus a CA bundle.
+For a sandbox without registry egress (including SWE-bench Pro with `task_network_policy`), preinstall the
+pinned runtime in the image and set all three fields: `copilot_binary` (absolute executable path),
+`copilot_binary_sha256` (lowercase SHA-256 of that binary), and `copilot_dist_dir` (absolute path to its unpacked
+version-matched package). Seed verifies the binary digest before executing it, verifies the reported version,
+and uses the supplied package directly without querying npm or invoking the installer. The image and unpacked
+package remain trusted operator inputs; the binary checksum does not authenticate the package directory.
+This path needs preinstalled bash and `sha256sum`. The default download path needs bash, `curl` or `wget`, `sha512sum`,
 and `tar` with gzip; it does not need Python. Session setup installs bash, and curl with ca-certificates when
 neither downloader is present, with apt-get or apk when running as root; otherwise preinstall them. The provider
 must support sandbox exec and file upload/download.
@@ -157,3 +162,11 @@ rollout can be graded. The retained-artifact checker accepts the incomplete tool
 other unavailable evidence, such as complete tool timing, remains an explicit gap.
 
 Response metadata includes `harness_execution: sandbox`, hostname, runner PID, and `copilot_version`.
+
+Owned sandboxes support `network_access: inherit` (default), `model_only`, or `model_and_tools`.
+Restricted values require the preinstalled runtime and OpenSandbox, and allow only the Model Server host
+(Copilot keeps no external tool grants). Policies open every port and path on that host, including co-hosted
+services. Restricted policies on borrowed sandboxes, conflicting explicit provider policies, unsupported
+providers, and unreachable model endpoints are refused before sandbox creation. Borrowed sandboxes retain
+the Resources Server's policy. This setting limits egress; denying built-in web fetch alone does not restrict
+shell networking. Restricted OpenSandbox enforcement has not been exercised by the unit tests.

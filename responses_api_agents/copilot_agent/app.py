@@ -51,6 +51,7 @@ from nemo_gym.agents import (
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
+    restrict_sandbox_network,
 )
 from nemo_gym.client import request as http_request
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -461,6 +462,11 @@ class CopilotAgentConfig(BaseResponsesAPIAgentConfig):
     )
     reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
     npm_registry: str = "https://registry.npmjs.org"
+    network_access: Literal["inherit", "model_only", "model_and_tools"] = "inherit"
+    copilot_binary: Optional[str] = Field(default=None, pattern=r"^/[^\x00\r\n]+$")
+    copilot_binary_sha256: Optional[str] = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    copilot_dist_dir: Optional[str] = Field(default=None, pattern=r"^/[^\x00\r\n]+$")
+    allow_web_fetch: bool = False
     sandbox_provider: Optional[str] = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
@@ -468,6 +474,9 @@ class CopilotAgentConfig(BaseResponsesAPIAgentConfig):
 
     @model_validator(mode="after")
     def _output_fits_in_context(self) -> "CopilotAgentConfig":
+        supplied = (self.copilot_binary, self.copilot_binary_sha256, self.copilot_dist_dir)
+        if any(value is not None for value in supplied) and not all(value is not None for value in supplied):
+            raise ValueError("Set copilot_binary, copilot_binary_sha256 and copilot_dist_dir together")
         if (
             self.context_window is not None
             and self.max_output_tokens is not None
@@ -505,6 +514,13 @@ class CopilotAgent(SimpleResponsesAPIAgent):
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CopilotSandboxSession:
         owns_sandbox = body.sandbox_access is None
+        if self.config.network_access != "inherit":
+            if not owns_sandbox:
+                raise AgentSeedRejectedError("Copilot network_access applies only to an agent-owned sandbox")
+            if self.config.copilot_binary is None:
+                raise AgentSeedRejectedError(
+                    "Restricted Copilot setup requires a checksum-pinned preinstalled runtime"
+                )
         if owns_sandbox:
             if not self.config.sandbox_provider:
                 raise AgentSeedRejectedError("Copilot requires sandbox_access or a configured sandbox_provider")
@@ -547,6 +563,19 @@ class CopilotAgent(SimpleResponsesAPIAgent):
         except (TypeError, ValueError) as error:
             raise AgentSeedRejectedError(str(error)) from error
         if owns_sandbox:
+            try:
+                spec = restrict_sandbox_network(
+                    spec,
+                    network_access=self.config.network_access,
+                    provider=provider,
+                    model_base_url=self.resolve_model_base_url(self.config.model_server.name),
+                )
+            except BaseException:
+                try:
+                    await provider.aclose()
+                except BaseException:
+                    LOG.exception("Copilot provider cleanup failed after policy refusal")
+                raise
             sandbox = AsyncSandbox(provider)
         else:
             try:
@@ -607,6 +636,40 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             _sandbox_prepare_command(directory), timeout_s=self.config.sandbox_install_timeout_seconds
         )
         _check_setup(prepared, "Cannot prepare Copilot session")
+        if self.config.copilot_binary is not None:
+            binary = self.config.copilot_binary
+            dist = self.config.copilot_dist_dir
+            digest = self.config.copilot_binary_sha256
+            assert dist is not None and digest is not None
+            # Check the bytes before executing the preinstalled binary; this path never queries the registry.
+            check = (
+                "set -eu; "
+                + shlex.join(["test", "-d", dist])
+                + "; "
+                + shlex.join(["printf", "%s  %s\n", digest, binary])
+                + " | sha256sum -c - >&2; "
+                + shlex.join(
+                    [
+                        "env",
+                        f"HOME={directory}",
+                        "PATH=/usr/bin:/bin",
+                        "COPILOT_OFFLINE=true",
+                        "COPILOT_AUTO_UPDATE=false",
+                        f"COPILOT_CLI_DIST_DIR={dist}",
+                        binary,
+                        "--version",
+                    ]
+                )
+            )
+            checked = await sandbox.exec(check, cwd="/", timeout_s=self.config.sandbox_install_timeout_seconds)
+            _check_setup(checked, "Preinstalled Copilot checksum/version probe failed")
+            if self.config.copilot_version not in (checked.stdout or "").split():
+                raise RuntimeError("Preinstalled Copilot does not report the pinned version")
+            state.runtime = CopilotRuntime(
+                binary=binary, dist_dir=dist, package="preinstalled", version=self.config.copilot_version
+            )
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+            return
         probe = await sandbox.exec(_PLATFORM_PROBE, cwd="/", timeout_s=30)
         _check_setup(probe, "Cannot identify the Copilot sandbox platform")
         package = copilot_package(probe.stdout or "")
@@ -712,6 +775,8 @@ class CopilotAgent(SimpleResponsesAPIAgent):
             "--disable-client-telemetry",
             "--no-auto-update",
         ]
+        if not self.config.allow_web_fetch:
+            command += ["--deny-tool", "web_fetch", "--deny-tool", "fetch"]
         if self.config.reasoning_effort:
             command += ["--reasoning-effort", self.config.reasoning_effort]
         return command

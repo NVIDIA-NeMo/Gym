@@ -1207,3 +1207,114 @@ def test_invalid_owned_sandbox_spec_is_refused_before_provider_allocation(setup,
         assert check_agent_seed_rejected(agent.setup_webserver(), seed(sandbox_access=False))
     create.assert_not_called()
     assert not agent._session_records
+
+
+@pytest.mark.parametrize("allow_web_fetch", [False, True])
+def test_web_fetch_is_denied_unless_explicitly_enabled(setup, allow_web_fetch):
+    agent, sandbox = setup
+    agent.config.allow_web_fetch = allow_web_fetch
+    result, _ = run_session(agent)
+    assert result.status_code == 200
+    command = sandbox.payload["command"]
+    assert ("--deny-tool" in command) is not allow_web_fetch
+    if not allow_web_fetch:
+        assert command[command.index("--deny-tool") + 1] == "web_fetch"
+
+
+@pytest.mark.parametrize("field", ["copilot_binary", "copilot_binary_sha256", "copilot_dist_dir"])
+def test_preinstalled_runtime_requires_all_pins(field):
+    values = {"copilot_binary": "/opt/copilot", "copilot_binary_sha256": "a" * 64, "copilot_dist_dir": "/opt/dist"}
+    del values[field]
+    with pytest.raises(ValidationError, match="together"):
+        agent_config(**values)
+
+
+@pytest.mark.parametrize("bad_digest,wrong_version", [(False, False), (True, False), (False, True)])
+def test_preinstalled_runtime_checks_bytes_without_registry_or_installer(setup, tmp_path, bad_digest, wrong_version):
+    import hashlib
+
+    agent, sandbox = setup
+    binary = tmp_path / "copilot"
+    marker = tmp_path / "executed"
+    version = "1.0.104" if wrong_version else "1.0.103"
+    binary.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nprintf '{version}\\n'\n")
+    binary.chmod(0o755)
+    agent.config.copilot_binary = str(binary)
+    agent.config.copilot_binary_sha256 = "0" * 64 if bad_digest else hashlib.sha256(binary.read_bytes()).hexdigest()
+    agent.config.copilot_dist_dir = str(tmp_path)
+    original = sandbox.execute
+
+    async def execute(command, **kwargs):
+        if "sha256sum -c" in command:
+            completed = subprocess.run(["bash", "-c", command], capture_output=True, text=True)
+            return SimpleNamespace(
+                return_code=completed.returncode, error_type=None, stdout=completed.stdout, stderr=completed.stderr
+            )
+        return await original(command, **kwargs)
+
+    sandbox.exec.side_effect = execute
+    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert response.status_code == (500 if bad_digest or wrong_version else 200), response.text
+    assert marker.exists() is not bad_digest
+    sandbox.metadata.assert_not_awaited()
+    assert not any(path.endswith("install_copilot_runtime.sh") for path in sandbox.files)
+    if bad_digest or wrong_version:
+        sandbox.disconnect.assert_awaited_once()
+
+
+@pytest.mark.parametrize("owned", [False, True])
+def test_restricted_network_requires_owned_preinstalled_runtime(setup, owned):
+    agent, sandbox = setup
+    agent.config.network_access = "model_only"
+    agent.config.sandbox_provider = "sandbox"
+    reason = check_agent_seed_rejected(agent.setup_webserver(), seed(sandbox_access=not owned))
+    assert ("preinstalled" if owned else "agent-owned") in reason
+    sandbox.exec.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("network_access", ["model_only", "model_and_tools"])
+async def test_owned_network_policy_is_applied_before_start(setup, network_access):
+    agent, sandbox = setup
+    agent.config.network_access = network_access
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.copilot_binary = "/opt/copilot"
+    agent.config.copilot_binary_sha256 = "a" * 64
+    agent.config.copilot_dist_dir = "/opt/dist"
+    provider = SimpleNamespace(name="opensandbox", aclose=AsyncMock())
+    with (
+        patch(f"{MODULE}.create_provider", return_value=provider),
+        patch(f"{MODULE}.AsyncSandbox", return_value=sandbox),
+        patch.object(agent, "_install", AsyncMock()) as install,
+    ):
+        await agent._seed_agent_session_state(seed(sandbox_access=False))
+    spec = install.await_args.args[1]
+    assert spec.provider_options["network_policy"] == {
+        "defaultAction": "deny",
+        "egress": [{"action": "allow", "target": "model.example"}],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["unsupported", "conflict", "loopback"])
+async def test_network_policy_refusal_closes_provider_before_allocation(setup, failure):
+    agent, sandbox = setup
+    agent.config.network_access = "model_only"
+    agent.config.sandbox_provider = "sandbox"
+    agent.config.copilot_binary = "/opt/copilot"
+    agent.config.copilot_binary_sha256 = "a" * 64
+    agent.config.copilot_dist_dir = "/opt/dist"
+    provider = SimpleNamespace(name="docker" if failure == "unsupported" else "opensandbox", aclose=AsyncMock())
+    if failure == "conflict":
+        agent.config.sandbox_config = {"provider_options": {"network_policy": {"defaultAction": "deny"}}}
+    if failure == "loopback":
+        agent.server_client._build_server_base_url.return_value = "http://127.0.0.1:9000"
+    with (
+        patch(f"{MODULE}.create_provider", return_value=provider),
+        patch(f"{MODULE}.AsyncSandbox") as allocate,
+        pytest.raises(ValueError),
+    ):
+        await agent._seed_agent_session_state(seed(sandbox_access=False))
+    allocate.assert_not_called()
+    provider.aclose.assert_awaited_once()
