@@ -327,7 +327,8 @@ class OpenCodeSandboxSession(AgentSessionState):
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
         """Stage the invocation and return the OpenCode worker command.
 
-        Staging runs inside the session's execute, so close fences it and the activation deadline bounds it.
+        Staging runs inside the session's execute, so close fences it. A continuation activation's deadline also
+        bounds it.
         """
         if payload.get("instructions"):
             await upload_text(
