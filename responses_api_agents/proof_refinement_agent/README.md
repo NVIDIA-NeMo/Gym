@@ -16,6 +16,10 @@ feedback and correction prompt. The response's `usage` covers every turn's model
   final response to `/verify`, which grades the last attempt and reports `total_turns` and `all_attempts`.
   The seed is refused without a direct HTTP grant when `max_correction_turns > 0`. A crash restarts the episode
   from its input.
+  This path pairs only with `math_formal_lean`. Composed onto another environment (for example with
+  `--agent-type proof_refinement_agent`), the agent runs in agent sessions too, and the episode fails with a 422:
+  at the seed without a direct HTTP grant, or at the first check when the resources server has no `/check_proof`.
+  To run it single-turn elsewhere, set `max_correction_turns: 0`.
 - **Legacy `/run`** (`math_formal_lean_multi_turn.yaml`, behind a `legacy_agent` relay): the agent seeds the
   resources server and calls `/verify` for every attempt.
 

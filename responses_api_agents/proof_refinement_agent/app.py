@@ -33,6 +33,7 @@ The loop runs in one of two places:
 Both send the model the same inputs, and both reward the final attempt's ``/verify`` result.
 """
 
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -55,6 +56,7 @@ from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.client import request as http_request
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    SESSION_LOST,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -124,6 +126,15 @@ class ProofRefinementSessionState(AgentSessionState):
     operations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
     # The first activation's path; a retry through another path (another capture segment) is refused.
     activation_path: Optional[str] = None
+
+
+def _failure_kind(content: bytes) -> Optional[str]:
+    """The ``failure_kind`` a Gym server names in an error body's ``detail``, if any."""
+    try:
+        detail = json.loads(content).get("detail")
+    except (ValueError, AttributeError):
+        return None
+    return detail.get("failure_kind") if isinstance(detail, dict) else None
 
 
 def generation_text(model_response_json: Dict[str, Any]) -> str:
@@ -221,7 +232,7 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, ProofRefinementSessionState):
             raise TypeError("Expected proof refinement session state")
-        await state.operations.close(timeout=30.0)
+        await state.operations.close(timeout=self.config.session_close_timeout_seconds)
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=AgentObservationBundle(
@@ -343,6 +354,17 @@ class ProofRefinementAgent(SimpleResponsesAPIAgent):
             headers=dict(access.headers),
             _internal=True,
         )
+        if 400 <= check_response.status < 500:
+            content = await check_response.content.read()
+            if _failure_kind(content) != SESSION_LOST:
+                # A server without math_formal_lean's /check_proof refuses every attempt the same way, so the episode
+                # fails once (422 is terminal) instead of being dispatched again. A lost session stays retryable.
+                raise HTTPException(
+                    422,
+                    f"The resources server refused /check_proof with HTTP {check_response.status}; "
+                    "proof_refinement_agent's agent sessions pair only with math_formal_lean",
+                )
+            await raise_for_status(check_response, content)
         await raise_for_status(check_response)
         return await get_response_json(check_response)
 

@@ -18,10 +18,10 @@
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Annotated, Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, TaskId
@@ -43,6 +43,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from resources_servers.math_formal_lean.sandbox_client import Lean4SandboxClient
 from resources_servers.math_formal_lean.task_data import TaskData
@@ -455,7 +456,10 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
         return app
 
     async def seed_session(
-        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[BaseSeedSessionRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         """Keep an episode session's Lean task for /check_proof.
 
@@ -517,7 +521,8 @@ class MathFormalLeanResourcesServer(SimpleResourcesServer):
             raise ResourcesSessionLostError(f"Resources session {sid} is not an open episode session")
         task = held[2]
         check = await self._check(body.proof, header=task.header, formal_statement=task.formal_statement)
-        if check.proof_status == "completed" and sid in self._episode_tasks:
+        # Only the episode the check ran for keeps its pass: a retire and a new seed of the ID may land meanwhile.
+        if check.proof_status == "completed" and self._episode_tasks.get(sid) is held:
             self._passed_checks[sid] = check
         return check
 

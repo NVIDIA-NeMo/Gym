@@ -609,7 +609,9 @@ class TestEpisodeSessions:
             server.setup_webserver(),
             ResourcesSeedSessionRequest.model_validate(_episode_seed("contract-session")),
             keeps_state=True,
-            holds_state=lambda resources_session_id: resources_session_id in server._episode_tasks,
+            holds_state=lambda resources_session_id: (
+                resources_session_id in server._episode_tasks or resources_session_id in server._passed_checks
+            ),
             verify_body=_verify_body("```lean4\ntrivial\n```"),
         )
         # A verify after close is masked without compiling anything.
@@ -663,11 +665,23 @@ class TestEpisodeSessions:
         assert refused.status_code == 422
         assert "formal_statement" in refused.text
 
+    @pytest.mark.parametrize("malformed", ["no_task_id", "extra_field"])
+    def test_seed_refuses_a_malformed_typed_seed(self, server, malformed: str) -> None:
+        # A typed seed that fails validation must not fall through to the cookie seed, which keeps nothing.
+        client = TestClient(server.setup_webserver())
+        seed = _episode_seed()
+        if malformed == "no_task_id":
+            del seed["task_id"]
+        else:
+            seed["unexpected"] = True
+        assert client.post("/seed_session", json=seed).status_code == 422
+        assert server._episode_tasks == {}
+
     async def test_verify_reports_the_attempts_of_a_session_activation(self, server) -> None:
         server._sandbox_client.execute_lean4 = AsyncMock(
             return_value={"process_status": "completed", "stdout": "", "stderr": ""}
         )
-        first = {"turn_index": 0, "generation": "bad", "proof_status": "completed", "reward": 0.0}
+        first = {"turn_index": 0, "generation": "bad", "proof_status": "error", "reward": 0.0}
         last = {"turn_index": 1, "generation": "good"}
         body = _verify_body("```lean4\ntrivial\n```")
         body["response"][PROOF_REFINEMENT_RESPONSE_KEY] = {"total_turns": 2, "all_attempts": [first, last]}

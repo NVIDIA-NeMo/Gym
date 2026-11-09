@@ -42,6 +42,7 @@ from responses_api_agents.proof_refinement_agent.app import (
 
 class _FakeResp:
     ok = True
+    status = 200
 
     def __init__(self, payload: dict[str, Any]) -> None:
         self._payload = payload
@@ -52,6 +53,18 @@ class _FakeResp:
 
     async def read(self) -> bytes:
         return json.dumps(self._payload).encode()
+
+
+class _FakeErrorResp(_FakeResp):
+    ok = False
+
+    def __init__(self, status: int, payload: dict[str, Any]) -> None:
+        super().__init__(payload)
+        self.status = status
+        self.content = self
+
+    def raise_for_status(self) -> None:
+        raise RuntimeError(f"HTTP {self.status}")
 
 
 def _usage(input_tokens: int, output_tokens: int, *, cached: int = 0, reasoning: int = 0) -> dict[str, Any]:
@@ -347,6 +360,33 @@ class TestAgentSessions:
         assert closed.json()["resources_cookies"] is None
         assert closed.json()["agent_observations"]["gaps"][0]["code"] == "observation_capture_failed"
 
+    @pytest.mark.parametrize(
+        ("check_reply", "status"),
+        [
+            # A resources server without /check_proof: the pairing can never work, so the episode fails once.
+            (_FakeErrorResp(404, {"detail": "Not Found"}), 422),
+            (_FakeErrorResp(405, {"detail": "Method Not Allowed"}), 422),
+            # math_formal_lean lost the session: an infrastructure failure, which stays retryable.
+            (_FakeErrorResp(404, {"detail": {"failure_kind": "session_lost", "message": "gone"}}), 500),
+        ],
+    )
+    def test_a_refused_check_fails_the_activation(self, check_reply: _FakeErrorResp, status: int) -> None:
+        server_client = MagicMock(spec=ServerClient)
+        server_client.post = AsyncMock(return_value=_FakeResp(_model_response("resp-0", "proof", _usage(1, 1))))
+        agent = _agent(server_client=server_client)
+        seed = _agent_seed(_GRANT)
+        path = f"/ng-rollout/{seed.episode_id.capture_key}/v1/responses"
+        with (
+            patch("responses_api_agents.proof_refinement_agent.app.http_request", AsyncMock(return_value=check_reply)),
+            TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client,
+        ):
+            assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+            result = client.post(path, json={"input": "Prove it."})
+
+        assert result.status_code == status, result.text
+        if status == 422:
+            assert "pair only with math_formal_lean" in result.text
+
     async def test_last_allowed_attempt_is_left_to_verify(self) -> None:
         server_client = MagicMock(spec=ServerClient)
         server_client.post = AsyncMock(
@@ -479,6 +519,8 @@ class TestRewardParity:
             (["good_tactic"], 1.0, 1),
             (["bad_tactic", "good_tactic"], 1.0, 2),
             (["bad_tactic", "worse_tactic", "still_bad"], 0.0, 3),
+            # The last allowed attempt is never checked, so /verify compiles and grades it.
+            (["bad_tactic", "worse_tactic", "good_tactic"], 1.0, 3),
         ],
     )
     async def test_session_result_equals_the_run_result(self, proofs: list[str], reward: float, total_turns: int):
