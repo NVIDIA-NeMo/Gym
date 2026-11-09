@@ -76,6 +76,7 @@ from nemo_gym.models import (
     PolicyModelParticipant,
     VLLMWorkerCaptureHandler,
     generation_cut_requester,
+    start_model_execution,
 )
 from nemo_gym.models.token_capture import (
     CaptureContext,
@@ -4914,6 +4915,33 @@ class TestReasoningFieldConfig:
             ("reasoning_content", {"reasoning_content"}),
         ],
     )
+    @mark.parametrize("content", [None, "visible answer", [{"type": "text", "text": "visible answer"}]])
+    def test_explicit_harness_reasoning_reaches_selected_backend_fields(
+        self, reasoning_field: str, expected_keys: set[str], content: Any
+    ) -> None:
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        body = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate(
+            {
+                "model": "caller-model",
+                "messages": [{"role": "assistant", "content": content, "reasoning_content": "prior reasoning"}],
+            }
+        )
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), body.model_dump(exclude_unset=True))[
+            "messages"
+        ][0]
+
+        assert assistant["content"] == content
+        assert {key for key in ("reasoning", "reasoning_content") if key in assistant} == expected_keys
+        assert all(assistant[key] == "prior reasoning" for key in expected_keys)
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning", "reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+        ],
+    )
     @mark.parametrize(
         "content",
         ["<think>reason</think>act", [{"type": "text", "text": "<think>reason</think>act"}]],
@@ -9068,3 +9096,19 @@ async def test_a_400_for_an_unsupported_parameter_value_records_invalid_request_
     execution = request.state.nemo_gym_model_execution
     assert execution["upstream_status_code"] == 400
     assert execution.get("error_category") == category
+
+
+@mark.parametrize("finish_reason", ["stop", "tool_calls", "length"])
+async def test_responses_notes_the_chat_finish_reason_for_model_call_capture(
+    monkeypatch: MonkeyPatch, finish_reason: str
+) -> None:
+    model = _refit_model(monkeypatch, False)
+    completion = PARAMETERIZE_DATA[0][2].model_copy(deep=True)
+    completion.choices[0].finish_reason = finish_reason
+    monkeypatch.setattr(VLLMModel, "chat_completions", AsyncMock(return_value=completion))
+    request = _refit_request()
+    start_model_execution(request, upstream_attempted=True)
+
+    await model.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="hi"))
+
+    assert request.state.nemo_gym_model_execution["finish_reason"] == finish_reason

@@ -29,7 +29,7 @@ from nemo_gym.metrics.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.metrics.reward_profile import (
     RewardProfiler,
     add_avg_sample_std_dev,
-    add_execution_metrics,
+    add_perf_metrics,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
     compute_perf_summary,
@@ -1294,7 +1294,7 @@ class TestCompletionTokenMetrics:
         assert result.perf_summary["mean_completion_tokens"] == pytest.approx(20.0)
 
 
-class TestAddExecutionMetrics:
+class TestAddPerfMetrics:
     @pytest.mark.parametrize("observations", [None, {}, {"completion_tokens": 12, "num_turns": 3}])
     def test_missing_observations_and_immutable_benchmark_result(self, observations: dict | None) -> None:
         rows = [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}, {TASK_INDEX_KEY_NAME: 1, "reward": 0.0}]
@@ -1304,7 +1304,7 @@ class TestAddExecutionMetrics:
         original_rows = deepcopy(rows)
         original_metrics = benchmark.model_dump()
 
-        result = add_execution_metrics(benchmark, rows)
+        result = add_perf_metrics(benchmark, rows)
 
         assert rows == original_rows
         assert benchmark.model_dump() == original_metrics
@@ -1322,16 +1322,16 @@ class TestAddExecutionMetrics:
                 assert result.repeat_level_metrics == benchmark.repeat_level_metrics
 
     def test_benchmark_repeat_rows_without_a_rollout_index_pass_through_when_nothing_was_observed(self) -> None:
-        # A Resources server may publish repeat rows of its own. With no observations there is
+        # A resources server may publish repeat rows of its own. With no observations there is
         # nothing to merge, so the rows come back as they were instead of failing the request.
         benchmark = AggregateMetrics(repeat_level_metrics=[{"mean/reward": 1.0}])
 
-        result = add_execution_metrics(benchmark, [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
+        result = add_perf_metrics(benchmark, [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}])
 
         assert result == benchmark
 
     def test_repeats_missing_from_the_benchmark_rows_are_added_in_order_without_agent_ref(self) -> None:
-        # Repeat 0 is fully masked, so Resources publishes repeat rows for repeats 1 and 2 only.
+        # Repeat 0 is fully masked, so The resources server publishes repeat rows for repeats 1 and 2 only.
         rows = [
             {
                 TASK_INDEX_KEY_NAME: 0,
@@ -1345,7 +1345,7 @@ class TestAddExecutionMetrics:
         benchmark = compute_aggregate_metrics([{k: v for k, v in row.items() if k != "ng_perf"} for row in rows])
         assert [row[ROLLOUT_INDEX_KEY_NAME] for row in benchmark.repeat_level_metrics] == [1, 2]
 
-        result = add_execution_metrics(benchmark, rows)
+        result = add_perf_metrics(benchmark, rows)
 
         assert [row[ROLLOUT_INDEX_KEY_NAME] for row in result.repeat_level_metrics] == [0, 1, 2]
         assert all(AGENT_REF_KEY_NAME not in row for row in result.repeat_level_metrics)
@@ -1354,19 +1354,19 @@ class TestAddExecutionMetrics:
         assert [row["mean/reward"] for row in result.repeat_level_metrics[1:]] == [0.0, 1.0]
 
     def test_a_benchmark_perf_summary_survives_only_when_nothing_was_observed(self) -> None:
-        # Execution accounting replaces a summary Resources published itself, but a batch without
+        # Performance accounting replaces a summary Resources published itself, but a batch without
         # observations has nothing to replace it with.
         benchmark = AggregateMetrics(perf_summary={"from_resources": 1.0})
         unobserved = [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}]
         observed = [{**unobserved[0], "ng_perf": {"completion_tokens": 10, "num_turns": 2}}]
 
-        assert add_execution_metrics(benchmark, unobserved).perf_summary == {"from_resources": 1.0}
-        replaced = add_execution_metrics(benchmark, observed).perf_summary
+        assert add_perf_metrics(benchmark, unobserved).perf_summary == {"from_resources": 1.0}
+        replaced = add_perf_metrics(benchmark, observed).perf_summary
         assert "from_resources" not in replaced
         assert replaced["total_completion_tokens"] == 10
 
     def test_a_mixed_batch_keeps_the_results_the_reducer_published_before_it_was_split(self) -> None:
-        # Frozen from compute_aggregate_metrics before add_execution_metrics existed (origin/main):
+        # Frozen from compute_aggregate_metrics before add_perf_metrics existed (origin/main):
         # one masked sample, one rollout without observations, two repeats.
         def perf(tokens: int, turns: int, prompt: int, latency: float) -> dict:
             return {

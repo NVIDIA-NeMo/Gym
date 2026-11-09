@@ -91,7 +91,7 @@ A single run is a point estimate. Collecting repeats (`--num-repeats`) lets you 
 
 ### Within a repeat, across tasks
 
-`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty. Per-repeat token statistics computed from `ng_perf` are the exception: they are reported for every repeat, including a single one.
+`repeat_level_metrics` holds one entry per `(agent, repeat)`. It is produced **only for agents with two or more repeats** — an agent with a single repeat has nothing to compare against and is skipped. When no agent qualifies, the list is empty. Per-repeat token statistics computed from `ng_perf` are the exception: they are reported for every repeat, including a single one. When every rollout is masked, `compute_aggregate_metrics` returns no repeat rows, and an environment server such as `single_agent_turn` still adds the token statistics.
 
 Each entry carries:
 
