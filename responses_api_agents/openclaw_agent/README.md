@@ -211,7 +211,9 @@ local `/run` path does not load it. OpenClaw's generic custom-provider policy ot
 punctuation from IDs, breaking tool-result identity. The adapter requires the plugin's per-session
 readiness receipt before accepting a response. This detects a missing hook after execution;
 it does not prevent earlier model or tool calls. Missing readiness retains transcript evidence
-and fails activation with HTTP 502 before verification; the message keeps the worker's own error,
+and fails activation before verification with a typed harness failure (`agent_route_failed`, operation
+`openclaw.replay_policy`); like any agent 5xx, the Environment Server reruns the episode under its attempt
+cap without grading it. The failure reason keeps the worker's own error,
 such as a startup crash. A supervisor timeout before any model/tool activity
 remains an incomplete response eligible for verification, even if startup ended before the
 receipt was written; the missing receipt is still recorded as an observation gap.

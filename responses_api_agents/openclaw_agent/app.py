@@ -61,6 +61,7 @@ from nemo_gym.agents import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
@@ -75,6 +76,7 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
+    NgFailureEvent,
 )
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -989,12 +991,20 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 for record in state.observations.records:
                     if record.kind == "agent_invocation":
                         record.status = "failed"
-                # Keep the worker's own failure, such as a startup crash, in the activation error.
+                # The receipt is the harness's own evidence that it replays model turns under the policy the adapter
+                # configured. A run that ended without it contradicts that configuration: a harness failure, not a
+                # sandbox fault, unconfirmed termination or a model outcome. Like any agent 5xx, it is ungraded and
+                # retryable. Keep the worker's own failure, such as a startup crash, in the reason.
                 cause = f": {response.error.message}" if response.error is not None else ""
-                raise HTTPException(
-                    502,
-                    "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
-                    + cause,
+                raise NgFailureEvent(
+                    boundary="harness",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    operation="openclaw.replay_policy",
+                    stage="agent",
+                    failure_reason=(
+                        "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+                        + cause
+                    )[:2000],
                 )
         if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
             # Runtime and cleanup failures must not become gradable model outcomes.

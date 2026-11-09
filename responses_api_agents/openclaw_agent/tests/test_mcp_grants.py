@@ -12,7 +12,13 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.openclaw_agent.app import _mcp_probe_problem
-from responses_api_agents.openclaw_agent.tests.test_sandbox import close_body, seed, setup  # noqa: F401
+from responses_api_agents.openclaw_agent.tests.test_sandbox import (  # noqa: F401
+    close_body,
+    replay_policy_failure,
+    seed,
+    served_app,
+    setup,
+)
 
 
 def grant(name: str, *, required: bool) -> dict:
@@ -263,12 +269,11 @@ def test_missing_replay_receipt_keeps_the_optional_grant_gap(setup, stage):  # n
         await download(source, destination)
 
     sandbox.download = missing_policy
-    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=body)
         assert created.status_code == 200, created.text
         result = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-        assert result.status_code == 502
-        assert "replay policy" in result.json()["detail"]
+        replay_policy_failure(result)
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200, closed.text
     problem = _PROBLEM["exit"] if stage == "probe" else "did not connect in the agent run"

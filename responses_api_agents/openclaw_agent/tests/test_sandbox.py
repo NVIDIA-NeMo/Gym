@@ -2461,6 +2461,48 @@ def test_task_timeout_does_not_allow_other_metadata_or_consume_activation(
         assert closed.status_code == 200, closed.text
 
 
+def served_app(agent):
+    """The agent's routes with the failure reply and header the agent server sends in production."""
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    return app
+
+
+def replay_policy_failure(response):
+    """The harness event of an activation refused for a missing replay-policy receipt, checked as the
+    single_agent_turn Environment Server receives it: a typed, retryable agent failure."""
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.core import FailureHeader, rebuild_failure
+    from nemo_gym.server_runtime import dependency_failure
+
+    assert response.status_code == 500, response.text
+    report = FailureHeader.decode(response.headers)
+    route = report.events[report.failure_id]
+    assert (route.boundary, route.failure_kind, route.operation) == ("agent", "agent_route_failed", "agent.responses")
+    cause = report.events[route.cause_id]
+    assert (cause.boundary, cause.failure_kind, cause.operation, cause.stage) == (
+        "harness",
+        "agent_route_failed",
+        "openclaw.replay_policy",
+        "agent",
+    )
+    assert "replay policy" in cause.failure_reason
+    # What raise_boundary_failure and _invoke_agent make of the reply: an episode failure caused by the typed
+    # agent failure, not terminal, so the collector reruns the attempt under its cap and never grades it.
+    remote = rebuild_failure(report)
+    remote.http_error = ClientResponseError(
+        SimpleNamespace(real_url="http://agent/ng-rollout/openclaw-smoke-a2/v1/responses"),
+        (),
+        status=response.status_code,
+    )
+    episode_failure = dependency_failure(remote, stage="agent")
+    assert episode_failure.episode_terminal is False
+    assert episode_failure.__cause__.__cause__.failure_kind == "agent_route_failed"
+    assert episode_failure.__cause__.__cause__.operation == "openclaw.replay_policy"
+    return cause
+
+
 @pytest.mark.parametrize("receipt", [None, "wrong-policy"])
 def test_missing_provider_policy_receipt_fails_closed_and_releases_borrowed_sandbox(setup, receipt):
     agent, sandbox = setup
@@ -2475,12 +2517,15 @@ def test_missing_provider_policy_receipt_fails_closed_and_releases_borrowed_sand
             await download(source, destination)
 
     sandbox.download = missing_policy
-    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 502
-        assert "replay policy" in response.json()["detail"]
+        cause = replay_policy_failure(response)
+        # A repeated activation replays the same harness failure.
+        replayed = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert replay_policy_failure(replayed).event_id == cause.event_id
+        sandbox.launch.assert_awaited_once()
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200
         observations = closed.json()["agent_observations"]
@@ -2517,19 +2562,19 @@ def test_startup_timeout_without_replay_policy_remains_incomplete(setup, activit
             await download(source, destination)
 
     sandbox.download = missing_policy
-    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
         startup_timeout = receipt is None and activity in {"empty", "input"}
-        assert response.status_code == (200 if startup_timeout else 502), response.text
         if startup_timeout:
+            assert response.status_code == 200, response.text
             assert response.json()["status"] == "incomplete"
             assert response.json()["error"] is None
             assert response.json()["output"] == []
             assert "ng_agent_outcome" not in response.json()["metadata"]
         else:
-            assert "replay policy" in response.json()["detail"]
+            replay_policy_failure(response)
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200
         observations = closed.json()["agent_observations"]
@@ -2552,14 +2597,12 @@ def test_startup_crash_without_receipt_keeps_the_worker_error(setup):
         await download(source, destination)
 
     sandbox.download = missing_policy
-    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 502, response.text
-        detail = response.json()["detail"]
-        assert "replay policy" in detail
-        assert "OpenClaw exited 1: Error: Config validation failed" in detail
+        cause = replay_policy_failure(response)
+        assert "OpenClaw exited 1: Error: Config validation failed" in cause.failure_reason
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
@@ -2585,12 +2628,11 @@ def test_startup_timeout_requires_no_stdout_output_or_usage(setup, envelope):
         await download(source, destination)
 
     sandbox.download = missing_policy
-    with TestClient(agent.setup_webserver(), raise_server_exceptions=False) as client:
+    with TestClient(served_app(agent), raise_server_exceptions=False) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200
         response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
-        assert response.status_code == 502, response.text
-        assert "replay policy" in response.json()["detail"]
+        replay_policy_failure(response)
         closed = client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
         assert closed.status_code == 200
         assert closed.json()["agent_observations"]["records"][0]["status"] == "failed"
