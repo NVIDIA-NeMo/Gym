@@ -7,7 +7,7 @@ config_paths:
 
 visual_coding_opencode_agent:
   responses_api_agents:
-    opencode_vision_agent:
+    opencode_agent:
       datasets:
       - name: babyvision_opencode_question_only
         type: benchmark

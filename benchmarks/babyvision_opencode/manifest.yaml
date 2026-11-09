@@ -17,7 +17,7 @@ reward:
   higher_is_better: true
 determinism: stochastic
 resources_server: visual_coding_opencode
-agent_server: opencode_vision_agent
+agent_server: opencode_agent
 datasets:
 - name: babyvision_opencode
   type: benchmark

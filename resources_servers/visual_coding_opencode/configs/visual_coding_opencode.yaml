@@ -4,58 +4,97 @@
 # and a GPT judge grades the final \boxed{} answer against the gold answer. Nothing here is
 # dataset-specific; benchmarks (e.g. benchmarks/babyvision_opencode) and training sets only
 # supply rows with an image, the prompt, `question` and `expected_answer`.
+#
+# opencode_agent runs each task in its own sandbox, through the Environment Server, as an agent session. The resources
+# server lends that sandbox: each episode's seed starts one through the `sandbox` provider, and the episode's close
+# stops it. The prompt image goes into the sandbox and is attached with `opencode run --file`. Gym's token capture
+# records the model calls, so the same config serves evaluation and RL training.
+#
+# Needs a sandbox image built from resources_servers/visual_coding_opencode/sandbox_image/Dockerfile
+# (VISUAL_CODING_OPENCODE_SANDBOX_IMAGE) and the OpenSandbox provider settings (OPENSANDBOX_DOMAIN,
+# OPENSANDBOX_API_KEY). The sandbox reaches only the model server, by address.
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+
+# The sandbox calls the model server by address, so only the model servers advertise this host's address. The head
+# server (its config endpoint is unauthenticated) and the agent (a request without a session runs OpenCode on this
+# host) stay on loopback.
+use_absolute_ip: true
+absolute_ip_server_types: [responses_api_models]
+
 visual_coding_opencode:
   resources_servers:
     visual_coding_opencode:
       entrypoint: app.py
       domain: other
       verified: false
-      description: Image questions solved by OpenCode with a Python image toolkit (multi-turn visual coding), GPT-judged final answers.
-      value: Train and evaluate tool-assisted fine-grained visual reasoning (counting, coordinates, tracing).
+      description: Image questions solved by OpenCode in a sandbox session with a Python image toolkit, GPT-judged final answers.
+      value: Train and evaluate tool-assisted fine-grained visual reasoning, with Gym's token capture for RL.
       judge_model_server:
         type: responses_api_models
         name: visual_coding_opencode_judge_model
       judge_model: ${oc.select:visual_coding_opencode_judge_model_name,gpt-4o-mini}
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:VISUAL_CODING_OPENCODE_SANDBOX_IMAGE,null}
+        # Without ttl_s, OpenSandbox ends the sandbox after 10 minutes.
+        ttl_s: 7200
+        ready_timeout_s: 1200
+        resources: {cpu: 2, memory_mib: 8192}
+      # WORKDIR of the sandbox image.
+      sandbox_workdir: /workspace
+      # The lent sandbox reaches only the model server, so the model cannot look answers up. It cannot download
+      # OpenCode either, so the image carries the binary (sandbox_executable_path below).
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
 
 visual_coding_opencode_agent:
   responses_api_agents:
-    opencode_vision_agent:
+    opencode_agent:
       entrypoint: app.py
+      description: Visual coding with OpenCode in a sandbox session that has a Python image toolkit
       resources_server:
         type: resources_servers
         name: visual_coding_opencode
       model_server:
         type: responses_api_models
         name: policy_model
-      model: policy
-      concurrency: 64
-      command: opencode
+      model: ${policy_model_name}
       opencode_version: 1.17.11
-      thinking: false
-      # The only hard stop: OpenCode itself has no turn cap.
+      concurrency: 64
+      # On for a reasoning policy: the adapter passes --thinking and sets reasoning on the model entry.
+      thinking: true
+      # The only hard stop besides the context window: OpenCode itself has no turn cap.
       timeout: 1800
       context_window: 131072
       max_output_tokens: 32768
-      attach_images: true
-      vision: true
-      # Each task gets its own /tmp: models write crops to fixed names such as /tmp/crop.png.
-      private_tmp: true
-      env:
-        OMP_NUM_THREADS: "1"
-        OPENBLAS_NUM_THREADS: "1"
-        MKL_NUM_THREADS: "1"
-        NUMEXPR_NUM_THREADS: "1"
-        VECLIB_MAXIMUM_THREADS: "1"
-        OPENCV_FOR_THREADS_NUM: "1"
+      session_close_timeout_seconds: 90
+      # The resources server lends the sandbox and sets its network, so the agent keeps network_access inherit and
+      # needs no sandbox_provider of its own. The lent sandbox cannot download OpenCode, so the image carries the
+      # binary, pinned by its SHA-256.
+      sandbox_executable_path: /opt/opencode/bin/opencode
+      sandbox_executable_sha256: 0254a429cd0e6cf0ba53fc01672cf98e4a8dc728f7fa94be88f1e4b3645e6ded  # pragma: allowlist secret
       opencode_config:
+        tools:
+          webfetch: false
+          websearch: false
+          # Subagents run in sessions of their own, outside the scored chain of model calls.
+          task: false
         permission:
           bash: allow
           edit: allow
-          webfetch: deny
-          external_directory:
-            /tmp/*: allow
-        experimental:
-          continue_loop_on_deny: true
+          # OpenCode asks before it reads or writes outside the working directory, as when the model saves a crop
+          # under /tmp. `opencode run` rejects every request that would ask, and a rejection ends the run with no
+          # answer. The sandbox holds only this task, so allow every path.
+          external_directory: allow
+          # OpenCode also asks when the model repeats an identical tool call, and that rejection ends the run too.
+          doom_loop: allow
+        compaction:
+          # Automatic compaction continues from a summary, in model calls that training cannot join to the scored
+          # call. With it off, a run that fills the context ends with a context-limit error.
+          auto: false
       datasets:
       - name: example
         type: example
@@ -75,10 +114,14 @@ visual_coding_opencode_judge_model:
       openai_default_headers: {}
       max_concurrent_requests: 32
 
+# The Environment Server runs each episode as an agent session: it seeds the session, sends the task, and closes it.
 visual_coding_opencode_environment_server:
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: visual_coding_opencode
       agent_server:
         type: responses_api_agents
         name: visual_coding_opencode_agent

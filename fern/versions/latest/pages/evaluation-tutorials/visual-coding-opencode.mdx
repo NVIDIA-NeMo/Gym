@@ -1,10 +1,10 @@
 ---
 title: "Evaluate Visual Coding with OpenCode"
-description: "Run BabyVision under the OpenCode CLI with a Python image toolkit and a GPT judge."
+description: "Run BabyVision with OpenCode in a sandbox session, with a Python image toolkit and a GPT judge."
 position: 7
 ---
 
-The `visual_coding_opencode` environment answers a question about an image over as many tool turns as the model needs. The OpenCode CLI runs the session, and its shell has Python with pillow, numpy, scipy and opencv, so the model can crop, measure and plot the image and then look at what it made. A GPT judge grades the final `\boxed{}` answer against the gold answer.
+The `visual_coding_opencode` environment answers a question about an image over as many tool turns as the model needs. OpenCode runs each task in its own sandbox, whose shell has Python with pillow, numpy, scipy and opencv, so the model can crop, measure and plot the image and then look at what it made. A GPT judge grades the final `\boxed{}` answer against the gold answer.
 
 This tutorial runs the BabyVision benchmark (388 visual-reasoning puzzles) on it.
 
@@ -14,7 +14,8 @@ This tutorial runs the BabyVision benchmark (388 visual-reasoning puzzles) on it
 |---|---|
 | Resources server | `resources_servers/visual_coding_opencode` |
 | Environment config | `resources_servers/visual_coding_opencode/configs/visual_coding_opencode.yaml` |
-| Agent | `opencode_vision_agent` (OpenCode 1.17.11 with the Python image toolkit) |
+| Agent | `opencode_agent` (OpenCode 1.17.11) in a sandbox session, behind the `single_agent_turn_legacy` Environment Server |
+| Sandbox | One per task, lent by the resources server; it reaches only the policy model server |
 | Benchmarks | `babyvision_opencode`, `babyvision_opencode_question_only` |
 | Tasks | 388 BabyVision puzzles |
 | Score (`reward` field) | `1.0` when the judge's verdict is `equivalent`, otherwise `0.0` |
@@ -31,14 +32,15 @@ Complete [Installation](/get-started/installation). Then check the following:
 - **A vision-language policy.** The policy endpoint must accept image input, because the puzzle image is attached to the first user message and OpenCode's `read` tool returns the model's crops and plots as images.
 - **The BabyVision TSV.** `prepare.py` reads BabyVision in VLMEvalKit's TSV format (`BabyVision.tsv`) and checks its md5 against the two known copies.
 - **An OpenAI API key for the judge**, in `OPENAI_API_KEY`. The judge defaults to `gpt-4o-mini` on the OpenAI API.
-- **OpenCode on the agent host.** The agent installs OpenCode 1.17.11 on first use, so the host needs network access to download it (or a preinstalled copy).
-- **Unprivileged user namespaces** on the agent host. The environment config sets `private_tmp: true`, which runs each task in its own user and mount namespace so concurrent tasks do not share `/tmp`.
+- **The sandbox image.** Build it from `resources_servers/visual_coding_opencode/sandbox_image/Dockerfile` and set `VISUAL_CODING_OPENCODE_SANDBOX_IMAGE` to it. It holds the Python image toolkit and OpenCode 1.17.11 under `/opt/opencode/bin`, pinned by its SHA-256 in the config, because the sandbox cannot download it.
+- **A sandbox provider.** The config uses [OpenSandbox](/main/infrastructure/sandbox/opensandbox): set `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY`.
+- **A host address the sandbox can reach.** OpenCode in the sandbox calls the policy model server by address. The config sets `use_absolute_ip`, and only the model servers advertise this host's address.
 
-<Warning>
+<Note>
 
-On the local path, the model's shell commands run on the agent host with the agent server's permissions. Only `/tmp` is private to each task. Run local evaluations on a host where that is acceptable, or use a session sandbox (below).
+The model's shell commands run in the task's sandbox, not on the agent host. The sandbox can reach the policy model server and nothing else, so the model cannot look answers up.
 
-</Warning>
+</Note>
 
 ## Prepare the Data
 
@@ -72,7 +74,7 @@ gym eval run \
     ++policy_model_name="${POLICY_MODEL}"
 ```
 
-The metric is `mean/reward`: judged accuracy over the 388 puzzles. Each task stops after 1800 seconds, and a task that times out scores `0`. OpenCode has no turn cap of its own.
+The metric is `mean/reward`: judged accuracy over the 388 puzzles. Each task stops after 1800 seconds, and a task that times out scores `0`. The config sets no step limit and turns off automatic compaction, so token capture can join every model call.
 
 To use another judge, point it at any OpenAI-compatible endpoint with `++visual_coding_opencode_judge_base_url=...` and `++visual_coding_opencode_judge_model_name=...`.
 
@@ -84,55 +86,47 @@ vLLM can send every message's `content` to the chat template as a list of parts.
 
 ## Read the Results
 
-Each rollout carries the judge's verdict and reason, the extracted answer, and `string_match_reward` as a diagnostic next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`.
+Each rollout carries the judge's verdict and reason, the extracted answer, and `string_match_reward` as a diagnostic next to `reward`. The judge sees the question text, the gold answer, the extracted answer and the end of the model's text, but not the image. A response without a final answer scores `0`. A judge failure (a failed call, or a reply without a valid verdict) is not a score: the row comes back masked (`failure_kind: judge_failed`).
 
 See [Aggregate Metrics](/evaluation/aggregate-metrics) for the summary files a run writes.
 
-## Run Sessions in a Sandbox
+## How a Task Runs
 
-With `session_sandbox`, each OpenCode session runs in its own sandbox from a `nemo_gym.sandbox` provider, such as [OpenSandbox](/main/infrastructure/sandbox/opensandbox), instead of on the agent host. The run directory (OpenCode's config and the task image) is uploaded, OpenCode runs in the sandbox and calls the model through the agent as usual, and only OpenCode's session database comes back. The sandbox is deleted after the session.
+The Environment Server runs each task as an agent session:
 
-Put the settings in a config file and add it to the run with `--config`:
+1. It seeds the resources server, which starts the task's sandbox from `sandbox_config` and lends it to the agent. With `sandbox_network_access: model_only`, the sandbox's egress rule allows only the host of `sandbox_model_server`.
+2. It opens an `opencode_agent` session in that sandbox. The agent uploads the puzzle image into the session and attaches it with `opencode run --file`; the model entry declares image input, so `read` also returns images.
+3. OpenCode works in the sandbox until it answers, the context fills or the task times out. The resources server grades the answer.
+4. It closes the session, and the resources server stops the sandbox.
+
+The sandbox settings are on the resources server:
 
 ```yaml
-# session-sandbox.yaml
-visual_coding_opencode_agent:
-  responses_api_agents:
-    opencode_vision_agent:
-      session_sandbox:
-        provider:
-          opensandbox:
-            connection:
-              protocol: https
-        # Read from the agent's environment, so they never appear in configs or logs.
-        provider_secret_env:
-          domain: OPENSANDBOX_DOMAIN
-          api_key: OPENSANDBOX_API_KEY
-        spec:
-          # An image with OpenCode 1.17.11 and Python with pillow, numpy, scipy and opencv.
-          image: registry.example.com/opencode-vision:1.17.11
+visual_coding_opencode:
+  resources_servers:
+    visual_coding_opencode:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ${oc.env:VISUAL_CODING_OPENCODE_SANDBOX_IMAGE,null}
+        ttl_s: 7200
+        resources: {cpu: 2, memory_mib: 8192}
+      sandbox_workdir: /workspace
+      sandbox_network_access: model_only
+      sandbox_model_server:
+        type: responses_api_models
+        name: policy_model
 ```
 
-Local and sandboxed runs differ in a few ways:
-
-| | Local (default) | `session_sandbox` |
-|---|---|---|
-| Where the model's commands run | The agent host, as the agent server's user | The session's sandbox |
-| OpenCode install | Installed on the agent host on first use | Provided by the sandbox image or `setup_command` |
-| `private_tmp` and user namespaces | Required | Not used: the sandbox is private |
-| A provider outage or unconfirmed run | Not applicable | Fails the episode; it is not scored as a wrong answer |
-
-`repo_dir` works only with local sessions: sandbox and multi-node sessions (`session_nodes > 1`) copy only the run directory, so the agent rejects that combination when it starts.
+Without `sandbox_provider`, the resources server lends no sandbox; the agent then needs a `sandbox_provider` of its own.
 
 ## Train on the Environment
 
-For RL training, enable training-token capture on `opencode_vision_agent` so its model calls are recorded with their token IDs and log-probabilities. See [Training on External Agent Harnesses](/tutorials/training-tutorials/external-agent-harnesses).
+Gym's token capture records each model call of the session with its token IDs and log-probabilities, so the same config serves RL training. See [Training on External Agent Harnesses](/tutorials/training-tutorials/external-agent-harnesses).
 
 ## Reference
 
 The component READMEs have the details:
 
-- [Visual coding resources server](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/visual_coding_opencode/README.md): the judge prompt, scoring rules and BabyVision data checks.
-- [OpenCode vision agent](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_vision_agent/README.md): the image toolkit and multimodal options.
-- [OpenCode agent](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md): every local-run option, including `session_sandbox` and `session_nodes`.
+- [Visual coding resources server](https://github.com/NVIDIA-NeMo/Gym/blob/main/resources_servers/visual_coding_opencode/README.md): the judge prompt, scoring rules, the lent sandbox and BabyVision data checks.
+- [OpenCode agent](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/opencode_agent/README.md): sandbox sessions, prompt images and the session options.
 - [BabyVision benchmark](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/babyvision_opencode/README.md): the prompt format and data preparation.

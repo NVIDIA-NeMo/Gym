@@ -1,10 +1,10 @@
 # BabyVision under OpenCode
 
-BabyVision (388 visual-reasoning puzzles: counting, coordinates, tracing paths) solved by the
-OpenCode CLI with a Python shell that can crop, measure and plot the image. The environment is
+BabyVision (388 visual-reasoning puzzles: counting, coordinates, tracing paths) solved by
+OpenCode with a Python shell that can crop, measure and plot the image. The environment is
 the generic [`visual_coding_opencode`](../../resources_servers/visual_coding_opencode/README.md)
-resources server with the [`opencode_vision_agent`](../../responses_api_agents/opencode_vision_agent/README.md)
-harness; this benchmark only adds the data.
+resources server, with `opencode_agent` running each task in its own sandbox session; this benchmark only adds the
+data.
 
 Each row is one user message: the image, a visual-reasoning instruction, `---`, the question,
 and "Please answer the question and put the final answer within \boxed{}." A GPT judge grades
@@ -41,6 +41,6 @@ gym eval run \
     ++policy_model_name=<>
 ```
 
-The policy must accept images, and the OpenCode CLI (1.17.11) must be installable on the agent
-host. The model's shell runs with the agent server's permissions; each task gets its own `/tmp`
-(`private_tmp`, which needs unprivileged user namespaces).
+The policy must accept images. Each task runs OpenCode in its own sandbox, and Gym's token capture records the model
+calls, so the same config serves RL training. The resources server's README (section "Run") lists what the sandbox
+needs: the sandbox image, the OpenSandbox provider settings and an address that the sandbox can reach.
