@@ -112,11 +112,6 @@
       "openai==2.44.0"
     ]
   },
-  "responses_api_agents/opencode_vision_agent": {
-    "override-dependencies": [
-      "opencv-python-headless==5.0.0.93"
-    ]
-  },
   "responses_api_agents/osworld_agent": {
     "exclude-dependencies": [
       "agp-client",
