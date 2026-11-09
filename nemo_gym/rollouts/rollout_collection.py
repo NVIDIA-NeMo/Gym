@@ -112,6 +112,7 @@ from nemo_gym.core.failure_records import EpisodeFailure, FailureBoundary, Failu
 from nemo_gym.core.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.core.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.models.model_call_capture import ModelCallCaptureConfig
 from nemo_gym.rollouts.batch_status import (
     BatchStatusTracker,
     RunStatusTracker,
@@ -181,6 +182,7 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.trajectory.trajectory_format import project_result_v1
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -905,6 +907,7 @@ async def enrich_run_result(
     include_payloads: bool = True,
     rollout_latency_ms: Optional[float] = None,
     delete_capture: bool = False,
+    trajectory_schema_version: Literal["1.0", "2.0"] = "1.0",
 ) -> dict[str, Any]:
     """Attach a finished rollout's collected evidence to its ``/run`` result, in place.
 
@@ -936,6 +939,8 @@ async def enrich_run_result(
     # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
+    redacted = _has_observation_gap(result, "multimodal_history_redacted")
+    payloads_kept = include_payloads and not redacted
     if capture_dirs and (
         not no_persist
         or NG_AGENT_OBSERVATIONS_KEY in result
@@ -949,8 +954,12 @@ async def enrich_run_result(
         quiesced = False
         if rollout_id_for_capture is not None:
             quiesced = await await_model_call_capture_quiescence(rollout_id_for_capture, capture_dirs)
-        payloads_kept = include_payloads and not _has_observation_gap(result, "multimodal_history_redacted")
-        merge_model_call_capture_into_record(result, capture_dirs, include_payloads=payloads_kept)
+        # Available unredacted responses verify exact tool requests before output omission.
+        merge_model_call_capture_into_record(
+            result,
+            capture_dirs,
+            include_payloads=not redacted if trajectory_schema_version == "2.0" else payloads_kept,
+        )
         capture = result.get("ng_model_call_capture")
         safe_to_delete = quiesced and payloads_kept and isinstance(capture, dict) and not capture.get("gaps")
 
@@ -960,7 +969,36 @@ async def enrich_run_result(
         or NG_TRAJECTORY_KEY in result
         or NG_VERIFIER_INVOCATIONS_KEY in result
     ):
-        _attach_trajectory_record(row, result)
+        _attach_trajectory_record(
+            row, result, schema_version=trajectory_schema_version, include_payloads=payloads_kept
+        )
+        trajectory = result.get(NG_TRAJECTORY_KEY)
+        if isinstance(trajectory, dict):
+            if not payloads_kept:
+                for call in trajectory.get("model_calls", []):
+                    call["request"] = None
+                    call["response"] = None
+                if trajectory_schema_version == "2.0":
+                    gaps = trajectory.setdefault("gaps", [])
+                    for tool in trajectory.get("tool_calls", []):
+                        gap = {
+                            "code": "tool_request_payload_unavailable",
+                            "invocation_id": tool["invocation_id"],
+                            "agent_instance": tool.get("agent_instance"),
+                            "span_id": tool["span_id"],
+                            "detail": None,
+                        }
+                        if tool.get("model_call_id") is not None and gap not in gaps:
+                            gaps.append(gap)
+
+    # Omission applies even when malformed capture prevents trajectory projection.
+    if not payloads_kept:
+        capture = result.get("ng_model_call_capture")
+        calls = capture.get("calls") if isinstance(capture, dict) else None
+        for call in calls if isinstance(calls, list) else []:
+            if isinstance(call, dict):
+                for key in ("request", "response", "request_raw", "response_raw"):
+                    call.pop(key, None)
 
     # Assembles ng_perf from ng_trajectory when observability is enabled.
     _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
@@ -971,6 +1009,19 @@ async def enrich_run_result(
 
 
 _ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
+
+
+def _returned_observation_envelopes(result: Any) -> list[tuple[dict[str, Any], str, str]]:
+    """Known evidence locations, preserving a returned episode's outer shape."""
+    if not isinstance(result, dict):
+        return []
+    envelopes = [(result, NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY)]
+    if _is_episode_response(result):
+        if isinstance(result.get("result"), dict):
+            envelopes.append((result["result"], NG_TRAJECTORY_KEY, NG_AGENT_OBSERVATIONS_KEY))
+        if isinstance(result.get("failure"), dict):
+            envelopes.append((result["failure"], "trajectory", "agent_observations"))
+    return envelopes
 
 
 async def _enrich_returned_result(
@@ -1127,6 +1178,13 @@ def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
     """Add a stored record's enrichment and identity keys to the reply ``run_examples`` returns in its own shape."""
     if record is result or not isinstance(result, dict):
         return
+    # Enrichment already made one projection decision over the collected evidence.
+    # Reflect that decision into existing nested producer slots instead of running
+    # ID restoration again without the collector's complete join/collision evidence.
+    for container, trajectory_key, bundle_key in _returned_observation_envelopes(result):
+        for target, source in ((trajectory_key, NG_TRAJECTORY_KEY), (bundle_key, NG_AGENT_OBSERVATIONS_KEY)):
+            if container.get(target) is not None and source in record:
+                container[target] = copy.deepcopy(record[source])
     for key in (*_ENRICHMENT_KEYS, *_SHARD_IDENTITY_KEYS):
         if key in record and key not in result:
             result[key] = record[key]
@@ -4381,6 +4439,9 @@ executions → not run again (left to recovery)
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
                     rollout_latency_ms=rollout_latency_ms,
+                    trajectory_schema_version=ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version,
                 )
 
                 # Freeze and rebuild tokens only for participating agents.
@@ -5600,6 +5661,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         retry_requests: bool = True,
         enrich_results: bool = False,
         include_model_call_payloads: bool = True,
+        trajectory_schema_version: Literal["1.0", "2.0"] | None = None,
         delete_model_call_capture: bool = False,
         record_output_dir: Optional[Path | str] = None,
         record_shard: Optional[str] = None,
@@ -5667,6 +5729,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
 
+        ``trajectory_schema_version`` also applies when ``enrich_results=False``: v1 projects returned producer
+        observations without reading captures or adding records; v2 retains their original qualified evidence.
+        The explicit choice overrides ``model_call_capture.trajectory_schema_version`` (default v1).
+
         ``enrich_results`` runs :func:`enrich_run_result` on each result before it is returned, so the caller receives
         what ``ng_collect_rollouts`` records: the row's rollout identity, the captured model calls
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
@@ -5708,6 +5774,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     observability_enabled=observability_enabled,
                     include_payloads=include_model_call_payloads,
                     delete_capture=delete_model_call_capture,
+                    trajectory_schema_version=trajectory_schema_version
+                    or ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version,
                 )
                 if writer is None:
                     await _enrich_returned_result(
@@ -5727,6 +5797,43 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 )
                 _reflect_enrichment(completed.result, record)
                 writer.write(record)
+
+        else:
+            returned_schema = trajectory_schema_version
+
+            async def enrich(completed: _CompletedRollout) -> None:
+                # Raw producer evidence stays qualified until the caller-facing boundary.
+                # Choosing a wire version does not opt into capture reads or enrichment.
+                nonlocal returned_schema
+                envelopes = _returned_observation_envelopes(completed.result)
+                if not any(
+                    isinstance(container.get(key), dict) and container[key].get("schema_version") == "2.0"
+                    for container, trajectory_key, bundle_key in envelopes
+                    for key in (trajectory_key, bundle_key)
+                ):
+                    return
+                if returned_schema is None:
+                    global_config = self.setup_server_client(head_server_config).global_config_dict
+                    returned_schema = ModelCallCaptureConfig.model_validate(
+                        global_config.get("model_call_capture") or {}
+                    ).trajectory_schema_version
+                if returned_schema == "2.0":
+                    return
+                for container, trajectory_key, bundle_key in envelopes:
+                    trajectory, bundle = container.get(trajectory_key), container.get(bundle_key)
+                    if trajectory is not None and not isinstance(trajectory, dict):
+                        continue
+                    if bundle is not None and not isinstance(bundle, dict):
+                        continue
+                    try:
+                        projected, projected_bundle = project_result_v1(trajectory or {}, bundle)
+                    except (AttributeError, KeyError, TypeError, ValueError):
+                        # Keep malformed producer evidence intact, as raw dispatch did.
+                        continue
+                    if trajectory_key in container and trajectory is not None:
+                        container[trajectory_key] = projected
+                    if bundle_key in container and projected_bundle is not None:
+                        container[bundle_key] = projected_bundle
 
         dispatched = examples
         run_id = None
