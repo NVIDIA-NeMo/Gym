@@ -3,6 +3,8 @@
 # pi_search_legacy_agent.yaml keeps pi_sandboxed_agent on the deprecated legacy_agent relay.
 config_paths:
 - benchmarks/hle/pi.yaml
+# The sandbox reaches the Tavily server's MCP tools by address, so the Resources servers leave loopback too.
+absolute_ip_server_types: [responses_api_models, resources_servers]
 tavily:
   resources_servers:
     tavily_search:

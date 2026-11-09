@@ -8,6 +8,9 @@
 # The settings follow opencode_sandboxed_agent's configs/benchmark.yaml where opencode_agent has them; the
 # benchmark READMEs list what differs.
 use_absolute_ip: true
+# A sandbox allowed to reach the model server's host reaches every port on it, so only the model server leaves
+# loopback. A search preset adds resources_servers for its tool server.
+absolute_ip_server_types: [responses_api_models]
 # The head server's config endpoint is unauthenticated, so keep it off the address sandboxes reach.
 head_server:
   host: 127.0.0.1
