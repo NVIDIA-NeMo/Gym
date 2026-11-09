@@ -666,27 +666,34 @@ def question_words(text: str, reading: str = "removed") -> Tuple[str, ...]:
 class QuestionSpans:
     """The word n-grams of one rollout's question, for the verbatim-span refusal.
 
-    ``span_words`` is the configured threshold; a question with fewer words than that is protected as a whole.
+    ``span_words`` is the configured threshold; a question with fewer words than that is protected as a whole, in
+    each of its ``IGNORABLE_READINGS``.
     """
 
     def __init__(self, question: str, span_words: int):
         words = question_words(question)
         # Identifies the question without keeping its text, so a retried seed can be told from a re-seed.
         self.digest = hashlib.sha256("\x1f".join(words).encode()).hexdigest()
-        self.span_words = min(span_words, len(words)) if words else 0
-        n = self.span_words
         other_readings = (question_words(question, reading) for reading in IGNORABLE_READINGS[1:])
-        readings = dict.fromkeys((words, *other_readings)) if n else ()
-        self.ngrams = frozenset(reading[i : i + n] for reading in readings for i in range(len(reading) - n + 1))
+        readings = dict.fromkeys((words, *other_readings)) if words else ()
+        # Each reading has its own span length, so a short question is protected as a whole in every reading: a
+        # reading that splits more words (an ignorable character inside a word read as a space) must not expose
+        # fragments of one word as blocked n-grams.
+        lengths = {reading: min(span_words, len(reading)) for reading in readings if reading}
+        self.lengths = sorted(set(lengths.values()), reverse=True)
+        self.ngrams = frozenset(
+            reading[i : i + k] for reading, k in lengths.items() for i in range(len(reading) - k + 1)
+        )
 
     def longest_shared_span(self, query: str) -> Optional[int]:
-        """The span length when the query repeats that many consecutive question words, else ``None``."""
-        n = self.span_words
-        if not n:
+        """The length of the longest span of consecutive question words the query repeats, else ``None``."""
+        if not self.lengths:
             return None
-        for words in dict.fromkeys(question_words(query, reading) for reading in IGNORABLE_READINGS):
-            if any(words[i : i + n] in self.ngrams for i in range(len(words) - n + 1)):
-                return n
+        query_readings = list(dict.fromkeys(question_words(query, reading) for reading in IGNORABLE_READINGS))
+        for k in self.lengths:
+            for words in query_readings:
+                if any(words[i : i + k] in self.ngrams for i in range(len(words) - k + 1)):
+                    return k
         return None
 
 

@@ -274,6 +274,25 @@ async def test_presentation_variants_of_a_blocked_query_are_refused(server, capl
     backend.search.assert_not_awaited()
 
 
+@pytest.mark.parametrize(
+    "question",
+    ["葛\U000e0100城市の人口は？", "葛\u200b城市の人口は？"],
+    ids=["variation-selector", "zero-width-space"],
+)
+async def test_a_short_question_is_protected_whole_in_every_ignorable_reading(server, caplog, question):
+    """A question under the threshold is blocked as a whole in each reading of its ignorable characters, never by
+    a fragment that the reading splitting more words produces, and the log names the span length that matched."""
+    backend = stub_backend(server, results=[result("https://example.com/ok")])
+    await seed(server, {"question": question})
+    assert not (await search(server, "葛 surname origin")).refused  # one fragment of the question's only word
+    for spelling in ("葛城市の人口は", "葛 城市の人口は", question):
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            assert (await search(server, spelling)).refused
+    assert "family=question_span rule='1 consecutive words of the question'" in caplog.text
+    assert "family=question_span rule='2 consecutive words of the question'" in caplog.text  # the space reading
+    assert backend.search.await_count == 1
+
+
 async def test_reseeding_a_seeded_session_with_another_question_is_refused(server, caplog):
     """A session keeps the question it was seeded with: a retried seed (same question) is served again, a seed
     that would swap or drop the question answers 409, so the span check cannot be replaced from the plain route

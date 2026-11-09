@@ -91,7 +91,9 @@ Beyond the families, the protocol's own refusals:
   words are case-folded maximal runs of letters and digits after that folding and with combining marks
   removed, so punctuation, case, whitespace, underscores, full-width or mathematical letters, zero-width
   and other default-ignorable characters read in any of those three ways, and accents do not evade the rule. Letters from another script that look alike (a Cyrillic
-  `о` for a Latin `o`) are not folded. A question shorter than the threshold is protected as a whole. The question
+  `о` for a Latin `o`) are not folded. A question shorter than the threshold is protected as a whole, in each of
+  those three readings, so a reading that splits a word at an ignorable character never blocks a fragment of it on
+  its own. The question
   reaches the server through `/seed_session`: an Agent seeds its tool servers with its run request,
   whose extra fields are the task row (`question` for the HLE presets, configurable as
   `question_field`); the last user message of `responses_create_params.input` is the fallback, and an
