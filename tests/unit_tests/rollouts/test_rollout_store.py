@@ -32,7 +32,7 @@ from nemo_gym.rollouts.rollout_records import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest, atomic_write_json, manifest_path_for
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from nemo_gym.utils.path_utils import failures_path_for
+from nemo_gym.utils.path_utils import failures_path_for, rerun_masked_journal_path_for
 
 
 @pytest.fixture
@@ -66,6 +66,26 @@ def test_invalid_outcomes_are_rejected_before_appending_bytes(prepared_run):
                 store.record_outcome(invalid)
             assert snapshot(output) == before
     assert RolloutStore.read(output).selected("success") == [result]
+
+
+def test_a_fresh_run_does_not_inherit_an_earlier_runs_rerun_approvals(prepared_run):
+    from nemo_gym.rollouts.rollout_recovery import load_rerun_masked_approvals
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    # An earlier run at this path approved running its masked attempt 0 of rollout (0, 0) again.
+    rerun_masked_journal_path_for(output).write_text(
+        orjson.dumps({"reason": "r", "identities": [{"identity": [0, 0], "attempt": 0, "attempts": 1}]}).decode()
+        + "\n"
+    )
+    assert load_rerun_masked_approvals(output) == frozenset({(0, 0, 0)})
+
+    with RolloutStore.start_or_resume(output, prepare, resume=False):
+        pass
+    # The fresh run numbers attempts from 0 again, so the old approval would name its first attempt.
+    assert not rerun_masked_journal_path_for(output).exists()
+    assert load_rerun_masked_approvals(output) == frozenset()
 
 
 def test_partial_open_failure_closes_files_and_allows_retry(prepared_run, monkeypatch):
@@ -537,7 +557,7 @@ async def test_journal_reverification_waits_for_followup_without_changing_files(
 
 
 @pytest.mark.parametrize("alias", [False, True])
-def test_journal_health_waits_for_followup_without_reporting_stale_results(prepared_run, alias):
+def test_health_selects_no_stale_result_after_interruption(prepared_run, alias):
     from nemo_gym.rollouts.rollout_health import run_health_checks
 
     output, prepare = prepared_run
@@ -551,9 +571,9 @@ def test_journal_health_waits_for_followup_without_reporting_stale_results(prepa
         shortcut.symlink_to(output)
         output = shortcut
     before = snapshot(output)
-    with pytest.raises(ConfigError, match="histories with superseded outcomes"):
-        run_health_checks(output, workers=1)
-    assert snapshot(output) == before
+    result = run_health_checks(output, workers=1)
+    assert result.rollouts == []
+    assert {name: data for name, data in snapshot(output).items() if name in before} == before
 
 
 @pytest.mark.parametrize("mismatch", ["run_id", "rollout_id", "attempt", "terminal", "failure_kind"])
@@ -1027,6 +1047,8 @@ def test_saved_retry_cap_drives_resume_exporters_and_health(prepared_run, monkey
     coverage = reader.coverage()
     assert (coverage["failed_final"], coverage["failed_not_final"], coverage["failure_budget_exhausted"]) == (1, 0, 1)
     assert (coverage["missing"], coverage["not_started"], coverage["intentionally_omitted"]) == (1, 1, 1)
+    # The missing and the not-started rollout have no final result; the final failure is not open.
+    assert (coverage["open"], coverage["failed_masked"]) == (2, 0)
     metrics = _failure_export_metrics([], lambda row: None, set(), histories=[reader])
     assert metrics["retries/max_attempts"] == metrics["retries/at_cap"] == 1
     assert metrics["coverage/failed/agent_run_error"] == 1
@@ -1597,3 +1619,21 @@ def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run
     assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
     assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ["new-verifier"]
     assert selected["response"] == failure["response"] and selected["reward"] == 0.0
+
+
+def test_coverage_reports_masked_failure_records_apart_from_masked_results(prepared_run):
+    """A judge outage leaves a failure record with ``mask_sample``: excluded from the score, not a zero. It is a
+    failure, so it never counts under ``masked`` (completed results); ``failed_masked`` says how many failures are
+    masked, and a final failure is not an open rollout."""
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        scored, judged = store.pending()
+        store.record_dispatches([scored, judged])
+        store.record_outcome(scored | {"reward": 1.0})
+        store.record_outcome(judged | {"_ng_failure_class": "judge_failed", "mask_sample": True})
+        live = store.coverage()
+    for coverage in (live, RolloutStore.read(output).coverage()):
+        assert (coverage["expected"], coverage["successful"], coverage["measured"]) == (2, 1, 1)
+        assert (coverage["failed"], coverage["failed_final"], coverage["failed_masked"]) == (1, 1, 1)
+        assert (coverage["masked"], coverage["final_zeros"], coverage["open"]) == (0, 0, 0)
+        assert coverage["complete"] is False

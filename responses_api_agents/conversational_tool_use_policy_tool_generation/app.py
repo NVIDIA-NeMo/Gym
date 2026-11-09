@@ -32,7 +32,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.models import ResponsesConverter, chat_completion_usage_to_response_usage
+from nemo_gym.models import ChatCompletionsConverter, chat_completion_usage_to_response_usage
 from responses_api_agents.conversational_tool_use_policy_tool_generation.generation import PolicyToolGenerator
 from responses_api_agents.conversational_tool_use_policy_tool_generation.models import (
     CallPhase,
@@ -129,7 +129,7 @@ class PolicyToolGenerationAgent(SimpleResponsesAPIAgent):
             random_seed=self.config.random_seed,
         ).generate(body, caller)
         response_params = body.responses_create_params.model_copy(update={"model": final_completion.model})
-        final_response = ResponsesConverter(return_token_id_information=False).chat_completion_to_response(
+        final_response = ChatCompletionsConverter(return_token_id_information=False).chat_completion_to_response(
             response_params, final_completion
         )
         # The response text is the final completion; usage covers every policy call in the rollout.

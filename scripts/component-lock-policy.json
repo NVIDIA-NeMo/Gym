@@ -20,11 +20,12 @@
     ]
   },
   "resources_servers/longmt_eval": {
+    "constraint-dependencies": [
+      "transformers>=4.17,<5"
+    ],
     "override-dependencies": [
       "torchvision==0.27.0",
-      "protobuf==6.33.6",
-      "transformers>=5.17.0,<6",
-      "huggingface-hub>=1.31,<2"
+      "protobuf==6.33.6"
     ]
   },
   "resources_servers/nemo_user_sim": {
@@ -73,11 +74,22 @@
     ]
   },
   "resources_servers/wmt_translation": {
+    "constraint-dependencies": [
+      "transformers>=4.17,<5"
+    ],
     "override-dependencies": [
       "torchvision==0.27.0",
-      "protobuf==6.33.6",
-      "transformers>=5.17.0,<6",
-      "huggingface-hub>=1.31,<2"
+      "protobuf==6.33.6"
+    ]
+  },
+  "responses_api_agents/agentic_mme_agent": {
+    "override-dependencies": [
+      "opencv-python-headless>=4.10"
+    ]
+  },
+  "responses_api_agents/harbor_agent": {
+    "override-dependencies": [
+      "pathspec"
     ]
   },
   "responses_api_agents/harbor_agent_general": {
@@ -114,7 +126,9 @@
       "alibabacloud-ecs20140526",
       "alibabacloud-tea-openapi",
       "alibabacloud-tea-util",
-      "volcengine-python-sdk"
+      "volcengine-python-sdk",
+      "paddleocr",
+      "paddlepaddle"
     ],
     "override-dependencies": [
       "grpcio-status==1.71.2",

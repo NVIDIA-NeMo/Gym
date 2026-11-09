@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Integration test for a Resources Server's Environment Server session lifecycle.
+"""Integration test for a resources server's episode session lifecycle.
 
 :func:`check_resources_session_contract` drives the app a server builds through its real HTTP routes and middleware,
-in process, the way an Environment Server calls a deployed server: typed seed, repeated seed, a conflicting seed,
+in process, the way an environment server calls a deployed server: episode seed, repeated seed, a conflicting seed,
 close, repeated close, a close that names another episode, close of a never-seeded session, a seed after close, a
 close without the session cookie after a seed whose reply was lost, and optionally a verify after close. Call it from
 the server's own tests. Because it goes through the routes, it also catches a route that another registration
@@ -36,9 +36,10 @@ def check_resources_session_contract(
     ``seed`` must use a ``resources_session_id`` the app has not seen. With ``keeps_state``:
 
     - a seed that names the open session's ID with another episode is refused with 409;
+    - a close of the open session that names another episode is refused with 409 and releases nothing;
     - a close of the closed session that names another episode is refused with 409;
     - a seed that arrives after its session closed, or after a close for an ID that was never seeded, is refused
-      with 409 while the server remembers the close (``session_close_retry_window_seconds``). A server that keeps
+      with 409 while the session is fenced (``session_close_retry_window_seconds``). A server that keeps
       no state has nothing such a seed could recreate.
 
     The check also seeds a second session and drops its cookie, as when the seed's reply is lost, then closes it
@@ -69,6 +70,18 @@ def check_resources_session_contract(
 
     if keeps_state:
         other_episode = seed.episode_id.model_copy(update={"rollout_id": f"{seed.episode_id.rollout_id}-other"})
+        response = client.post(
+            "/close_session",
+            json=ResourcesCloseSessionRequest(
+                resources_session_id=seed.resources_session_id, episode_id=other_episode
+            ).model_dump(mode="json"),
+        )
+        assert response.status_code == 409, (
+            f"a close of active session {seed.resources_session_id} from another episode must get 409, "
+            f"got {response.status_code}: {response.text}"
+        )
+        if holds_state is not None:
+            assert holds_state(seed.resources_session_id), "a conflicting close released the owning episode's state"
         conflicting = seed.model_copy(update={"episode_id": other_episode})
         client.cookies.clear()
         response = client.post("/seed_session", json=conflicting.model_dump(mode="json"))

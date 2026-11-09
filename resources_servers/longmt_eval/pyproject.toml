@@ -27,7 +27,7 @@ constraint-dependencies = [
     "certifi>=2026.10.19",
     "msgpack>=1.2.1",
     "pyarrow>=25.0.1",
-    "transformers>=5.17.0",
+    "transformers>=4.17,<5",
 ]
 override-dependencies = [
     "spacy>=3.8.13",
@@ -41,8 +41,6 @@ override-dependencies = [
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
     "protobuf==6.33.6",
-    "transformers>=5.17.0,<6",
-    "huggingface-hub>=1.31,<2",
 ]
 exclude-dependencies = [
     "fasttext-wheel",
