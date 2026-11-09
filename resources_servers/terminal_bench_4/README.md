@@ -135,7 +135,7 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
-## Environment Server sessions (SandboxAccess)
+## Episode sessions (SandboxAccess)
 
 Harnesses that borrow a task sandbox through `SandboxAccess` (for example
 `codex_agent` behind `single_agent_turn` or `single_agent_turn_legacy`) use the
@@ -161,7 +161,7 @@ shared resources-session protocol instead of the contract above, as
   It then waits for in-flight provisioning or grading, stops anything still running
   without grading it (finishing even if the caller disconnects), and fences late seeds.
   A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
-  retries the deletion, and the provider TTL bounds it. A completed close is remembered
+  retries the deletion, and the provider TTL bounds it. A completed close keeps its fence
   for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
   late seeds are rejected; set it to cover the caller's retry horizon.
 

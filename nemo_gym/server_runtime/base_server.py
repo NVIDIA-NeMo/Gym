@@ -25,16 +25,15 @@ from contextlib import asynccontextmanager
 from functools import partial
 from ipaddress import ip_network
 from os import environ, getenv
-from traceback import format_exc, print_exc
+from traceback import format_exception, print_exception
 from typing import Any, Awaitable, Callable, ClassVar, List, Optional, Protocol, Sequence, TextIO, Tuple, Type
 from urllib.parse import urlsplit, urlunsplit
-from uuid import uuid4
 
 import uvicorn
 from aiohttp import (
     ClientResponseError,
 )
-from fastapi import FastAPI, Request, Response
+from fastapi import FastAPI, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from omegaconf import OmegaConf
@@ -50,7 +49,6 @@ from nemo_gym.client.http_client import (
     _set_tcp_keepalive,
 )
 from nemo_gym.client.server_client import (
-    SESSION_ID_KEY,
     ServerClient,
     rollout_path_prefix,
 )
@@ -66,8 +64,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.core.episode_context import current_rollout_id
-from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
-from nemo_gym.core.typed_exceptions import NgFailureEvent, route_reply_error
+from nemo_gym.core.typed_exceptions import NgFailureEvent
 from nemo_gym.server_runtime.ray_support import (
     _connect_server_to_ray,
     maybe_ray_cluster_exit,
@@ -78,12 +75,12 @@ from nemo_gym.server_runtime.request_handling.disconnect import (
 from nemo_gym.server_runtime.request_handling.errors import (
     _validation_exception_handler,
 )
+from nemo_gym.server_runtime.request_handling.exception_handling import ExceptionHandlingMiddleware
 from nemo_gym.server_runtime.request_handling.request_context import (
     install_request_context_isolation,
 )
+from nemo_gym.server_runtime.request_handling.session_id import SessionIDMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import (
-    SESSION_CLAIM_SCOPE_KEY,
-    SESSION_ID_SCOPE_KEY,
     SESSION_SOCKET_DIR_ENV,
     create_session_socket_dir,
     install_session_routing,
@@ -272,8 +269,8 @@ class SimpleServer(BaseServer):
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
 
-    def claimed_session_routing(self) -> dict[str, Any]:
-        """Arguments to ``install_session_routing``: where requests name their session, and how long claims last.
+    def owned_session_routing(self) -> dict[str, Any]:
+        """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
 
         A server that sets ``routes_sessions_to_owner`` implements it.
         """
@@ -356,96 +353,13 @@ class SimpleServer(BaseServer):
         # - at request time: They execute B first then A
         # - at response time: They return to A first and then B
         # So for adding session IDs, that middleware must run after SessionMiddleware, so it must be registered before it.
-
-        @app.middleware("http")
-        async def add_session_id(request: Request, call_next):  # pragma: no cover
-            # Always assign so Starlette 1.0+ marks session.modified=True and re-sends Set-Cookie.
-            # A new session takes the ID the session router chose, if any (see nemo_gym.server_runtime.request_handling.session_routing):
-            # a typed resources seed's resources_session_id, or an ID the router minted.
-            new_session_id = request.scope.get(SESSION_ID_SCOPE_KEY) or str(uuid4())
-            claim = request.scope.get(SESSION_CLAIM_SCOPE_KEY)
-            session = request.session
-            minted = SESSION_ID_KEY not in session
-            session[SESSION_ID_KEY] = session.get(SESSION_ID_KEY, new_session_id)
-            if claim is None:
-                response = await call_next(request)
-                if minted and response.status_code >= 400:
-                    # A failed request keeps nothing under a new session, so its reply names none: a seed refused
-                    # for another episode's resources_session_id must not hand this client that session's cookie.
-                    del session[SESSION_ID_KEY]
-                return response
-
-            # With several workers, a session nobody claims, new or named by a cookie whose claim ended,
-            # is claimed only if the handler uses it, before the reply leaves this worker,
-            # so the client's next request finds the claim.
-            # Starlette's session records each access through request.session; only the handler's count from here.
-            tracks_access = hasattr(session, "mark_accessed")
-            if tracks_access:
-                session.accessed = False
-            response: Response = await call_next(request)
-            used = session.accessed if tracks_access else True
-            if tracks_access:
-                # The reply keeps its Vary: Cookie header, as for any request that reads the session.
-                session.mark_accessed()
-            if used and not claim():
-                # Another worker claimed the same ID meanwhile; serving the request here would split the session.
-                return JSONResponse({"detail": "This session's ID is already claimed. Retry it."}, status_code=409)
-            if minted and (not used or response.status_code >= 400):
-                # No cookie names an ID that nothing holds, so a later request cannot name an unclaimed session,
-                # and a failed request hands out no cookie, as with one worker.
-                del session[SESSION_ID_KEY]
-            return response
-
-        # Direct MCP dispatch materializes the session itself.
-        add_session_id.skipped_on_direct_mcp_dispatch = True
+        app.add_middleware(SessionIDMiddleware)
 
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
-    def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
-        @app.middleware("http")
-        async def exception_handling_middleware(request: Request, call_next):
-            with RequestFailureLog.capture() as failure_log:
-                error: BaseException | None = None
-                try:
-                    response = await call_next(request)
-                except BaseException as raised:
-                    error = raised
-                    # An agent route failure answers with its cause's body and status.
-                    reply_error = route_reply_error(raised)
-                    response = SimpleServer._failure_reply(self, reply_error)
-                    # These are the same typed observations a successful reply carries.
-                    # A raised route must not turn its actual partial observations into an escaped error string.
-                    from nemo_gym.trajectory.trajectory_record import failure_observations
-
-                    observed = {}
-                    for slot, key in (
-                        ("nemo_gym_agent_observations", "ng_agent_observations"),
-                        ("nemo_gym_agent_trajectory", "ng_trajectory"),
-                    ):
-                        value = getattr(request.state, slot, None)
-                        if isinstance(value, BaseModel):
-                            observed.update(failure_observations({key: value.model_dump(mode="json")}))
-                    if observed:
-                        payload = json.loads(response.body)
-                        payload = payload if isinstance(payload, dict) else {"detail": payload}
-                        payload.update(observed)
-                        response = JSONResponse(
-                            payload,
-                            status_code=response.status_code,
-                            headers={k: v for k, v in response.headers.items() if k != "content-length"},
-                        )
-                # Success or failure, the reply forwards its own failure and those observed while serving it.
-                report = failure_log.reply_report(error)
-                # A nested layer of this middleware may have sent the report already; keep its failure_id.
-                inner = FailureHeader.decode(response.headers)
-                if inner is not None:
-                    report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
-                response.headers.update(FailureHeader.encode(report))
-                return response
-
-        # Direct MCP dispatch handles exceptions in the /mcp request itself.
-        exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
+    def setup_exception_middleware(self, app: FastAPI) -> None:
+        app.add_middleware(ExceptionHandlingMiddleware, failure_reply=partial(SimpleServer._failure_reply, self))
 
     def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
         """The reply for an exception the route did not handle."""
@@ -472,11 +386,11 @@ class SimpleServer(BaseServer):
         if isinstance(e, Exception):
             print(
                 f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
-Formatted exception: {format_exc()}
+Formatted exception: {"".join(format_exception(e))}
 repr(e): {repr(e)}"""
             )
             return JSONResponse(content=repr(e), status_code=500)
-        print_exc()
+        print_exception(e)
         print(
             f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
         )
@@ -637,13 +551,13 @@ repr(e): {repr(e)}"""
             report_connection_pool_capacity(connection_pool_config, pool_capacity, visible=True)
         server.setup_exception_middleware(app)
         backlog = UvicornBacklogConfig.model_validate(global_config_dict).uvicorn_backlog
-        # A worker of a multi-worker server serves a private socket in this directory and claims sessions in it.
+        # A worker of a multi-worker server serves a private socket in this directory and records session owners in it.
         # The main process of a multi-worker server never serves the app.
         session_socket_dir = getenv(SESSION_SOCKET_DIR_ENV) if not is_main_fastapi_proc else None
         is_multi_worker_main_proc = is_main_fastapi_proc and (server.config.num_workers or 1) > 1
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
-            # a forwarded request is handled only by the worker that claims its session.
+            # a forwarded request is handled only by the worker that owns its session.
             session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
@@ -652,7 +566,7 @@ repr(e): {repr(e)}"""
                 secret_key=session_cookie,
                 backlog=backlog,
                 **mcp_token_routing,
-                **server.claimed_session_routing(),
+                **server.owned_session_routing(),
             )
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)

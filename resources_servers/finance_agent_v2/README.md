@@ -324,7 +324,7 @@ byte-identical to a live call and survives an upstream formatting bump.
 |--------|-------------|
 | `price_history` (Tiingo) | per-`(endpoint, ticker)` master of raw records, sliced on read by the upstream `_records_to_csv` |
 | `edgar_search` (sec-api.io) | raw `filings` list keyed by the normalized request |
-| `parse_html_page` on sec.gov filing URLs | parsed text at `sec_filings/<cik>/<accession>/<primary-doc>.txt`; general web is not cached |
+| `parse_html_page` on sec.gov filing URLs | parsed text at `filings/<cik>/<accession>/<document>.txt` (document path percent-encoded, shared with `finance_sec_search`); general web is not cached |
 
 Caching is on by default. Point `cache_dir` at a shared absolute path so it
 survives across jobs:
@@ -333,6 +333,10 @@ survives across jobs:
 use_cache: true                            # true = read+write, false = off
 cache_dir: /shared/cache/finance_agent_v2  # null -> ~/.cache/nemo_gym/finance_agent_v2
 ```
+
+Cache files are written `0664` and new cache directories `2775`, so users in
+the cache root's group can read and extend a shared cache. Create the root
+yourself with group write and the setgid bit (`chmod 2775`) before sharing it.
 
 `cache_dir` also reads `FINANCE_AGENT_V2_CACHE_DIR`. Tiingo responses are cached
 verbatim and never re-derived, and extending a window keeps already-cached rows, so

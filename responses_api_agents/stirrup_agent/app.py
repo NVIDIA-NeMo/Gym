@@ -41,6 +41,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -364,6 +365,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("invalid_output"):
+            # Output of the policy model the harness cannot use: graded as the model's result, never retried.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return super().classify_outcome(native_result)
 
     async def _run_sandbox_episode(
