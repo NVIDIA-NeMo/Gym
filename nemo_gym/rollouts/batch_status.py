@@ -35,6 +35,7 @@ from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
+    ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     RESPONSES_CREATE_PARAMS_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -382,9 +383,17 @@ def _read_aggregate_entries(metrics_fpath: Optional[Path]) -> tuple[Dict[str, Di
         if not isinstance(entry, dict):
             return {}, "InvalidAggregateMetricsArtifact"
         agent_name = (entry.get(AGENT_REF_KEY_NAME) or {}).get("name")
-        if not agent_name or agent_name in entries:
+        if not isinstance(agent_name, str) or not agent_name:
             return {}, "InvalidAggregateMetricsArtifact"
-        entries[agent_name] = entry
+        environment_name = entry.get(ENVIRONMENT_SERVER_STAMP_KEY_NAME)
+        if environment_name is not None and (not isinstance(environment_name, str) or not environment_name):
+            return {}, "InvalidAggregateMetricsArtifact"
+        # Taskset status names the dispatch environment; metrics also retain the
+        # bound agent label for callers using an explicit agent reference.
+        for name in dict.fromkeys([agent_name, *([environment_name] if environment_name is not None else [])]):
+            if name in entries:
+                return {}, "InvalidAggregateMetricsArtifact"
+            entries[name] = entry
     return entries, None
 
 

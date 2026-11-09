@@ -15911,6 +15911,22 @@ class TestRunStatusFiles:
         ("metrics", "expected"),
         [
             pytest.param([{"agent_ref": {"name": "a"}, "mean/reward": 1.0}], "complete", id="aggregated"),
+            pytest.param(
+                [{"agent_ref": {"name": "bound_agent"}, "_ng_environment_server": "a", "mean/reward": 1.0}],
+                "complete",
+                id="environment dispatch",
+            ),
+            pytest.param(
+                [
+                    {
+                        "agent_ref": {"name": "bound_agent"},
+                        "_ng_environment_server": "a",
+                        "aggregation_error": {"type": "HTTPError"},
+                    }
+                ],
+                "error",
+                id="environment aggregation failed",
+            ),
             pytest.param(None, "error", id="aggregation failed"),
         ],
     )
