@@ -89,7 +89,9 @@ the server refuses either at seed. Compose environments start as
 a sandbox group when a `compose-images.json` with the sidecar images' recorded OCI configuration sits next to
 the task folders, written by `gym dataset fetch`; on OpenSandbox the provider block also needs
 `networking.enabled: true` (with `loopback_forwarding`) and `runtime_requirements.shm_size_metadata_key` (see
-[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed.
+[Compose tasks on OpenSandbox](#compose-tasks-on-opensandbox)); each service's working directory is created once its sandbox is up, as Docker creates a missing `working_dir` or `WORKDIR` at container create. `[environment.healthcheck]` is polled at seed as main's Compose `user:` when one is set, including for a task
+with its own `environment/docker-compose.yaml` and no job-level overlay. A decimal string is passed as an integer
+user ID; an absent or empty `user:` falls back to the image account. This does not change the agent's configured user.
 A Compose file's `${NAME}` resolves as Harbor's `docker compose` would: Gym's infrastructure variables, the task's
 `[environment].env`, the process environment, then `environment/.env`; a name none of them sets is an empty string
 at prepare, with one warning. The server's `compose_variables` fill such names at seed, below everything the task
@@ -108,7 +110,18 @@ compose_variables:
 ```
 Tasks that declare GPUs run on the `gpu_sandbox_provider` block when one is set. The task's
 `[[environment.mcp_servers]]` and `skills_dir` are written to `/tmp/.nemo-gym/task.json` in the agent's
-sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does). With `task_mcp_grants:
+sandbox for harnesses that drive task MCP servers from inside it (mini-SWE does); a relative `skills_dir` is
+written there as the absolute path it resolves to in the working directory. A task that declares `skills_dir` and
+ships `environment/skills/` has that folder uploaded to `skills_dir` at seed, as root, once the working directory
+exists, when the sandbox's `skills_dir` is missing or empty. In a single sandbox that is before the task's
+entrypoint, healthcheck and harness session; a Compose group's main has already run its command and passed its
+image healthcheck by then, so there the skills reach the harness session only. Harbor expects the image to hold the
+folder already (a Dockerfile `COPY skills ...`), and an image that filled it keeps it as built; the upload covers a
+task that runs a prebuilt or pulled image whose skills live only in the build context, as runners that deploy
+skills at start (BenchFlow's SkillsBench) expect. A task without `environment/skills/` uploads nothing. The
+uploaded skill folders are opened to every user, and `skills_dir` itself when the upload made it; a `skills_dir`
+of `/` or the working directory, or one only a shell resolves (`~`, `$`), is refused. The folders above it keep
+the image's modes, so a task user other than root needs a `skills_dir` it can reach. With `task_mcp_grants:
 optional` or `required`, the `streamable-http` URL entries are also granted to the agent as MCP tool
 accesses, as declared; a Compose sidecar's URL names its service, which resolves inside the task's group.
 A task that declares MCP servers or `skills_dir` is refused to a harness that does not declare
@@ -360,7 +373,7 @@ beside a declared verifier image, `image`, `build` and `pull_policy: build` too;
 beside `services`, `name`, `version` and `x-` fields (`networks`, `volumes`, `configs`, `secrets`, `include`, ...).
 Harbor stacks the whole file on its verifier project (`_docker_compose_paths` in docker.py at v0.22.0), so every such
 key shapes Harbor's verifier container, while this server starts the verifier from `task.toml`'s environment and the
-verifier image and reads the file's `services` alone (`nemo_gym/tasks/harbor/verifier_env.py`); grading it without
+verifier image and reads the file's `services` alone (`nemo_gym/data/tasks/harbor/verifier_env.py`); grading it without
 the key would differ from Harbor without a word. Among the hub datasets, arc-crm-6's six separate-verifier tasks are
 refused this way (their file sets `network_mode`, `pids_limit`, `security_opt` and `cap_drop` on `main`);
 cadir-ci-benchmark's two ship the `main`-only shape this rule honours, but they are refused at load before the file
@@ -375,7 +388,7 @@ declared images lack the helper its Dockerfiles copy in). The record names the t
 
 The image is named the way Harbor names it, `hb__<hash>`, where the hash is Harbor's 32-character content
 hash of the `environment/` folder, its environment id (vendored from Harbor v0.22.0 in
-`nemo_gym/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
+`nemo_gym/data/tasks/harbor/harbor_compat.py`), so identical contexts get the same image name in Harbor and in
 Gym. Builds are configured by a top-level `builds:` block in the merged configuration (`env.yaml`, a
 `--config` file, or `++builds.<setting>=<value>` on the command line; explicit settings apply over the
 defaults below):
@@ -478,7 +491,7 @@ builds a task with (service `main`, `build.context` the task's `environment/` fo
 when the task ships one, and runs
 `docker compose --project-directory <environment/> -f <harbor file> [-f <task file>] -f <images file> build`, as
 `DockerEnvironment.start()` does (`harbor/environments/docker/docker.py` at v0.22.0, cited by permalink in
-`nemo_gym/tasks/harbor/image_build.py`), with one generated override of Gym's own passed last, the way Harbor
+`nemo_gym/data/tasks/harbor/image_build.py`), with one generated override of Gym's own passed last, the way Harbor
 passes its own generated overrides after the task's file: `docker-compose-images.yaml`, the `image` of every
 service built (`hb__<hash>` for `main`, `hb__<hash>-<service>` per sidecar), so Gym's names win over a sidecar's
 own `image:` without a `docker tag` step. One compose build builds every service with a `build:` section, as
@@ -604,9 +617,10 @@ credentials of the sandbox provider block (`images.auth`), the same way as any p
 is created with the Dockerfile's final `USER` (or `[agent].user`) as the default for every command, on every
 provider, not only for the overlay `RUN` lines. An overlay task starts without that default, because its
 `RUN` lines may be what creates the user, and switches to it once they have run. A numeric `USER 1000` is
-resolved to its name in the image with `getent` first, because OpenSandbox and PTY sessions switch user by
-name. When the uid names no user, the number stays and the seed logs a warning: Docker accepts a uid as
-it is, the other providers cannot run commands as it.
+resolved to its name in the image with `getent` first. When the uid names no user, it is passed as an integer
+user ID: Docker and OpenSandbox's plain exec support it. Other providers, and OpenSandbox's PTY and bash
+sessions, still need a named user. A `uid:gid` pair is supported only on Docker. These limits apply with or
+without a job-level Compose overlay.
 
 | Setting or feature | Behavior in this layer |
 | --- | --- |
@@ -732,7 +746,7 @@ can be empty if optional log collection fails.
 
 Every run through this server (`gym dataset validate` and `gym eval run <task target>`) also leaves one
 per-run summary beside its rollouts, `<rollouts stem>_run_summary.json` (`rollouts_run_summary.json` by
-default; `nemo_gym.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
+default; `nemo_gym.data.tasks.harbor.run_summary`), so a results folder explains itself: the command, target,
 taskset and agent; the dataset's folder, source and digests; the `task_source` the run config declares for the
 taskset (`harbor_<taskset>_agent`, known before dispatch) and, as a cross-check, the one the result rows carry
 (`rows_task_source`, `null` without rows or when they disagree); the files of the run under `files` (rollouts,
@@ -1069,7 +1083,7 @@ num_repeats = 3
 A task folder may carry `task_data.json`, a JSON object of the task's own field values; the loader writes them into the
 row's `task_input.task_data` beside `_ng_digest` and `_ng_dataset_digest`, and the file enters the task digest. A dataset
 that ships `task_data.py` beside `dataset.toml`, a module exporting one Pydantic model `TaskData`, types those fields
-(`nemo_gym.tasks.harbor.task_data`). Prepare imports it once per dataset and checks every task folder's
+(`nemo_gym.data.tasks.harbor.task_data`). Prepare imports it once per dataset and checks every task folder's
 `task_data.json` against it before any image is recorded or built (and the loaded tasks again before a row is
 written), refusing the dataset, naming the task, when a task's fields do not satisfy the model or carry a key it does
 not declare (unknown keys fail whatever the model's `extra` setting: the model is validated with extras forbidden, so
@@ -1090,7 +1104,7 @@ report. A dataset without the module is checked for the reserved keys only, as b
 ## Authoring Gym datasets
 
 Three authoring shapes sit on top of Harbor's task folder, all rendered to plain files before any server reads them
-(`nemo_gym.tasks.harbor.parameterized`, `python_verifier`, `publish`):
+(`nemo_gym.data.tasks.harbor.parameterized`, `python_verifier`, `publish`):
 
 - **Parameterized tasks.** A template folder is a task folder with `tasks.jsonl` beside its `task.toml`, one row per
   task (`{"task_id": "...", "task_data": {...}}`, or the fields flat beside `task_id`). Prepare renders it into
@@ -1157,7 +1171,7 @@ Three authoring shapes sit on top of Harbor's task folder, all rendered to plain
 - **`solution/answer.md`.** A task verified by its answer rather than by a script ships the reference answer as
   `solution/answer.md` (or `answer.template.md` in a template). The oracle writes the file's text to `answer.md` in
   the working directory, as the task user, with the command the published `solve.sh` runs under Harbor's oracle
-  (`printf '%s' <answer> > answer.md`, `nemo_gym.tasks.harbor.publish.answer_write_command`), and submits the same
+  (`printf '%s' <answer> > answer.md`, `nemo_gym.data.tasks.harbor.publish.answer_write_command`), and submits the same
   text as its response. The oracle reads the file as bytes (`base64 /solution/answer.md` over the sandbox exec, decoded
   on the host), not as the exec's raw stdout: a provider may rebuild stdout from per-line messages (OpenSandbox's
   foreground exec, its default when `operations.background_exec` is unset, drops a trailing newline, doubles blank
@@ -1434,7 +1448,7 @@ harbor_environment_server:
 ```
 
 **Files.** Each file is merged onto the task's Compose document, in order, the way Compose merges `-f` files
-(`nemo_gym/tasks/harbor/compose_overlay.py`): mappings key by key; sequences appended, the keyed ones (`ports` by
+(`nemo_gym/data/tasks/harbor/compose_overlay.py`): mappings key by key; sequences appended, the keyed ones (`ports` by
 host, published port, target and protocol; `volumes` by target; `expose`, `cap_add`, `env_file`, ... by value)
 unique on their key with the later entry winning; `environment`, `labels`, `extra_hosts` and `sysctls` as mappings
 whatever their written form; `depends_on` and a service's `networks` as mappings; `command`, `entrypoint` and

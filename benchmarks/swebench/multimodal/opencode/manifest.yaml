@@ -1,0 +1,32 @@
+name: swebench/multimodal/opencode
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: coding
+description: SWE-bench Multimodal dev-split JavaScript repair tasks with the issue's images
+  attached, using prepared repair prompts, a sandboxed OpenCode agent, and binary
+  patch-resolution scoring.
+modality: text,image
+licensing: unknown
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../opencode.yaml
+resources_server: swebench
+agent_server: opencode_sandboxed_agent
+datasets:
+- name: swebench_multimodal
+  type: benchmark
+  jsonl_fpath: benchmarks/swebench/data/swebench_multimodal_benchmark.jsonl
+  prepare_script: benchmarks/swebench/multimodal/prepare.py
+  num_repeats: 3
+model_server: policy_model
+canonical_split: dev
+prompt_source: prepared
+lifecycle: active

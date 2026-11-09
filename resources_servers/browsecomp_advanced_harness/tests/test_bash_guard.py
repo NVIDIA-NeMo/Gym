@@ -168,6 +168,7 @@ def _server() -> TavilySearchResourcesServer:
         entrypoint="",
         name="",
         search_provider="tavily",
+        allow_host_execution=True,
         tavily_api_key="test_api_key",  # pragma: allowlist secret
         exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
         judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),

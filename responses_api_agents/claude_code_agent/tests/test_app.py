@@ -24,7 +24,6 @@ import pytest
 import yaml
 from fastapi import Request
 
-from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.client import ServerClient
 from nemo_gym.config import SKILLS_REF_KEY_NAME
 from nemo_gym.core import (
@@ -34,9 +33,8 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.token_id_capture.lineage import stamp_continuation
-from nemo_gym.token_id_capture.records import TokenEntry
-from nemo_gym.token_id_capture.terminal import resolve_terminal
+from nemo_gym.models import AnthropicConverter
+from nemo_gym.models.token_capture import TokenEntry, resolve_terminal, stamp_continuation
 from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation
 from responses_api_agents.claude_code_agent.app import (
     ClaudeCodeAgent,
@@ -426,6 +424,7 @@ class TestRunClaudeCode:
             # the staged dir + settings must exist while the subprocess runs
             captured["dir_exists_during_run"] = (Path(config_dir) / "settings.json").is_file()
             captured["sandbox"] = env.get("IS_SANDBOX")
+            captured["background_tasks_disabled"] = env.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")
             return FakeProc()
 
         with (
@@ -438,6 +437,7 @@ class TestRunClaudeCode:
         assert "--mcp-config" in captured["cmd"]
         assert "be terse" in captured["cmd"]
         assert captured["sandbox"] == "1"
+        assert captured["background_tasks_disabled"] == "1"
         assert captured["dir_exists_during_run"] is True
         # config dir is removed after the run (no leakage between rollouts)
         assert not Path(captured["config_dir"]).exists()
@@ -1103,6 +1103,8 @@ class TestConfigYaml:
         assert inner.get("token_id_capture", False) is False
         assert inner["concurrency"] == 32
         assert inner["max_turns"] == 30
+        # Restricting egress is opt-in: the shipped default leaves the provider's network alone.
+        assert inner["network_access"] == "inherit"
 
 
 class TestCaptureFriendlyTranscript:
@@ -1269,7 +1271,7 @@ class TestCaptureFriendlyTranscript:
             )
             served.id = f"resp_{call_id}"
             entry = TokenEntry(
-                rollout_id="rollout",
+                capture_key="rollout",
                 model_call_id=call_id,
                 response_id=served.id,
                 prompt_token_ids=[1],

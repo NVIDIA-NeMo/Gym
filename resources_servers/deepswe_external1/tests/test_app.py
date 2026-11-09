@@ -15,7 +15,7 @@ from fastapi import Request
 
 import resources_servers.deepswe_external1.app as module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.metrics.reward_profile import select_measured
+from nemo_gym.metrics import select_measured
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.deepswe.app import AgentSandboxSession, VerifierResult
 from resources_servers.deepswe.validate_golden import _empty_response
@@ -138,7 +138,7 @@ async def test_collection_distinguishes_invalid_submission_from_infrastructure(
     invalid = failure in {"git", "head"}
     assert result.reward == 0 and not result.evaluation_completed
     assert result.mask_sample is not invalid
-    assert result.failure_kind == ("deepswe_external1:invalid_submission" if invalid else "verifier_error")
+    assert result.failure_kind == ("deepswe_external1:invalid_submission" if invalid else "environment_server_failed")
     assert result.failure_stage == "patch_collection"
     _, measured, masked, _ = select_measured([{}], [result.model_dump()])
     assert [row["reward"] for row in measured] == ([0] if invalid else [])
@@ -386,6 +386,7 @@ async def test_failures_are_masked_and_owned_sandboxes_are_released(task: Inline
         agent.stop.side_effect = RuntimeError("delete unavailable")
     result = await server.verify(request(), body(task))
     assert not result.evaluation_completed and result.mask_sample and result.reward == 0
+    # Golden mode collects the verifier's own solution, so even a collection failure stays a verifier error.
     assert result.failure_kind == "verifier_error" and result.verifier_error
     assert result.failure_stage
     agent.stop.assert_awaited_once()
@@ -416,7 +417,57 @@ async def test_agent_requires_matching_seeded_session(task: InlineTask, mismatch
         data.sandbox_handle = "wrong"
     result = await server.verify(request(), data)
     assert result.mask_sample and not result.evaluation_completed
+    assert result.failure_kind == "session_lost" and result.failure_reason
     assert agent.stop.await_count == (mismatch != "absent")
+
+
+def _saved_row(result) -> dict:
+    """The row recovery reads back: the verify response plus the model answer the rollout saved."""
+    row = result.model_dump()
+    row["response"] = {
+        "object": "response",
+        "status": "completed",
+        "output": [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "done", "annotations": []}],
+            }
+        ],
+    }
+    return row
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failing_stage", ["patch_collection", "native_verifier"])
+async def test_agent_mode_names_the_stage_that_failed_and_keeps_recovery_aligned(
+    task: InlineTask, failing_stage: str
+) -> None:
+    """A collection failure is an environment failure; a verifier failure after a collected patch stays a verifier
+    error, so recovery grades the saved patch again only in the second case."""
+    from nemo_gym.orchestration.recovery import REVERIFY_VERIFIER, reverification_cause
+
+    server = make_server(task, mode="agent")
+    server.config.include_model_patch_in_response = True
+    agent = sandbox("A", [])
+    server._agent_sessions["session"] = AgentSandboxSession(task.data.task_id, task.data.image, agent, "A", {})
+    server._create_sandbox = AsyncMock(return_value=sandbox("B", []))
+    server._collect_model_patch = AsyncMock(
+        return_value=b"patch", side_effect=RuntimeError("capture") if failing_stage == "patch_collection" else None
+    )
+    server._run_verifier = AsyncMock(side_effect=RuntimeError("grader"))
+
+    result = await server.verify(request(), body(task))
+
+    assert result.mask_sample and not result.evaluation_completed and result.reward == 0
+    assert result.failure_stage == failing_stage
+    assert result.failure_reason
+    if failing_stage == "patch_collection":
+        assert result.failure_kind == "environment_server_failed"
+        assert reverification_cause(_saved_row(result)) is None
+    else:
+        assert result.failure_kind == "verifier_error"
+        assert reverification_cause(_saved_row(result)) == REVERIFY_VERIFIER
 
 
 @pytest.mark.asyncio

@@ -14,12 +14,30 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.agent_activation_types import AgentContinuationRequirements
-from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agents import (
+    AGENT_ACTIVATION_HEADER,
+    AgentCloseSessionRequest,
+    AgentContinuationRequirements,
+)
+from nemo_gym.core import (
+    PROVIDER_OOM_KILLED,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+    SandboxFailureDetails,
+)
+from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
+
+
+def sandbox_oom(reason: str, *, sandbox_id: str = "task-5") -> NgFailureEvent:
+    return NgFailureEvent(
+        boundary="sandbox",
+        failure_kind=PROVIDER_OOM_KILLED,
+        failure_reason=reason,
+        details=SandboxFailureDetails(provider="opensandbox", sandbox_id=sandbox_id),
+    )
 
 
 def install_artifact_runner(sandbox, tmp_path):
@@ -157,6 +175,30 @@ def roots(observations):
     ]
 
 
+def test_confirmed_oom_activation_retains_failure_observation(setup):
+    agent, sandbox = setup
+    agent.config.report_agent_sandbox_oom = True
+    error = sandbox_oom("Sandbox was OOM-killed", sandbox_id=sandbox.sandbox_id)
+    sandbox.launch.side_effect = error
+
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        response = activate(client, 1)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert result["status"] == "failed" and result["output"] == []
+        observation = SandboxObservation.model_validate_json(result["metadata"][NG_AGENT_SANDBOX_OBSERVATION_KEY])
+        assert observation.outcome == "oom" and observation.sandbox_id == sandbox.sandbox_id
+        [invocation] = roots(result["_ng_agent_observations"])
+        assert invocation["activation_id"] == 1
+        assert invocation["status"] == "failed" and invocation["error_type"] == "server_error"
+
+        receipt = close(client, request)
+        assert roots(receipt["agent_observations"]) == [invocation]
+        assert observation.model_dump() in receipt["agent_observations"]["records"]
+    sandbox.disconnect.assert_awaited_once()
+
+
 @pytest.mark.parametrize("activation_count", [1, 2])
 @pytest.mark.parametrize("disconnect_failure", [False, True])
 def test_negative_cleanup_releases_borrowed_session_and_replays_receipt(
@@ -209,7 +251,7 @@ def test_close_retains_recovered_activation_once(setup, tmp_path, monkeypatch, p
             earlier = roots(state.observations.model_dump(mode="json"))[0]
         index = 2 if prior_success else 1
         stop = AsyncMock(side_effect=[RuntimeError("temporary receipt unavailable"), dict(sandbox.result)])
-        monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+        monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
         capture = AsyncMock(wraps=state.collect_artifacts)
         state.collect_artifacts = capture
         assert activate(client, index).status_code == 500
@@ -266,7 +308,7 @@ async def test_close_recovery_preserves_cancelled_activation(setup, tmp_path, mo
     body = seed().model_copy(update={"continuation": AgentContinuationRequirements()})
     await agent.seed_agent_session(request, body)
     stop = AsyncMock(side_effect=[asyncio.CancelledError(), dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     stop.assert_awaited_once()
@@ -299,7 +341,7 @@ async def test_close_without_recovered_root_preserves_activation(
     request = Request({**request.scope, "headers": [(AGENT_ACTIVATION_HEADER.encode(), str(index).encode())]})
     error = asyncio.CancelledError() if cancelled else RuntimeError("temporary receipt unavailable")
     stop = AsyncMock(side_effect=[error, dict(sandbox.result)])
-    monkeypatch.setattr("nemo_gym.agent_utils.sandbox_session.stop_and_confirm_cleanup", stop)
+    monkeypatch.setattr("nemo_gym.agents.utils.sandbox_session.stop_and_confirm_cleanup", stop)
     with pytest.raises(asyncio.CancelledError if cancelled else RuntimeError):
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="next task"))
     retained = state.observations.model_dump(mode="json")
@@ -387,9 +429,11 @@ def test_plain_http_delta_replay_and_cumulative_close(setup, tmp_path):
     assert sandbox.disconnect.await_count == 1 and sandbox.stop.await_count == 0
 
 
-def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_path, mode):
     agent, sandbox = setup
-    install_artifact_runner(sandbox, tmp_path)
+    agent.config.system_prompt_mode = mode
+    payloads = install_artifact_runner(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         request = start(client)
         assert activate(client, 1, "").status_code == 422
@@ -397,6 +441,18 @@ def test_invalid_delta_and_instructions_leave_activation_available(setup, tmp_pa
         assert activate(client, 2, instructions="Replace instructions").status_code == 422
         assert activate(client, 2, "A valid correction").status_code == 200
         assert sandbox.launch.call_count == 2
+        for index, payload in enumerate(payloads):
+            config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+            if mode == "replace":
+                assert config["agent"]["build"]["prompt"] == "Keep changes small"
+                assert "instructions" not in config
+            else:
+                assert "instructions" in config
+            assert payload["env"]["NEMO_GYM_OPENCODE_ACTIVATION_ID"] == (
+                f"{request.agent_session_id}:activation-{index + 1}"
+            )
+        continued = payloads[1]["command"]
+        assert continued[continued.index("--session") + 1] == "opencode-session"
         close(client, request)
 
 
@@ -628,11 +684,15 @@ def test_reported_error_retains_continuation_evidence(
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
-    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.rollout_collection import _build_trajectory_record
-    from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord, join_agent_model_calls
-    from nemo_gym.trajectory.trajectory_record import join_assistant_message_calls
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+    from nemo_gym.trajectory import (
+        AgentObservationBundle,
+        ModelCallRecord,
+        TrajectoryRecord,
+        join_agent_model_calls,
+        join_assistant_message_calls,
+    )
 
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
@@ -744,6 +804,127 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert response.json() == {"agent_session_id": request.agent_session_id, "supports_task_tool_context": False}
         receipt = close(client, request)
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
+
+
+@pytest.mark.parametrize("return_session_trajectory", [False, True])
+def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
+    from nemo_gym.rollouts.harness_capabilities import EvidenceScope, inspect_record
+    from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
+    from nemo_gym.trajectory import (
+        AgentObservationBundle,
+        ContextCompactionObservation,
+        ModelCallRecord,
+        TrajectoryRecord,
+        join_agent_model_calls,
+        join_assistant_message_calls,
+    )
+    from responses_api_agents.opencode_agent.tests.test_app import _session_db
+
+    def reply(*parts, **message):
+        info = {"role": "assistant", "finish": "stop", "time": {"created": 1, "completed": 2}, **message}
+        return info, [{"type": "step-start"}, *parts, {"type": "step-finish"}]
+
+    tool = {
+        "type": "tool",
+        "tool": "bash",
+        "callID": "tool-1",
+        "state": {
+            "status": "completed",
+            "input": {"command": "pwd"},
+            "output": "/app",
+            "time": {"start": 1, "end": 2},
+        },
+    }
+    database = _session_db(
+        tmp_path,
+        [
+            ("user", [{"type": "text", "text": "task"}]),
+            reply(tool, finish="tool-calls"),
+            ("user", [{"type": "compaction", "auto": True}]),
+            reply({"type": "text", "text": "summary"}, summary=True, parentID="m2"),
+            reply({"type": "text", "text": "Fixed"}),
+        ],
+    )
+    agent, sandbox = setup
+    agent.config.return_session_trajectory = return_session_trajectory
+    download = sandbox.download
+
+    async def download_database(source, destination):
+        if source.endswith("/opencode.db"):
+            Path(destination).write_bytes(database.read_bytes())
+        else:
+            await download(source, destination)
+
+    sandbox.download = download_database
+    request = seed()
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post(f"/ng-rollout/{request.episode_id.capture_key}/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        receipt = close(client, request)
+    if not return_session_trajectory:
+        # The default keeps the existing protocol: collection builds the turns from the captured calls.
+        assert "trajectory" not in receipt
+        return
+    trajectory = TrajectoryRecord.model_validate(receipt["trajectory"])
+    assert [turn.source_message_id for turn in trajectory.turns] == ["m1", "m4"]
+
+    output = response.json()
+    calls = [
+        ModelCallRecord(
+            call_index=index,
+            model_call_id=f"capture-{index}",
+            response_id=f"reply-{index}",
+            model_ref=agent.config.model_server,
+            model="fixture",
+            dialect="responses",
+            status_code=200,
+            response_status="completed",
+            client_session_id="root",
+            client_assistant_message_id=message_id,
+            started_at=float(index),
+            completed_at=index + 0.5,
+            tokens_in=13,
+            tokens_out=3,
+            tokens_total=16,
+            tokens_reasoning=1,
+            cached_tokens=3,
+            request={"input": [{"role": "user", "content": "task"}]},
+            response={
+                "id": f"reply-{index}",
+                "status": "completed",
+                "output": output["output"],
+                "usage": output["usage"],
+            },
+        )
+        for index, message_id in enumerate(["m1", "m3", "m4"])
+    ]
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+    [compaction] = [record for record in bundle.records if isinstance(record, ContextCompactionObservation)]
+    assert [ref.model_call_id for ref in compaction.model_calls] == ["capture-1"]
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "task_id": "task",
+        "_ng_rollout_id": request.episode_id.capture_key,
+    }
+    result = {
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+        "ng_model_call_capture": {"calls": [call.model_dump(mode="json") for call in calls]},
+        "response": output,
+    }
+    canonical = _build_trajectory_record(row, result)
+    assert [[ref.model_call_id for ref in turn.model_calls] for turn in canonical.turns] == [
+        ["capture-0"],
+        ["capture-2"],
+    ]
+    result["ng_trajectory"] = canonical.model_dump(mode="json")
+    report = inspect_record(row | result, scope=EvidenceScope(tools=False, verifier=False))
+    failed = [check for check in report["checks"] if check["status"] == "fail"]
+    assert not failed, failed
 
 
 def test_provider_preparation_timeout_does_not_brick_unstarted_session(setup, tmp_path):

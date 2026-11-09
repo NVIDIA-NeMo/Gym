@@ -30,8 +30,11 @@ from pytest import MonkeyPatch
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, TaskId
-from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.testing.session_conformance import check_resources_session_contract
+from nemo_gym.server_runtime import (
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    check_resources_session_contract,
+)
 
 
 class _Browser:
@@ -100,7 +103,7 @@ def _close_json(session_id: str = "resources-session", episode=_EPISODE) -> dict
 
 
 class TestTypedSessionsOverHttp:
-    def test_a_typed_seed_opens_the_browser_under_the_callers_id(self, browsers) -> None:
+    def test_an_episode_seed_opens_the_browser_under_the_callers_id(self, browsers) -> None:
         server = _server()
         client = TestClient(server.setup_webserver())
 
@@ -281,7 +284,7 @@ def _request() -> SimpleNamespace:
     return SimpleNamespace(session={})
 
 
-def _typed_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
+def _episode_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRequest:
     return ResourcesSeedSessionRequest(
         resources_session_id=session_id,
         episode_id=EpisodeId(**_EPISODE),
@@ -290,7 +293,7 @@ def _typed_seed(session_id: str = "resources-session") -> ResourcesSeedSessionRe
     )
 
 
-def _typed_close(session_id: str = "resources-session") -> dict:
+def _episode_close(session_id: str = "resources-session") -> dict:
     return ResourcesCloseSessionRequest(resources_session_id=session_id, episode_id=EpisodeId(**_EPISODE)).model_dump(
         mode="json"
     )
@@ -304,9 +307,9 @@ class TestCloseRacingTheSeed:
         server = _server()
 
         async def run():
-            seed = asyncio.create_task(server.seed_session(_request(), _typed_seed()))
+            seed = asyncio.create_task(server.seed_session(_request(), _episode_seed()))
             await asyncio.sleep(0.05)  # the browser is still opening
-            await server.close_resources_session(_request(), _typed_close())
+            await server.close_resources_session(_request(), _episode_close())
             await seed
 
         asyncio.run(run())
@@ -320,9 +323,9 @@ class TestCloseRacingTheSeed:
         server = _server()
 
         async def run():
-            await server.close_resources_session(_request(), _typed_close())
+            await server.close_resources_session(_request(), _episode_close())
             with pytest.raises(HTTPException, match="already closed") as refused:
-                await server.seed_session(_request(), _typed_seed())
+                await server.seed_session(_request(), _episode_seed())
             assert refused.value.status_code == 409
 
         asyncio.run(run())
@@ -330,16 +333,16 @@ class TestCloseRacingTheSeed:
         assert browsers.created == []
 
 
-def test_typed_sessions_follow_the_session_contract(browsers) -> None:
+def test_episode_sessions_follow_the_session_contract(browsers) -> None:
     from test_verify_reporting import _body
 
     server = _server()
     check_resources_session_contract(
         server.setup_webserver(),
-        _typed_seed("contract-session"),
+        _episode_seed("contract-session"),
         keeps_state=True,
         holds_state=lambda resources_session_id: (
-            resources_session_id in server._session_id_to_state or resources_session_id in server._typed_identity
+            resources_session_id in server._session_id_to_state or resources_session_id in server._episode_identity
         ),
         verify_body=_body().model_dump(mode="json"),
     )
@@ -360,8 +363,8 @@ def test_verify_after_close_is_a_masked_lost_session(browsers) -> None:
 
     async def run():
         request = _request()
-        await server.seed_session(request, _typed_seed())
-        await server.close_resources_session(request, _typed_close())
+        await server.seed_session(request, _episode_seed())
+        await server.close_resources_session(request, _episode_close())
         return await server.verify(SimpleNamespace(session={SESSION_ID_KEY: "resources-session"}), _body())
 
     response = asyncio.run(run())
@@ -385,7 +388,7 @@ def test_a_lost_verify_ignores_response_fields_the_caller_sent(browsers) -> None
 
 def test_mcp_tool_calls_reach_the_browser_opened_under_the_callers_id(browsers) -> None:
     """With MCP exposure on, the token minted at seed must name the caller's id, not a fresh one."""
-    from nemo_gym.server_runtime.mcp_auto_exposure import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, maybe_auto_expose
+    from nemo_gym.server_runtime import NEMO_GYM_MCP_SESSION_TOKEN_HEADER, maybe_auto_expose
 
     server = _server(expose_tools_over_mcp=True)
     app = server.setup_webserver()

@@ -33,7 +33,7 @@ different filesystems.
 The Gym container image (`docker/Dockerfile`, `release` target) seeds its `UV_CACHE_DIR` with the
 root lock, so `lint.sh` and `core_unit_tests.sh` run without a package index; in the container,
 `setup_dev.sh` syncs the driver environment with `--offline`. Every server module also installs its
-own unlocked `requirements.txt` or `pyproject.toml`, which the root lock does not cover. Built with
+own `pyproject.toml` and committed `uv.lock`, which the root lock does not cover. Built with
 `--build-arg NEMO_GYM_SEED_SERVER_ENVS=1`, the image also seeds every server's environment through
 `ng_test_all +setup_only=true`, installed exactly as `server_tests.sh` installs it, so the server
 suite runs offline too when the provider sets `UV_OFFLINE=1` for the nested installs. A server
@@ -92,3 +92,25 @@ Lint clears `SKIP`; core and server tests clear external Gym roots, root configu
 `PYTHONSAFEPATH` overrides. Clearing `PYTHONSAFEPATH` keeps nested module imports consistent with
 GitHub when a CI image enables Python safe-path mode globally. Resolver/index settings are
 intentionally preserved so internal package access remains available.
+
+## Four-way core sharding on GitHub
+
+`unit-tests.yml` runs `core_unit_tests.sh INDEX 4` on four independent runners.
+The default invocation without arguments still runs every non-sandbox test for the internal adapter.
+The opt-in pytest plugin assigns whole collected files, longest first, to the least-loaded shard.
+Assignments use `core_test_durations.json`; new files use the median recorded duration.
+Every collected file belongs to exactly one shard. Tests within a file stay serial.
+
+The initial weights estimate file durations from timestamped verbose results in run `41587144451`.
+They exclude collection and sandbox time; log buffering makes them approximate, not speedup measurements.
+Each shard publishes JUnit durations with its coverage artifact for future weight updates.
+Sum JUnit testcase times by source file to refresh the `files` map, and update the source metadata.
+Keep all four shards on the same checked-in weights so they select disjoint partitions.
+
+Sandbox tests run once on a separate runner. Coverage uses relative paths across runner checkouts.
+The coverage job requires all four core files and the sandbox file before combining them.
+Only the combined report enforces `pyproject.toml`'s coverage threshold and precision.
+The report includes measured Git-tracked sources, not dependency-cache helpers or synthetic code from tests.
+Missing tracked sources still fail reporting; the job does not ignore coverage errors.
+The existing `Test` check requires every core shard, sandbox tests, combined coverage, and any required changed-server tests.
+The eight server shards and the separate on-demand `full-test-suite.yml` keep their existing behavior.
