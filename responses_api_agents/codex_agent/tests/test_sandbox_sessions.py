@@ -1377,10 +1377,12 @@ async def test_close_stops_config_staging_before_releasing_the_sandbox(setup):
     body = AgentSeedSessionRequest.model_validate({**seed().model_dump(mode="json"), "tool_accesses": [mcp_grant()]})
     seeded = await agent.seed_agent_session(request, body)
     task = asyncio.create_task(agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="task")))
-    await asyncio.wait_for(started.wait(), 2)
-    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id)))
-    await asyncio.wait({task}, timeout=2)
-    assert task.done()
+    await asyncio.wait_for(started.wait(), 5)
+    await asyncio.wait_for(
+        agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(seeded.agent_session_id))), 10
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, 5)
     assert events == ["upload cancelled", "sandbox released"]
     sandbox.launch.assert_not_awaited()
 

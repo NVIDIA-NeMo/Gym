@@ -1097,8 +1097,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
         failure = None
         try:
             async with self.sem:
-                # The configuration carries the MCP grant headers. Staging it inside the session's execute lets close
-                # stop the upload before it releases the sandbox.
+                # The configuration can carry the MCP grant headers. Staging it inside the session's execute lets
+                # close cancel the upload before it releases the sandbox.
                 raw = await state.execute(
                     payload,
                     timeout=timeout,

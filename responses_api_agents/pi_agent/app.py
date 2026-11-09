@@ -976,7 +976,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         models = {
             "providers": {"nemo": self._build_models_config(state.request.episode_id.capture_key)["providers"]["nemo"]}
         }
-        # Staged inside the session's execute, so that close stops the uploads before it releases the sandbox.
+        # Staged inside the session's execute, so that close cancels the uploads before it releases the sandbox.
         files: dict[str, str | Path] = {
             "home/.pi/agent/models.json": json.dumps(models),
             "home/.pi/agent/settings.json": json.dumps(self._build_settings_config()),

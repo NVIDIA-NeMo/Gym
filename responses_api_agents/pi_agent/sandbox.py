@@ -8,7 +8,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError
 
 from nemo_gym.agents import (
     HARNESS_RUNNER_FILE,
@@ -53,10 +53,6 @@ class PiSandboxSession(AgentSessionState):
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
 
-    async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage adapter input using the shared text-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
-
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
@@ -87,7 +83,10 @@ class PiSandboxSession(AgentSessionState):
         close_timeout: float,
         files: dict[str, str | Path] | None = None,
     ) -> str:
-        """Run through the common lifecycle; the adapter validates terminal events."""
+        """Run through the common lifecycle; the adapter validates terminal events.
+
+        ``files`` are staged with the invocation; see ``stage_activation``.
+        """
         return await self.session.execute(
             stage_activation=lambda: self.stage_activation(command=command, env=env, prompt=prompt, files=files),
             collect=self.collect_artifacts,
@@ -101,7 +100,8 @@ class PiSandboxSession(AgentSessionState):
         """Stage the invocation and return the Pi worker command.
 
         ``files`` maps paths under the session directory to text or to a local source file. They are uploaded here,
-        inside the session's execute, so that close stops the uploads before it releases the sandbox.
+        inside the session's execute, so that close cancels and waits for the uploads before it releases the
+        sandbox.
         """
         directory = self.session.session_dir
         for name, content in (files or {}).items():

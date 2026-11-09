@@ -112,7 +112,10 @@ class CodexSandboxSession(AgentSessionState):
         close_timeout: float,
         files: dict[str, str] | None = None,
     ) -> str:
-        """Run through the common lifecycle; the adapter validates terminal events."""
+        """Run through the common lifecycle; the adapter validates terminal events.
+
+        ``files`` are staged with the invocation; see ``stage_activation``.
+        """
         self.capture_budget_s = close_timeout
         return await self.session.execute(
             stage_activation=lambda: self.stage_activation(payload, files=files),
@@ -127,7 +130,8 @@ class CodexSandboxSession(AgentSessionState):
         """Stage the invocation and return the runner command that starts the Codex launcher.
 
         ``files`` maps paths under the session directory to text, kept out of ``input.json``. They are uploaded here,
-        inside the session's execute, so that close stops the uploads before it releases the sandbox.
+        inside the session's execute, so that close cancels and waits for the uploads before it releases the
+        sandbox.
         """
         directory = self.session.session_dir
         for name, text in (files or {}).items():
