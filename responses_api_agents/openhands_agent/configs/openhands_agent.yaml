@@ -24,9 +24,8 @@ openhands_agent:
       llm_settings:
         # OpenHands otherwise sends reasoning_effort: high to models it believes support it.
         reasoning_effort: null
-        # Per model call, in seconds.
+        # Per model call, in seconds. OpenHands sends each call once; the model server retries transient failures.
         timeout: 600
-        num_retries: 5
       # Only for an agent-owned sandbox, when Resources supplies no sandbox_access.
       sandbox_provider: null
       sandbox_config: {}

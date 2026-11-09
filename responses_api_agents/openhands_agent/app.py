@@ -79,9 +79,10 @@ from responses_api_agents.openhands_agent.sandbox import (
 
 LOG = logging.getLogger(__name__)
 # OpenHands SDK 1.59.0 LLM settings that change only how the harness calls the model. The adapter owns the
-# connection (model, base_url, api_key, usage_id, extra_headers). Settings that write files (completion logs,
-# tokenizer downloads), call other models (fallbacks), or stream (Gym's Chat Completions route does not) are
-# not offered. OpenHands silently ignores unknown names, so every name is checked here.
+# connection (model, base_url, api_key, usage_id, extra_headers) and turns OpenHands' own model retries off, so its
+# retry settings are not offered. Settings that write files (completion logs, tokenizer downloads), call other models
+# (fallbacks), or stream (Gym's Chat Completions route does not) are not offered either. OpenHands silently ignores
+# unknown names, so every name is checked here.
 SUPPORTED_LLM_SETTINGS = frozenset(
     {
         "api_mode",
@@ -101,14 +102,10 @@ SUPPORTED_LLM_SETTINGS = frozenset(
         "max_output_tokens",
         "model_canonical_name",
         "native_tool_calling",
-        "num_retries",
         "output_cost_per_token",
         "prompt_cache_retention",
         "reasoning_effort",
         "reasoning_summary",
-        "retry_max_wait",
-        "retry_min_wait",
-        "retry_multiplier",
         "seed",
         "temperature",
         "timeout",
@@ -364,6 +361,10 @@ class OpenHandsAgent(SimpleResponsesAPIAgent):
                 # The Model Server holds the provider credentials; this placeholder never leaves Gym.
                 "api_key": "gym",
                 "usage_id": "agent",
+                # OpenHands sends a failed call again on its own, but through LiteLLM it cannot tell a 4xx from a
+                # transient error: LiteLLM 1.105.7 raises any error whose text mentions a rate limit as a
+                # RateLimitError, and OpenHands also retries 409. The Model Server retries transient failures.
+                "num_retries": 0,
                 # Every model call, including the condenser's, names the invocation that owns it.
                 "extra_headers": {"x-session-id": invocation_id},
             },

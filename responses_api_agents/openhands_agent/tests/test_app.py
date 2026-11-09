@@ -4,6 +4,8 @@
 import asyncio
 import copy
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -139,6 +141,44 @@ def test_llm_settings_reject_connection_and_unknown_fields():
         with pytest.raises(ValueError, match=name):
             agent(llm_settings={name: True})
     assert agent(llm_settings={"temperature": 0.0}).config.llm_settings == {"temperature": 0.0}
+
+
+@pytest.mark.parametrize("name", ["num_retries", "retry_min_wait", "retry_max_wait", "retry_multiplier"])
+def test_llm_settings_cannot_turn_openhands_retries_back_on(name):
+    with pytest.raises(ValueError, match=name):
+        agent(llm_settings={name: 3})
+
+
+@pytest.mark.parametrize(
+    "status, message",
+    [(409, "conflict"), (400, "Rate limit exceeded for this key"), (413, "Request too large"), (503, "unavailable")],
+)
+def test_openhands_sends_a_failed_model_call_once(status, message):
+    """With the adapter's settings, OpenHands' own retries are off; LiteLLM maps the texts above to rate limits."""
+    sdk = pytest.importorskip("openhands.sdk")
+    requests = []
+
+    class ModelServer(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            requests.append(self.rfile.read(int(self.headers["Content-Length"])))
+            body = json.dumps({"error": {"message": message}}).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ModelServer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    settings = agent()._runner_input(session_state(), prompt="p", system="")["llm"]
+    llm = sdk.LLM(**{**settings, "base_url": f"http://127.0.0.1:{server.server_address[1]}/v1"})
+    try:
+        with pytest.raises(Exception):
+            llm.completion(messages=[sdk.Message(role="user", content=[sdk.TextContent(text="hi")])])
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert len(requests) == 1
 
 
 @pytest.mark.asyncio
@@ -351,6 +391,7 @@ async def test_activation_routes_every_model_call_through_the_rollout_prefixed_m
         "base_url": "http://10.0.0.5:9000/ng-rollout/rollout/v1",
         "api_key": "gym",
         "usage_id": "agent",
+        "num_retries": 0,
         "extra_headers": {"x-session-id": "rollout"},
     }
     assert runner_input["workdir"] == "/app"

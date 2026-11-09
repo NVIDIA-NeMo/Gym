@@ -63,7 +63,10 @@ The adapter owns the model connection: the base URL, a placeholder API key (the 
 provider credentials), the `agent` usage ID, and an `x-session-id` header set to the episode's capture key,
 which is also the invocation ID. `llm_settings` cannot change these, and OpenHands silently ignores unknown
 setting names, so the adapter refuses every name outside its list, along with settings that write files
-(completion logs, tokenizer downloads), call other models (fallbacks), or stream. `api_mode` defaults to
+(completion logs, tokenizer downloads), call other models (fallbacks), or stream. OpenHands' own model retries
+are off (`num_retries: 0`), and its retry settings are refused: through LiteLLM 1.105.7 it cannot tell a 4xx from a
+transient failure, since LiteLLM raises any error whose text mentions a rate limit as a `RateLimitError`, and OpenHands
+also retries HTTP 409. The Model Server retries transient failures. `api_mode` defaults to
 `chat`, because OpenHands' `auto` mode sends models its metadata marks as Responses API models (such as
 gpt-5) to `/responses`. The shipped config sets `reasoning_effort: null`, because OpenHands otherwise sends
 `reasoning_effort: high` to models it believes support it; keep sampling and reasoning controls on the Model
@@ -133,7 +136,7 @@ Status follows OpenHands' own rule at 1.59.0: `conversation.run()` raises only f
 | `MaxIterationsReached`, `MaxBudgetReached`, stuck detection, a rollout stop, or Gym's deadline after a model call returned | `incomplete`; `stop_reason` names it | Yes |
 | Context window exceeded | `incomplete`, `stop_reason` `context_limit` | Yes |
 | Gym's deadline before any model call returned | `failed`, `stop_reason` `timeout`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
-| A model error after OpenHands' own retries | `failed`, with `ng_agent_outcome` `model_request_error` and the HTTP status the provider's error recorded, or `model_transport_error` | By the outcome policy: by default 400, 413 and 422 are verified, `model_transport_error` and 408, 425, 429 and 5xx are retried, and other statuses fail the episode |
+| A model error | `failed`, with `ng_agent_outcome` `model_request_error` and the HTTP status the provider's error recorded, or `model_transport_error` | By the outcome policy: by default 400, 413 and 422 are verified, `model_transport_error` and 408, 425, 429 and 5xx are retried, and other statuses fail the episode |
 | Any other error that ends the run, including a model error that recorded no HTTP status | `failed`, with `ng_agent_outcome` `unknown` | No: the outcome policy retries it by default |
 | No result, unconfirmed termination, or a sandbox failure | HTTP error from `/v1/responses` | No |
 
