@@ -24,7 +24,8 @@ from typing import Any, Dict, List, Mapping, Optional
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field, model_validator
+from pydantic import ConfigDict, Field, ValidationError, model_validator
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from nemo_gym.agents import (
     AgentCloseSessionResponse,
@@ -40,6 +41,7 @@ from nemo_gym.agents import (
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
 from nemo_gym.core import (
+    AGENT_INVALID_OUTPUT,
     MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -166,6 +168,10 @@ _REMOVED_OPTIONS = [
     "model_id",
     "task",
 ]
+_REMOVED_OPTION_MESSAGE = (
+    "Stirrup config includes removed options that are no longer supported: `{name}`\n"
+    "See migration guide for details: benchmarks/gdpval/README.md"
+)
 
 
 class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
@@ -174,11 +180,19 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
     @model_validator(mode="before")
     @classmethod
     def _reject_removed_options(cls, data: Any) -> Any:
-        removed = [f"`{name}`" for name in _REMOVED_OPTIONS if name in (data or {})]
+        removed = [name for name in _REMOVED_OPTIONS if name in (data or {})]
         if removed:
-            raise ValueError(
-                f"Stirrup config includes removed options that are no longer supported: {', '.join(removed)}\n"
-                "See migration guide for details: benchmarks/gdpval/README.md"
+            # One error per option, located at its own key, so a config check names the exact field to delete.
+            raise ValidationError.from_exception_data(
+                cls.__name__,
+                [
+                    InitErrorDetails(
+                        type=PydanticCustomError("removed_option", _REMOVED_OPTION_MESSAGE, {"name": name}),
+                        loc=(name,),
+                        input=data[name],
+                    )
+                    for name in removed
+                ],
             )
         return data
 
@@ -351,6 +365,9 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
         status = native_result.get("model_error_status")
         if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
             return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("invalid_output"):
+            # Output of the policy model the harness cannot use: graded as the model's result, never retried.
+            return AgentOutcome(failure_kind=AGENT_INVALID_OUTPUT)
         return super().classify_outcome(native_result)
 
     async def _run_sandbox_episode(

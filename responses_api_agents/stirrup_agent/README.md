@@ -17,7 +17,7 @@ Stirrup runs only in agent sessions, seeded by an environment server with these 
 
 The sandbox must be x86_64 or aarch64 Linux with glibc 2.28 or newer, `bash`, and `tar` with gzip. musl images, such as
 Alpine, and older glibc are not supported: `imageio-ffmpeg` publishes no musllinux wheel, and the Pillow version in
-`overrides.txt` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
+`pyproject.toml` publishes only manylinux_2_28 wheels. The agent's host builds the runtime with `uv` and caches it under
 `sandbox_python` in Gym's `cache_dir`. Building needs the Python package index and the python-build-standalone
 releases on GitHub; `HTTPS_PROXY` and `UV_PYTHON_INSTALL_MIRROR` apply, and a host that cannot download the Python
 build can be given the file in that cache directory.
@@ -91,7 +91,7 @@ These are constructor arguments of `DynamicMaxTokensChatCompletionsClient`
 | `min_completion_tokens` (client) | `1024` | Target per-call completion floor. The hard cap always applies, and the approximate estimate keeps this floor even when it exceeds the context. Agents that write a whole script or deliverable in one tool call may need a higher floor: a 1024-token completion cannot reliably hold one. |
 | `prompt_estimator_truncate_history_thinking` (client) | `None` | Estimator-only. When `True`, the character estimate drops completed reasoning from assistant turns before the last user turn, as Nemotron's template does. It is never sent to the provider and never changes the recorded history. |
 | `truncation_recovery` (client) | `False` | When `True`, a turn that uses its whole completion budget without a schema-valid tool call is followed by one turn that requests thinking off and appends a one-time instruction to act now. The instruction is sent to the model but not recorded in the trajectory. |
-| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and raises instead of replacing the history with an unusable summary. |
+| `min_compaction_summary_words` (agent) | `1` | Minimum word count for a context-compaction summary, counted after a leading `<think>` block is stripped. The agent makes up to 3 summary attempts (the last one without tools) and never replaces the history with an unusable summary: when every attempt is unusable, the episode ends as a failed response on the turns so far, classified `agent_invalid_output`, so it is graded as the model's result and not retried. |
 
 Thinking control (`enable_thinking`, and the thinking-off turn of
 `truncation_recovery`) is sent as `extra_body.chat_template_kwargs`. It only
@@ -101,5 +101,5 @@ to vLLM.
 ## Licensing
 
 - **Code**: Apache License 2.0 (see repository `LICENSE`).
-- **Dependencies**: `stirrup` (Apache 2.0). See `requirements.txt` and the top-level `pyproject.toml` for full
+- **Dependencies**: `stirrup` (Apache 2.0). See `pyproject.toml` and the top-level `pyproject.toml` for full
   attribution.
