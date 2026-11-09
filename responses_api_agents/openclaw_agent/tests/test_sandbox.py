@@ -2448,14 +2448,14 @@ def test_model_transport_and_context_errors_reach_environment(
         assert body["error"]["message"] == message
         assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
         assert any(item["type"] == "function_call_output" for item in body["output"]) == partial
-        # Context prechecks have no HTTP status: the environment can explicitly
-        # choose verification, rather than inheriting a fabricated HTTP 400.
+        # Context prechecks have no HTTP status, so no fabricated HTTP 400 decides them: the default policy grades
+        # a reported context limit (the shared outcome ladder's rule), and an environment can still choose otherwise.
         assert agent_outcome_policy(NeMoGymResponse.model_validate(body)).value == (
-            "fail" if envelope_error else "retry"
-        )
-        policy = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "verify"})
-        assert agent_outcome_policy(NeMoGymResponse.model_validate(body), config=policy).value == (
             "verify" if envelope_error else "retry"
+        )
+        policy = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "fail"})
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(body), config=policy).value == (
+            "fail" if envelope_error else "retry"
         )
         assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
