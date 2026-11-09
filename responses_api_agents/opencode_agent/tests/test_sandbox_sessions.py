@@ -41,6 +41,7 @@ from nemo_gym.core import (
 from nemo_gym.data.tasks.harbor import load_task, materialize_task
 from nemo_gym.sandbox import SandboxHandle
 from nemo_gym.trajectory import NG_AGENT_SANDBOX_OBSERVATION_KEY, SandboxObservation
+from responses_api_agents.opencode_agent import app as opencode_app
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 
@@ -1092,8 +1093,10 @@ def test_token_capture_routes_every_opencode_model_call_to_the_rollout(setup):
     )
 
 
-def test_with_token_capture_a_seed_refuses_build_steps(setup):
+def test_with_token_capture_a_seed_refuses_build_steps(setup, monkeypatch):
     agent, sandbox = setup
+    # Without Gym #5833's capture fix installed.
+    monkeypatch.setattr(opencode_app, "_capture_joins_opencode_step_limit", lambda: False)
     agent.server_client.global_config_dict = OmegaConf.create(
         {
             "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
@@ -1110,6 +1113,30 @@ def test_with_token_capture_a_seed_refuses_build_steps(setup):
         # compaction.auto keeps capture whole, so it stays allowed.
         agent.config.opencode_config = {"compaction": {"auto": False}}
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+
+
+def test_with_token_capture_a_seed_accepts_build_steps_when_the_capture_fix_is_installed(setup, monkeypatch):
+    agent, sandbox = setup
+    # Gym #5833 installs the capture fix for OpenCode's step-limit note. TODO: drop this test with the check.
+    monkeypatch.setattr(opencode_app, "_capture_joins_opencode_step_limit", lambda: True)
+    agent.server_client.global_config_dict = OmegaConf.create(
+        {
+            "policy": {"responses_api_models": {"openai_model": {"host": "model.example", "port": 9000}}},
+            "token_id_capture": {"enabled": True, "all_agents": True},
+        }
+    )
+    agent.config.opencode_config = {"compaction": {"auto": False}, "agent": {"build": {"steps": 8}}}
+    with TestClient(agent.setup_webserver()) as client:
+        client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
+
+
+def test_capture_fix_detection_reads_the_installed_token_capture_files(monkeypatch, tmp_path):
+    package = tmp_path / "nemo_gym"
+    (package / "models" / "token_capture").mkdir(parents=True)
+    monkeypatch.setattr(opencode_app.importlib.resources, "files", lambda name: package)
+    assert not opencode_app._capture_joins_opencode_step_limit()
+    (package / "models" / "token_capture" / "harness_notes.py").write_text("")
+    assert opencode_app._capture_joins_opencode_step_limit()
 
 
 def test_http_close_retry_survives_other_session_closes(setup, monkeypatch):
