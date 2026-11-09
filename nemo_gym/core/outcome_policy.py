@@ -3,6 +3,7 @@
 
 """Shared configurable outcome selection; each boundary executes its own actions."""
 
+from collections.abc import Mapping
 from enum import StrEnum
 from typing import TYPE_CHECKING, Annotated, ClassVar
 
@@ -37,6 +38,20 @@ class OutcomeAction(StrEnum):
     RETRY = "retry"
     FAIL = "fail"
     COUNT_AS_ZERO = "count_as_zero"
+
+
+def is_policy_counted_zero(row: Mapping[str, object]) -> bool:
+    """Consume a saved explicit-zero decision, independently of completion or diagnostic evidence.
+
+    The owning boundary admits the failure and applies its policy before persisting ``failure_outcome_action``.
+    Readers check only consistency with the measured result; counting does not establish fault attribution.
+    """
+    return (
+        row.get("failure_outcome_action") == OutcomeAction.COUNT_AS_ZERO
+        and type(row.get("reward")) in (int, float)
+        and row["reward"] == 0
+        and row.get("mask_sample", False) is False
+    )
 
 
 def _require_registered_kinds[T](value: dict[str, T]) -> dict[str, T]:
@@ -184,6 +199,26 @@ class StageOutcomePolicyConfig(BaseModel):
             value,
             dict_fields=("by_failure_kind", "by_status_code", "by_failure_class"),
         )
+
+    @classmethod
+    def overlay(cls, defaults: "StageOutcomePolicyConfig", override: object) -> object:
+        """Merge an explicit override over a boundary's own defaults instead of the shared ones.
+
+        Rules the override does not mention keep the boundary's default. Anything that is not a policy mapping or
+        model is returned unchanged for validation to reject.
+        """
+        if isinstance(override, StageOutcomePolicyConfig):
+            override = override.model_dump(exclude_unset=True)
+        if not isinstance(override, dict):
+            return override
+        return {
+            **override,
+            "by_stage": _merge_stage_overrides(
+                defaults.by_stage,
+                override.get("by_stage", {}),
+                dict_fields=("by_failure_kind", "by_status_code", "by_failure_class"),
+            ),
+        }
 
 
 def choose_stage_outcome(
