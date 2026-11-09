@@ -65,44 +65,17 @@ class JsonEvaluator:
             return "exact"
         return "not_enforced"
 
-    @property
-    def response_reasoning_validation(self) -> str:
-        return "exact"
-
     async def generate_json(
         self,
         schema: type[SchemaT],
-        system: str | None,
-        user: str,
+        prompt: str,
         *,
-        reasoning_effort: str | None = None,
-        include_schema_instruction: bool = False,
-        sanitize_json: bool = True,
-        salvage_embedded_json: bool = False,
         constrain_json_schema: bool = False,
-        validate_schema: bool = True,
-    ) -> SchemaT | object:
+    ) -> SchemaT:
         params = self._create_params.model_copy(deep=True)
-        messages = []
-        if system:
-            system_text = system.rstrip()
-            if include_schema_instruction:
-                schema_text = json.dumps(schema.model_json_schema(), ensure_ascii=False, indent=2)
-                system_text = (
-                    f"{system_text}\n\n"
-                    "OUTPUT FORMAT:\n"
-                    "Return only valid JSON matching the schema below. Do not use Markdown fences or add commentary.\n"
-                    f"{schema_text}"
-                )
-            messages.append(NeMoGymEasyInputMessage(role="system", content=system_text))
-        messages.append(NeMoGymEasyInputMessage(role="user", content=user))
-        params.input = messages
+        params.input = [NeMoGymEasyInputMessage(role="user", content=prompt)]
         if constrain_json_schema:
-            # The local vLLM Responses server supports OpenAI's structured
-            # output shape.  LongFact opts into guided decoding because one
-            # malformed answer among thousands of per-claim calls otherwise
-            # invalidates an entire prompt row.  Keep this opt-in so existing
-            # Keep evaluator sampling behavior stable for LongFact.
+            # Local vLLM supports guided JSON decoding; hosted judges can leave it disabled.
             params.text = {
                 "format": {
                     "type": "json_schema",
@@ -117,8 +90,6 @@ class JsonEvaluator:
             # Clear any inherited constraint when guided decoding is disabled.
             params.text = None
             params.model_fields_set.discard("text")
-        if reasoning_effort is not None:
-            params.reasoning = {"effort": reasoning_effort}
 
         last_error: Exception | None = None
         response_text: str | None = None
@@ -138,7 +109,6 @@ class JsonEvaluator:
                     await raise_for_status(response)
                     parsed = NeMoGymResponse.model_validate(await get_response_json(response))
                     self._validate_model_identity(parsed)
-                    self._validate_reasoning_identity(parsed, reasoning_effort)
                     response_text = extract_text(parsed)
                 except EvaluatorIdentityError:
                     # A successful response from an unexpected model is a
@@ -167,73 +137,7 @@ class JsonEvaluator:
         # The released workers parse one completed sampler response exactly
         # once. A malformed answer is an evaluation error, not a reason to ask
         # the model for a different semantic answer.
-        if not validate_schema:
-            return self._load_json(
-                response_text,
-                sanitize_json=sanitize_json,
-                salvage_embedded_json=salvage_embedded_json,
-            )
-        return self._parse_json(
-            schema,
-            response_text,
-            sanitize_json=sanitize_json,
-            salvage_embedded_json=salvage_embedded_json,
-        )
-
-    async def generate_text(
-        self,
-        user: str,
-        *,
-        reasoning_effort: str | None = None,
-    ) -> str:
-        """Make the unstructured Responses call used by upstream follow-up generation."""
-
-        params = self._create_params.model_copy(deep=True)
-        params.input = [NeMoGymEasyInputMessage(role="user", content=user)]
-        params.text = None
-        params.model_fields_set.discard("text")
-        if reasoning_effort is not None:
-            params.reasoning = {"effort": reasoning_effort}
-
-        last_error: Exception | None = None
-        async with self._semaphore:
-            for attempt in range(1, self._max_attempts + 1):
-                try:
-                    await asyncio.sleep(random.uniform(0, 0.2))
-                    response = await self._server_client.post(
-                        server_name=self._model_server.name,
-                        url_path="/v1/responses",
-                        json=params,
-                        timeout=self._timeout_seconds,
-                        _max_num_tries=INTERNAL_MODEL_TRANSPORT_MAX_ATTEMPTS,
-                    )
-                    await raise_for_status(response)
-                    parsed = NeMoGymResponse.model_validate(await get_response_json(response))
-                    self._validate_model_identity(parsed)
-                    self._validate_reasoning_identity(parsed, reasoning_effort)
-                    # Upstream's sampler can return an empty completed response.
-                    # Callers decide whether that means "stop", an error, or an
-                    # empty planner selection; do not resample it here.
-                    return extract_text(parsed).strip()
-                except EvaluatorIdentityError:
-                    raise
-                except Exception as exc:
-                    if self._is_bad_request(exc):
-                        raise EvaluatorResponseError(f"Evaluator request rejected with HTTP {exc.status}") from exc
-                    last_error = exc
-                    LOG.warning(
-                        "Evaluator text call failed (%d/%d): %s",
-                        attempt,
-                        self._max_attempts,
-                        f"{type(exc).__name__}: {exc}",
-                    )
-                    if attempt < self._max_attempts:
-                        base_wait = 2 ** (attempt - 1)
-                        await asyncio.sleep(base_wait + random.uniform(0, base_wait * 0.5))
-
-        raise EvaluatorResponseError(
-            f"Evaluator failed for unstructured text after {self._max_attempts} attempts"
-        ) from last_error
+        return self._parse_json(schema, response_text, salvage_embedded_json=True)
 
     @staticmethod
     def _is_bad_request(exc: Exception) -> bool:
@@ -249,26 +153,6 @@ class JsonEvaluator:
         if actual != expected:
             raise EvaluatorIdentityError(
                 f"Response model identity mismatch: expected {expected!r}, received {actual!r}"
-            )
-
-    @staticmethod
-    def _validate_reasoning_identity(
-        response: NeMoGymResponse,
-        expected_effort: str | None,
-    ) -> None:
-        if expected_effort is None:
-            return
-        if isinstance(response, dict):
-            reasoning = response.get("reasoning")
-        else:
-            reasoning = response.reasoning
-        if isinstance(reasoning, dict):
-            actual_effort = reasoning.get("effort")
-        else:
-            actual_effort = reasoning.effort if reasoning is not None else None
-        if actual_effort != expected_effort:
-            raise EvaluatorIdentityError(
-                f"Response reasoning identity mismatch: expected {expected_effort!r}, received {actual_effort!r}"
             )
 
     @classmethod

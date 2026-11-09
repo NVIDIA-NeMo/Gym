@@ -475,6 +475,41 @@ async def test_read_write_quarantines_and_repairs_checksum_mismatch(tmp_path):
     assert len(list((tmp_path / ".corrupt").glob("search-*.corrupt"))) == 1
 
 
+@pytest.mark.parametrize("format_version", [[], {}, True, 2.0, "2", None])
+@pytest.mark.parametrize("cache_mode", ["replay", "read_write"])
+@pytest.mark.asyncio
+async def test_malformed_cache_format_is_rejected_or_preserved_and_repaired(tmp_path, format_version, cache_mode):
+    provider = _provider(tmp_path, FakeTavilyClient())
+    await provider.search("repair malformed format")
+    cache_path = next(tmp_path.glob("search-*.json"))
+    document = json.loads(cache_path.read_text(encoding="utf-8"))
+    document[CACHE_METADATA_KEY]["format_version"] = format_version
+    corrupt_bytes = json.dumps(document).encode()
+    cache_path.write_bytes(corrupt_bytes)
+    client = FakeTavilyClient()
+    reader = _provider(tmp_path, client, cache_mode=cache_mode)
+
+    if cache_mode == "replay":
+        with pytest.raises(TavilyCacheCorruptionError, match="Unsupported Tavily cache format"):
+            await reader.search("repair malformed format")
+        assert client.search_calls == 0
+        assert cache_path.read_bytes() == corrupt_bytes
+        assert not (tmp_path / ".corrupt").exists()
+    else:
+        repaired = await reader.search("repair malformed format")
+
+        assert client.search_calls == 1
+        assert repaired[0].snippet == "Relevant snippet"
+        assert reader.cache_stats["corruptions"] == 1
+        quarantined = list((tmp_path / ".corrupt").glob("search-*.corrupt"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_bytes() == corrupt_bytes
+        assert json.loads(cache_path.read_text(encoding="utf-8"))[CACHE_METADATA_KEY]["format_version"] == (
+            CACHE_FORMAT_VERSION
+        )
+        assert await _provider(tmp_path, cache_mode="replay").search("repair malformed format") == repaired
+
+
 @pytest.mark.asyncio
 async def test_replay_accepts_version_one_envelope(tmp_path):
     provider = _provider(tmp_path, FakeTavilyClient())

@@ -50,6 +50,30 @@ def test_zero_judged_claims_have_perfect_precision_and_zero_f1():
     assert evaluation["traces"] == []
 
 
+def test_onboarding_fixture_exercises_real_scoring_and_cleans_up_sessions():
+    from nemo_gym.verification import exercise_verifier_fixture, load_verifier_fixture
+    from resources_servers.longfact.app import VERIFIER_FIXTURE
+    from resources_servers.longfact.verifier_fixture import invoke_fixture
+
+    async def run():
+        results = await exercise_verifier_fixture(
+            VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="stochastic"
+        )
+        case = next(case for case in load_verifier_fixture(VERIFIER_FIXTURE.cases_path) if case.kind == "full_reward")
+        server = VERIFIER_FIXTURE.server_factory()
+        request = VERIFIER_FIXTURE.request_model.model_validate(case.request)
+        scored = await invoke_fixture(server, request)
+        return results, server, scored
+
+    results, server, scored = asyncio.run(run())
+
+    assert {result.kind for result in results} == {"full_reward", "zero_reward", "malformed"}
+    assert scored["reward"] == 1.0
+    assert scored["info"]["safe_variant"]["f1_max_claims"] == 100
+    assert scored["info"]["num_extracted_claims"] == scored["info"]["supported_claims"] == 100
+    assert server.session_state == {}
+
+
 def test_claim_listing_prompt_includes_question_response_and_raw_json_contract():
     server = SimpleNamespace(
         config=SimpleNamespace(claim_extraction_prompt="claim_listing_v1", browse_off_instructions=False)

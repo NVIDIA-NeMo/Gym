@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -128,390 +129,178 @@ class _CreateParams(NeMoGymResponseCreateParamsNonStreaming):
     def __init__(self):
         super().__init__(
             input=[],
-            text={
-                "format": {
-                    "type": "json_schema",
-                    "name": "inherited_constraint",
-                    "schema": {},
-                }
-            },
-            reasoning=None,
+            text={"format": {"type": "json_schema", "name": "inherited_constraint", "schema": {}}},
         )
 
 
+def _wire_response(text, model="judge-snapshot"):
+    return {
+        "id": "fixture-response",
+        "created_at": 0,
+        "model": model,
+        "object": "response",
+        "parallel_tool_calls": False,
+        "tool_choice": "auto",
+        "tools": [],
+        "output": [
+            {
+                "id": "fixture-message",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": text, "annotations": []}],
+            }
+        ],
+    }
+
+
+_DECISION = '{"reasoning":"Enough evidence","continue_searching":false,"search_query":null,"relevant_urls":[]}'
+
+
+class _Response:
+    ok = True
+
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def read(self):
+        return json.dumps(self.payload).encode()
+
+
 class _CapturingClient:
-    def __init__(self):
+    def __init__(self, responses=None):
+        self.responses = [_wire_response(_DECISION)] if responses is None else list(responses)
         self.requests = []
         self.wire_requests = []
 
     async def post(self, **kwargs):
         self.requests.append(kwargs)
         self.wire_requests.append(kwargs["json"].model_dump(exclude_unset=True))
-        return object()
+        response = self.responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return _Response(response)
 
 
-class _FakeResponseModel:
-    @classmethod
-    def model_validate(cls, payload):
-        return payload
-
-
-def test_generate_json_does_not_append_a_schema_instruction_by_default(monkeypatch):
-    async def fake_raise_for_status(response):
-        return None
-
-    async def fake_get_response_json(response):
-        return {
-            "reasoning": {"effort": "minimal"},
-            "text": (
-                '{"reasoning":"Enough evidence","continue_searching":false,'
-                '"search_query":null,"relevant_urls":["[1.1]"]}'
-            ),
-        }
-
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(evaluator_module, "get_response_json", fake_get_response_json)
-    monkeypatch.setattr(evaluator_module, "NeMoGymResponse", _FakeResponseModel)
-    monkeypatch.setattr(evaluator_module, "extract_text", lambda response: response["text"])
-
-    client = _CapturingClient()
-    evaluator = JsonEvaluator(
+def _evaluator(client, *, attempts=1, identity=None):
+    return JsonEvaluator(
         server_client=client,
         model_server=SimpleNamespace(name="judge"),
         create_params=_CreateParams(),
         max_concurrency=1,
-        max_attempts=1,
+        max_attempts=attempts,
         timeout_seconds=1,
+        expected_model_identity=identity,
     )
 
-    parsed = asyncio.run(
-        evaluator.generate_json(
-            SearchDecision,
-            "Exact upstream system prompt",
-            "Exact upstream user prompt",
-            reasoning_effort="minimal",
-        )
-    )
+
+def test_json_transport_preserves_prompt_and_omits_disabled_guided_decoding():
+    client = _CapturingClient()
+
+    parsed = asyncio.run(_evaluator(client).generate_json(SearchDecision, "Exact LongFact judge prompt"))
 
     params = client.requests[0]["json"]
+    assert parsed.reasoning == "Enough evidence"
     assert parsed.continue_searching is False
-    assert params.input[0].content == "Exact upstream system prompt"
-    assert "OUTPUT FORMAT" not in params.input[0].content
-    assert params.input[1].content == "Exact upstream user prompt"
+    assert len(params.input) == 1
+    assert params.input[0].role == "user"
+    assert params.input[0].content == "Exact LongFact judge prompt"
     assert params.text is None
     assert "text" not in client.wire_requests[0]
-    assert params.reasoning == {"effort": "minimal"}
+    assert "reasoning" not in client.wire_requests[0]
     assert client.requests[0]["_max_num_tries"] == 1
     assert client.requests[0]["timeout"] == 1
 
 
-def test_generate_text_omits_inherited_text_constraint_from_wire(monkeypatch):
-    async def fake_raise_for_status(response):
-        return None
-
-    async def fake_get_response_json(response):
-        return {
-            "reasoning": {"effort": "minimal"},
-            "text": "follow-up question?",
-        }
-
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(evaluator_module, "get_response_json", fake_get_response_json)
-    monkeypatch.setattr(evaluator_module, "NeMoGymResponse", _FakeResponseModel)
-    monkeypatch.setattr(evaluator_module, "extract_text", lambda response: response["text"])
-
-    client = _CapturingClient()
-    evaluator = JsonEvaluator(
-        server_client=client,
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=1,
-        timeout_seconds=1,
-    )
-
-    result = asyncio.run(
-        evaluator.generate_text(
-            "Exact upstream follow-up prompt",
-            reasoning_effort="minimal",
-        )
-    )
-
-    params = client.requests[0]["json"]
-    assert result == "follow-up question?"
-    assert params.text is None
-    assert "text" not in client.wire_requests[0]
-    assert params.reasoning == {"effort": "minimal"}
-
-
-def test_generate_json_does_not_resample_a_malformed_completed_response(monkeypatch):
-    async def fake_raise_for_status(response):
-        return None
-
-    async def fake_get_response_json(response):
-        return {"reasoning": {"effort": "minimal"}, "text": "not json"}
-
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(evaluator_module, "get_response_json", fake_get_response_json)
-    monkeypatch.setattr(evaluator_module, "NeMoGymResponse", _FakeResponseModel)
-    monkeypatch.setattr(evaluator_module, "extract_text", lambda response: response["text"])
-
-    client = _CapturingClient()
-    evaluator = JsonEvaluator(
-        server_client=client,
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=3,
-        timeout_seconds=1,
-    )
+def test_generate_json_does_not_resample_a_malformed_completed_response():
+    client = _CapturingClient([_wire_response("not json")])
 
     with pytest.raises(ValueError, match="parseable JSON"):
-        asyncio.run(
-            evaluator.generate_json(
-                SearchDecision,
-                None,
-                "Exact upstream planner prompt",
-                reasoning_effort="minimal",
-            )
-        )
+        asyncio.run(_evaluator(client, attempts=3).generate_json(SearchDecision, "Judge this claim"))
 
     assert len(client.requests) == 1
 
 
-def test_pinned_model_identity_is_checked_without_retrying(monkeypatch):
-    async def fake_raise_for_status(response):
-        return None
+@pytest.mark.parametrize("model", ["judge-snapshot", "other-judge"])
+def test_pinned_model_identity_is_checked_without_retrying(model):
+    client = _CapturingClient([_wire_response(_DECISION, model=model)])
+    evaluator = _evaluator(client, attempts=3, identity="judge-snapshot")
 
-    async def fake_get_response_json(response):
-        return {
-            "model": "gpt-5-mini",
-            "text": (
-                '{"reasoning":"Enough evidence","continue_searching":false,"search_query":null,"relevant_urls":[]}'
-            ),
-        }
-
-    class FakeResponseModel:
-        @classmethod
-        def model_validate(cls, payload):
-            return SimpleNamespace(**payload)
-
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(evaluator_module, "get_response_json", fake_get_response_json)
-    monkeypatch.setattr(evaluator_module, "NeMoGymResponse", FakeResponseModel)
-    monkeypatch.setattr(evaluator_module, "extract_text", lambda response: response.text)
-
-    client = _CapturingClient()
-    evaluator = JsonEvaluator(
-        server_client=client,
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=3,
-        timeout_seconds=1,
-        expected_model_identity="gpt-5-mini-2025-08-07",
-    )
-
-    with pytest.raises(EvaluatorIdentityError, match="model identity mismatch"):
-        asyncio.run(
-            evaluator.generate_json(
-                SearchDecision,
-                None,
-                "Exact upstream planner prompt",
-                reasoning_effort="minimal",
-            )
-        )
+    if model == "judge-snapshot":
+        parsed = asyncio.run(evaluator.generate_json(SearchDecision, "Judge this claim"))
+        assert parsed.reasoning == "Enough evidence"
+    else:
+        with pytest.raises(EvaluatorIdentityError, match="model identity mismatch"):
+            asyncio.run(evaluator.generate_json(SearchDecision, "Judge this claim"))
 
     assert len(client.requests) == 1
     assert evaluator.response_model_validation == "exact"
 
 
 def test_unknown_model_identity_is_explicitly_not_enforced():
-    evaluator = JsonEvaluator(
-        server_client=_CapturingClient(),
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=1,
-        timeout_seconds=1,
-        expected_model_identity="unknown",
-    )
+    client = _CapturingClient([_wire_response(_DECISION, model="any-judge")])
+    evaluator = _evaluator(client, identity="unknown")
 
-    evaluator._validate_model_identity(SimpleNamespace(model="any-model"))
+    parsed = asyncio.run(evaluator.generate_json(SearchDecision, "Judge this claim"))
 
+    assert parsed.reasoning == "Enough evidence"
     assert evaluator.response_model_validation == "not_enforced"
-    assert evaluator.response_reasoning_validation == "exact"
 
 
-def test_response_reasoning_identity_is_checked():
-    with pytest.raises(EvaluatorIdentityError, match="reasoning identity mismatch"):
-        JsonEvaluator._validate_reasoning_identity(
-            SimpleNamespace(reasoning=SimpleNamespace(effort="medium")),
-            "minimal",
-        )
-
-
-def test_request_retry_matches_upstream_jitter_and_backoff(monkeypatch):
+def test_json_request_retries_transport_failures_with_jitter_and_backoff(monkeypatch):
     sleeps = []
     jitter_values = iter((0.1, 0.25, 0.1))
 
-    async def fake_sleep(seconds):
+    async def record_sleep(seconds):
         sleeps.append(seconds)
 
-    async def fake_raise_for_status(response):
-        return None
+    monkeypatch.setattr(evaluator_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(evaluator_module.random, "uniform", lambda _low, _high: next(jitter_values))
+    client = _CapturingClient([RuntimeError("transient transport failure"), _wire_response(_DECISION)])
 
-    async def fake_get_response_json(response):
-        return {
-            "reasoning": {"effort": "minimal"},
-            "text": "follow-up question?",
-        }
+    parsed = asyncio.run(_evaluator(client, attempts=2).generate_json(SearchDecision, "Judge this claim"))
 
-    class FlakyClient:
-        def __init__(self):
-            self.calls = 0
-
-        async def post(self, **kwargs):
-            del kwargs
-            self.calls += 1
-            if self.calls == 1:
-                raise RuntimeError("transient")
-            return object()
-
-    monkeypatch.setattr(evaluator_module.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(
-        evaluator_module.random,
-        "uniform",
-        lambda _low, _high: next(jitter_values),
-    )
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(evaluator_module, "get_response_json", fake_get_response_json)
-    monkeypatch.setattr(evaluator_module, "NeMoGymResponse", _FakeResponseModel)
-    monkeypatch.setattr(evaluator_module, "extract_text", lambda response: response["text"])
-    client = FlakyClient()
-    evaluator = JsonEvaluator(
-        server_client=client,
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=2,
-        timeout_seconds=1,
-    )
-
-    result = asyncio.run(evaluator.generate_text("Exact upstream follow-up prompt", reasoning_effort="minimal"))
-
-    assert result == "follow-up question?"
-    assert client.calls == 2
+    assert parsed.reasoning == "Enough evidence"
+    assert len(client.requests) == 2
     assert sleeps == [0.1, 1.25, 0.1]
 
 
-@pytest.mark.parametrize("method", ["json", "text"])
-def test_http_400_is_not_retried_like_upstream_bad_request(monkeypatch, method):
-    sleeps = []
-
-    async def fake_sleep(seconds):
-        sleeps.append(seconds)
-
-    async def fake_raise_for_status(response):
-        del response
-        raise ClientResponseError(
-            SimpleNamespace(real_url="http://judge/v1/responses"),
-            (),
-            status=400,
-            message="bad request",
-        )
-
-    monkeypatch.setattr(evaluator_module.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(evaluator_module.random, "uniform", lambda _low, _high: 0.1)
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-
-    client = _CapturingClient()
-    evaluator = JsonEvaluator(
-        server_client=client,
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=3,
-        timeout_seconds=1,
+def _http_error(status):
+    return ClientResponseError(
+        SimpleNamespace(real_url="https://judge.invalid/v1/responses"), (), status=status, message="fixture error"
     )
 
+
+def test_http_400_is_not_retried(monkeypatch):
+    sleeps = []
+
+    async def record_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(evaluator_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(evaluator_module.random, "uniform", lambda _low, _high: 0.1)
+    client = _CapturingClient([_http_error(400)])
+
     with pytest.raises(EvaluatorResponseError, match="rejected with HTTP 400"):
-        if method == "json":
-            asyncio.run(
-                evaluator.generate_json(
-                    SearchDecision,
-                    None,
-                    "Exact upstream planner prompt",
-                    reasoning_effort="minimal",
-                )
-            )
-        else:
-            asyncio.run(
-                evaluator.generate_text(
-                    "Exact upstream follow-up prompt",
-                    reasoning_effort="minimal",
-                )
-            )
+        asyncio.run(_evaluator(client, attempts=3).generate_json(SearchDecision, "Judge this claim"))
 
     assert len(client.requests) == 1
     assert sleeps == [0.1]
 
 
-def test_http_429_remains_retryable_like_upstream_rate_limit(monkeypatch):
+def test_http_429_remains_retryable(monkeypatch):
     sleeps = []
     jitter_values = iter((0.1, 0.25, 0.1))
-    status_checks = 0
 
-    async def fake_sleep(seconds):
+    async def record_sleep(seconds):
         sleeps.append(seconds)
 
-    async def fake_raise_for_status(response):
-        nonlocal status_checks
-        del response
-        status_checks += 1
-        if status_checks == 1:
-            raise ClientResponseError(
-                SimpleNamespace(real_url="http://judge/v1/responses"),
-                (),
-                status=429,
-                message="rate limited",
-            )
+    monkeypatch.setattr(evaluator_module.asyncio, "sleep", record_sleep)
+    monkeypatch.setattr(evaluator_module.random, "uniform", lambda _low, _high: next(jitter_values))
+    client = _CapturingClient([_http_error(429), _wire_response(_DECISION)])
 
-    async def fake_get_response_json(response):
-        del response
-        return {
-            "reasoning": {"effort": "minimal"},
-            "text": "follow-up question?",
-        }
+    parsed = asyncio.run(_evaluator(client, attempts=2).generate_json(SearchDecision, "Judge this claim"))
 
-    monkeypatch.setattr(evaluator_module.asyncio, "sleep", fake_sleep)
-    monkeypatch.setattr(
-        evaluator_module.random,
-        "uniform",
-        lambda _low, _high: next(jitter_values),
-    )
-    monkeypatch.setattr(evaluator_module, "raise_for_status", fake_raise_for_status)
-    monkeypatch.setattr(evaluator_module, "get_response_json", fake_get_response_json)
-    monkeypatch.setattr(evaluator_module, "NeMoGymResponse", _FakeResponseModel)
-    monkeypatch.setattr(evaluator_module, "extract_text", lambda response: response["text"])
-
-    client = _CapturingClient()
-    evaluator = JsonEvaluator(
-        server_client=client,
-        model_server=SimpleNamespace(name="judge"),
-        create_params=_CreateParams(),
-        max_concurrency=1,
-        max_attempts=2,
-        timeout_seconds=1,
-    )
-
-    result = asyncio.run(
-        evaluator.generate_text(
-            "Exact upstream follow-up prompt",
-            reasoning_effort="minimal",
-        )
-    )
-
-    assert result == "follow-up question?"
+    assert parsed.reasoning == "Enough evidence"
     assert len(client.requests) == 2
     assert sleeps == [0.1, 1.25, 0.1]

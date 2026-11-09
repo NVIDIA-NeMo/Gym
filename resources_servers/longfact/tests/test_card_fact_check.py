@@ -37,6 +37,7 @@ def _card_server(answers, *, plan_edits=(), verdict_edits=(), batch_size=10, max
     searched = []
     constrained = []
     calls = {"plan": 0, "verdicts": 0}
+    batches = {"plan": [], "verdicts": []}
 
     async def search(query):
         searched.append(query)
@@ -45,12 +46,16 @@ def _card_server(answers, *, plan_edits=(), verdict_edits=(), batch_size=10, max
     async def generate_json(schema, request, *, constrain=None):
         if schema is BatchSearchPlan:
             constrained.append(constrain)
-            items = [{"claim_id": cid, "queries": ["q1", "q2", "q3", "q4"]} for cid, _ in _requested(request)]
+            requested = _requested(request)
+            batches["plan"].append(tuple(claim for _, claim in requested))
+            items = [{"claim_id": cid, "queries": ["q1", "q2", "q3", "q4"]} for cid, _ in requested]
             edit = plan_edits[calls["plan"]] if calls["plan"] < len(plan_edits) else None
             calls["plan"] += 1
             return BatchSearchPlan(claims=edit(items) if edit else items)
         if schema is CardBatchVerdicts:
             constrained.append(constrain)
+            requested = _requested(request, "\n\nSearch results:")
+            batches["verdicts"].append(tuple(claim for _, claim in requested))
             items = [
                 {
                     "claim_id": cid,
@@ -59,7 +64,7 @@ def _card_server(answers, *, plan_edits=(), verdict_edits=(), batch_size=10, max
                     "reasoning": claim,
                     "supporting_evidence": [],
                 }
-                for cid, claim in _requested(request, "\n\nSearch results:")
+                for cid, claim in requested
             ]
             edit = verdict_edits[calls["verdicts"]] if calls["verdicts"] < len(verdict_edits) else None
             calls["verdicts"] += 1
@@ -89,6 +94,7 @@ def _card_server(answers, *, plan_edits=(), verdict_edits=(), batch_size=10, max
     server._check_batch_safely = lambda *args: LongFactSafeServer._check_batch_safely(server, *args)
     server.constrained = constrained
     server.calls = calls
+    server.batches = batches
     return server, searched
 
 
@@ -191,7 +197,7 @@ def test_a_search_plan_malformed_after_every_attempt_is_an_error():
     assert searched == []
 
 
-def test_card_mode_checks_claims_in_batches_and_keeps_good_batches():
+def test_card_mode_checks_claims_in_separate_batches():
     answers = {f"claim {index}": ("false" if index < 3 else "true") for index in range(12)}
     server, searched = _card_server(answers, batch_size=10)
 
@@ -202,6 +208,10 @@ def test_card_mode_checks_claims_in_batches_and_keeps_good_batches():
     assert evaluation["contradiction_rate"] == pytest.approx(3 / 12)
     assert evaluation["fact_check_mode"] == "gpt5_card_batch"
     assert len(searched) == 36
+    expected_batches = {tuple(f"claim {index}" for index in range(10)), ("claim 10", "claim 11")}
+    assert server.calls == {"plan": 2, "verdicts": 2}
+    assert set(server.batches["plan"]) == expected_batches
+    assert set(server.batches["verdicts"]) == expected_batches
 
 
 def test_browse_off_sentences_follow_the_card():

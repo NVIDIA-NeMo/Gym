@@ -406,7 +406,7 @@ class TavilyProvider:
                     f"received {metadata.get(key)!r}"
                 )
         format_version = metadata.get("format_version")
-        if format_version not in CACHE_READABLE_FORMAT_VERSIONS:
+        if type(format_version) is not int or format_version not in CACHE_READABLE_FORMAT_VERSIONS:
             raise TavilyCacheCorruptionError(f"Unsupported Tavily cache format for {path}: {format_version!r}")
         if require_checksum and format_version != CACHE_FORMAT_VERSION:
             raise TavilyCacheCorruptionError(

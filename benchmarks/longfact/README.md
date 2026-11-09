@@ -36,6 +36,48 @@ Concepts prompts selected using contradiction counts from an earlier model
 evaluation. The selection manifest and provenance are in the same directory.
 Use this dataset when a stable 200-prompt stress test is desired.
 
+## Measurement contract and onboarding
+
+`manifest.yaml` declares this benchmark's existing `gymnasium_agent` pairing
+and prepared prompts. Its `full-objects-and-concepts` split names the union of
+all 2,280 upstream Objects and Concepts prompts. The default is one repeat
+and one policy answer per prompt; the model sees the source prompt and has
+no retrieval tools. Search belongs to the verifier. The hard-200 stress set
+and any sampled run are distinct protocols and must be identified separately.
+
+The per-prompt reward is SAFE-style F1@100 in `[0, 1]`, higher is better.
+Precision counts supported claims against all relevant judged claims;
+recall is the supported count divided by 100, capped at 1. The primary
+aggregate averages per-prompt F1; pooled claim metrics are reported
+separately. Contradicted and unsure claims both count as unsupported in
+F1. Judge/search failures fail the rollout for recovery. The default
+configuration uses `legacy_v1` extraction,
+three-way per-claim verdicts and Tantivy; the card overlay below changes
+this protocol and is not interchangeable with that default.
+
+Policy sampling, context and token budgets come from the configured model
+and run, so record them alongside the resolved configuration, judge identity,
+retrieval settings and repeat count. LongFact imposes no episode deadline.
+Its evaluator HTTP calls default to 180 seconds, and Tavily calls to 90
+seconds, with their configured bounded retries. The agent's 60-second
+environment-cleanup timeout is a separate bound.
+
+Complete the manifest-backed local checks after preparation:
+
+```bash
+gym eval prepare --benchmark longfact
+gym env validate --sync longfact
+gym env test longfact
+gym env test --resources-server longfact
+gym env publish longfact
+```
+
+Static validation resolves the selected judge configuration and reads the
+prepared data. The workload fixture checks scoring without live services;
+component tests cover the server implementation. These local checks do not
+replace the representative real model/search rollout, reference comparison,
+and reward profiling required before benchmark approval.
+
 ## Configuration
 
 Configure the policy and evaluator model servers in the usual NeMo Gym way,

@@ -38,6 +38,7 @@ from resources_servers.longfact.evaluator import (
 from resources_servers.longfact.milvus_provider import MilvusProvider
 from resources_servers.longfact.tantivy_provider import TantivyProvider
 from resources_servers.longfact.tavily_provider import TavilyProvider
+from resources_servers.longfact.verifier_fixture import VERIFIER_FIXTURE as VERIFIER_FIXTURE
 
 
 BENCHMARK_VARIANT = "longfact-safe-v1"
@@ -532,11 +533,7 @@ RETRIEVED EVIDENCE:
             try:
                 return await self._evaluator.generate_json(
                     schema,
-                    None,
                     prompt,
-                    reasoning_effort=None,
-                    include_schema_instruction=False,
-                    salvage_embedded_json=True,
                     constrain_json_schema=(
                         self.config.evaluator_constrain_json_schema if constrain is None else constrain
                     ),
