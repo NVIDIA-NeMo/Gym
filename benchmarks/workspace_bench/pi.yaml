@@ -5,6 +5,10 @@ config_paths:
 - resources_servers/workspace_bench/configs/workspace_bench.yaml
 - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
 
+# The agent calls the model server from inside a remote sandbox, so the servers advertise this host's address
+# instead of loopback. Pass +default_host=<address the sandbox reaches> when the hostname does not resolve.
+use_absolute_ip: true
+
 workspace_bench_pi_agent:
   responses_api_agents:
     pi_agent:
@@ -16,6 +20,8 @@ workspace_bench_pi_agent:
       model: ${policy_model_name}
       thinking: high
       timeout: 7200
+      # harness_agent set no per-command limit; keep long document conversions within the agent's budget.
+      sandbox_bash_timeout_seconds: 7200
       pi_version: 0.80.2
       context_window: 262144
       max_output_tokens: 65536

@@ -28,6 +28,9 @@ Set these before running:
 
 `codex`, `pi` and `hermes` run through `single_agent_turn_legacy`: the resources server lends each task's sandbox to
 `codex_agent`, `pi_agent` or `hermes_agent`, which installs its pinned runtime there, so the image needs `bash`, `tar`
-and glibc, and the sandbox must reach the Gym model server. `claude_code` still runs through `harness_agent` behind
+and glibc. Codex and Pi download Node.js and their CLI into the sandbox at each seed, so the sandbox needs internet
+access; Hermes uploads its runtime. The agent calls the Gym model server from inside the sandbox, so these configs set
+`use_absolute_ip: true` and the servers advertise this host's address: pass `+default_host=<address the sandbox
+reaches>` when the hostname does not resolve. `claude_code` still runs through `harness_agent` behind
 `legacy_agent`, which runs the agent inside the task sandbox; for it the image also needs `python3` with Gym's
 dependencies.

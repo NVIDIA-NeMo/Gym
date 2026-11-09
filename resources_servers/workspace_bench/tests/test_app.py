@@ -99,7 +99,7 @@ async def test_verify_collects_files_without_runtime_links(monkeypatch, tmp_path
     }
     judge_error = JudgeError("judge interrupted: original-secret" if mode in invalid_outputs else "judge interrupted")
 
-    async def judge(self, directory):
+    async def judge(self, directory, session_id):
         nonlocal judge_calls
         judge_calls += 1
         assert (directory / "output/answer.txt").read_text() == "answer"
@@ -254,15 +254,17 @@ async def test_verify_collects_files_without_runtime_links(monkeypatch, tmp_path
         assert not (receipts[0].parent / "judge.yaml").exists()
     sandbox.stop.assert_awaited_once()
     sandbox.start.assert_awaited_once()
-    assert not references.exists()
-    assert not server._reference_dirs
     if cleanup_fails:
         stop_failures = [record for record in caplog.records if record.getMessage().startswith("Failed to stop the")]
         assert [record.exc_info[1] for record in stop_failures] == [cleanup_error]
-        # The sandbox stays registered, so shutdown retries its stop.
+        # The sandbox stays registered with its frozen inputs, so shutdown retries its stop and drops them.
         assert server._session_id_to_sandbox == {"session": sandbox}
+        assert set(server._reference_dirs) == {"session"}
+        await server.shutdown()
     else:
         assert server._session_id_to_sandbox == {}
+    assert not references.exists()
+    assert not server._reference_dirs
 
 
 @pytest.mark.parametrize("failure", [None, "error", "cancellation"])
@@ -405,14 +407,14 @@ async def test_judge_uses_isolated_upstream_evaluator(
 
     if return_code:
         with pytest.raises(RuntimeError, match="judge error"):
-            await server._judge(tmp_path)
+            await server._judge(tmp_path, "session")
         sandbox.download.assert_not_awaited()
     elif judge_error and judge_error != "Judge output parse failed":
         with pytest.raises(JudgeError, match=judge_error):
-            await server._judge(tmp_path)
+            await server._judge(tmp_path, "session")
         assert sandbox.download.await_count == 2
     else:
-        rubrics, graph = await server._judge(tmp_path)
+        rubrics, graph = await server._judge(tmp_path, "session")
         assert rubrics == [{"index": 0, "passed": not judge_error}]
         assert graph == {"nodes": [], "edges": []}
     assert sandbox.start.await_args.args[0].image == "test-runtime"
@@ -423,6 +425,10 @@ async def test_judge_uses_isolated_upstream_evaluator(
     if cleanup_fails:
         assert "Workspace-Bench judge sandbox cleanup failed" in caplog.text
         assert caplog.records[-1].exc_info[1] is cleanup_error
+        # The judge sandbox stays registered, so the session's close or shutdown retries its stop.
+        assert server._verifier_sandboxes == {"session": sandbox}
+    else:
+        assert server._verifier_sandboxes == {}
 
 
 def test_relative_task_paths_resolve_against_pinned_snapshot(monkeypatch, tmp_path):

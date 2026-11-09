@@ -11,11 +11,11 @@ import tarfile
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import HTTPException, Request
-from pydantic import ConfigDict, Field
+from pydantic import BeforeValidator, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
@@ -38,6 +38,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
     lost_session_verification,
+    reject_partial_typed_seed,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import JudgeError
@@ -128,7 +129,10 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
         self._drop_reference_dir(session_id)
 
     async def seed_session(
-        self, request: Request, body: WorkspaceBenchRequest | ResourcesSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest
+        | Annotated[WorkspaceBenchRequest, BeforeValidator(reject_partial_typed_seed)],
     ) -> WorkspaceBenchSeedResponse | ResourcesSeedSessionResponse:
         """Start the task sandbox with the task's files in ``/workspace/input`` and an empty ``/workspace/output``."""
         if isinstance(body, ResourcesSeedSessionRequest):
@@ -151,7 +155,15 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
         task_dir = await asyncio.to_thread(resolve_task_path, task.task_dir)
         if not (task_dir / "metadata.json").is_file():
             raise ResourcesSeedRejectedError(f"Invalid Workspace-Bench task directory: {task_dir}")
-        metadata = json.loads((task_dir / "metadata.json").read_text(encoding="utf-8"))
+        try:
+            metadata = json.loads((task_dir / "metadata.json").read_text(encoding="utf-8"))
+            manifest = metadata.get("data_manifest") or []
+            for item in manifest:
+                if not isinstance(item.get("stored_relpath"), str) or not isinstance(item.get("filename"), str):
+                    raise ValueError(f"data_manifest entry without stored_relpath and filename: {item}")
+        except (ValueError, AttributeError) as error:
+            # No retry can seed a task whose metadata is broken.
+            raise ResourcesSeedRejectedError(f"Invalid Workspace-Bench metadata in {task_dir}: {error}") from error
         sandbox_config = self.config.sandbox_config
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
         sandbox = AsyncSandbox(provider)
@@ -177,7 +189,6 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
         try:
             await sandbox.start(spec)
             archive = Path(reference_dir.name) / "input.tar.gz"
-            manifest = metadata.get("data_manifest") or []
 
             def build_archive() -> None:
                 with tarfile.open(archive, "w:gz", dereference=True) as tar:
@@ -213,8 +224,21 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
         async def collect() -> _WorkspaceCapture:
             sandbox = self._session_id_to_sandbox[session_id]
             references = Path(self._reference_dirs[session_id].name)
-            result = await sandbox.exec(f"tar -czf /tmp/workspace.tar.gz -C {WORKDIR} input output")
-            if result.return_code != 0 or result.error_type is not None:
+            # The agent may have removed input/ or output/; that is graded as no output, not failed as a collection
+            # error. Grading takes the inputs from the copy frozen at seed.
+            result = await sandbox.exec(
+                f"rm -f /tmp/workspace.tar.gz && mkdir -p {WORKDIR}/input {WORKDIR}/output "
+                f"&& tar -czf /tmp/workspace.tar.gz -C {WORKDIR} input output"
+            )
+            # GNU tar exits 1 when a file changed while it was read (a process the agent left running) and still
+            # writes the archive; that output is the agent's result. Exit 2 is a fatal tar error.
+            if result.return_code == 1 and result.error_type is None:
+                LOG.warning(
+                    "Workspace-Bench files of session %s changed while they were archived: %s",
+                    session_id,
+                    result.stderr,
+                )
+            elif result.return_code != 0 or result.error_type is not None:
                 raise RuntimeError(
                     f"Failed to collect Workspace-Bench files ({result.error_type}): {result.stderr}; "
                     f"output={(result.stdout or '')[-4000:]}"
@@ -238,12 +262,24 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
             except Exception:
                 LOG.exception("Failed to stop the Workspace-Bench task sandbox of session %s", session_id)
             raise
-        finally:
-            self._drop_reference_dir(session_id)
+        # Stopping the sandbox drops the frozen inputs too; after a failed stop they stay for the retried collection.
         await self.stop_task_sandbox_after_capture(session_id)
         return capture
 
-    async def _judge(self, case_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    async def _stop_agent_run_sandbox(self, session_id: str) -> None:
+        """Stop the task sandbox of a session an agent's ``/run`` seeded, whose verify failed before collection.
+
+        Such a session gets no close, so nothing else would stop the sandbox before shutdown. An episode session
+        keeps its sandbox for the retried verify or the close.
+        """
+        record = self._task_sessions.get(session_id)
+        if record is None or record.seed is None:
+            try:
+                await self._stop_task_sandbox(session_id)
+            except Exception:
+                LOG.exception("Failed to stop the Workspace-Bench task sandbox of session %s", session_id)
+
+    async def _judge(self, case_dir: Path, session_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         metadata_path = case_dir / "metadata.json"
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         metadata["__metadata_path"] = "/judge/task/metadata.json"
@@ -262,6 +298,9 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
         )
         provider = create_provider(resolve_provider_config(self.config.sandbox_provider, get_global_config_dict()))
         sandbox = AsyncSandbox(provider)
+        # The base stops a registered verifier sandbox even when this request is cancelled, and close and shutdown
+        # retry a stop that failed.
+        self._verifier_sandboxes[session_id] = sandbox
         try:
             await sandbox.start(SandboxSpec(**self.config.sandbox_config))
             with tempfile.TemporaryDirectory() as temporary_dir:
@@ -282,7 +321,7 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
                 await sandbox.download(f"/judge/task/{name}", case_dir / name)
         finally:
             try:
-                await sandbox.stop()
+                await self._stop_verifier_sandbox(session_id)
             except Exception:
                 LOG.warning("Workspace-Bench judge sandbox cleanup failed", exc_info=True)
         judged = json.loads((case_dir / "rubrics_judge--gym-judge.json").read_text(encoding="utf-8"))
@@ -352,22 +391,30 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
                 references.mkdir()
                 reference_dir = self._reference_dirs.get(session_id)
                 if saved is not None:
-                    # A retried verify saved the frozen inputs on its first attempt, before the sandbox stopped.
-                    if reference_dir is not None:
-                        shutil.copyfile(Path(reference_dir.name) / "metadata.json", saved / "metadata.json")
-                        shutil.copyfile(Path(reference_dir.name) / "input.tar.gz", saved / "input.tar.gz")
-                    pending = saved / "request.partial"
-                    pending.write_text(body.model_dump_json())
-                    pending.replace(saved / "request.json")
+                    try:
+                        # A retried verify saved the frozen inputs on its first attempt, before the sandbox stopped.
+                        if reference_dir is not None:
+                            shutil.copyfile(Path(reference_dir.name) / "metadata.json", saved / "metadata.json")
+                            shutil.copyfile(Path(reference_dir.name) / "input.tar.gz", saved / "input.tar.gz")
+                        pending = saved / "request.partial"
+                        pending.write_text(body.model_dump_json())
+                        pending.replace(saved / "request.json")
+                    except BaseException:
+                        await self._stop_agent_run_sandbox(session_id)
+                        raise
                 capture = await self._collect_workspace(session_id)
-                (references / "metadata.json").write_bytes(capture.metadata)
-                (references / "input.tar.gz").write_bytes(capture.inputs)
-                partial = archive.with_suffix(".partial")
-                with partial.open("wb") as stream:
-                    stream.write(capture.workspace)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                partial.replace(archive)
+
+                def write_capture() -> None:
+                    (references / "metadata.json").write_bytes(capture.metadata)
+                    (references / "input.tar.gz").write_bytes(capture.inputs)
+                    partial = archive.with_suffix(".partial")
+                    with partial.open("wb") as stream:
+                        stream.write(capture.workspace)
+                        stream.flush()
+                        os.fsync(stream.fileno())
+                    partial.replace(archive)
+
+                await asyncio.to_thread(write_capture)
 
             def prepare_judge_input() -> None:
                 with tarfile.open(archive, "r:gz") as tar:
@@ -386,7 +433,7 @@ class WorkspaceBenchResourcesServer(SandboxSessionResourcesServer):
             await asyncio.to_thread(prepare_judge_input)
             async with self._semaphore:
                 try:
-                    rubrics, dependency_graph = await self._judge(local_dir)
+                    rubrics, dependency_graph = await self._judge(local_dir, session_id)
                 finally:
                     judge_output = local_dir / "rubrics_judge--gym-judge.json"
                     if saved is not None and judge_output.is_file():
