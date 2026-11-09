@@ -126,3 +126,24 @@ async def test_a_judge_failure_of_a_live_session_names_the_persisted_deliverable
     assert row["deliverables_dir"] == str(persisted)
     assert (persisted / "report.md").read_text() == "the deliverable"
     await server.shutdown()
+
+
+@pytest.mark.parametrize("breakage", ["empty_directory", "lfs_pointer"])
+async def test_a_dataset_without_its_input_files_refuses_to_start_the_episode(server, home, dataset, breakage) -> None:
+    notes = dataset / "source_files/week/notes.txt"
+    if breakage == "empty_directory":
+        notes.unlink()
+    else:
+        notes.write_text("version https://git-lfs.github.com/spec/v1\noid sha256:0\nsize 123456\n")
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="session",
+        episode_id=EpisodeId(rollout_id="0-0"),
+        task_id=TaskId(taskset="aa_briefcase_lite:benchmark", task_id="w1_t1"),
+        task_data={"task_id": "w1_t1"},
+    )
+
+    with pytest.raises(RuntimeError, match="no files|unhydrated"):
+        await server.seed_session(SimpleNamespace(session={}), seed)
+
+    assert server._sessions == {}
+    assert server._claimed_directories == {}

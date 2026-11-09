@@ -82,6 +82,7 @@ class AAEvaluationFault(RuntimeError):
     """The evaluation could not stage, convert or read what it grades; the model is not at fault."""
 
 
+_LFS_POINTER_PREFIX = b"version https://git-lfs.github.com/spec/"
 _BINARY_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 _BINARY_JSON_INSTRUCTION = 'Return only one JSON object with boolean key "passed" and string key "reasoning".'
 
@@ -237,6 +238,14 @@ class AABriefcaseLiteVerifyResponse(AABriefcaseLiteVerifyRequest, BaseVerifyResp
     pairwise_ties: int = 0
     # References that were not judged for this task; their votes are absent from the counts above.
     pairwise_references_skipped: int = 0
+
+
+def _is_lfs_pointer(path: Path) -> bool:
+    """Whether *path* is the stub Git LFS leaves for a file it has not downloaded."""
+    if path.stat().st_size > 1024:
+        return False
+    with path.open("rb") as handle:
+        return handle.read(len(_LFS_POINTER_PREFIX)) == _LFS_POINTER_PREFIX
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -867,9 +876,17 @@ class AABriefcaseLiteResourcesServer(GDPValResourcesServer):
         staged: List[str] = []
         for name in SOURCE_DIRECTORIES:
             source = self._aa_dataset_root / "source_files" / name
-            for path in sorted(source.rglob("*")):
-                if not path.is_file():
-                    continue
+            files = [path for path in sorted(source.rglob("*")) if path.is_file()]
+            # An empty or unhydrated input directory would start every episode without the task's files, and the
+            # model's work on nothing would be scored as its own.
+            if not files:
+                raise RuntimeError(f"AA-Briefcase-Lite input directory {source} has no files")
+            pointers = [path.name for path in files if _is_lfs_pointer(path)]
+            if pointers:
+                raise RuntimeError(
+                    f"AA-Briefcase-Lite input files under {source} are unhydrated Git LFS pointers: {pointers[:5]}"
+                )
+            for path in files:
                 relative = f"{name}/{path.relative_to(source).as_posix()}"
                 target = reference_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
