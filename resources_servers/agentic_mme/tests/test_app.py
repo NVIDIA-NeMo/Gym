@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import json
+import random
+import re
+import time
 from unittest.mock import MagicMock
 
 import pytest
@@ -14,6 +17,8 @@ from resources_servers.agentic_mme.app import (
     AgenticMMEConfig,
     AgenticMMEServer,
     AgenticMMEVerifyRequest,
+    extract_answer,
+    strip_closed_reasoning,
 )
 
 
@@ -251,3 +256,52 @@ async def test_verifier_fixture() -> None:
     await exercise_verifier_fixture(
         VERIFIER_FIXTURE, reward_range=(0.0, 1.0), higher_is_better=True, determinism="unknown"
     )
+
+
+def test_strip_closed_reasoning_matches_the_regex() -> None:
+    rng = random.Random(0)
+    pieces = ["<think>", "</think>", "<thinking>", "</thinking>", "<THINK>", "</Think>", "a", "b ", "\n", "<answer>"]
+    for _ in range(2000):
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 12)))
+        expected = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.S | re.I)
+        assert strip_closed_reasoning(text) == expected, text
+
+
+def test_unclosed_reasoning_tags_stay_linear() -> None:
+    # Each unclosed opening tag made the old regex rescan the rest: 320 KB took about 44 s.
+    text = "<answer>42</answer>" + "<think>x" * 40_000
+    started = time.perf_counter()
+    assert extract_answer(text) == "42"
+    assert time.perf_counter() - started < 2.0
+
+
+@pytest.mark.asyncio
+async def test_judge_reply_without_choices_goes_to_failures_sidecar(judged_server, monkeypatch) -> None:
+    from nemo_gym.verification import judge_failsafe
+
+    empty = completion("unused").model_copy(update={"choices": []})
+
+    async def empty_call_judge(*args, **kwargs):
+        return empty
+
+    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", empty_call_judge)
+    request = judged_request("<answer>44.6 million</answer>")
+    routed = json.loads((await judge_failsafe(judged_server.verify)(body=request)).body)
+    assert routed["reward"] == 0.0 and routed["mask_sample"] is True
+    assert routed["failure_kind"] == "judge_failed" and routed["_ng_failure_class"] == "judge_failed"
+    assert routed["response"]["output"][0]["content"][0]["text"] == "<answer>44.6 million</answer>"
+
+
+@pytest.mark.asyncio
+async def test_cut_off_episode_scores_zero_without_asking_the_judge(judged_server, monkeypatch) -> None:
+    async def unexpected_call(*args, **kwargs):
+        raise AssertionError("judge must not be called for a cut-off answer")
+
+    monkeypatch.setattr("resources_servers.agentic_mme.app.call_judge", unexpected_call)
+    body = judged_request("<answer>44.6 million</answer>")
+    body.response = NeMoGymResponse.model_validate(
+        body.response.model_dump() | {"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+    )
+    result = await judged_server.verify(body)
+    assert result.reward == 0.0 and result.mask_sample is False
+    assert result.failure_reason == "incomplete_response"

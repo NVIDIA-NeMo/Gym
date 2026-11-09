@@ -22,6 +22,7 @@ REPO_ID = "Crystal1047/Agentic-MME"
 REVISION = "b9ea9d3f68ff896d83fec666b6143da594c054a8"  # pragma: allowlist secret
 MAX_PIXELS = 2048 * 2048
 MAX_BYTES = 15 * 1024 * 1024
+EXPECTED_TASKS = 418
 
 BENCHMARK_DIR = Path(__file__).parent
 OUTPUT_FPATH = BENCHMARK_DIR / "data" / "agentic_mme_benchmark.jsonl"
@@ -107,9 +108,14 @@ def prepare() -> Path:
     root = dataset_root()
     OUTPUT_FPATH.parent.mkdir(parents=True, exist_ok=True)
     files = sorted((root / "json").glob("*.json"))
-    with open(OUTPUT_FPATH, "w") as out:
+    if len(files) != EXPECTED_TASKS:
+        raise ValueError(f"expected {EXPECTED_TASKS} task files under {root / 'json'}, found {len(files)}")
+    # An existing output counts as prepared, so publish it only after every task converts.
+    partial = OUTPUT_FPATH.with_suffix(".jsonl.partial")
+    with open(partial, "w") as out:
         for path in files:
             out.write(json.dumps(convert(json.loads(path.read_text()), root)) + "\n")
+    os.replace(partial, OUTPUT_FPATH)
     print(f"Wrote {len(files)} tasks to {OUTPUT_FPATH}")
     return OUTPUT_FPATH
 

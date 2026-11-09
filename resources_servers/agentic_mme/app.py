@@ -21,7 +21,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import VerifierFixture, call_judge
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.agentic_mme.task_data import GoldenAnswer
 from resources_servers.agentic_mme.verifier_fixture import create_server
 
@@ -35,13 +35,40 @@ def judge_tolerance(metadata: dict[str, Any], golden: GoldenAnswer) -> float:
     return golden.tolerance if golden.match_type == "numeric" else 0.0
 
 
+_REASONING_TAG = re.compile(r"<(/?)(think|thinking)>", re.I)
+
+
+def strip_closed_reasoning(text: str) -> str:
+    """Remove each <think>...</think> (or <thinking>) block in one linear pass.
+
+    Same result as re.sub(r"<(think|thinking)>.*?</\\1>", "", text, flags=re.S | re.I), which rescans the
+    rest of the text for every unclosed opening tag.
+    """
+    tags = [(m.start(), m.end(), m.group(1) == "/", m.group(2).lower()) for m in _REASONING_TAG.finditer(text)]
+    next_close: dict[str, list[int]] = {"think": [], "thinking": []}
+    for index, (_, _, closing, name) in enumerate(tags):
+        if closing:
+            next_close[name].append(index)
+    cursors = {"think": 0, "thinking": 0}
+    kept, position = [], 0
+    for index, (start, end, closing, name) in enumerate(tags):
+        closes = next_close[name]
+        while cursors[name] < len(closes) and closes[cursors[name]] <= index:
+            cursors[name] += 1
+        if not closing and start >= position and cursors[name] < len(closes):
+            kept.append(text[position:start])
+            position = tags[closes[cursors[name]]][1]
+    kept.append(text[position:])
+    return "".join(kept)
+
+
 def extract_answer(text: str) -> str:
     """Extract the public atomic answer format, excluding private reasoning.
 
     With several <answer> tags the last one wins: a model that quotes the format before answering
     (e.g. <answer>YOUR_SHORT_ANSWER</answer>) is scored on the answer it gives afterwards.
     """
-    text = re.sub(r"<(think|thinking)>.*?</\1>", "", text, flags=re.S | re.I)
+    text = strip_closed_reasoning(text)
     text = re.split(r"</(?:think|thinking)>", text, flags=re.I)[-1]
     text = re.split(r"<(?:think|thinking)>", text, flags=re.I)[0]
     answers = re.findall(r"<answer>(.*?)(?:</answer>|$)", text, re.S | re.I)
@@ -189,6 +216,8 @@ class AgenticMMEServer(SimpleResourcesServer):
                 json=params,
                 response_model=NeMoGymChatCompletion,
             )
+        if not completion.choices:
+            raise JudgeError("judge returned no choices")
         return parse_verdict(completion.choices[0].message.content or "")
 
     async def verify(self, body: AgenticMMEVerifyRequest) -> AgenticMMEVerifyResponse:
