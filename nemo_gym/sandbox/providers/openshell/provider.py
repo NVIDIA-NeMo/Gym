@@ -35,7 +35,7 @@ import shlex
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +50,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxSpec,
     SandboxStatus,
 )
+from nemo_gym.sandbox.providers.utils import require_shell_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -840,7 +841,7 @@ class OpenShellProvider:
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -854,6 +855,7 @@ class OpenShellProvider:
         deadline past it. ``user`` is ignored with a warning: the OpenShell exec API has no user
         field, so commands run as the sandbox's default user.
         """
+        command = require_shell_text(command, provider=self.name)
         inst = handle.raw
         if user is not None:
             LOGGER.warning(

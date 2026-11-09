@@ -27,7 +27,7 @@ import signal
 import socket
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -35,6 +35,7 @@ from typing import Any
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
+    SandboxExecArgvUnsupportedError,
     SandboxExecResult,
     SandboxHandle,
     SandboxResources,
@@ -627,10 +628,14 @@ class ApptainerProvider:
             raise RuntimeError(f"Apptainer instance {name} is not running")
         return handle
 
+    def exec_takes_argv(self) -> bool:
+        """``apptainer exec`` runs an argument list as the program's argv (``SupportsSandboxExecArgv``)."""
+        return True
+
     async def exec(
         self,
         handle: SandboxHandle,
-        command: str,
+        command: str | Sequence[str],
         *,
         cwd: str | None = None,
         env: dict[str, str] | None = None,
@@ -638,12 +643,13 @@ class ApptainerProvider:
         user: str | int | None = None,
         stdin: bytes | None = None,
     ) -> SandboxExecResult:
-        """Run a command inside the instance.
+        """Run a command inside the instance: shell text under ``sh -c``, an argument list without a shell.
 
         Maps the neutral ``user`` parameter onto apptainer:
         - None            -> run as the default (launching) user.
         - "root" / 0      -> add --fakeroot (root inside the container).
-        - other user/uid  -> --fakeroot + wrap in ``su`` to switch to that user.
+        - other user/uid  -> --fakeroot + wrap in ``su`` to switch to that user. ``su`` runs a shell, so an
+                             argument list raises ``SandboxExecArgvUnsupportedError`` for such a user.
 
         ``stdin``, when given, is piped to the command's standard input. This is an
         apptainer-provider extension to the base protocol, useful for feeding large
@@ -665,9 +671,18 @@ class ApptainerProvider:
             if self._exec_config.fakeroot_for_root:
                 flags.append("--fakeroot")
         elif user is not None:
+            if not isinstance(command, str):
+                raise SandboxExecArgvUnsupportedError(
+                    "The apptainer sandbox provider switches to a user other than root only through su, which runs "
+                    "a shell; run an argument list as the default user or as root"
+                )
             # Need root inside the container to switch users, then su to the target.
             flags.append("--fakeroot")
             effective_command = f"su -s /bin/sh -c {shlex.quote(command)} {shlex.quote(str(user))}"
+        if isinstance(effective_command, str):
+            process_argv = ["sh", "-c", effective_command]
+        else:
+            process_argv = list(effective_command)
 
         flags += list(self._exec_config.extra_exec_args)
 
@@ -677,7 +692,7 @@ class ApptainerProvider:
             with _private_env_file(inst.staging_dir, env_file_content) as env_file:
                 if env_file is not None:
                     flags += ["--no-eval", "--env-file", str(env_file)]
-                argv = [self._binary, "exec", *flags, f"instance://{inst.name}", "sh", "-c", effective_command]
+                argv = [self._binary, "exec", *flags, f"instance://{inst.name}", *process_argv]
                 code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
         except TimeoutError as e:
             return SandboxExecResult(

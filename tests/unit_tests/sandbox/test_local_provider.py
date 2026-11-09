@@ -113,6 +113,33 @@ async def test_exec_runs_in_the_workspace_with_layered_env(tmp_path: Path) -> No
     assert workspace.parent == tmp_path
 
 
+async def test_exec_runs_an_argument_list_without_the_shell(tmp_path: Path) -> None:
+    # The configured shell does not exist: shell text cannot start, an argument list never needs it.
+    provider = LocalProvider(workspace_root=str(tmp_path), shell=str(tmp_path / "no-such-shell"))
+    assert provider.exec_takes_argv()
+    handle = await provider.create(SandboxSpec(env={"FROM_SPEC": "spec"}))
+    show = "import os, sys; print(os.getcwd(), os.environ['FROM_SPEC'], os.environ['FROM_CALL'], sys.argv[1:])"
+
+    result = await provider.exec(handle, [sys.executable, "-c", show, "a;b $HOME", "*"], env={"FROM_CALL": "call"})
+
+    workspace, spec, call, received = result.stdout.split(" ", 3)
+    assert (result.return_code, result.error_type) == (0, None)
+    assert Path(workspace).resolve() == handle.raw["workspace"].resolve()
+    assert (spec, call) == ("spec", "call")
+    assert received.strip() == "['a;b $HOME', '*']"
+    with pytest.raises(FileNotFoundError):
+        await provider.exec(handle, "true")
+
+
+async def test_public_sandbox_api_runs_an_argument_list_literally_and_shell_text_expanded(tmp_path: Path) -> None:
+    async with AsyncSandbox(create_provider({"local": {"workspace_root": str(tmp_path)}})) as sandbox:
+        await sandbox.start(SandboxSpec(env={"HOME": "/home/agent"}))
+        argv = await sandbox.exec(["printf", "%s", "a;b $HOME"])
+        text = await sandbox.exec('printf %s "a;b $HOME"')
+    assert (argv.return_code, argv.stdout) == (0, "a;b $HOME")
+    assert (text.return_code, text.stdout) == (0, "a;b /home/agent")
+
+
 async def test_command_failure_is_reported_not_raised(tmp_path: Path) -> None:
     provider = LocalProvider(workspace_root=str(tmp_path))
     handle = await provider.create(SandboxSpec())
