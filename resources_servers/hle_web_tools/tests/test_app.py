@@ -437,7 +437,9 @@ async def test_archive_and_proxy_wrappers_are_decoded_before_the_url_check(serve
 
 OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
 # Four timestamped Wayback layers around a percent-encoded page: the deepest nesting MAX_URL_DECODE_ROUNDS allows.
-NESTED_WAYBACK = "".join(f"https://web.archive.org/web/2024010100000{i}/" for i in range(4)) + "https://example.org/x%20y"
+NESTED_WAYBACK = (
+    "".join(f"https://web.archive.org/web/2024010100000{i}/" for i in range(4)) + "https://example.org/x%20y"
+)
 
 
 @pytest.mark.parametrize(
