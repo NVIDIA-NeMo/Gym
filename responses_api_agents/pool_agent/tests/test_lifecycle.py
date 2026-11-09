@@ -356,7 +356,7 @@ def test_runner_executes_fake_cli_without_changing_host_environment(tmp_path, mo
     assert os.environ["HOME"] == str(tmp_path / "host-home")
     assert os.environ["POOL_REMOTE_SINK"] == "host-value"
     assert json.loads((directory / "exit.json").read_text()) == 0
-    assert json.loads((directory / "model_calls.json").read_text()) == {"completed": 0}
+    assert json.loads((directory / "model_calls.json").read_text()) == {"completed": 0, "last_failure": None}
     output = json.loads((directory / "stdout.jsonl").read_text())
     assert output["home"] == str(directory / "home")
     assert output["provider_keys"] == ["POOLSIDE_API_KEY"]

@@ -11,9 +11,16 @@ from fastapi import HTTPException
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from nemo_gym.agents import AgentSeedSessionRequest, AgentSessionSetupError, SandboxSession
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentSeedSessionRequest,
+    AgentSessionSetupError,
+    OutcomeAction,
+    SandboxSession,
+    agent_outcome_policy,
+)
 from nemo_gym.client import ServerClient
-from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.pool_agent.app import PoolAgent, PoolAgentConfig, prompt_from_request
 from responses_api_agents.pool_agent.configuration import pool_config
@@ -365,27 +372,82 @@ async def test_wrong_rollout_cannot_start_activation():
     assert session.task is None
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "exit_code,reason,timed_out",
-    [(1, "exit_tool_called", False), (0, "model_next_tool_call_http_error", False)],
-)
-async def test_runtime_failure_is_not_returned_as_a_gradable_response(exit_code, reason, timed_out):
-    server, session = agent(), state()
-    session.session.cleanup = {
-        "cleanup_confirmed": True,
-        "return_code": exit_code,
-        "error": None,
-        "timed_out": timed_out,
-    }
-    artifacts = PoolArtifacts(events(event("session.exit", reason=reason)), "", "", exit_code)
+async def run_pool(session: PoolSession, artifacts: PoolArtifacts) -> NeMoGymResponse:
+    """One activation whose sandbox run left ``artifacts`` under the session's cleanup receipt."""
+    session.session.artifacts = artifacts
     with (
         patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
         patch.object(SandboxSession, "execute", return_value=artifacts),
-        pytest.raises((RuntimeError, TimeoutError)),
     ):
-        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert session.failure
+        return await agent()._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+
+
+def outcome(response: NeMoGymResponse) -> dict | None:
+    raw = (response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY)
+    return json.loads(raw) if raw else None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exit_code,reason,expected",
+    [
+        (1, "exit_tool_called", {"failure_kind": "agent_run_error"}),
+        # Pool's events carry no status, and the proxy recorded no failed call.
+        (0, "model_next_tool_call_http_error", {"failure_kind": "unknown"}),
+    ],
+)
+async def test_runtime_failure_is_not_returned_as_a_gradable_response(exit_code, reason, expected):
+    """main raised these (a retried 500); they are failed responses the default policy retries."""
+    session = state()
+    session.session.cleanup = receipt(return_code=exit_code)
+    response = await run_pool(session, PoolArtifacts(events(event("session.exit", reason=reason)), "", "", exit_code))
+    assert response.status == "failed"
+    assert outcome(response) == expected
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert session.failure == expected["failure_kind"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "recorded,replied,expected,action",
+    [
+        # main answered 500 for each of these, which lost the status and was retried.
+        ({"last_model_failure_status": 400}, 0, {"failure_kind": "model_request_rejected"}, OutcomeAction.FAIL),
+        (
+            {"last_model_failure_status": 400},
+            1,
+            {"failure_kind": "model_request_error", "status_code": 400},
+            OutcomeAction.VERIFY,
+        ),
+        (
+            {"last_model_failure_status": 401},
+            1,
+            {"failure_kind": "model_request_error", "status_code": 401},
+            OutcomeAction.FAIL,
+        ),
+        (
+            {"last_model_failure_status": 503},
+            1,
+            {"failure_kind": "model_request_error", "status_code": 503},
+            OutcomeAction.RETRY,
+        ),
+        ({"last_model_failure_transport": True}, 1, {"failure_kind": "model_transport_error"}, OutcomeAction.RETRY),
+    ],
+)
+async def test_a_model_error_is_classified_from_the_proxy_record(recorded, replied, expected, action):
+    session = state()
+    session.session.cleanup = receipt(return_code=1)
+    artifacts = PoolArtifacts(
+        events(event("session.exit", reason="model_next_tool_call_http_error")),
+        "",
+        "",
+        1,
+        completed_model_calls=replied,
+        **recorded,
+    )
+    response = await run_pool(session, artifacts)
+    assert (response.status, outcome(response)) == ("failed", expected)
+    assert agent_outcome_policy(response) == action
 
 
 @pytest.mark.asyncio
@@ -488,14 +550,10 @@ async def test_confirmed_timeout_keeps_partial_output_gradable(text):
         (None, 0, complete()),
         (receipt(cleanup_confirmed=False), 0, complete()),
         (receipt(error="spawn failed", timed_out=True), None, ""),
-        (receipt(return_code=1), None, ""),
-        (receipt(return_code=1), 0, complete()),
-        (receipt(), None, complete()),
-        (receipt(timed_out=True), None, events(event("session.error", error="HTTP 401"))),
         (receipt(timed_out=True), None, "bad\n{}"),
     ],
 )
-async def test_runtime_errors_cannot_be_disguised_as_gradable_partials(cleanup, exit_code, text):
+async def test_lifecycle_failures_still_fail_the_activation(cleanup, exit_code, text):
     server, session = agent(), state()
     session.session.cleanup = cleanup
     with (
@@ -505,6 +563,27 @@ async def test_runtime_errors_cannot_be_disguised_as_gradable_partials(cleanup, 
     ):
         await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
     assert session.failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cleanup,exit_code,text,expected",
+    [
+        (receipt(return_code=1), None, "", "agent_run_error"),
+        (receipt(return_code=1), 0, complete(), "agent_run_error"),
+        (receipt(), None, complete(), "agent_run_error"),
+        # A deadline before any model reply stays retried, as main's 500 was.
+        (receipt(timed_out=True), None, events(event("session.error", error="HTTP 401")), "unknown"),
+    ],
+)
+async def test_runtime_errors_cannot_be_disguised_as_gradable_partials(cleanup, exit_code, text, expected):
+    """main raised these (a retried 500); they are failed responses that are retried, never graded."""
+    session = state()
+    session.session.cleanup = cleanup
+    response = await run_pool(session, PoolArtifacts(text, "", "", exit_code))
+    assert (response.status, outcome(response)) == ("failed", {"failure_kind": expected})
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert session.failure == expected
 
 
 @pytest.mark.asyncio
@@ -598,21 +677,49 @@ def test_custom_metadata_stays_unsupported():
 
 
 @pytest.mark.asyncio
-async def test_recorded_model_failure_overrides_timeout_and_preserves_diagnostics(caplog):
-    server, session = agent(), state()
+@pytest.mark.parametrize(
+    "recorded,expected",
+    [
+        ({"last_model_failure_status": 503}, {"failure_kind": "model_request_error", "status_code": 503}),
+        ({"last_model_failure_transport": True}, {"failure_kind": "model_transport_error"}),
+    ],
+)
+async def test_recorded_model_failure_overrides_timeout_and_preserves_diagnostics(caplog, recorded, expected):
+    """A deadline spent on a failing model server is that fault, retried (main: a 500 that lost the status)."""
+    session = state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
     artifacts = PoolArtifacts(
-        events(event("session.exit", reason="model_next_tool_call_http_error")), "", "upstream HTTP 503", None
+        events(event("assistant_message.end", assistant_message="working"), event("session.exit", reason="x")),
+        "",
+        "upstream HTTP 503",
+        None,
+        completed_model_calls=1,
+        **recorded,
     )
-    session.session.artifacts = artifacts
-    with (
-        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
-        patch.object(SandboxSession, "execute", return_value=artifacts),
-        pytest.raises(RuntimeError, match="model request failed"),
-    ):
-        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    assert session.failure == "RuntimeError"
+    response = await run_pool(session, artifacts)
+    assert (response.status, outcome(response)) == ("failed", expected)
+    assert response.metadata["ng_agent_stop_reason"] == "infra"
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
+    assert session.failure == expected["failure_kind"]
     assert "upstream HTTP 503" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_client_error_recorded_before_the_deadline_is_not_an_infrastructure_fault():
+    """Only 408/425/429/5xx and transport failures are the model server's; the deadline after a reply is graded."""
+    session = state()
+    session.session.cleanup = receipt(timed_out=True, return_code=-15)
+    artifacts = PoolArtifacts(
+        events(event("assistant_message.end", assistant_message="working")),
+        "",
+        "",
+        None,
+        completed_model_calls=1,
+        last_model_failure_status=400,
+    )
+    response = await run_pool(session, artifacts)
+    assert (response.status, outcome(response)) == ("incomplete", None)
+    assert response.metadata["ng_agent_stop_reason"] == "timeout"
 
 
 def fresh_request():
@@ -814,13 +921,14 @@ async def test_failure_artifacts_survive_close_without_duplicate_files(tmp_path)
     server, session = agent(failure_artifacts_dir=tmp_path), state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
     raw = events(event("session.exit", reason="model_next_tool_call_http_error"))
-    session.session.artifacts = PoolArtifacts(raw, "raw stdout", "HTTP 503", None)
+    session.session.artifacts = PoolArtifacts(raw, "raw stdout", "HTTP 503", None, last_model_failure_status=503)
     with (
         patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
         patch.object(SandboxSession, "execute", return_value=session.session.artifacts),
-        pytest.raises(RuntimeError, match="model request failed"),
     ):
-        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+        response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    # A failed response keeps its failure artifacts, as main's raised failure did.
+    assert response.status == "failed"
     with patch.object(PoolSession, "close"):
         await server._close_agent_session_state(session)
     files = list(tmp_path.iterdir())
@@ -829,7 +937,7 @@ async def test_failure_artifacts_survive_close_without_duplicate_files(tmp_path)
     assert saved["artifacts"]["trajectory"] == raw
     assert saved["artifacts"]["stdout"] == "raw stdout"
     assert saved["artifacts"]["stderr"] == "HTTP 503"
-    assert saved["failure"] == "RuntimeError"
+    assert saved["failure"] == "model_request_error"
     assert saved["cleanup"]["timed_out"] is True
     assert files[0].stat().st_mode & 0o777 == 0o600
 
@@ -872,38 +980,35 @@ async def test_timeout_without_trajectory_requires_completed_model_response(
     completed_calls: int, trajectory_error: bool
 ) -> None:
     """Classify model-free timeouts while preserving failed trajectory reads."""
-    server, session = agent(), state()
+    session = state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
     artifacts = PoolArtifacts(
         "", "", "", None, trajectory_error=trajectory_error, completed_model_calls=completed_calls
     )
-    with (
-        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
-        patch.object(SandboxSession, "execute", return_value=artifacts),
-    ):
-        if not completed_calls:
-            with pytest.raises(RuntimeError, match="before any model response"):
-                await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-            assert session.failure == "RuntimeError"
-        elif trajectory_error:
-            with pytest.raises(RuntimeError, match="readable root trajectory"):
-                await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-        else:
-            response = await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-            assert response.status == "incomplete" and response.output == []
+    if not completed_calls:
+        # A deadline before any model reply stays retried (main: a 500), now as a failed response.
+        response = await run_pool(session, artifacts)
+        assert (response.status, outcome(response)) == ("failed", {"failure_kind": "unknown"})
+        assert agent_outcome_policy(response) == OutcomeAction.RETRY
+        assert session.failure == "unknown"
+    elif trajectory_error:
+        with pytest.raises(RuntimeError, match="readable root trajectory"):
+            await run_pool(session, artifacts)
+    else:
+        response = await run_pool(session, artifacts)
+        assert response.status == "incomplete" and response.output == []
 
 
 @pytest.mark.asyncio
-async def test_timeout_does_not_hide_unknown_terminal_failure():
-    server, session = agent(), state()
+async def test_a_timeout_before_any_reply_stays_retried_whatever_pool_recorded():
+    """main raised an unknown terminal reason as a 500; before any model reply it is now failed unknown (retried)."""
+    session = state()
     session.session.cleanup = receipt(timed_out=True, return_code=-15)
-    artifacts = PoolArtifacts(events(event("session.exit", reason="some_other_failure")), "", "", None)
-    with (
-        patch.object(PoolAgent, "model_endpoint", return_value=MagicMock(base_url="http://model/v1")),
-        patch.object(SandboxSession, "execute", return_value=artifacts),
-        pytest.raises(RuntimeError, match="some_other_failure"),
-    ):
-        await server._activate(session, NeMoGymResponseCreateParamsNonStreaming(input="task"))
+    response = await run_pool(
+        session, PoolArtifacts(events(event("session.exit", reason="some_other_failure")), "", "", None)
+    )
+    assert (response.status, outcome(response)) == ("failed", {"failure_kind": "unknown"})
+    assert agent_outcome_policy(response) == OutcomeAction.RETRY
 
 
 @pytest.mark.asyncio

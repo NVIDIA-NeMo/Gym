@@ -5,32 +5,43 @@
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from pathlib import Path
 from shlex import quote
 from time import time
-from typing import ClassVar
+from typing import Any, ClassVar
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import Field, JsonValue, PrivateAttr
 
 from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
     AGENT_TIMEOUT_METADATA_KEY,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    RunEvidence,
     SandboxSession,
     SimpleResponsesAPIAgent,
     resolve_agent_timeout,
 )
 from nemo_gym.config import ModelServerRef, get_global_config_dict
-from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NgFailureEvent,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -39,12 +50,12 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, is_retryable_dependency_status
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.pool_agent.configuration import pool_config
-from responses_api_agents.pool_agent.sandbox import PoolSession
-from responses_api_agents.pool_agent.trajectory import parse_trajectory
+from responses_api_agents.pool_agent.sandbox import PoolArtifacts, PoolSession
+from responses_api_agents.pool_agent.trajectory import PoolTrajectory, parse_trajectory
 
 
 LOG = logging.getLogger(__name__)
@@ -64,6 +75,27 @@ class PoolAgentConfig(BaseResponsesAPIAgentConfig):
     failure_artifacts_dir: Path | None = Path("results/pool-agent-failures")
     sandbox_provider: str | None = None
     sandbox_config: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+def _recorded_model_fault(artifacts: PoolArtifacts) -> NgFailureEvent | None:
+    """The model server's fault the proxy recorded as the run's last model call, or ``None``.
+
+    A deadline that came while the last model call had failed with 408, 425, 429 or a 5xx, or had got no reply, was
+    spent on a failing model server, not by the model: the run is retried, as before, instead of graded.
+    """
+    status = artifacts.last_model_failure_status
+    if status is not None and is_retryable_dependency_status(status):
+        return NgFailureEvent(
+            boundary="model",
+            failure_kind=MODEL_REQUEST_ERROR,
+            failure_reason=f"Pool's last model call failed with HTTP {status}",
+            http_status=status,
+        )
+    if artifacts.last_model_failure_transport:
+        return NgFailureEvent(
+            boundary="model", failure_kind=MODEL_TRANSPORT_ERROR, failure_reason="Pool's last model call got no reply"
+        )
+    return None
 
 
 def prompt_from_request(body: NeMoGymResponseCreateParamsNonStreaming) -> str:
@@ -313,8 +345,21 @@ class PoolAgent(SimpleResponsesAPIAgent):
                     state.failure_artifact_task = None
                 LOG.exception("Could not preserve Pool failure artifacts")
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Name a model error from the proxy's record of the last failed model call (Pool's events carry no status)."""
+        status = native_result.get("last_model_failure_status")
+        if type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        if native_result.get("last_model_failure_transport") is True:
+            return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        return super().classify_outcome(native_result)
+
     async def _activate(self, state: PoolSession, body: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
-        """Run Pool and classify timeouts from confirmed cleanup and model-call evidence."""
+        """Run Pool and decide its outcome from confirmed cleanup, its trajectory and the proxy's model-call record.
+
+        A failed launch, supervisor or unreadable trajectory is a lifecycle failure and raises; everything else is
+        answered with the outcome ladder's response.
+        """
         timeout = resolve_agent_timeout(
             body.metadata, ceiling=min(self.config.timeout, state.request.agent_timeout_sec or self.config.timeout)
         )
@@ -339,36 +384,53 @@ class PoolAgent(SimpleResponsesAPIAgent):
             if cleanup["error"]:
                 raise RuntimeError(f"Pool supervision failed: {cleanup['error']}")
             timed_out = cleanup["timed_out"]
-            if artifacts.trajectory_error:
-                if timed_out and not artifacts.completed_model_calls:
-                    raise RuntimeError("Pool timed out before any model response completed")
+            replied = artifacts.completed_model_calls > 0
+            if artifacts.trajectory_error and not (timed_out and not replied):
                 raise RuntimeError("Pool did not produce a readable root trajectory")
-            parsed = parse_trajectory(artifacts.trajectory)
+            parsed = parse_trajectory(artifacts.trajectory) if not artifacts.trajectory_error else PoolTrajectory()
+            model_error = parsed.exit_reason == "model_next_tool_call_http_error"
+            has_result = (
+                cleanup["return_code"] in (0, 4)
+                and artifacts.exit_code in (0, 4)
+                and parsed.exit_reason == "exit_tool_called"
+                and not parsed.errors
+                and not parsed.gaps
+            )
+            evidence = RunEvidence(
+                has_result=has_result,
+                timed_out=timed_out,
+                # Assistant messages and tool calls in the trajectory come from model replies too.
+                model_replied=replied or bool(parsed.output),
+                # Pool's events carry no status: the proxy's record of the last failed model call supplies it.
+                error=self.classify_outcome(asdict(artifacts))
+                if model_error
+                else AgentOutcome(failure_kind="unknown")
+                if parsed.errors
+                else None,
+                infra_fault=_recorded_model_fault(artifacts) if timed_out else None,
+                # A deadline before any model reply stays retried until capture evidence lands for every harness.
+                retry_deadline_before_reply=True,
+            )
             if parsed.errors:
-                raise RuntimeError("Pool session failed: " + "; ".join(parsed.errors))
-            if parsed.exit_reason == "model_next_tool_call_http_error":
-                raise RuntimeError("Pool model request failed: " + parsed.exit_reason)
-            if parsed.exit_reason not in (None, "exit_tool_called"):
-                raise RuntimeError(f"Pool failed: reason={parsed.exit_reason}")
-            if timed_out and not parsed.output and not artifacts.completed_model_calls:
-                raise RuntimeError("Pool timed out before any model response completed")
-            if not timed_out:
-                if cleanup["return_code"] not in (0, 4) or artifacts.exit_code not in (0, 4):
-                    raise RuntimeError(
-                        f"Pool runner failed: supervisor exit={cleanup['return_code']}, Pool exit={artifacts.exit_code}"
-                    )
-                if parsed.exit_reason != "exit_tool_called":
-                    raise RuntimeError(f"Pool failed: reason={parsed.exit_reason}")
-                if parsed.gaps:
-                    raise RuntimeError("Pool completed without a complete trajectory: " + ", ".join(parsed.gaps))
-            return NeMoGymResponse(
+                problem = "Pool session failed: " + "; ".join(parsed.errors)
+            elif model_error:
+                problem = "Pool model request failed: " + parsed.exit_reason
+            elif not has_result and not timed_out:
+                problem = (
+                    f"Pool ended without a result: reason={parsed.exit_reason}, "
+                    f"supervisor exit={cleanup['return_code']}, Pool exit={artifacts.exit_code}"
+                    + ("; incomplete trajectory: " + ", ".join(parsed.gaps) if parsed.gaps else "")
+                )
+            else:
+                problem = None
+            response = NeMoGymResponse(
                 id=f"resp_{uuid4().hex}",
                 created_at=int(time()),
                 object="response",
                 model=self.config.model,
                 output=parsed.output,
                 usage=None,
-                status="incomplete" if timed_out else "completed",
+                error={"code": "server_error", "message": problem} if problem else None,
                 tools=body.tools,
                 tool_choice=body.tool_choice,
                 parallel_tool_calls=body.parallel_tool_calls,
@@ -379,6 +441,15 @@ class PoolAgent(SimpleResponsesAPIAgent):
                     **({"runner_pid": str(artifacts.runner_pid)} if artifacts.runner_pid is not None else {}),
                 },
             )
+            response = self.finish_response(response, evidence, session=state.session)
+            if response.status == "failed":
+                if artifacts.stderr:
+                    LOG.error("Pool run failed; stderr tail: %s", artifacts.stderr[-4096:])
+                state.failure = AgentOutcome.model_validate_json(
+                    response.metadata[AGENT_OUTCOME_METADATA_KEY]
+                ).failure_kind
+                await self._preserve_failure(state)
+            return response
         except BaseException as error:
             artifacts = state.session.artifacts
             if artifacts is not None and artifacts.stderr:

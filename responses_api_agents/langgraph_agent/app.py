@@ -16,24 +16,37 @@ from abc import abstractmethod
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from numbers import Number
+from time import time
 from typing import Any
+from uuid import uuid4
 
+from aiohttp import ClientConnectionError, ClientResponseError
 from fastapi import Body, HTTPException, Request
 from pydantic import ConfigDict
 
 from nemo_gym.agents import (
     ActivationConflictError,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     OrderedOperationLedger,
+    RunEvidence,
     SimpleResponsesAPIAgent,
+    confirmed_policy_response_timeout,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    FailureHeader,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseUsage,
+)
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 
@@ -67,6 +80,20 @@ def aggregate_response_usage(usages: list[NeMoGymResponseUsage | None]) -> NeMoG
         return None
     usage = _aggregate_usage_values([item.model_dump(mode="python") for item in usages])
     return NeMoGymResponseUsage.model_validate(usage)
+
+
+def _model_call_error(error: BaseException) -> ClientResponseError | ClientConnectionError | None:
+    """The failed model call a graph's error is, or ``None``.
+
+    The graphs' only HTTP calls are model calls; parallel paths raise theirs in an ``ExceptionGroup``. A reply that
+    confirms a policy response timeout is not one: the agent boundary raises its typed failure, as before.
+    """
+    if isinstance(error, ExceptionGroup):
+        errors = [_model_call_error(inner) for inner in error.exceptions]
+        return errors[0] if errors and all(errors) else None
+    if isinstance(error, ClientResponseError):
+        return None if confirmed_policy_response_timeout(FailureHeader.decode(error.headers)) else error
+    return error if isinstance(error, ClientConnectionError) else None
 
 
 class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
@@ -130,17 +157,58 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
     async def _invoke_graph(
         self, body: NeMoGymResponseCreateParamsNonStreaming, *, model_url_path: str
     ) -> NeMoGymResponse:
+        """Run the graph, then answer with the outcome ladder's response.
+
+        A model call that failed after Gym's client retries ends the run on that error, by its HTTP status or as a
+        transport error, with the outputs of the graph steps that finished. A confirmed policy response timeout
+        keeps its typed failure, and any other exception is the adapter's own failure.
+        """
         # Model cookies are independent of the agent and resources session jars.
         initial_state = await self.get_initial_state(body, {})
         initial_state["model_url_path"] = model_url_path
-        final_state = await self.graph.ainvoke(initial_state)
+        state = initial_state
+        try:
+            # The values stream yields the graph's state after each step; its last value is ainvoke's result.
+            async for state in self.graph.astream(initial_state, stream_mode="values"):
+                pass
+        except (ClientResponseError, ClientConnectionError, ExceptionGroup) as error:
+            model_error = _model_call_error(error)
+            if model_error is None:
+                raise
+            # A graph step that had not finished leaves no state, so a reply it got is not observed here.
+            replied = state.get("last_policy_response") is not None
+            failed = NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=int(time()),
+                model=body.model or self.config.model_server.name,
+                object="response",
+                output=self.extract_outputs(state),
+                error={"code": "server_error", "message": f"Model call failed: {model_error}"},
+                tools=body.tools,
+                tool_choice=body.tool_choice,
+                parallel_tool_calls=body.parallel_tool_calls,
+            )
+            outcome = (
+                AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=model_error.status)
+                if isinstance(model_error, ClientResponseError)
+                else AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+            )
+            evidence = RunEvidence(has_result=False, timed_out=False, model_replied=replied, error=outcome)
+            return self.finish_response(failed, evidence)
 
-        model_response = self.extract_model_response(final_state)
-        outputs = self.extract_outputs(final_state)
+        model_response = self.extract_model_response(state)
+        outputs = self.extract_outputs(state)
         model_response.output = outputs
-        if "policy_usages" in final_state:
-            model_response.usage = aggregate_response_usage(final_state["policy_usages"])
-        return model_response
+        if "policy_usages" in state:
+            model_response.usage = aggregate_response_usage(state["policy_usages"])
+        evidence = RunEvidence(
+            has_result=True,
+            timed_out=False,
+            model_replied=True,
+            # The final reply stopped at the model's output limit.
+            model_limit="output" if model_response.status == "incomplete" else None,
+        )
+        return self.finish_response(model_response, evidence)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
         if body.sandbox_access is not None:
