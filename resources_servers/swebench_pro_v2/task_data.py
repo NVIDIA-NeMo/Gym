@@ -11,5 +11,12 @@ class TaskData(SWEBenchProTaskData):
     """A v1 SWE-bench Pro row plus the v2 image and per-task verifier files."""
 
     docker_image: str = Field(json_schema_extra={"consumed_by": ["verify"]})
+    image_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$", json_schema_extra={"consumed_by": ["verify"]})
     test_sh: str = Field(json_schema_extra={"consumed_by": ["verify"]})
     test_config: str = Field(json_schema_extra={"consumed_by": ["verify"]})
+    hard: bool | str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    version: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    source_repository: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    source_revision: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    source_license: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
+    source_task_path: str = Field(default="", json_schema_extra={"consumed_by": ["provenance"]})
