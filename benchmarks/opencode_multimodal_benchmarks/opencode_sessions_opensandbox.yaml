@@ -16,6 +16,12 @@ visual_environment:
   environment_servers:
     single_agent_turn:
       host: 127.0.0.1
+      resources_server:
+        type: resources_servers
+        name: opencode_multimodal_benchmarks
+      agent_server:
+        type: responses_api_agents
+        name: visual_agent
 # judge.yaml binds its optional judge route to loopback too. Only the model
 # gateway should listen on the task-facing IP.
 visual_agent:

@@ -2,9 +2,11 @@
 
 For new evaluations, use the provider-backed `<benchmark>/opencode.yaml` recipes
 in the [catalog guide](README.md). This page documents the existing local
-Bubblewrap relay path for historical runs and training. Both execution paths
-now require private PID/procfs and network namespaces, with the validating proxy
-protecting Gym control services. Deployment qualification is still required; see
+Bubblewrap relay path for historical runs and training. Bubblewrap and Enroot
+use private PID/procfs and network namespaces, with the validating proxy
+protecting Gym control services. Owned OpenSandbox sessions use the provider's
+process isolation and egress policy; Gym control services must be separately
+inaccessible from task sandboxes. Deployment qualification is still required; see
 the [network policy](../../responses_api_agents/opencode_multimodal_agent/network-policy.md).
 Do not change an existing run's runtime while resuming it.
 

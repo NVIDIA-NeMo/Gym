@@ -15,10 +15,12 @@ and trajectory records before the workspace is cleaned up.
 For session-based evaluation, use a Gym sandbox provider and a Linux sandbox
 image containing Bash. Install Python, Pillow, numpy, scipy and OpenCV in the
 image when tasks need those tools. Gym installs the pinned OpenCode runtime during
-session seed. All sessions also install an adapter-owned Python interpreter
-for the mandatory network/procfs wrapper, including `inherit` sessions.
-The wrapper never uses the task image's interpreter or Python environment. No host OpenCode installation
-or Bubblewrap is required for this path.
+session seed. Enroot, local-provider and borrowed sessions also install an
+adapter-owned Python interpreter for the network/procfs wrapper, including
+`inherit` sessions. The wrapper never uses the task image's interpreter or Python
+environment. Owned OpenSandbox sessions use provider isolation and egress instead
+and do not install this interpreter. No host OpenCode installation or Bubblewrap
+is required for the session path.
 
 For compatibility configurations, use a Linux host with:
 
