@@ -77,9 +77,10 @@ class _ListingConfigParser(GlobalConfigDictParser):
 
 
 def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfig) -> DictConfig:
-    """`parse_no_environment` for listing: fill unset `???`, `${...}` and environment values (runtime-only
-    things like API keys/endpoints) with a placeholder so the config still resolves enough to identify the
-    component. Never mutates the input; other config and resolver errors propagate.
+    """Offline `parse` for listing, which reads no CLI or dotenv, like `parse_no_environment`.
+    It fills unset `???`, `${...}` and environment values (runtime-only things like API keys/endpoints)
+    with a placeholder so the config still resolves enough to identify the component.
+    Never mutates the input; other config and resolver errors propagate.
     """
     working = deepcopy(initial_config_dict)  # never mutate the caller's config
     parser = _ListingConfigParser()
@@ -90,7 +91,7 @@ def _parse_no_environment_tolerating_unset_values(initial_config_dict: DictConfi
     while True:
         try:
             # Listing only reads configs, so it parses offline.
-            # Offline parsing never looks up this host for `use_absolute_ip`, probes ports, or sets environment variables.
+            # Offline parsing skips the `use_absolute_ip` host lookup, port probes, UV_* writes and exporters.
             return parser.parse(
                 parse_config=GlobalConfigDictParserConfig(
                     dotenv_path=None,
