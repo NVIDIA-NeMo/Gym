@@ -2,9 +2,11 @@
 
 For new evaluations, use the provider-backed `<benchmark>/opencode.yaml` recipes
 in the [catalog guide](README.md). This page documents the existing local
-Bubblewrap relay path for historical runs and training. Its shared host procfs
-and networking remain unchanged; it does not provide the same boundary as a
-separate provider sandbox. Do not change an existing run's runtime while resuming it.
+Bubblewrap relay path for historical runs and training. Both execution paths
+now require private PID/procfs and network namespaces, with the validating proxy
+protecting Gym control services. Deployment qualification is still required; see
+the [network policy](../../responses_api_agents/opencode_multimodal_agent/network-policy.md).
+Do not change an existing run's runtime while resuming it.
 
 Evaluate visual tasks with `opencode_multimodal_agent`. The benchmark configurations
 prepare Gym task rows, run the agent, and score its answers through the
@@ -17,7 +19,6 @@ prepare Gym task rows, run the agent, and score its answers through the
 | `vstar/opencode_relay.yaml` | VStar TSV and images | Multiple-choice accuracy |
 | `hrbench8k/opencode_relay.yaml` | HRBench8K TSV and images | Mean accuracy across cycles |
 | `vtcbench/opencode_relay.yaml` | VTCBench TSV and images | Rule matching with LLM fallback |
-| `agentx/opencode_relay.yaml` | Agent-X source data or prepared bundle | GoalAcc on 605 non-generative tasks |
 | `zerobench/opencode_relay.yaml` | Official main-split Parquet with embedded images | Case-insensitive exact answer accuracy |
 
 ## Prepare data
@@ -39,26 +40,6 @@ Supply these preparation arguments through Gym's `prepare_kwargs`:
 TSV files can contain embedded images or image paths. Use relative image paths
 for portable datasets. VStar and HRBench8K inputs are checked against the manifests in
 [`manifests/`](manifests/) before applying `limit`; keep the original image bytes.
-
-### Agent-X
-
-Download the release identified in [`manifests/AgentX.json`](manifests/AgentX.json),
-including `data.json`, `dataset.json`, and `files/`. Set `prepare_kwargs.source_root`
-to its directory. Preparation validates the source files and produces 494 image
-tasks and 111 video tasks. Videos are sampled at approximately one frame per second,
-up to 128 frames. The manifest records the selected tasks and exclusions.
-
-To package prepared tasks for another machine:
-
-```bash
-python -m benchmarks.opencode_multimodal_benchmarks.bundle_agentx \
-  benchmarks/opencode_multimodal_benchmarks/data/agentx.jsonl \
-  /data/agentx/bundle --sha256 <prepared-jsonl-sha256>
-```
-
-Use a new destination directory. The bundle contains `agentx.jsonl`, `media/`, and
-`provenance.json`. To load it, supply `prepare_kwargs.dataset`, `sha256`, and
-`media_root` instead of `source_root`.
 
 ### ZeroBench
 
@@ -116,8 +97,6 @@ score zero.
   is ambiguous. HRBench8K averages the per-cycle accuracies.
 - **VTCBench:** apply the rule matcher, then judge answers that did not match.
   Set `vtc_llm_fallback: false` for rule-only scoring.
-- **Agent-X:** use the GoalAcc rubric. Objective answers receive 0 or 1;
-  subjective answers receive a score from 0 to 1. Image-generation tasks are excluded.
 
 Unresolved judge failures need rejudging before reporting a complete benchmark
 score. For agent sessions, the Environment Server's `agent_outcome_policy`

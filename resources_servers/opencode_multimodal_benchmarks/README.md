@@ -1,12 +1,11 @@
 # Visual benchmark verification
 
-This resources server scores VStar, HRBench8K, VTCBench, Agent-X and ZeroBench
+This resources server scores VStar, HRBench8K, VTCBench and ZeroBench
 responses. Dataset preparation produces Gym task rows with reference labels in
 `verifier_metadata`, separate from model inputs and the episode sandbox.
 
 VStar and HRBench8K use multiple-choice extraction with a reference-blind judge
-fallback. VTCBench uses the public rule matcher followed by an LLM judge for rule-negative answers. Agent-X uses its Goal
-Accuracy rubric and retains fractional subjective scores. ZeroBench uses the public last-curly-brace extraction
+fallback. VTCBench uses the public rule matcher followed by an LLM judge for rule-negative answers. ZeroBench uses the public last-curly-brace extraction
 and case-insensitive exact comparison, without a judge. Empty answers score zero.
 
 For judge-based benchmarks, supply `judge_model` and either `judge_server` or `judge_endpoint` explicitly.

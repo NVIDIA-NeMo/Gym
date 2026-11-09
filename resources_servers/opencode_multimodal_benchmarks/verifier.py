@@ -14,7 +14,6 @@ from nemo_gym.server_runtime import (
 )
 from nemo_gym.utils import final_assistant_text as final_answer
 from nemo_gym.verification import JudgeError, record_parsed_judge_verdict
-from resources_servers.opencode_multimodal_benchmarks.agentx_rubric import final_response
 from resources_servers.opencode_multimodal_benchmarks.mcq import (
     MCQ_SCORER,
     infer_option,
@@ -51,10 +50,6 @@ class VisualVerifyResponse(VisualVerifyRequest, BaseVerifyResponse):
     scorer: str
     extraction_method: str | None = None
     judge_model: str | None = None
-
-
-class AgentXVerifyResponse(VisualVerifyResponse):
-    judge_raw: str
 
 
 class InvalidJudgeVerdict(JudgeError):
@@ -154,35 +149,3 @@ class VisualVerifier:
 
             return await observe_llm_judge_grading(judge_mcq)
         raise ValueError(f"Unsupported visual benchmark: {benchmark}")
-
-
-class AgentXVerifier:
-    config: "VisualBenchmarksConfig"
-
-    async def _judge_answer(self, task: dict[str, Any], prediction: str) -> tuple[float, str]:
-        raise NotImplementedError("The resources server supplies the judge transport")
-
-    async def verify(self, body: VisualVerifyRequest) -> AgentXVerifyResponse:
-        task = body.verifier_metadata
-        if task["benchmark"] != "AgentX_GoalAcc":
-            raise ValueError(f"Not an Agent-X task: {task['benchmark']}")
-        prediction = final_response(final_answer(body.response.model_dump()["output"]))
-
-        def response(score: float, raw: str) -> AgentXVerifyResponse:
-            return AgentXVerifyResponse(
-                **body.model_dump(),
-                reward=score,
-                extracted=prediction,
-                scorer="agentx-goal-full-response-v1",
-                judge_model=self.config.judge_model,
-                judge_raw=raw,
-            )
-
-        if not prediction:
-            return observe_programmatic_grading(lambda: response(0, "Score: 0; no final answer."))
-
-        async def judge_answer() -> AgentXVerifyResponse:
-            score, raw = await self._judge_answer(task, prediction)
-            return response(score, raw)
-
-        return await observe_llm_judge_grading(judge_answer)

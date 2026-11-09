@@ -19,10 +19,9 @@ ROOT = Path(__file__).resolve().parents[3]
     "benchmark,sessions",
     [
         (benchmark, sessions)
-        for benchmark in ["vstar", "hrbench8k", "vtcbench", "agentx", "zerobench"]
+        for benchmark in ["vstar", "hrbench8k", "vtcbench", "zerobench"]
         for sessions in [False, True, "opensandbox"]
-    ]
-    + [("agentx", "opensandbox-provider")],
+    ],
 )
 def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     monkeypatch.chdir(ROOT)
@@ -96,9 +95,9 @@ def test_catalog_and_compatibility_route_once(monkeypatch, benchmark, sessions):
     ]["opencode_multimodal_agent"]
     assert agent.build_system_prompt == original["build_system_prompt"]
     assert agent.context_window == agent.max_output_tokens == 131072
-    assert agent.opencode_config.get("tools", {}).get("webfetch", False) is (benchmark == "agentx")
-    assert agent.opencode_config.get("tools", {}).get("websearch", False) is (benchmark == "agentx")
-    assert agent.network_access == ("inherit" if benchmark == "agentx" else "model_only")
+    assert agent.opencode_config.get("tools", {}).get("webfetch", False) is False
+    assert agent.opencode_config.get("tools", {}).get("websearch", False) is False
+    assert agent.network_access == "model_only"
     assert agent.max_turns == agent.turn_budget.hard_limit == 65
     assert agent.turn_budget.model_dump() == OmegaConf.to_container(
         cfg.policy_model.responses_api_models.vllm_model.turn_budget

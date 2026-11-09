@@ -55,10 +55,6 @@ def task(benchmark="VStarBench", answer="A"):
         "cycle_category": "1",
         "split": "test",
         "expected_samples": 1,
-        "GT_json": json.dumps({"value": answer}),
-        "query_type": "objective",
-        "query_type_raw": "Objective",
-        "modality": "Image",
     }
 
 

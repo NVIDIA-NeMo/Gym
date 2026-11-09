@@ -173,9 +173,9 @@ available with the configured model provider. WebSearch uses OpenCode's Exa
 service; it is independent of the model provider and requires outbound access.
 The flag is explicitly off when WebSearch is disabled.
 
-The Agent-X [OpenCode pairing](../../benchmarks/opencode_multimodal_benchmarks/agentx/opencode.yaml)
-enables WebFetch and WebSearch with `network_access: inherit`.
-Other benchmark pairings default to `network_access: model_only`.
+The shipped benchmark pairings select `network_access: model_only` and disable
+WebFetch and WebSearch. Custom tasks can explicitly enable either web tool with
+`network_access: inherit`, subject to the process/network boundary below.
 
 This is a tool-permission setting, not a network firewall: Bash and Python can
 still make network requests if the sandbox permits them. Use sandbox network
@@ -378,6 +378,15 @@ and rejects another model entrypoint at agent startup. Existing turn counting an
 notice/grace thresholds are retained. The hosted gateway preset preserves explicit
 server sampling/template settings while omitting harness sampling defaults.
 
-The compatibility Bubblewrap path's shared host `/proc` behavior remains unchanged;
-its isolation review is still open. Agent-X rubric permission is also unresolved.
-Neither issue is resolved by the unit-test results.
+Both provider-managed execution and the compatibility Bubblewrap path require
+private PID/procfs and network namespaces. Synthetic process/control-service
+denial and public-web access have been checked on Bubblewrap and Enroot/Pyxis.
+These checks do not qualify a different deployment or an unlisted public control
+endpoint; see [deployment qualification](network-policy.md#provider-execution-and-deployment-qualification).
+
+Live OpenSandbox deployment validation remains outstanding. Qwen reasoning-history
+retention under the deployed chat template is also unverified; investigation is
+paused. The adapter preserves preceding reasoning, but the trailing directive
+normalized to a user message could affect template rendering. A render comparison
+using the actual deployed template and settings is required before claiming
+reasoning-history compatibility.

@@ -30,8 +30,7 @@ These adapters run a harness inside a sandbox and are driven by the `single_agen
 The [OpenCode multimodal adapter](https://github.com/NVIDIA-NeMo/Gym/tree/main/responses_api_agents/opencode_multimodal_agent)
 adds initial image staging and inline tool-image outputs to OpenCode 1.17.11.
 Its [visual benchmark catalog](https://github.com/NVIDIA-NeMo/Gym/tree/main/benchmarks/opencode_multimodal_benchmarks)
-provides a session overlay for VStar, HRBench8K, VTCBench, BabyVision, Agent-X and
-ZeroBench. These pairings are experimental. It accepts one activation, rejects
+provides a session overlay for VStar, HRBench8K, VTCBench and ZeroBench. These pairings are experimental. It accepts one activation, rejects
 continuations, and requires explicit `temperature` and `top_p`. Session evaluation
 rejects training capture and auxiliary tool rewards; the existing compatibility
 path retains those features. Configure the sandbox provider, model and budgets

@@ -6,7 +6,6 @@ used independently of OpenCode:
 - [VStar](vstar/README.md)
 - [HRBench8K](hrbench8k/README.md)
 - [VTCBench](vtcbench/README.md)
-- [Agent-X GoalAcc](agentx/README.md)
 - [ZeroBench](zerobench/README.md)
 
 Each entry documents its dataset and measurement contract. The catalog defaults
@@ -21,7 +20,6 @@ sandbox through Gym's shared agent-session lifecycle.
 | [VStar](vstar/opencode.yaml) | `model_only` | Disabled |
 | [HRBench8K](hrbench8k/opencode.yaml) | `model_only` | Disabled |
 | [VTCBench](vtcbench/opencode.yaml) | `model_only` | Disabled |
-| [Agent-X](agentx/opencode.yaml) | `inherit` | Enabled |
 | [ZeroBench](zerobench/opencode.yaml) | `model_only` | Disabled |
 
 This uses the same provider execution boundary as BrowseComp's OpenCode pairing.
@@ -32,18 +30,18 @@ repeats and primary pass@5.
 
 For restricted OpenSandbox runs, compose
 [`opencode_sessions_opensandbox.yaml`](opencode_sessions_opensandbox.yaml) after
-the recipe and provide the six offline-runtime pins and task image. For Agent-X
-with `inherit`, compose the standard
-[OpenSandbox provider](../../nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml)
-instead; no nested network helper is installed. Supply provider credentials in
+the recipe and provide the six offline-runtime pins and task image. All network modes install/probe the private namespace runtime during
+seed; a failed namespace probe stops setup. Live OpenSandbox deployment validation
+remains outstanding. Supply provider credentials in
 the runtime environment and an image with the task's required libraries. See
 the [agent session setup](../../responses_api_agents/opencode_multimodal_agent/README.md#agent-sessions)
-and [network boundary](../../responses_api_agents/opencode_multimodal_agent/network-policy.md#provider-execution-and-host-service-isolation)
+and [network boundary](../../responses_api_agents/opencode_multimodal_agent/network-policy.md#provider-execution-and-deployment-qualification)
 for runtime requirements and deployment checks.
 
 The `opencode_relay.yaml` configurations in [ONBOARDING.md](ONBOARDING.md) retain
 the local Bubblewrap compatibility path for existing runs and training. They do
-not acquire provider isolation from these new recipes. Resume existing results
+use the provider session lifecycle, but enforce the same inner process/network
+boundary. Resume existing results
 with their recorded configuration; choose the provider recipe for a new run.
 
 ## Run configuration
@@ -65,7 +63,7 @@ set `judge_endpoint` and `judge_api_key_env` for direct HTTP judging. The catalo
 does not select a hosted model or endpoint. ZeroBench requires no judge.
 
 The shared verifier defaults to a 120-second timeout and three transport attempts
-per judge request. Agent-X uses 300 seconds and ten attempts. VTCBench additionally
+per judge request. VTCBench additionally
 uses the public five-verdict parsing schedule. Judge failures need resolution
 before a complete score is reported.
 
@@ -144,7 +142,7 @@ the submitted run's health and recovery gates.
 
 ## Dataset identity
 
-VStar/HRBench8K, Agent-X and ZeroBench are checked against the pinned manifests or
+VStar/HRBench8K and ZeroBench are checked against the pinned manifests or
 source checksum. VTCBench TSV releases are caller-supplied: pass
 `prepare_script_args.sha256` for qualification and retain the preparation's
 `dataset.json` with its source and prepared-task hashes. Use a separate output

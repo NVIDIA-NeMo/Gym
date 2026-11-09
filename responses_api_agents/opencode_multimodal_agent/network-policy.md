@@ -23,7 +23,7 @@ it no longer launches directly on the provider's inherited host network.
 
 ## Benchmark configuration
 
-The shipped Agent-X pairing uses inherited networking with both web tools enabled:
+For tasks whose evaluation conditions permit public-web access, explicitly configure:
 
 ```yaml
 visual_agent:
@@ -36,7 +36,7 @@ visual_agent:
           websearch: true
 ```
 
-Other benchmark profiles and the offline training recipe explicitly use
+The shipped benchmark profiles and offline training recipe explicitly use
 `model_only` and disable both web tools. Use the appropriate agent instance name
 when overriding a recipe.
 
@@ -139,7 +139,7 @@ The recommended `<benchmark>/opencode.yaml` recipes use Gym provider-managed
 sandboxes and the shared OpenCode session lifecycle. The multimodal wrapper
 adds the process/network boundary described above to both provider execution
 and compatibility Bubblewrap execution. This applies to every `inherit`
-benchmark, including Agent-X, and preserves its native web-tool interface.
+task and preserves the native web-tool interface.
 Other OpenCode agents, including BrowseComp's pairing, are unchanged.
 
 Keep head, agent, judge and verifier control services off public ingress where

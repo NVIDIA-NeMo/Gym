@@ -16,13 +16,12 @@ class FixtureRequest(VisualVerifyRequest):
     judge_failure: bool = False
 
 
-def _server(*, agentx: bool = False) -> object:
+def _server() -> object:
     # Import lazily because the entrypoints export these fixture descriptors.
-    from resources_servers.opencode_multimodal_benchmarks.agentx import AgentXConfig, AgentXServer
     from resources_servers.opencode_multimodal_benchmarks.app import VisualBenchmarksConfig, VisualBenchmarksServer
 
-    config_type = AgentXConfig if agentx else VisualBenchmarksConfig
-    server_type = AgentXServer if agentx else VisualBenchmarksServer
+    config_type = VisualBenchmarksConfig
+    server_type = VisualBenchmarksServer
     return server_type(
         config=config_type(
             name="fixture",
@@ -35,10 +34,6 @@ def _server(*, agentx: bool = False) -> object:
         ),
         server_client=MagicMock(spec=ServerClient),
     )
-
-
-def _agentx_server() -> object:
-    return _server(agentx=True)
 
 
 async def _invoke(server: object, body: FixtureRequest) -> VisualVerifyResponse:
@@ -81,14 +76,4 @@ def visual_fixture() -> VerifierFixture:
         request_model=FixtureRequest,
         invoke=_invoke,
         cases_path=Path(__file__).parent / "tests/verifier_cases.jsonl",
-    )
-
-
-def agentx_fixture() -> VerifierFixture:
-    """Exercise objective, blank, malformed, and unavailable Agent-X judging."""
-    return VerifierFixture(
-        server_factory=_agentx_server,
-        request_model=FixtureRequest,
-        invoke=_invoke,
-        cases_path=Path(__file__).parent / "tests/agentx_verifier_cases.jsonl",
     )

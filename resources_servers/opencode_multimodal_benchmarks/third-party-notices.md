@@ -11,10 +11,6 @@ headers do not replace terms applicable to third-party material.
   revision `5e0a5533f597b0c56dae7d9705771498202ab19b`.
   The evaluator subtree is Apache-2.0; its VLMEvalKit license is reproduced below.
   Source: https://github.com/zhuzil/VTC-Bench/blob/5e0a5533f597b0c56dae7d9705771498202ab19b/eval/eval/VLMEvalKit/vlmeval/dataset/image_vqa.py
-- `agentx_rubric.py` adapts Agent-X's Goal Accuracy rubric at revision
-  `1dcd5a66267f0582898c692a5eef9d4a52d0dc2f`.
-  Source: https://github.com/mbzuai-oryx/Agent-X/blob/1dcd5a66267f0582898c692a5eef9d4a52d0dc2f/evaluation/multiagent_evaluation.py
-
 ## Scoring deviations
 
 The `mcq-final-answer-llm-v3` scorer requires an uppercase, word-bounded option
