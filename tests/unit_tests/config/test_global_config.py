@@ -67,6 +67,13 @@ from nemo_gym.config.secret_utils import hide_secrets_in_overrides, recursively_
 from nemo_gym.rollouts.rollout_collection import _environment_servers_by_agent
 
 
+@fixture(autouse=True)
+def _no_exported_uv_cache_dir(monkeypatch: MonkeyPatch) -> None:
+    # An exported UV_CACHE_DIR (CI runners set one) takes precedence over the default
+    # cache_dir/uv, so the default-config expectations only hold without it.
+    monkeypatch.delenv("UV_CACHE_DIR", raising=False)
+
+
 class TestGlobalConfig:
     def _mock_versions_for_testing(self, monkeypatch: MonkeyPatch) -> None:
         # An exported UV_LOCK_TIMEOUT becomes the resolved default; keep snapshots hermetic.
