@@ -63,8 +63,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import VERIFIER_ERROR, EpisodeId, NgFailureEvent, TaskId
-from nemo_gym.core.failure_kinds import PROVIDER_REQUEST_FAILED
+from nemo_gym.core import PROVIDER_REQUEST_FAILED, VERIFIER_ERROR, EpisodeId, NgFailureEvent, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,

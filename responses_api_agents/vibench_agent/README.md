@@ -29,11 +29,13 @@ POST /verify         resources server unpacks and grades it
 
 ## Why the agent owns the sandbox
 
-The sandbox is never shared. Reaching into the agent's box the way `swebench` does requires
-`serialize()`/`connect()`, which only the OpenSandbox provider implements — so that shape
-cannot run on Docker, Apptainer or enroot at all. Handing the built app over as a tarball
-keeps every provider viable. See [#2082](https://github.com/NVIDIA-NeMo/Gym/issues/2082) for
-the design discussion.
+The sandbox is never shared. Reaching into another process's sandbox requires `serialize()` and
+`connect()`, which only the OpenSandbox provider implemented when this agent was written. Handing
+the built app over as a tarball keeps every provider viable, including those without them, such as
+enroot. See [#2082](https://github.com/NVIDIA-NeMo/Gym/issues/2082) for the design discussion.
+OpenSandbox, Docker, Apptainer and E2B implement both now, and the session path
+(`resources_servers/vibench/configs/vibench.yaml`) relies on that: the resources server owns the
+sandbox and lends it to `opencode_agent`.
 
 `artifact_dir` is a filesystem path shared with the resources server. That is not a new
 constraint: grading already shells into a local Docker daemon, so both processes are on one

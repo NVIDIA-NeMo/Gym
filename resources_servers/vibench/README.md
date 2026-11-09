@@ -39,7 +39,8 @@ a resent `verify` can harvest again (close stops it). Sessions are process-local
 runs with one worker.
 
 The sandbox provider has to support reattaching (`serialize()`/`connect()`), since the agent
-borrows the sandbox from another process. OpenSandbox and Docker both do.
+borrows the sandbox from another process. OpenSandbox, Docker, Apptainer and E2B do; enroot and the
+local provider do not.
 
 One row is one `(app, artifact)` pair. Reward is the mean normalized score
 (`score / full_points`) across that artifact's test plans, with the per-plan values exposed
@@ -165,15 +166,16 @@ gym eval run --no-serve \
     --num-repeats 1
 ```
 
-The recipe keeps the legacy relay path's `vibench_agent` settings where it can: OpenCode 1.17.11,
-a 5,400-second build, no subagents. Two differ. The output budget is 32,768 tokens per model call
+The recipe keeps the legacy relay path's `vibench_agent` settings where it can: OpenCode 1.17.11
+and a 5,400-second build. Three differ. The output budget is 32,768 tokens per model call
 and the context window 229,376, so a call fits a 262,144-token served context; the legacy
 recipe asks for the whole window on every call, which an OpenAI-compatible server such as vLLM
 refuses, and OpenCode then ends the build with no model call at all. OpenCode also runs with
 `opencode_agent`'s command deny-list (`configs/permissions/default.yaml`), which also denies Git
 network commands, Git history mining and `curl`/`wget` to GitHub; the legacy recipe denies only
-process killing and `rm -rf /`. That deny-list also turns off the web and skill tools, and the
-recipe turns off subagents (`task`) through `permission` as well.
+process killing and `rm -rf /`. And the recipe has no web, skill or subagent tools: the deny-list
+turns off `webfetch`, `websearch` and `skill`, and the recipe turns off `task` through `permission`
+as well. The legacy recipe allows all four.
 
 Start with `--limit 1`. A single rollout builds an app and then runs a full compose stack
 per test plan; wall-clock is tens of minutes and the box needs headroom for

@@ -65,7 +65,8 @@ vibench_resources_server:
       keep_evaluation_artifacts: ${oc.env:VIBENCH_KEEP_ARTIFACTS,false}
 
 # OpenCode builds the app in the lent sandbox, with opencode_agent's command deny-list and without the web, subagent
-# and skill tools. The other settings keep vibench_agent's (configs/vibench_legacy_agent.yaml).
+# and skill tools, all of which the legacy recipe allows. The other settings keep vibench_agent's
+# (configs/vibench_legacy_agent.yaml) except where noted.
 vibench_opencode_agent:
   _inherit_from: opencode_agent
   responses_api_agents:
@@ -93,7 +94,7 @@ vibench_opencode_agent:
       # Sessions are process-local to this one worker; grading, not the agent, bounds throughput.
       concurrency: 32
       opencode_config:
-        # These follow the deny-list's "*": allow, which they override. As before, no subagents.
+        # These follow the deny-list's "*": allow, which they override. The legacy recipe allows all four tools.
         permission:
           webfetch: deny
           websearch: deny
